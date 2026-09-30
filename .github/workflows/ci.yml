@@ -3,12 +3,19 @@
 # report. Runs in fedora:latest because the Tauri build dependencies are
 # installed as Fedora packages by ci/install-build-deps.sh (the release build
 # uses the same image).
+#
+# Runner minutes are budgeted (2000 a month on GitHub's free plan), so changes
+# that touch only documentation run nothing, and a run can also be started by
+# hand from the Actions tab.
 name: CI
 
 on:
   pull_request:
+    paths-ignore: ["**.md", "docs/**", ".gitlab-ci.yml"]
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", ".gitlab-ci.yml"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: fedora:latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       # git so actions/checkout makes a real clone instead of a REST tarball.
       - name: Install rustfmt
@@ -50,40 +57,28 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: fedora:latest
-    timeout-minutes: 120
+    # A cold run took 42 minutes before the prebuilt tauri-cli, 12 of them
+    # compiling it. This bounds what a hung test can cost.
+    timeout-minutes: 60
     env:
-      # Line tables keep backtraces readable; full DWARF would multiply the
-      # size of target/ (and of its cache) for nothing a CI log shows.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # No debug info: a panic still names its file and line, and target/
+      # stays small enough to cache. With line tables the runner's disk ran
+      # out while compressing the cache.
+      CARGO_PROFILE_DEV_DEBUG: none
     steps:
-      # git for a real clone; tar + zstd for actions/cache inside the container.
+      # git for a real clone; tar + zstd for the cache inside the container.
       - name: Install checkout and cache tools
         run: dnf -y install git-core tar zstd
       - uses: actions/checkout@v7
 
-      # Relative to the workspace, like .gitlab-ci.yml does, so actions/cache
-      # can pick them up. Set via GITHUB_ENV: in a container job the
-      # `github.workspace` expression is the HOST path, $GITHUB_WORKSPACE the
-      # container's.
+      # Relative to the workspace, like .gitlab-ci.yml does. Set via
+      # GITHUB_ENV: in a container job the `github.workspace` expression is the
+      # HOST path, $GITHUB_WORKSPACE the container's.
       - name: Keep the cargo home and Trunk's tool cache in the workspace
         run: |
           echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$GITHUB_WORKSPACE/.cache" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.cargo/bin" >> "$GITHUB_PATH"
-
-      # Registry + installed tools (cargo-tauri, trunk) + Trunk's
-      # wasm-bindgen/wasm-opt downloads. Shared with release.yml.
-      - name: Restore the cargo home
-        uses: actions/cache@v6
-        with:
-          path: |
-            .cargo/registry/index/
-            .cargo/registry/cache/
-            .cargo/git/db/
-            .cargo/bin/
-            .cache/trunk/
-          key: cargo-home-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-home-
 
       - name: Install build dependencies
         run: bash ci/install-build-deps.sh
@@ -92,18 +87,21 @@ jobs:
       - name: Install poppler-utils
         run: dnf -y install poppler-utils
 
-      # target/ is only valid for the compiler that built it, and fedora:latest
-      # moves rustc on its own schedule — so the compiler is part of the key.
-      - name: Compiler version
-        id: rustc
-        run: echo "version=$(rustc -V | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
-      - name: Restore target/
-        id: target-cache
-        uses: actions/cache/restore@v6
+      # The cargo registry and the compiled dependencies, without the
+      # workspace's own crates (they change with every commit), keyed on the
+      # compiler and Cargo.lock; plus Trunk's wasm-bindgen/wasm-opt downloads.
+      # After the toolchain install: the key reads `rustc -vV`. Saved even when
+      # a test fails (the compile is the expensive part), but only from main:
+      # PR runs restore main's cache instead of each adding a multi-GB entry of
+      # their own to the repository's 10 GB cache budget. GitHub drops a cache
+      # nobody read for a week.
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: target/
-          key: target-test-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: target-test-${{ steps.rustc.outputs.version }}-
+          cache-directories: .cache/trunk
+          cache-bin: "false"
+          cache-on-failure: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # lmgw-core serves the dashboard bundle and tests/it/web_pages.rs asserts
       # it is really served, so it has to exist before the suite (as in
@@ -113,16 +111,3 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace --locked
-
-      # Saved even when a test fails (the compile is the expensive part), but
-      # only from main: PR runs restore main's cache instead of each adding a
-      # multi-GB entry of their own to the repository's 10 GB cache budget.
-      - name: Save target/
-        if: >-
-          ${{ !cancelled() && github.event_name == 'push'
-          && steps.target-cache.outcome == 'success'
-          && steps.target-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v6
-        with:
-          path: target/
-          key: ${{ steps.target-cache.outputs.cache-primary-key }}

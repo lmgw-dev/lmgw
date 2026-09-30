@@ -36,8 +36,10 @@ jobs:
     # SONAME dependencies match the hosts it is installed on.
     container:
       image: fedora:latest
-    # A cold LTO (codegen-units = 1) build on a 4-core runner.
-    timeout-minutes: 300
+    # A cold LTO (codegen-units = 1) build on a 4-core runner: 0.3.0 took 59
+    # minutes, 35 of them the build and 15 compiling tauri-cli (now a
+    # download). This bounds what a hung build can cost.
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -45,38 +47,25 @@ jobs:
       # publish, never to the build: every dependency's build script runs there.
       GH_REPO: ${{ github.repository }}
     steps:
-      # git for a real clone; tar + zstd for actions/cache inside the container;
-      # gh + jq to publish.
-      - name: Install checkout, cache and publish tools
-        run: dnf -y install git-core tar zstd gh jq
+      # git for a real clone; gh + jq to publish.
+      - name: Install checkout and publish tools
+        run: dnf -y install git-core gh jq
       - uses: actions/checkout@v7
         with:
           # Nothing here pushes; keep the write token out of .git/config.
           persist-credentials: false
 
-      # See ci.yml: GITHUB_ENV, because `github.workspace` is the host path.
+      # As in ci.yml (GITHUB_ENV, because `github.workspace` is the host path),
+      # so ci/build.sh finds the tools the next step installs.
       - name: Keep the cargo home and Trunk's tool cache in the workspace
         run: |
           echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$GITHUB_WORKSPACE/.cache" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.cargo/bin" >> "$GITHUB_PATH"
 
-      # Registry + cargo-tauri/trunk + Trunk's tools, shared with ci.yml.
-      # target/ is deliberately not cached: releases are rare, a release
-      # target/ is large, and the 10 GB repository budget is better spent on
-      # ci.yml's.
-      - name: Restore the cargo home
-        uses: actions/cache@v6
-        with:
-          path: |
-            .cargo/registry/index/
-            .cargo/registry/cache/
-            .cargo/git/db/
-            .cargo/bin/
-            .cache/trunk/
-          key: cargo-home-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-home-
-
+      # No cache: one saved here would belong to this tag, and no other run can
+      # read a tag's cache, so every release downloads and compiles from
+      # scratch.
       - name: Install build dependencies
         run: bash ci/install-build-deps.sh
 
