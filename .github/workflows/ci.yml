@@ -39,7 +39,7 @@ jobs:
       # git so actions/checkout makes a real clone instead of a REST tarball.
       - name: Install rustfmt
         run: dnf -y install git-core cargo rustfmt
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # cargo-fmt reads the workspace with `cargo metadata --no-deps`: nothing
       # is downloaded or compiled.
       - name: cargo fmt --check --all
@@ -59,7 +59,7 @@ jobs:
       # git for a real clone; tar + zstd for actions/cache inside the container.
       - name: Install checkout and cache tools
         run: dnf -y install git-core tar zstd
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Relative to the workspace, like .gitlab-ci.yml does, so actions/cache
       # can pick them up. Set via GITHUB_ENV: in a container job the
@@ -74,7 +74,7 @@ jobs:
       # Registry + installed tools (cargo-tauri, trunk) + Trunk's
       # wasm-bindgen/wasm-opt downloads. Shared with release.yml.
       - name: Restore the cargo home
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .cargo/registry/index/
@@ -99,7 +99,7 @@ jobs:
         run: echo "version=$(rustc -V | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
       - name: Restore target/
         id: target-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: target/
           key: target-test-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}
@@ -122,7 +122,7 @@ jobs:
           ${{ !cancelled() && github.event_name == 'push'
           && steps.target-cache.outcome == 'success'
           && steps.target-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: target/
           key: ${{ steps.target-cache.outputs.cache-primary-key }}
