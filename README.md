@@ -90,6 +90,10 @@ works remotely from a browser too.
 - **Model capabilities in `/v1/models`.** Context length, output limit, modalities and reasoning controls, per model.
 - **MCP gateway.** Stdio servers (Podman-isolated by default) and HTTP servers sit behind one `/mcp` endpoint, each under its own tool prefix. For upstreams without `/v1/responses`, lmgw runs that API itself, MCP tool calls included.
 
+**Docs and knowledge**
+- **Library docs for small models.** A small local model reasons well but hasn't memorised every API. lmgw ingests the documentation of the libraries you use, one corpus per library version, and serves it to any agent as the `docs__resolve` and `docs__query` MCP tools. Search fuses BM25 with embeddings and can rerank. A model picks the chunk boundaries and code copies the text, so every chunk is the original word for word. When an agent finds a library missing, it can ask for it with `docs__request`.
+- **Knowledge bases for your own files.** Put PDFs, office documents and spreadsheets into named collections. lmgw extracts the text and embeds it with the model you choose, and scanned pages can go through a vision model for OCR. In Chat, answers cite numbered excerpts that open the passage in its file. Agents can search the same bases through the `kb__*` tools on `/mcp`.
+
 **Operations**
 - **Usage and cost.** Every request is logged with its tokens, latency and price. Charts break it down by alias and key.
 - **API keys with policy.** A key can carry alias and tool scopes, a budget, rate limits and a concurrency cap.
@@ -97,6 +101,7 @@ works remotely from a browser too.
 
 **Dashboard and extensions**
 - **Desktop app, remote-ready.** The tray menu covers the GPU hold, starting and stopping models, and updates, and the dashboard opens in a native window. Bind lmgw to your LAN and the same dashboard works remotely in any browser.
+- **Rust from gateway to dashboard.** The dashboard is about 88,000 lines of Rust (Leptos), compiled to WebAssembly and built with cargo and Trunk. There's no npm anywhere in the tree. JavaScript is limited to vendored libraries for chat rendering (highlight.js, KaTeX, Mermaid, DOMPurify) and about 700 lines of glue for the window title bar and code blocks.
 - **Chat, plus labs for audio and images.** Chat with any alias, with attachments, knowledge bases and MCP tools. The Audio lab and Image lab are playgrounds for the speech and image routes.
 - **Self-administration over MCP.** The `lmgw__*` tools on `/mcp/admin` let an agent such as Claude Code inspect and configure the gateway. They stay off until you enable their key, and start out read-only.
 - **Agents.** JSON manifests define chat presets, batch pipelines whose results you review before anything gets written, and container agents that bring their own UI.
