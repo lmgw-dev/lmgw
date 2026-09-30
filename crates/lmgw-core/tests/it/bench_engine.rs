@@ -438,16 +438,15 @@ async fn ik_shape_template_500_and_integrated_energy() {
 /// reported so the store can write what it has.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_drops_the_request_in_flight() {
+    // Raised by the fake once the request hangs: a timer could fire before
+    // the request is even sent on a slow machine, and then nothing is in
+    // flight to drop.
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cfg = Config {
         hang_completion: true,
+        raise_when_hanging: Some(flag.clone()),
         ..Config::default()
     };
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let raise = flag.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        raise.store(true, Ordering::Relaxed);
-    });
     let ran = run(
         cfg,
         BenchTarget::default(),

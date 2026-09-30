@@ -60,11 +60,18 @@ pub struct Config {
     pub fail_prompt_len: Option<(usize, u16)>,
     /// `(len, n, status)`: the same, but only for the `n`-th request of that
     /// length (1-based) — one of several streams released together fails,
-    /// the others run on.
+    /// the others run on. The refusal waits (up to 5 s) until another
+    /// `/completion` is streaming: streams released together reach the fake
+    /// in no fixed order, and on a loaded machine the refused one can
+    /// otherwise end the run before its siblings ever arrive.
     pub fail_prompt_len_nth: Option<(usize, usize, u16)>,
     /// `/completion` never answers — except the first request, the engine's
     /// unmeasured warm-up — it only notices the client leaving.
     pub hang_completion: bool,
+    /// Raised when a `/completion` starts hanging: a test's cancel flag, so
+    /// the cancel lands while a request is in flight however slow the
+    /// machine is.
+    pub raise_when_hanging: Option<Arc<AtomicBool>>,
     /// `/completion` never answers a request generating exactly this many
     /// tokens — a measured prefill's `1` — while the unmeasured ones (the
     /// warm-up, the slot resets) are answered.
@@ -106,6 +113,7 @@ impl Default for Config {
             fail_prompt_len: None,
             fail_prompt_len_nth: None,
             hang_completion: false,
+            raise_when_hanging: None,
             hang_n_predict: None,
             drafting: false,
             chat_cache_nondeterministic: false,
@@ -451,6 +459,12 @@ async fn completion(State(f): St, headers: HeaderMap, Json(body): Json<Value>) -
         (_, Some((len, n, status)))
             if prompt.len() == len && f.seen.nth_seen.fetch_add(1, Ordering::SeqCst) + 1 == n =>
         {
+            let t0 = Instant::now();
+            while f.seen.inflight.load(Ordering::SeqCst) == 0
+                && t0.elapsed() < Duration::from_secs(5)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             Some(status)
         }
         _ => None,
@@ -500,6 +514,9 @@ async fn stream(
         let _gone = scopeguard(|| {
             f.seen.hanging.fetch_sub(1, Ordering::SeqCst);
         });
+        if let Some(flag) = &c.raise_when_hanging {
+            flag.store(true, Ordering::SeqCst);
+        }
         tokio::select! {
             () = tx.closed() => {}
             () = f.seen.killed.notified() => {
