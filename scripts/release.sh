@@ -5,8 +5,9 @@
 #
 # Sets the version in Cargo.toml ([workspace.package]), src-tauri/tauri.conf.json and
 # Cargo.lock, commits "release X.Y.Z" on main and tags that commit. The tag's message becomes
-# the GitHub release notes: the notes file when given, else git opens your editor. When the tree
-# already carries the version (the first release), it only tags. Then publish:
+# the GitHub release notes, Markdown with wrapped lines joined (ci/unwrap-notes.awk): the
+# notes file when given, else git opens your editor. When the tree already carries the
+# version (the first release), it only tags. Then publish:
 #   git push origin main vX.Y.Z    GitLab: a private build X.Y.Z+<pipeline> of main
 #   git push github main vX.Y.Z    GitHub: the public release (.github/workflows/release.yml)
 set -euo pipefail

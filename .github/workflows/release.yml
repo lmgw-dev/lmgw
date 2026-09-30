@@ -106,12 +106,14 @@ jobs:
             gh release edit "$tag" --draft=false --latest
           else
             # The notes are the annotated tag's message (checkout leaves only
-            # a lightweight copy of the tag, so ask the API). A lightweight
+            # a lightweight copy of the tag, so ask the API), unwrapped to one
+            # line per paragraph: GitHub shows every line break. A lightweight
             # tag gets GitHub's generated notes instead.
             ref="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')"
             notes=""
             if [[ "$ref" == "tag "* ]]; then
-              notes="$(gh api "repos/${GH_REPO}/git/tags/${ref#tag }" --jq .message)"
+              notes="$(gh api "repos/${GH_REPO}/git/tags/${ref#tag }" --jq .message \
+                | awk -f ci/unwrap-notes.awk)"
             fi
             if [[ -n "${notes//[[:space:]]/}" ]]; then
               notes_args=(--notes "$notes")
