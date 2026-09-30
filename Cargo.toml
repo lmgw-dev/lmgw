@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+# First-party example agents (examples/agents/*) are ordinary members, so
+# `cargo test --workspace` and `cargo fmt --all` cover them like the gateway.
+members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-ui", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+# lmgw-ui is wasm32-only (built by Trunk); keep it out of plain `cargo build`.
+default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "FSL-1.1-MIT"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Trunk builds lmgw-ui with --release for bundle size; wasm-opt does the rest.
+[profile.release.package.lmgw-ui]
+opt-level = "s"
+
+# The debug `trunk build` (ci/check.sh, the dev loop). With full DWARF the
+# dashboard's debug wasm was 2.28 GB, and with the Benchmarks page rust-lld
+# crashed writing it (SIGSEGV in CustomSection::writeTo, 2026-09-29). Trunk's
+# wasm-bindgen strips DWARF from dist/ anyway (no data-keep-debug), so none
+# is emitted for this crate: the link input drops to 0.27 GB and wasm-bindgen
+# reads a fraction of it. Panic messages keep their file:line (that is the
+# panic location, not debug info), and index.html's data-no-demangle keeps
+# the function names in dist/ as the linker wrote them — demangled, the
+# monomorphized view types grew the name section fourfold, to 0.65 GB.
+[profile.dev.package.lmgw-ui]
+debug = false

@@ -1,0 +1,128 @@
+# Format + test gate for pull requests and pushes to main, on GitHub's own
+# runners. The same checks as ci/check.sh minus the advisory clippy / file-size
+# report. Runs in fedora:latest because the Tauri build dependencies are
+# installed as Fedora packages by ci/install-build-deps.sh (the release build
+# uses the same image).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same branch / PR supersedes the running check.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # A fresh checkout every run: incremental state is never reused, only cached
+  # and restored at a cost.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    timeout-minutes: 15
+    steps:
+      # git so actions/checkout makes a real clone instead of a REST tarball.
+      - name: Install rustfmt
+        run: dnf -y install git-core cargo rustfmt
+      - uses: actions/checkout@v4
+      # cargo-fmt reads the workspace with `cargo metadata --no-deps`: nothing
+      # is downloaded or compiled.
+      - name: cargo fmt --check --all
+        run: cargo fmt --check --all
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    timeout-minutes: 120
+    env:
+      # Line tables keep backtraces readable; full DWARF would multiply the
+      # size of target/ (and of its cache) for nothing a CI log shows.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      # git for a real clone; tar + zstd for actions/cache inside the container.
+      - name: Install checkout and cache tools
+        run: dnf -y install git-core tar zstd
+      - uses: actions/checkout@v4
+
+      # Relative to the workspace, like .gitlab-ci.yml does, so actions/cache
+      # can pick them up. Set via GITHUB_ENV: in a container job the
+      # `github.workspace` expression is the HOST path, $GITHUB_WORKSPACE the
+      # container's.
+      - name: Keep the cargo home and Trunk's tool cache in the workspace
+        run: |
+          echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$GITHUB_WORKSPACE/.cache" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Registry + installed tools (cargo-tauri, trunk) + Trunk's
+      # wasm-bindgen/wasm-opt downloads. Shared with release.yml.
+      - name: Restore the cargo home
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo/registry/index/
+            .cargo/registry/cache/
+            .cargo/git/db/
+            .cargo/bin/
+            .cache/trunk/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+
+      - name: Install build dependencies
+        run: bash ci/install-build-deps.sh
+      # Not a build dependency but the RPM's runtime one: with it the tests that
+      # drive the real pdftotext/pdftoppm run instead of skipping themselves.
+      - name: Install poppler-utils
+        run: dnf -y install poppler-utils
+
+      # target/ is only valid for the compiler that built it, and fedora:latest
+      # moves rustc on its own schedule — so the compiler is part of the key.
+      - name: Compiler version
+        id: rustc
+        run: echo "version=$(rustc -V | tr -c 'A-Za-z0-9.\n' '-')" >> "$GITHUB_OUTPUT"
+      - name: Restore target/
+        id: target-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/
+          key: target-test-${{ steps.rustc.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: target-test-${{ steps.rustc.outputs.version }}-
+
+      # lmgw-core serves the dashboard bundle and tests/it/web_pages.rs asserts
+      # it is really served, so it has to exist before the suite (as in
+      # ci/check.sh).
+      - name: trunk build (lmgw-ui)
+        run: cd crates/lmgw-ui && trunk build
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+      # Saved even when a test fails (the compile is the expensive part), but
+      # only from main: PR runs restore main's cache instead of each adding a
+      # multi-GB entry of their own to the repository's 10 GB cache budget.
+      - name: Save target/
+        if: >-
+          ${{ !cancelled() && github.event_name == 'push'
+          && steps.target-cache.outcome == 'success'
+          && steps.target-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/
+          key: ${{ steps.target-cache.outputs.cache-primary-key }}

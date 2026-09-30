@@ -1,0 +1,113 @@
+[
+ {
+  "size": "1536x864"
+ },
+ {
+  "nav": "/"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "shot": "overview"
+ },
+ {
+  "nav": "/models"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "shot": "models"
+ },
+ {
+  "nav": "/usage"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "shot": "usage"
+ },
+ {
+  "nav": "/traffic"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "shot": "traffic"
+ },
+ {
+  "nav": "/backends"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "shot": "backends"
+ },
+ {
+  "nav": "/mcp-servers"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "shot": "mcp-servers"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "js": "(()=>{const u=[...document.querySelectorAll('.msg-user-text')].pop(); if(!u) return 'no thread'; u.scrollIntoView({block:'start'}); return 'ok'})()"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "chat"
+ },
+ {
+  "nav": "/api-reference"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "js": "(()=>{const a=[...document.querySelectorAll('*')].filter(e=>e.children.length<3&&e.offsetParent&&/\\/v1\\/chat\\/completions$/.test(e.textContent.trim())); a[0]?.click(); return a.length})()"
+ },
+ {
+  "wait": 2.0
+ },
+ {
+  "shot": "api-reference"
+ }
+]

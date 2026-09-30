@@ -1,0 +1,18 @@
+-- §21 stage 3: a Chat thread can attach registered MCP servers.
+--
+-- Until now the southbound servers reached a model only through
+-- `/v1/responses` (an `{"type":"mcp"}` tool block) or through `/mcp` for an
+-- external client — the dashboard's own Chat had no path to them at all, which
+-- is exactly the gap an owner hits after registering a server and asking the
+-- chat to use it. The tools resolve through the same `mcp::exec::resolve` the
+-- Responses API calls, so a thread and an API client see one tool surface.
+--
+-- Per **thread** rather than a global setting: a thread is the unit that has a
+-- model, a system prompt and a purpose, and attaching every registered server
+-- to every thread would spend prompt tokens on tools that conversation will
+-- never call.
+--
+-- JSON array of `{"server_label": "...", "allowed_tools": ["…"] | null}` —
+-- null meaning the server's whole surface. `'[]'` is a plain 1:1 chat with no
+-- tools, which is what every existing thread stays.
+ALTER TABLE chat_threads ADD COLUMN mcp_tools TEXT NOT NULL DEFAULT '[]';

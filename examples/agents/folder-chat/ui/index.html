@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Folder chat</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <header class="titlebar">
+    <span class="brand"><b>folder</b> chat</span>
+    <span id="state-pill" class="pill">starting</span>
+    <span class="spacer"></span>
+    <span class="models" id="models"></span>
+  </header>
+
+  <aside class="side">
+    <section class="card" id="index-card">
+      <header class="card-h"><h2>Index</h2></header>
+      <dl class="kv">
+        <dt>Folder</dt><dd>the folder bound on the Run tab</dd>
+        <dt>Files</dt><dd id="k-files">–</dd>
+        <dt>Chunks</dt><dd id="k-chunks">–</dd>
+        <dt>Embedding model</dt><dd id="k-embed" class="mono">–</dd>
+        <dt>Vectors in memory</dt><dd id="k-resident">–</dd>
+        <dt>Last sync</dt><dd id="k-last">–</dd>
+      </dl>
+    </section>
+
+    <section class="card sync" id="sync-card">
+      <header class="card-h">
+        <h2>Sync</h2>
+        <span id="sync-state" class="muted"></span>
+        <span class="spacer"></span>
+        <button type="button" id="sync-stop" class="btn stop" hidden>Stop sync</button>
+        <button type="button" id="sync-now" class="btn">Sync now</button>
+      </header>
+      <div id="sync-notices"></div>
+      <div class="progress" aria-hidden="true"><div class="bar" id="sync-bar"></div></div>
+      <div class="progress-label" id="sync-label">Waiting for the first sync.</div>
+      <div class="sync-summary" id="sync-summary"></div>
+      <table class="skips" id="skips" hidden>
+        <thead><tr><th>Skipped</th><th class="num">Entries</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <details class="pruned" id="ignored-dirs" hidden>
+        <summary>Directories pruned by ignore rules</summary>
+        <ul></ul>
+      </details>
+      <div class="log-h">Files</div>
+      <ol class="log" id="sync-log"></ol>
+    </section>
+  </aside>
+
+  <main class="chat">
+    <div class="conversation" id="conv">
+      <p class="empty" id="conv-empty">Ask about the files in the folder. Answers cite the excerpts they used as numbered chips; click one to see the excerpt and where it is.</p>
+    </div>
+    <form class="composer" id="composer">
+      <textarea id="q" rows="3" placeholder="Ask about the folder. Enter sends, Shift+Enter starts a new line."></textarea>
+      <div class="composer-actions">
+        <button type="submit" class="btn primary" id="send">Send</button>
+        <button type="button" class="btn" id="new-chat">New chat</button>
+      </div>
+    </form>
+    <div class="budget" id="budget"></div>
+  </main>
+</div>
+</body>
+</html>

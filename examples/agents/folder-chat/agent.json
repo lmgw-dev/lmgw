@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "id": "folder-chat",
+  "name": "Folder chat",
+  "version": "0.2.0",
+  "description": "Chat with a folder on this machine. Pick a folder and the agent indexes every markdown, plain-text, source-code and PDF file in it (hidden files, symlinks and whatever the folder's own .gitignore or .ignore files exclude are skipped, and every skip is counted in the sync report), keeps the index in step as files are added, changed or deleted, and answers questions from the matching excerpts with numbered citations back to the file, heading or page. Embeddings, reranking and answers all go through this gateway with the models you choose below. With a vision model set, PDF pages that have no text (scans) or look like tables are also read from their page images, and those readings are indexed beside the PDF's own text, marked as that model's reading. Its search and read tools are also on /mcp, as folder-chat__search and folder-chat__read. The index lives inside the folder in one hidden directory, .lmgw-folder-chat, which is the only thing the agent ever writes. The app answers only a browser on this machine unless you turn on Serve other machines. While the app is running, every vector of the folder is held in memory, so a large folder needs the memory limit raised to match.",
+  "model": { "alias": "{{config.chat_model}}" },
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "format": "directory",
+          "access": "rw",
+          "title": "Folder",
+          "description": "The folder to chat with. Its index is kept in a hidden .lmgw-folder-chat directory inside it; that directory is the only thing the agent writes, and deleting it simply makes the next sync start over. Read-write access is needed for that one directory."
+        },
+        "embed_model": {
+          "type": "string",
+          "format": "model_alias",
+          "title": "Embedding model",
+          "description": "Turns every chunk and every question into a vector. Changing it re-embeds the whole folder on the next sync."
+        },
+        "chat_model": {
+          "type": "string",
+          "format": "model_alias",
+          "title": "Chat model",
+          "description": "Writes the answers. Its context length decides how many excerpts fit into one answer."
+        },
+        "rerank_model": {
+          "type": "string",
+          "format": "model_alias",
+          "title": "Rerank model",
+          "description": "Optional cross-encoder that re-orders the best matches before they reach the chat model. Leave empty to skip reranking."
+        },
+        "vision_model": {
+          "type": "string",
+          "format": "model_alias",
+          "title": "Vision model",
+          "description": "Optional model that reads PDF pages from their images: pages without text (scans) from the image alone, and pages that look like tables from the image plus the page's text, so each value keeps its row and column. Its readings are indexed beside the PDF's own text, never instead of it, and are cached, so a page is read once. It sees page images and table pages' text, so keep it a local model for a private folder. Leave empty to read no page."
+        },
+        "vision_every_page": {
+          "type": "boolean",
+          "title": "Vision: read every page",
+          "description": "Have the vision model read every PDF page, not only scans and table-like pages. A reading takes seconds per page, so the first sync after turning this on is slow; readings are cached.",
+          "default": false
+        },
+        "chunk_tokens": {
+          "type": "integer",
+          "title": "Chunk size (tokens)",
+          "description": "Target size of one indexed excerpt, in estimated tokens (characters / 4). Larger chunks carry more context each but fewer fit into an answer; it must not exceed the embedding model's context. Changing it re-chunks and re-embeds the whole folder on the next sync.",
+          "default": 400,
+          "minimum": 50
+        },
+        "allow_remote": {
+          "type": "boolean",
+          "title": "Serve other machines",
+          "description": "When on, any machine that can reach the gateway port and send this agent's host name can read and chat with the folder; there is no login. Off, only a browser on the machine lmgw runs on is served, and other containers on this machine count as other machines. The MCP tools are unaffected: they are reached only through lmgw's admin-gated MCP face. Takes effect the next time the app starts (Stop it on the App tab).",
+          "default": false
+        }
+      },
+      "required": ["folder", "embed_model", "chat_model"]
+    }
+  },
+  "run": {
+    "kind": "container",
+    "image": "localhost/folder-chat:0.2.0",
+    "pull": "never",
+    "service": {
+      "port": 8080,
+      "health_path": "/healthz",
+      "idle_seconds": 1800
+    },
+    "provides": { "mcp": "/mcp" },
+    "limits": { "memory_mb": 2048 }
+  }
+}

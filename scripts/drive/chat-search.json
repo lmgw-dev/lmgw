@@ -1,0 +1,76 @@
+[
+ {
+  "js": "'SETUP: ECHO=1 STREAM_DELAY=0.02 python3 scripts/mock-openai.py 9291 &  then  scripts/chat-actions-setup.sh <owner token>  (dev instance scripts/dev-instance.sh on :8899). Run: scripts/ui-drive.py scripts/drive/chat-search.json --token <token> --base http://127.0.0.1:8899'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "(async()=>{const mk=async()=>(await (await fetch('/chat/api/threads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model_alias:'fake-echo',kind:'chat'})})).json()).id;const a=await mk();const b=await mk();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"the zeppelin blueprint is in the attic\"})})).text();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"filler message number 0 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet \"})})).text();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"filler message number 1 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet \"})})).text();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"filler message number 2 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet \"})})).text();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"filler message number 3 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet \"})})).text();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"filler message number 4 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet \"})})).text();await (await fetch('/chat/api/threads/'+a+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"filler message number 5 lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet lorem ipsum dolor sit amet \"})})).text();await (await fetch('/chat/api/threads/'+b+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:\"a second thread about a Zeppelin hangar\"})})).text();localStorage.setItem('csA',a);return a+','+b})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "click": ".thread-q"
+ },
+ {
+  "type": "zeppel"
+ },
+ {
+  "until": "document.querySelectorAll('.msg-hit').length>=2",
+  "timeout": 15
+ },
+ {
+  "expect": "!!document.querySelector('.msg-hit-text mark')",
+  "label": "a marked snippet"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-hit-text mark')].every(m=>m.textContent.toLowerCase().startsWith('zeppel'))",
+  "label": "the mark wraps the match"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-hit-thread').length>=2",
+  "label": "both threads listed under Messages"
+ },
+ {
+  "shot": "chat-search-hits"
+ },
+ {
+  "js": "(()=>{const h=[...document.querySelectorAll('.msg-hit')].find(e=>e.textContent.includes('blueprint')&&e.textContent.startsWith('you'));h.dataset.pick='1';return !!h})()"
+ },
+ {
+  "click": ".msg-hit[data-pick='1']"
+ },
+ {
+  "until": "!!document.querySelector('.msg-flash')",
+  "timeout": 10
+ },
+ {
+  "expect": "(()=>{const e=document.querySelector('.msg-flash');const r=e.getBoundingClientRect();const p=document.getElementById('chat-scroll').getBoundingClientRect();return e.textContent.includes('blueprint')&&r.top>=p.top&&r.bottom<=p.bottom})()",
+  "label": "the hit message is flashed and inside the transcript viewport"
+ },
+ {
+  "shot": "chat-search-flash"
+ },
+ {
+  "until": "!document.querySelector('.msg-flash')",
+  "timeout": 5
+ },
+ {
+  "js": "(async()=>{const a=localStorage.getItem('csA');const d=await (await fetch('/chat/api/threads/'+a)).json();const m=d.messages[1];location.href='/chat?t='+a+'&m='+m.id;return a+','+m.id})()"
+ },
+ {
+  "until": "document.querySelector('.msg-item')!==null", "timeout": 20
+ },
+ {
+  "expect": "document.querySelector('.msg-item')!==null",
+  "label": "a cold ?t=&m= link opens the thread"
+ }
+]

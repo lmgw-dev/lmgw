@@ -1,0 +1,115 @@
+[package]
+name = "lmgw-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `schema`: the OpenAPI description (api-docs design §3) reads every DTO's
+# `schemars::JsonSchema` impl. lmgw-ui does not enable it — the wasm bundle
+# never builds a schema, only reads the ones this crate serves.
+lmgw-api-types = { path = "../lmgw-api-types", features = ["schema"] }
+# The corpus store, retrieval and the code-fenced half of ingestion. `http`
+# gives quickdoc-core its own OpenAI-compatible embedder, which is what lets the
+# crate be iterated against a running gateway without a second instance (§3).
+quickdoc-core = { path = "../quickdoc-core", features = ["http"] }
+anyhow = "1.0.102"
+arc-swap = "1.9.1"
+async-trait = "0.1.89"
+axum = { version = "0.8.9", features = ["macros", "multipart"] }
+# `lmgw__local_model_test target=image` reports how large the image a pipeline
+# just drew actually is, and the OpenAI images response carries it as base64
+# only (image-generation design §2.3) — so the byte count has to come from a
+# real decode, not from a length arithmetic that a stray newline would skew.
+# Already in the lock at this version through reqwest and rmcp.
+base64 = "0.22.1"
+bytes = "1.11.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+futures = "0.3.32"
+hex = "0.4.3"
+# `Limited`, the body wrapper enforcing the `max_body_mb` setting (§13). Same
+# version axum itself uses, so axum recognises its `LengthLimitError` and turns
+# a tripped limit into a 413 rejection rather than an opaque body error.
+http-body-util = "0.1.3"
+# The WebSocket tunnel service mode proxies (container-runtime §3.3). Neither
+# the enabled `axum` features (no `ws`) nor `reqwest`'s can do a raw upgrade on
+# the *inbound* half, and a frame-parsing library (tokio-tungstenite) would
+# decode and re-encode every frame for a proxy that must not look at them at
+# all. `hyper::upgrade::on` on the axum request + `reqwest::Response::upgrade`
+# on the outbound one + `copy_bidirectional` is the byte pipe this actually is.
+# Both versions are already in the lock, pulled in by axum and reqwest.
+hyper = "1.10.1"
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+if-addrs = "0.15.0"
+# `statfs` (is the builds dir a tmpfs?) and `kill` (SIGTERM to a spawned
+# `podman build` on cancel) — container-builds design §5, §10. Already in the
+# lock through tokio, and used the same way by examples/agents/folder-chat.
+libc = "0.2.186"
+mime_guess = "2.0.5"
+# Text out of office files for Chat attachments and knowledge bases
+# (`crate::extract::office`, chat-complete design §8): `zip` opens docx / pptx /
+# odt / odp / xlsx / ods containers (deflate only — what office writers use) and
+# `quick-xml` reads their XML, spreadsheets included (own sparse readers).
+quick-xml = "0.41"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# GPU memory telemetry for VRAM admission control (quickdoc §9b). Loads
+# `libnvidia-ml.so` at *runtime* (libloading), so a build and a test run on a
+# machine with no NVIDIA driver link and start fine — a missing library is an
+# `Nvml::init()` error the ledger reports as degraded, never a link failure.
+nvml-wrapper = "0.12.1"
+rand = "0.10.1"
+# The container-builds verify step reads its verdict out of probe output with
+# per-engine patterns (container-builds design §14.3). Already in the lock at
+# this version through tiktoken-rs and wiremock.
+regex = "1.12.4"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "multipart"] }
+# Southbound MCP client (§5). `transport-streamable-http-client-reqwest`
+# transitively enables `transport-streamable-http-client` + `client-side-sse`
+# (the latter is the SSE *response* parser the streamable transport uses, not a
+# standalone legacy transport — rmcp 2.0 has no separate SSE client transport;
+# see mcp/mod.rs). `client` is the RoleClient core; `transport-child-process`
+# is the stdio (Podman) transport.
+rmcp = { version = "2.0.0", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+rust-embed = "8.11.0"
+# JSON Schema generation for the OpenAPI description (api-docs design §3):
+# `schemars` schemas of core's own extractor, patch and query structs. The
+# api-types DTOs get theirs from that crate's own `schema` feature, above.
+schemars = "1.2"
+secrecy = "0.10.3"
+serde = { version = "1.0.228", features = ["derive"] }
+# `raw_value` so the agent import can strip an export envelope without carrying
+# the document through a `Value`: `serde_json::Map` is a `BTreeMap` here, and a
+# detour through one alphabetizes a manifest's config-form fields (agents §2.6).
+serde_json = { version = "1.0.150", features = ["raw_value"] }
+sha2 = "0.11.0"
+shlex = "1.3.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "json", "chrono", "macros"] }
+# Corpus export/import stages the file outside the live DB (quickdoc §10), so a
+# slow download never holds a lock on the corpus being queried.
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tiktoken-rs = "0.12.0"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-stream = { version = "0.1.18", features = ["sync"] }
+tower-http = { version = "0.6.11", features = ["trace", "cors", "timeout", "compression-gzip"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+async-trait = "0.1.89"
+# The service-mode proxy tests stand up a fake container that speaks a raw
+# HTTP upgrade, which needs the same two crates the proxy itself uses.
+hyper = "1.10.1"
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+insta = "1.47.2"
+# Validates the OpenAPI description's examples against its own schemas
+# (api-docs design §7.1 `every_example_validates_against_its_schema`, WP8).
+# `default-features = false`: lmgw never validates a remote `$schema` URI
+# against a fetched meta-schema, only the document's own inline schemas.
+jsonschema = { version = "0.58", default-features = false }
+tempfile = "3.27.0"
+wiremock = "0.6.5"

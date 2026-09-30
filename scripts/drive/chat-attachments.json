@@ -1,0 +1,231 @@
+[
+ {
+  "js": "'SETUP: ECHO=1 STREAM_DELAY=0.02 scripts/mock-openai.py 9291 &  scripts/dev-instance.sh  then  scripts/chat-actions-setup.sh <owner token>, plus two more aliases on the same upstream: fake-novision and fake-vision, model_set with capabilities_override {capabilities:{task:chat,vision:false|true,input_modalities:[text] | [text,image]}} (vision is its own key, not derived from the modalities), and settings_set chat_pdf_mode=ask. Run: scripts/ui-drive.py scripts/drive/chat-attachments.json --token <token> --base http://127.0.0.1:8899. Needs pdftotext (poppler-utils). Wipes every chat thread of that instance first.'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();await j('/api/op/settings_set',{chat_pdf_mode:'ask'});const t=await j('/chat/api/threads?archived=all');for(const x of t.threads)await j('/chat/api/threads/'+x.id+'/delete',{});return 'wiped '+t.threads.length})()"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'});setTimeout(()=>location.assign('/chat?t='+r.id),50);return r.id})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "until": "!!document.querySelector('.composer input[type=file]')&&document.querySelectorAll('.thread-row.active, .thread-row.on, .thread-row').length>0",
+  "label": "the composer is up",
+  "timeout": 15
+ },
+ {
+  "js": "(()=>{window.__up=(name,b64,type)=>{const b=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));const dt=new DataTransfer();dt.items.add(new File([b],name,{type}));const i=document.querySelector('.composer input[type=file]');i.files=dt.files;i.dispatchEvent(new Event('change',{bubbles:true}));return 'picked '+name};window.__pdf='JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA1IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNyAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA4MSA+PgpzdHJlYW0KQlQgL0YxIDE0IFRmIDcyIDcyMCBUZCAoVGhlIGxhbmRsb3JkIHJhaXNlZCB0aGUgcmVudCB0byA5NTAgRVVSIGZyb20gSnVseS4pIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA2IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA3IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvTGVuZ3RoIDY3ID4+CnN0cmVhbQpCVCAvRjEgMTQgVGYgNzIgNzIwIFRkIChLb250b2F1c3p1ZyBHaXJva29udG8gU2FsZG8gMTIzNCBFVVIpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNyAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMjEgMDAwMDAgbiAKMDAwMDAwMDI0NyAwMDAwMCBuIAowMDAwMDAwMzc4IDAwMDAwIG4gCjAwMDAwMDA1MDQgMDAwMDAgbiAKMDAwMDAwMDYyMSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDggL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjY5MQolJUVPRgo=';window.__docx='UEsDBBQAAAAAAJwxPl3MVIwQnAEAAJwBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PFR5cGVzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L2NvbnRlbnQtdHlwZXMiPjxEZWZhdWx0IEV4dGVuc2lvbj0icmVscyIgQ29udGVudFR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1wYWNrYWdlLnJlbGF0aW9uc2hpcHMreG1sIi8+PERlZmF1bHQgRXh0ZW5zaW9uPSJ4bWwiIENvbnRlbnRUeXBlPSJhcHBsaWNhdGlvbi94bWwiLz48T3ZlcnJpZGUgUGFydE5hbWU9Ii93b3JkL2RvY3VtZW50LnhtbCIgQ29udGVudFR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1vZmZpY2Vkb2N1bWVudC53b3JkcHJvY2Vzc2luZ21sLmRvY3VtZW50Lm1haW4reG1sIi8+PC9UeXBlcz5QSwMEFAAAAAAAnDE+XTZX3twYAQAAGAEAAAsAAABfcmVscy8ucmVsczw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PFJlbGF0aW9uc2hpcHMgeG1sbnM9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9wYWNrYWdlLzIwMDYvcmVsYXRpb25zaGlwcyI+PFJlbGF0aW9uc2hpcCBJZD0icklkMSIgVHlwZT0iaHR0cDovL3NjaGVtYXMub3BlbnhtbGZvcm1hdHMub3JnL29mZmljZURvY3VtZW50LzIwMDYvcmVsYXRpb25zaGlwcy9vZmZpY2VEb2N1bWVudCIgVGFyZ2V0PSJ3b3JkL2RvY3VtZW50LnhtbCIvPjwvUmVsYXRpb25zaGlwcz5QSwMEFAAAAAAAnDE+XYUgMqUyAQAAMgEAABEAAAB3b3JkL2RvY3VtZW50LnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PHc6ZG9jdW1lbnQgeG1sbnM6dz0iaHR0cDovL3NjaGVtYXMub3BlbnhtbGZvcm1hdHMub3JnL3dvcmRwcm9jZXNzaW5nbWwvMjAwNi9tYWluIj48dzpib2R5Pjx3OnA+PHc6cj48dzp0PlF1YXJ0ZXJseSByZXBvcnQ6IHJldmVudWUgZ3JldyBieSAxMiBwZXJjZW50Ljwvdzp0PjwvdzpyPjwvdzpwPjx3OnA+PHc6cj48dzp0PlNlY29uZCBwYXJhZ3JhcGggYWJvdXQgdGhlIHBpbmVhcHBsZSBidWRnZXQuPC93OnQ+PC93OnI+PC93OnA+PC93OmJvZHk+PC93OmRvY3VtZW50PlBLAQIUAxQAAAAAAJwxPl3MVIwQnAEAAJwBAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAAAnDE+XTZX3twYAQAAGAEAAAsAAAAAAAAAAAAAAIABzQEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAAAnDE+XYUgMqUyAQAAMgEAABEAAAAAAAAAAAAAAIABDgMAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAADAAMAuQAAAG8EAAAAAA==';window.__wav='UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';return 'helpers'})()"
+ },
+ {
+  "js": "__up('letter.pdf',__pdf,'application/pdf')"
+ },
+ {
+  "until": "[...document.querySelectorAll('.draft-chips .attach-chip')].some(c=>c.textContent.includes('2 pages')&&c.querySelector('.seg-mini'))",
+  "label": "the PDF chip shows its pages and the Text | Pages switch",
+  "timeout": 20
+ },
+ {
+  "expect": "[...document.querySelectorAll('.draft-chips .attach-chip')][0].textContent.includes('tokens')",
+  "label": "the PDF chip shows a token estimate"
+ },
+ {
+  "expect": "document.querySelectorAll('.seg-mini .seg-btn.on').length===0",
+  "label": "ask mode: neither Text nor Pages is selected"
+ },
+ {
+  "expect": "document.querySelector('.attach-blocker')?.textContent.includes('choose Text or Pages for letter.pdf')",
+  "label": "the blocker names the PDF under the chips"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').disabled&&[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').title.includes('choose Text or Pages')",
+  "label": "Send is disabled with the blocker as its title"
+ },
+ {
+  "shot": "attach-pdf-ask"
+ },
+ {
+  "click": ".seg-mini .seg-btn",
+  "nth": 0
+ },
+ {
+  "until": "!!document.querySelector('.seg-mini .seg-btn.on')&&document.querySelector('.seg-mini .seg-btn.on').textContent==='Text'&&!document.querySelector('.attach-blocker')",
+  "label": "Text selects and the blocker clears",
+  "timeout": 10
+ },
+ {
+  "expect": "![...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').disabled",
+  "label": "Send is enabled after choosing Text"
+ },
+ {
+  "click": ".draft-chips .chip-name",
+  "nth": 0
+ },
+ {
+  "until": "document.querySelector('dialog[open] .attach-text')?.textContent.includes('landlord')",
+  "label": "the viewer shows the extracted text",
+  "timeout": 10
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .viewer-meta').textContent.includes('tokens')&&document.querySelector('dialog[open] .viewer-meta .btn').textContent==='Download original'",
+  "label": "the viewer header has tokens and Download original"
+ },
+ {
+  "shot": "attach-viewer"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "__up('report.docx',__docx,'application/vnd.openxmlformats-officedocument.wordprocessingml.document')"
+ },
+ {
+  "until": "[...document.querySelectorAll('.draft-chips .attach-chip')].some(c=>c.textContent.includes('report.docx')&&c.textContent.includes('docx')&&c.textContent.includes('tokens'))",
+  "label": "the docx chip shows its format and tokens",
+  "timeout": 20
+ },
+ {
+  "js": "__up('blob.bin','/wD/AAECAwQFBgcICQoLDA0ODw==','application/octet-stream')"
+ },
+ {
+  "until": "[...document.querySelectorAll('.toast.err')].some(t=>t.textContent.includes('PDF')&&t.textContent.includes('FLAC'))",
+  "label": "an unsupported file is refused with the accepted-types list in a toast",
+  "timeout": 10
+ },
+ {
+  "js": "[...document.querySelectorAll('.toast,.chip-err-text')].map(e=>e.textContent).join(' | ')"
+ },
+ {
+  "shot": "attach-chips"
+ },
+ {
+  "js": "(()=>{const x=document.querySelector('.chip-err-text');x&&x.closest('.attach-chip').querySelector('.chip-x').click();return !!x})()"
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.composer textarea');t.value='what is in the files?';t.dispatchEvent(new Event('input',{bubbles:true}));return 'typed'})()"
+ },
+ {
+  "js": "(()=>{[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').click();return 'sent'})()"
+ },
+ {
+  "until": "[...document.querySelectorAll('.msg-assistant')].some(m=>m.textContent.includes('landlord'))&&[...document.querySelectorAll('.msg-assistant')].some(m=>m.textContent.includes('pineapple'))",
+  "label": "the upstream got the PDF text and the docx text (the echo shows both)",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('.msg-attach-row').textContent.includes('as text')",
+  "label": "the sent PDF chip shows the mode used"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-attach-row .attach-chip').length===2",
+  "label": "both sent chips are in the bubble"
+ },
+ {
+  "shot": "attach-sent"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/chat/api/threads',{model_alias:'fake-novision',kind:'chat'});setTimeout(()=>location.assign('/chat?t='+r.id),50);return r.id})()"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "until": "!!document.querySelector('.composer input[type=file]')&&document.querySelectorAll('.thread-row.active, .thread-row.on, .thread-row').length>0",
+  "label": "the composer is up",
+  "timeout": 15
+ },
+ {
+  "js": "(()=>{window.__up=(name,b64,type)=>{const b=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));const dt=new DataTransfer();dt.items.add(new File([b],name,{type}));const i=document.querySelector('.composer input[type=file]');i.files=dt.files;i.dispatchEvent(new Event('change',{bubbles:true}));return 'picked '+name};window.__pdf='JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA1IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNyAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA4MSA+PgpzdHJlYW0KQlQgL0YxIDE0IFRmIDcyIDcyMCBUZCAoVGhlIGxhbmRsb3JkIHJhaXNlZCB0aGUgcmVudCB0byA5NTAgRVVSIGZyb20gSnVseS4pIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA2IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA3IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvTGVuZ3RoIDY3ID4+CnN0cmVhbQpCVCAvRjEgMTQgVGYgNzIgNzIwIFRkIChLb250b2F1c3p1ZyBHaXJva29udG8gU2FsZG8gMTIzNCBFVVIpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNyAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMjEgMDAwMDAgbiAKMDAwMDAwMDI0NyAwMDAwMCBuIAowMDAwMDAwMzc4IDAwMDAwIG4gCjAwMDAwMDA1MDQgMDAwMDAgbiAKMDAwMDAwMDYyMSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDggL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjY5MQolJUVPRgo=';window.__docx='UEsDBBQAAAAAAJwxPl3MVIwQnAEAAJwBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PFR5cGVzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L2NvbnRlbnQtdHlwZXMiPjxEZWZhdWx0IEV4dGVuc2lvbj0icmVscyIgQ29udGVudFR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1wYWNrYWdlLnJlbGF0aW9uc2hpcHMreG1sIi8+PERlZmF1bHQgRXh0ZW5zaW9uPSJ4bWwiIENvbnRlbnRUeXBlPSJhcHBsaWNhdGlvbi94bWwiLz48T3ZlcnJpZGUgUGFydE5hbWU9Ii93b3JkL2RvY3VtZW50LnhtbCIgQ29udGVudFR5cGU9ImFwcGxpY2F0aW9uL3ZuZC5vcGVueG1sZm9ybWF0cy1vZmZpY2Vkb2N1bWVudC53b3JkcHJvY2Vzc2luZ21sLmRvY3VtZW50Lm1haW4reG1sIi8+PC9UeXBlcz5QSwMEFAAAAAAAnDE+XTZX3twYAQAAGAEAAAsAAABfcmVscy8ucmVsczw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PFJlbGF0aW9uc2hpcHMgeG1sbnM9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9wYWNrYWdlLzIwMDYvcmVsYXRpb25zaGlwcyI+PFJlbGF0aW9uc2hpcCBJZD0icklkMSIgVHlwZT0iaHR0cDovL3NjaGVtYXMub3BlbnhtbGZvcm1hdHMub3JnL29mZmljZURvY3VtZW50LzIwMDYvcmVsYXRpb25zaGlwcy9vZmZpY2VEb2N1bWVudCIgVGFyZ2V0PSJ3b3JkL2RvY3VtZW50LnhtbCIvPjwvUmVsYXRpb25zaGlwcz5QSwMEFAAAAAAAnDE+XYUgMqUyAQAAMgEAABEAAAB3b3JkL2RvY3VtZW50LnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04Ij8+PHc6ZG9jdW1lbnQgeG1sbnM6dz0iaHR0cDovL3NjaGVtYXMub3BlbnhtbGZvcm1hdHMub3JnL3dvcmRwcm9jZXNzaW5nbWwvMjAwNi9tYWluIj48dzpib2R5Pjx3OnA+PHc6cj48dzp0PlF1YXJ0ZXJseSByZXBvcnQ6IHJldmVudWUgZ3JldyBieSAxMiBwZXJjZW50Ljwvdzp0PjwvdzpyPjwvdzpwPjx3OnA+PHc6cj48dzp0PlNlY29uZCBwYXJhZ3JhcGggYWJvdXQgdGhlIHBpbmVhcHBsZSBidWRnZXQuPC93OnQ+PC93OnI+PC93OnA+PC93OmJvZHk+PC93OmRvY3VtZW50PlBLAQIUAxQAAAAAAJwxPl3MVIwQnAEAAJwBAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAAAnDE+XTZX3twYAQAAGAEAAAsAAAAAAAAAAAAAAIABzQEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAAAnDE+XYUgMqUyAQAAMgEAABEAAAAAAAAAAAAAAIABDgMAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAADAAMAuQAAAG8EAAAAAA==';window.__wav='UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';return 'helpers'})()"
+ },
+ {
+  "js": "__up('letter.pdf',__pdf,'application/pdf')"
+ },
+ {
+  "until": "[...document.querySelectorAll('.draft-chips .attach-chip')].some(c=>c.querySelector('.seg-mini'))",
+  "label": "PDF chip on the non-vision alias",
+  "timeout": 20
+ },
+ {
+  "click": ".seg-mini .seg-btn",
+  "nth": 1
+ },
+ {
+  "until": "document.querySelector('.attach-blocker')?.textContent.includes('does not accept images')&&document.querySelector('.attach-blocker').textContent.includes('as Text')",
+  "label": "Pages on a non-vision model gives the blocker",
+  "timeout": 10
+ },
+ {
+  "expect": "[...document.querySelectorAll('.composer-wrap .btn.primary, .btn.primary')].find(b=>b.textContent.trim()==='Send').disabled",
+  "label": "Send disabled for Pages without vision"
+ },
+ {
+  "click": ".seg-mini .seg-btn",
+  "nth": 0
+ },
+ {
+  "until": "!document.querySelector('.attach-blocker')",
+  "label": "switching to Text clears it",
+  "timeout": 10
+ },
+ {
+  "click": ".seg-mini .seg-btn",
+  "nth": 1
+ },
+ {
+  "until": "!!document.querySelector('.attach-blocker')",
+  "label": "back to Pages, blocked again",
+  "timeout": 10
+ },
+ {
+  "shot": "attach-pages-novision"
+ },
+ {
+  "js": "__up('tone.wav',__wav,'audio/wav')"
+ },
+ {
+  "until": "[...document.querySelectorAll('.draft-chips .attach-chip')].some(c=>c.textContent.includes('tone.wav'))",
+  "label": "the audio chip appears",
+  "timeout": 20
+ },
+ {
+  "until": "[...document.querySelectorAll('.attach-blocker')].some(b=>b.textContent.includes('no speech-to-text model'))",
+  "label": "audio without native support or an STT alias is blocked",
+  "timeout": 10
+ },
+ {
+  "shot": "attach-audio"
+ },
+ {
+  "click": ".model-picker .mp-btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "type": "fake-vision"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "![...document.querySelectorAll('.attach-blocker')].some(b=>b.textContent.includes('does not accept images'))",
+  "label": "after switching to a vision model the images blocker is gone (drafts re-read)",
+  "timeout": 10
+ },
+ {
+  "expect": "[...document.querySelectorAll('.attach-blocker')].some(b=>b.textContent.includes('speech-to-text'))",
+  "label": "the audio blocker stays"
+ },
+ {
+  "shot": "attach-model-switch"
+ }
+]

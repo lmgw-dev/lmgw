@@ -1,0 +1,41 @@
+{
+  "id": "stealth/union-alpha",
+  "name": "Union Alpha",
+  "created": 1789569723,
+  "description": "Union Alpha is a multimodal model built for research, coding, and agentic workflows, while delivering frontier-level performance across a broad range of general-purpose tasks. Union Alpha is a stealth model....",
+  "architecture": {
+    "modality": "text+image->text",
+    "input_modalities": [
+      "text",
+      "image"
+    ],
+    "output_modalities": [
+      "text"
+    ],
+    "tokenizer": "Other"
+  },
+  "top_provider": {
+    "is_moderated": false,
+    "context_length": 262144,
+    "max_completion_tokens": 131072
+  },
+  "pricing": {
+    "prompt": "0",
+    "completion": "0",
+    "discount": 0
+  },
+  "context_length": 262144,
+  "per_request_limits": null,
+  "supported_parameters": [
+    "max_tokens",
+    "response_format",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+  ],
+  "expiration_date": "2098-12-31",
+  "isFree": true,
+  "mayTrainOnYourPrompts": true,
+  "opencode": {}
+}

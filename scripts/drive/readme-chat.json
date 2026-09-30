@@ -1,0 +1,187 @@
+[
+ {
+  "size": "1536x864"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": "button.mp-btn"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "model gemma4-26b-a4b offered"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Summarize the difference between TCP and UDP in three short bullet points."
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 4
+ },
+ {
+  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
+  "timeout": 300
+ },
+ {
+  "wait": 2
+ },
+ {
+  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": "button.mp-btn"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "model gemma4-26b-a4b offered"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Write a haiku about a GPU fan spinning up at night."
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 4
+ },
+ {
+  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
+  "timeout": 300
+ },
+ {
+  "wait": 2
+ },
+ {
+  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": "button.mp-btn"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "model gemma4-26b-a4b offered"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Translate \"The gateway is up and running\" into German, French and Japanese."
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 4
+ },
+ {
+  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
+  "timeout": 300
+ },
+ {
+  "wait": 2
+ },
+ {
+  "js": "(()=>{const b=[...document.querySelectorAll('button')].filter(b=>b.offsetParent&&b.innerText.trim()==='New chat'); b[0].click(); return b.length})()"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": "button.mp-btn"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "(()=>{const o=[...document.querySelectorAll('[role=option]')].filter(e=>/^gemma4-26b-a4b(\\s|$)/.test(e.innerText.trim())); if(o.length){o[0].click(); return true} return false})()",
+  "label": "model gemma4-26b-a4b offered"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "How does merge sort work? Give a short table comparing it with quicksort, a simple mermaid `graph TD` diagram of splitting [5,2,8,1] and merging it back (node labels in double quotes, nothing else), and a compact Python implementation."
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 4
+ },
+ {
+  "until": "![...document.querySelectorAll('button')].some(b=>b.offsetParent&&/^Stop/.test(b.innerText.trim()))",
+  "timeout": 300
+ },
+ {
+  "wait": 2
+ }
+]

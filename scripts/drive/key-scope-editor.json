@@ -1,0 +1,148 @@
+[
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/usage/keys');let n=0;for(const k of (r.keys||[]))if(k.name==='drive-key'){await j('/api/op/key_delete',{id:k.id});n++}return 'removed '+n+' earlier drive-key'})()"
+ },
+ {
+  "nav": "/usage/keys"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "(async()=>{const r=await (await fetch('/api/tools')).json();const n=r.tools.filter(t=>t.plane==='/mcp'&&t.available&&!t.stale).map(t=>t.name);window.__inv={all:n.length,docs:n.filter(x=>x.startsWith('docs__')).length};return JSON.stringify(window.__inv)})()"
+ },
+ {
+  "click": ".key-create input"
+ },
+ {
+  "type": "drive-key"
+ },
+ {
+  "click": ".key-create > button.ghost"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "!!document.querySelector('.key-create-scope')",
+  "label": "the Scope section opens under the create row"
+ },
+ {
+  "click": ".key-create-scope .select > button",
+  "nth": 1
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "click": ".select-opt",
+  "nth": 1
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelectorAll('.key-create-scope .mcp-pick').length>=1",
+  "label": "the picker lists the sources"
+ },
+ {
+  "expect": "![...document.querySelectorAll('.key-create-scope .mcp-pick .mono')].some(e=>e.textContent==='lmgw')",
+  "label": "the self-admin source is never offered"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.key-create-scope .mcp-pick .mono')].some(e=>e.textContent==='docs')",
+  "label": "the docs builtin is offered"
+ },
+ {
+  "click": ".key-create-scope .mcp-pick input[type=checkbox]",
+  "nth": 0
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "shot": "key-scope-create"
+ },
+ {
+  "click": ".key-create > button.btn:not(.ghost)"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "[...document.querySelectorAll('tr')].some(r=>r.textContent.includes('drive-key')&&r.textContent.includes('tools allow docs__*'))",
+  "label": "the row stores tools allow docs__*"
+ },
+ {
+  "js": "[...document.querySelector('tr:has(.key-acts)') ? [...document.querySelectorAll('tr')].find(r=>r.textContent.includes('drive-key')).querySelectorAll('button') : []].find(b=>b.textContent.trim()==='Edit').click()"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "shot": "key-scope-editor"
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .mcp-pick input[type=checkbox]')?.checked===true",
+  "label": "the editor shows docs ticked"
+ },
+ {
+  "expect": "(()=>{const t=document.querySelector('dialog[open]').textContent,i=window.__inv;return i.docs===i.all?t.includes('Sees all '+i.all+' tools on /mcp'):t.includes('Sees '+i.docs+' of '+i.all+' tools on /mcp')})()",
+  "label": "the preview counts what the scope admits (the docs tools, of everything /mcp serves)"
+ },
+ {
+  "js": "document.querySelector('dialog[open] details.lab-details summary').click()"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "shot": "key-scope-editor-advanced"
+ },
+ {
+  "click": "dialog[open] details.lab-details textarea"
+ },
+ {
+  "type": "git*"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "[...document.querySelectorAll('tr')].some(r=>r.textContent.includes('drive-key')&&r.textContent.includes('tools allow docs__*, git*'))",
+  "label": "the ticked source and the hand-written glob are both stored"
+ },
+ {
+  "shot": "key-scope-saved"
+ },
+ {
+  "js": "[...document.querySelector('tr:has(.key-acts)') ? [...document.querySelectorAll('tr')].find(r=>r.textContent.includes('drive-key')).querySelectorAll('button') : []].find(b=>b.textContent.trim()==='Edit').click()"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "document.querySelector('dialog[open] details.lab-details textarea').value==='git*'",
+  "label": "the hand-written glob comes back in Advanced patterns"
+ },
+ {
+  "click": "dialog[open] .mcp-tools input",
+  "nth": 1
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "new RegExp('Sees [12] of '+window.__inv.all+' tools').test(document.querySelector('dialog[open]').textContent)",
+  "label": "narrowing to single tools narrows the preview"
+ },
+ {
+  "shot": "key-scope-narrowed"
+ },
+ {
+  "key": "Escape"
+ }
+]

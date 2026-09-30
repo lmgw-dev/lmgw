@@ -1,0 +1,313 @@
+[
+ {
+  "js": "'SETUP: EMBED_DIMS=64 scripts/mock-openai.py 9291 &  scripts/dev-instance.sh  then  scripts/knowledge-setup.sh <owner token>  (dev instance on :8899; needs pdftotext for the PDF). Run: scripts/ui-drive.py scripts/drive/knowledge.json --token <token> --base http://127.0.0.1:8899. Deletes every knowledge base of that instance first.'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/api/knowledge/bases');for(const k of r.bases)await j('/api/knowledge/bases/'+k.id+'/delete',{});return 'clean'})()"
+ },
+ {
+  "nav": "/knowledge"
+ },
+ {
+  "expect": "document.querySelector('.page-head h1').textContent==='Knowledge'",
+  "label": "the Knowledge page opens"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.sidebar a.nav-item, nav a.nav-item')].some(a=>a.getAttribute('href')==='/knowledge')",
+  "label": "the sidebar has a Knowledge entry"
+ },
+ {
+  "expect": "document.querySelector('.empty')&&document.querySelector('.empty').textContent.includes('No knowledge bases yet')",
+  "label": "an empty list says so"
+ },
+ {
+  "click": ".page-head .actions .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('dialog[open]')",
+  "label": "New knowledge base opens a modal"
+ },
+ {
+  "click": "dialog[open] .field input.input",
+  "nth": 0
+ },
+ {
+  "type": "Taxes"
+ },
+ {
+  "click": "dialog[open] .field input.input",
+  "nth": 1
+ },
+ {
+  "type": "tax papers"
+ },
+ {
+  "click": "dialog[open] .model-picker button.select-btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "type": "fake-embed"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .model-picker .mp-val')&&document.querySelector('dialog[open] .model-picker .mp-val').textContent.includes('fake-embed')",
+  "label": "the embedding alias is picked"
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .kb-limit').textContent.length>20",
+  "label": "the chunk-size hint says what limits it"
+ },
+ {
+  "shot": "knowledge-new"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "until": "location.pathname.startsWith('/knowledge/')",
+  "label": "creating lands on the base's page",
+  "timeout": 30
+ },
+ {
+  "until": "document.querySelector('.page-head h1')&&document.querySelector('.page-head h1').textContent==='Taxes'",
+  "label": "the base's name is the title",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('.sub-nav')&&document.querySelectorAll('.sub-nav .seg-btn').length===3",
+  "label": "three tabs"
+ },
+ {
+  "expect": "document.querySelector('.kb-facts').textContent.includes('per-input limit unknown')||document.querySelector('.kb-facts').textContent.includes('tokens per input')",
+  "label": "the embedding pin and its input limit are shown"
+ },
+ {
+  "js": "(()=>{const dt=new DataTransfer();dt.items.add(new File(['# Taxes 2025\\n\\nThe tax return was filed in March.\\n\\n## Refund\\n\\nThe refund of 412 EUR arrived in May.\\n\\n## Costs\\n\\n| Item | Amount |\\n| --- | --- |\\n| Accountant | 300 |\\n| Software | 40 |\\n'],'notes.md',{type:'text/markdown'}));const i=document.querySelector('.kb-drop input[type=file]');i.files=dt.files;i.dispatchEvent(new Event('change',{bubbles:true}));return 'picked'})()"
+ },
+ {
+  "js": "(()=>{const b=Uint8Array.from(atob('JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA1IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNyAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA4MSA+PgpzdHJlYW0KQlQgL0YxIDE0IFRmIDcyIDcyMCBUZCAoVGhlIGxhbmRsb3JkIHJhaXNlZCB0aGUgcmVudCB0byA5NTAgRVVSIGZyb20gSnVseS4pIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA2IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA3IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvTGVuZ3RoIDY3ID4+CnN0cmVhbQpCVCAvRjEgMTQgVGYgNzIgNzIwIFRkIChLb250b2F1c3p1ZyBHaXJva29udG8gU2FsZG8gMTIzNCBFVVIpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNyAwIG9iago8PCAvVHlwZSAvRm9udCAvU3VidHlwZSAvVHlwZTEgL0Jhc2VGb250IC9IZWx2ZXRpY2EgPj4KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMjEgMDAwMDAgbiAKMDAwMDAwMDI0NyAwMDAwMCBuIAowMDAwMDAwMzc4IDAwMDAwIG4gCjAwMDAwMDA1MDQgMDAwMDAgbiAKMDAwMDAwMDYyMSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDggL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjY5MQolJUVPRgo='),c=>c.charCodeAt(0));const dt=new DataTransfer();dt.items.add(new File([b],'letter.pdf',{type:'application/pdf'}));document.querySelector('.kb-drop').dispatchEvent(new DragEvent('drop',{dataTransfer:dt,bubbles:true,cancelable:true}));return 'dropped'})()"
+ },
+ {
+  "until": "document.querySelectorAll('.kb-files tbody tr').length===2",
+  "label": "both files are listed",
+  "timeout": 30
+ },
+ {
+  "until": "[...document.querySelectorAll('.kb-files tbody .chip')].length===2&&[...document.querySelectorAll('.kb-files tbody .chip')].every(c=>c.textContent.trim()==='ready')",
+  "label": "both files reach ready",
+  "timeout": 60
+ },
+ {
+  "expect": "document.querySelector('.kb-results')&&document.querySelector('.kb-results').textContent.includes('added')",
+  "label": "the upload outcome is listed"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.kb-files tbody tr')].some(r=>r.textContent.includes('letter.pdf')&&r.querySelectorAll('td')[4].textContent.trim()==='2')",
+  "label": "the PDF shows its two pages"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.kb-files tbody tr')].every(r=>+r.querySelectorAll('td')[6].textContent.replace(/\\D/g,'')>0)",
+  "label": "every file has chunks"
+ },
+ {
+  "shot": "knowledge-files"
+ },
+ {
+  "click": ".kb-files tbody tr .link-btn",
+  "nth": 0
+ },
+ {
+  "until": "document.querySelector('dialog[open] .kb-src')",
+  "label": "the text viewer opens",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .kb-src').textContent.length>20",
+  "label": "it shows extracted text"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]')",
+  "label": "Esc closes the viewer"
+ },
+ {
+  "click": ".sub-nav .seg-btn",
+  "nth": 1
+ },
+ {
+  "expect": "document.querySelector('.kb-search input.input')",
+  "label": "the Search tab has a query box"
+ },
+ {
+  "click": ".kb-search input.input",
+  "nth": 0
+ },
+ {
+  "type": "refund May"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.kb-excerpt')",
+  "label": "a search shows excerpts",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('.kb-excerpt').textContent.includes('notes.md')&&document.querySelector('.kb-excerpt').textContent.includes('refund')",
+  "label": "the top excerpt is the refund passage of notes.md"
+ },
+ {
+  "expect": "document.querySelector('.kb-excerpt').textContent.includes('score')&&document.querySelector('.kb-excerpt').textContent.includes('tok')",
+  "label": "it carries score and tokens"
+ },
+ {
+  "click": ".sec-toggle"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.sec-body:not([hidden])')&&document.querySelector('.sec-body:not([hidden])').textContent.includes('FTS query')",
+  "label": "the trace opens in its section"
+ },
+ {
+  "shot": "knowledge-search"
+ },
+ {
+  "click": ".kb-excerpt-text",
+  "nth": 0
+ },
+ {
+  "until": "document.querySelector('dialog[open] mark#kb-hl')",
+  "label": "clicking an excerpt opens the file with the chunk highlighted",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('dialog[open] mark#kb-hl').textContent.includes('refund')",
+  "label": "the highlight is the cited chunk"
+ },
+ {
+  "shot": "knowledge-source"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "click": ".sub-nav .seg-btn",
+  "nth": 2
+ },
+ {
+  "expect": "document.querySelector('.card .spec-grid')",
+  "label": "the Settings tab shows the fields"
+ },
+ {
+  "js": "(()=>{const i=[...document.querySelectorAll('input.input.mono')].find(x=>x.value==='512');i.value='300';i.dispatchEvent(new Event('input',{bubbles:true}));return i.value})()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.notice.warn')].some(n=>n.textContent.includes('re-chunks every file'))",
+  "label": "a chunk change warns that it re-chunks every file"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.btn.primary')].some(b=>b.textContent.includes('re-chunk'))",
+  "label": "Save says what it will do"
+ },
+ {
+  "click": "input[type=checkbox]"
+ },
+ {
+  "click": ".card .btn.primary"
+ },
+ {
+  "until": "fetch('/api/knowledge/bases/'+location.pathname.split('/')[2]).then(r=>r.json()).then(j=>j.base.chunk_tokens===300&&j.base.mcp_visible===false)",
+  "label": "the new chunk size and the mcp switch are saved",
+  "timeout": 30
+ },
+ {
+  "until": "fetch('/api/knowledge/bases/'+location.pathname.split('/')[2]).then(r=>r.json()).then(j=>j.files.length===2&&j.files.every(f=>f.status==='ready'))",
+  "label": "the files were re-chunked back to ready",
+  "timeout": 60
+ },
+ {
+  "nav": "/knowledge"
+ },
+ {
+  "until": "document.querySelector('.kb-table tbody tr')",
+  "label": "the list shows the base",
+  "timeout": 30
+ },
+ {
+  "expect": "(()=>{const r=document.querySelector('.kb-table tbody tr');return r.textContent.includes('Taxes')&&r.textContent.includes('fake-embed')&&r.querySelectorAll('td')[2].textContent.includes('2')})()",
+  "label": "name, file count and embedding alias are in the row"
+ },
+ {
+  "shot": "knowledge-list"
+ },
+ {
+  "click": ".kb-table tbody tr a"
+ },
+ {
+  "until": "/^\\/knowledge\\/\\d+$/.test(location.pathname)",
+  "label": "the row links to the base",
+  "timeout": 30
+ },
+ {
+  "click": ".sub-nav .seg-btn",
+  "nth": 2
+ },
+ {
+  "click": ".sec-toggle"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".sec-body:not([hidden]) .btn"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "document.querySelector('.sec-body:not([hidden]) .btn.danger')&&document.querySelector('.sec-body:not([hidden])').textContent.includes('Delete')",
+  "label": "the first click only arms the delete"
+ },
+ {
+  "expect": "fetch('/api/knowledge/bases').then(r=>r.json()).then(j=>j.bases.length===1)",
+  "label": "the base is still there after one click"
+ },
+ {
+  "click": ".sec-body:not([hidden]) .btn.danger"
+ },
+ {
+  "until": "location.pathname==='/knowledge'",
+  "label": "the second click deletes it and returns to the list",
+  "timeout": 30
+ },
+ {
+  "until": "fetch('/api/knowledge/bases').then(r=>r.json()).then(j=>j.bases.length===0)",
+  "label": "the base is gone from the server",
+  "timeout": 30
+ }
+]

@@ -1,0 +1,50 @@
+[
+ {
+  "size": "1440x900"
+ },
+ {
+  "nav": "/"
+ },
+ {
+  "js": "(()=>{const f=window.fetch; window.__tools=0; window.__toolsResp=null; window.fetch=async function(u,o){const url=typeof u==='string'?u:u.url; if(/\\/api\\/tools(\\?|$)/.test(url)){ window.__tools++; if(window.__toolsResp){ return new Response(window.__toolsResp,{status:200,headers:{'content-type':'application/json'}}); } const r=await f.apply(this,arguments); window.__toolsResp=await r.clone().text(); return r; } return f.apply(this,arguments)}; return 'stubbed'})()"
+ },
+ {
+  "js": "new Promise(res=>{const es=new EventSource('/api/events'); const t=setTimeout(()=>{es.close(); res('timeout')},4000); es.addEventListener('mcp', ev=>{window.__mcpFrame=ev.data; clearTimeout(t); es.close(); res(ev.data.slice(0,200))})})"
+ },
+ {
+  "go": "/mcp-servers"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "window.__tools"
+ },
+ {
+  "js": "window.__base = window.__tools; window.__frame('mcp', window.__mcpFrame); window.__frame('mcp', window.__mcpFrame); 'replayed twice'"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "window.__tools === window.__base",
+  "label": "MCP: a reconnect's repeat of the same statuses fetches no tools"
+ },
+ {
+  "js": "(()=>{const v=JSON.parse(window.__mcpFrame); v[0].status = v[0].status==='ready' ? 'error' : 'ready'; window.__frame('mcp', v); return v.map(x=>x.name+':'+x.status).join(',')})()"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "window.__tools === window.__base + 1",
+  "label": "MCP: a real status change refetches once"
+ },
+ {
+  "js": "window.__frame('mcp', window.__mcpFrame); 'restored'"
+ },
+ {
+  "expect": "window.__blocked === undefined || window.__blocked.length === 0",
+  "label": "no write"
+ }
+]

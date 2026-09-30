@@ -1,0 +1,63 @@
+[
+ {
+  "nav": "/settings/chat"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "shot": "settings-chat"
+ },
+ {
+  "expect": "document.querySelector('textarea.set-prompt')?.value.includes('self-hosted LLM gateway')",
+  "label": "the box shows the built-in prompt"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.field-unit')].some(e => e.textContent === 'built-in')",
+  "label": "tagged built-in"
+ },
+ {
+  "expect": "document.querySelector('.set-prompt-foot button').disabled === true",
+  "label": "Reset is off while it is the built-in"
+ },
+ {
+  "click": "textarea.set-prompt"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "type": " Extra line."
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.field-unit')].some(e => e.textContent === 'your own')",
+  "label": "an edit is your own"
+ },
+ {
+  "expect": "document.querySelector('.set-prompt-foot button').disabled === false",
+  "label": "Reset is on"
+ },
+ {
+  "shot": "settings-chat-edited"
+ },
+ {
+  "click": ".set-prompt-foot button"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.field-unit')].some(e => e.textContent === 'built-in')",
+  "label": "Reset puts the built-in back"
+ },
+ {
+  "expect": "!document.querySelector('.save-bar .count.attn') || document.querySelector('.save-bar')?.textContent.includes('0')",
+  "label": "nothing unsaved after reset"
+ },
+ {
+  "shot": "settings-chat-reset"
+ }
+]

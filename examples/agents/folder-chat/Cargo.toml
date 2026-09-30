@@ -1,0 +1,68 @@
+[package]
+name = "folder-chat"
+# The agent's own version — `agent.json`'s `version` and the image tag say the
+# same thing, and a test keeps the three from drifting.
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "lmgw example agent: chat with a folder of notes, code and PDFs through a vector index kept inside it"
+
+[[bin]]
+# The container's entrypoint: the web server, the UI and the MCP face over the
+# library below.
+name = "folder-chat"
+path = "src/main.rs"
+
+[dependencies]
+# The corpus store, the f16 KNN matrix and hybrid retrieval. Not its `http`
+# feature: the agent's own embedder (gateway.rs) talks to lmgw's
+# /v1/embeddings, because quickdoc's `HttpEmbedder` cannot see lmgw's
+# x-lmgw-fallback header.
+quickdoc-core = { path = "../../../crates/quickdoc-core" }
+# Every shared dependency below is pinned to the line lmgw-core uses, so the
+# workspace keeps one copy of each in the lock.
+async-trait = "0.1.89"
+# The page image a vision model reads goes in a `data:image/png;base64,…` URL
+# (gateway.rs, `read_page`).
+base64 = "0.22.1"
+# The web server (UI, JSON API, SSE) — the same axum lmgw-core serves with.
+axum = "0.8.9"
+futures = "0.3.32"
+hex = "0.4.3"
+# ripgrep's ignore-file matcher, for the folder's own `.gitignore` / `.ignore`
+# files (see scan.rs). Only its `gitignore` module is used: the walk stays
+# ours, so every pruned entry is counted and no symlink is ever followed.
+ignore = "0.4.23"
+# `O_NOFOLLOW` for opening source files; already in the lock through tokio.
+libc = "0.2.186"
+# `stream` for the SSE body of a streaming chat completion.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
+# The MCP face (`provides.mcp`): the same rmcp lmgw-core's client speaks, with
+# the server half and its streamable-HTTP transport (see mcp.rs for why the
+# stateless JSON mode).
+rmcp = { version = "2.0.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+# The index file's pool, opened with the agent's own options, and the agent's
+# own tables in it (see index.rs). index.rs also reads and deletes quickdoc's
+# `chunk` rows directly — to resume a file without re-embedding what is
+# stored, and to drop the chunks a re-indexed file no longer holds; every
+# other quickdoc table is reached through quickdoc-core's functions.
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+# `CancellationToken` — one shutdown signal for the server, its SSE streams and
+# rmcp's transport. Already in the lock through rmcp.
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+# Only for tests/manifest.rs: the shipped agent.json is validated by lmgw's own
+# manifest parser and warning pass, not by a copy of their rules. No cycle —
+# lmgw-core does not depend on this crate.
+lmgw-core = { path = "../../../crates/lmgw-core" }
+tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["full"] }

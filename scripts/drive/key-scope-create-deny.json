@@ -1,0 +1,71 @@
+[
+ {
+  "nav": "/usage/keys"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "click": ".key-create input"
+ },
+ {
+  "type": "drive-deny"
+ },
+ {
+  "click": ".key-create > button.ghost"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": ".key-create-scope .select > button",
+  "nth": 1
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "click": ".select-opt",
+  "nth": 2
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "/Ticked tools are hidden/.test(document.querySelector('.key-create-scope').textContent)",
+  "label": "deny mode is on for the create form"
+ },
+ {
+  "click": ".key-create-scope .mcp-pick input[type=checkbox]",
+  "nth": 0
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".key-create > button.ghost"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "click": ".key-create > button.ghost"
+ },
+ {
+  "wait": 2.0
+ },
+ {
+  "expect": "document.querySelector('.key-create-scope .mcp-pick input[type=checkbox]').checked===true",
+  "label": "the tick made in Create survives collapse and expand"
+ },
+ {
+  "click": ".key-create > button.btn:not(.ghost)"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "[...document.querySelectorAll('tr')].some(r=>r.textContent.includes('drive-deny')&&r.textContent.includes('tools deny docs__*'))",
+  "label": "the created key denies docs__*"
+ }
+]

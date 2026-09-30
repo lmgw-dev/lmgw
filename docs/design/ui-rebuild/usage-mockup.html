@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<!-- lmgw — Usage page mockup (spec: docs/design/2026-09-18-usage-analytics-cost-policy-design.md)
+     Local file, open directly. Tokens mirror crates/lmgw-ui/assets/app.css; the
+     .chart-* block below is the new contract that app.css gains with this feature.
+     Data is synthetic (seeded PRNG) — the shapes, colours, marks and motion are the point.
+
+     SUPERSEDED FOR LAYOUT (UX overhaul, 2026-09): the page's structure — the three
+     tabs as routes (Charts · Keys & budgets · Prices), the Chart | Table switch in each
+     card head (the <details> table view below is gone), card spans and breakpoints by
+     the pane's width, colour slots assigned per page (SlotRegistry) — is now defined by
+     crates/lmgw-ui/assets/app.css and docs/design/ui-rebuild/design-sample.html. What stays the
+     contract here are the MARK SPECS: <=24px columns with a 4px rounded data end, 2px
+     lines, >=8px markers with a 2px surface ring, 10% area washes, a solid hairline
+     grid (dashing means projection), 2px surface gaps between touching fills, and grey
+     only for Other and unpriced. -->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>lmgw — Usage</title>
+<style>
+@font-face { font-family: "Plex Sans"; font-weight: 400; font-display: swap;
+  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexSans-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Plex Sans"; font-weight: 500; font-display: swap;
+  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexSans-Medium.woff2") format("woff2"); }
+@font-face { font-family: "Plex Sans"; font-weight: 600; font-display: swap;
+  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexSans-SemiBold.woff2") format("woff2"); }
+@font-face { font-family: "Plex Mono"; font-weight: 400; font-display: swap;
+  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Plex Mono"; font-weight: 500; font-display: swap;
+  src: url("../../crates/lmgw-ui/assets/fonts/IBMPlexMono-Medium.woff2") format("woff2"); }
+
+/* ---------- tokens: dark (default) — verbatim from app.css ---------- */
+:root {
+  --bg0:#16191C; --bg1:#1C2024; --surface:#23272C; --surface-hi:#2B3036;
+  --border:#333940; --border-strong:#454D56;
+  --text:#E2E6EA; --text-2:#98A2AC; --text-3:#6A737D;
+  --accent:#3DAEE9; --accent-hi:#5CBDF2; --accent-ink:#10161C; --accent-bg:rgba(61,174,233,.13);
+  --amber:#E8A33D; --amber-bg:rgba(232,163,61,.13);
+  --ok:#41B25D; --ok-bg:rgba(65,178,93,.13);
+  --err:#E5534B; --err-bg:rgba(229,83,75,.12);
+  --shadow:0 1px 2px rgba(0,0,0,.25), 0 4px 16px rgba(0,0,0,.18);
+  --sans:"Plex Sans",system-ui,sans-serif; --mono:"Plex Mono",monospace;
+
+  /* ---------- NEW: chart tokens (validated, see spec §6.3) ---------- */
+  --c1:#0486D3; --c2:#D57700; --c3:#009D9E; --c4:#875CC6; --c5:#5B9D2C; --c6:#CF5291;
+  --c-other:#6A737D;
+  --seq1:#375F80; --seq2:#3674A5; --seq3:#3089CB; --seq4:#3F9FE8; --seq5:#60B6FA;
+  --seq0:#262C33;              /* an empty cell — one step off surface */
+  --grid:#2E343A;              /* hairline, solid, recessive */
+}
+[data-theme="light"] {
+  --bg0:#E8EAEC; --bg1:#F3F4F5; --surface:#FBFCFC; --surface-hi:#FFFFFF;
+  --border:#D3D8DC; --border-strong:#B4BCC2;
+  --text:#21262B; --text-2:#5A646D; --text-3:#87919A;
+  --accent:#1F6DAD; --accent-hi:#185A91; --accent-ink:#FFFFFF; --accent-bg:rgba(31,109,173,.10);
+  --amber:#B45309; --amber-bg:rgba(180,83,9,.10);
+  --ok:#1E7E3E; --ok-bg:rgba(30,126,62,.12);
+  --err:#C03B32; --err-bg:rgba(192,59,50,.10);
+  --shadow:0 1px 2px rgba(25,30,36,.08), 0 4px 14px rgba(25,30,36,.07);
+  /* dark mode is *selected*, not flipped: its own validated steps */
+  --c1:#0077C7; --c2:#CF7100; --c3:#009192; --c4:#7541B8; --c5:#4A8B10; --c6:#C43783;
+  --c-other:#87919A;
+  --seq1:#CFE3F4; --seq2:#A9CDEC; --seq3:#78B0DF; --seq4:#4590CE; --seq5:#1F6DAD;
+  --seq0:#EFF2F4;
+  --grid:#E4E8EB;
+}
+
+/* ---------- density ---------- */
+.density-dense { --ctl-h:28px; --fs:13px; --fs-sm:12px; --pad:10px; --gap:8px; --card-r:10px; --row-h:32px; }
+.density-airy  { --ctl-h:36px; --fs:14px; --fs-sm:13px; --pad:18px; --gap:14px; --card-r:14px; --row-h:44px; }
+
+* { box-sizing:border-box; scrollbar-width:thin; scrollbar-color:var(--border-strong) transparent; }
+html,body { margin:0; height:100%; }
+body { font-family:var(--sans); background:var(--bg0); color:var(--text); font-size:14px;
+       -webkit-font-smoothing:antialiased; overflow:hidden; }
+.app { display:grid; grid-template-rows:40px 1fr; grid-template-columns:216px 1fr;
+       grid-template-areas:"titlebar titlebar" "sidebar content"; height:100vh; }
+
+/* ---------- titlebar ---------- */
+.titlebar { grid-area:titlebar; display:flex; align-items:center; gap:14px; padding:0 10px 0 16px;
+  background:var(--bg0); border-bottom:1px solid var(--border); user-select:none; }
+.brand { font-family:var(--mono); font-weight:500; font-size:13px; letter-spacing:.06em; color:var(--text-2); }
+.brand b { color:var(--text); font-weight:500; }
+.pulse { display:flex; align-items:center; gap:8px; }
+.pulse .wave { stroke:var(--amber); fill:none; stroke-width:1.5;
+  filter:drop-shadow(0 0 3px var(--amber)); stroke-dasharray:120; animation:flow 2.2s linear infinite; }
+@keyframes flow { from{stroke-dashoffset:0} to{stroke-dashoffset:-120} }
+.pulse .label { font-family:var(--mono); font-size:11px; color:var(--amber); }
+.pulse .rate { font-family:var(--mono); font-size:11px; color:var(--amber); white-space:nowrap; min-width:78px; }
+.pulse .rate::before { content:"·"; color:var(--text-3); margin-right:8px; }
+.pulse .rate .n { display:inline-block; min-width:4ch; text-align:right; }
+.spacer { flex:1; }
+.tb-btn { height:24px; padding:0 10px; border-radius:6px; border:1px solid var(--border);
+  background:transparent; color:var(--text-2); font:inherit; font-size:12px; cursor:pointer; }
+.tb-btn:hover { background:var(--surface-hi); color:var(--text); }
+
+/* ---------- sidebar ---------- */
+.sidebar { grid-area:sidebar; background:var(--bg0); border-right:1px solid var(--border);
+  padding:10px 8px; overflow:auto; }
+.nav-eyebrow { font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--text-3);
+  padding:12px 10px 5px; }
+.nav-item { display:flex; align-items:center; gap:9px; height:30px; padding:0 10px; border-radius:7px;
+  color:var(--text-2); font-size:13px; text-decoration:none; cursor:pointer; }
+.nav-item:hover { background:var(--surface); color:var(--text); }
+.nav-item[aria-current="page"] { background:var(--accent-bg); color:var(--accent); font-weight:500; }
+.nav-dot { width:6px; height:6px; border-radius:50%; background:currentColor; opacity:.55; }
+
+/* ---------- content ---------- */
+.content { grid-area:content; background:var(--bg1); overflow:auto; padding:20px 24px 40px; }
+.page-head { display:flex; align-items:baseline; gap:12px; margin-bottom:4px; }
+.page-head h1 { font-size:20px; font-weight:600; margin:0; }
+.page-head .sub { color:var(--text-2); font-size:13px; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:var(--card-r);
+  box-shadow:var(--shadow); }
+
+/* ---------- filter row (one row, above everything it scopes) ---------- */
+.filters { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:14px 0 16px; }
+.seg { display:inline-flex; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:2px; }
+.seg-btn { height:26px; padding:0 11px; border:0; background:transparent; color:var(--text-2);
+  font:inherit; font-size:12px; border-radius:6px; cursor:pointer; }
+.seg-btn.active { background:var(--accent-bg); color:var(--accent); font-weight:500; }
+.selectish { height:30px; padding:0 10px; border-radius:8px; border:1px solid var(--border);
+  background:var(--surface); color:var(--text); font:inherit; font-size:12px; }
+.filters .lbl { font-size:12px; color:var(--text-3); }
+.chip { display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 9px; border-radius:999px;
+  font-size:11.5px; border:1px solid var(--border); color:var(--text-2); background:var(--surface); }
+.chip .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+.chip.live { color:var(--amber); border-color:var(--amber-bg); background:var(--amber-bg); }
+.chip.live .dot { animation:blink 1.6s ease-in-out infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+/* ---------- grid ---------- */
+.grid { display:grid; grid-template-columns:repeat(12,1fr); gap:14px; }
+.col4 { grid-column:span 4; } .col5 { grid-column:span 5; } .col6 { grid-column:span 6; }
+.col7 { grid-column:span 7; } .col8 { grid-column:span 8; } .col12 { grid-column:span 12; }
+@media (max-width:1250px){ .col4,.col5,.col6,.col7,.col8{ grid-column:span 12; } }
+
+/* ---------- tiles ---------- */
+.tiles { display:grid; grid-template-columns:repeat(6,1fr); gap:14px; margin-bottom:14px; }
+@media (max-width:1250px){ .tiles{ grid-template-columns:repeat(3,1fr);} }
+.tile { padding:13px 15px 11px; }
+.tile-label { font-size:11.5px; color:var(--text-3); letter-spacing:.02em; }
+.tile-value { font-size:26px; font-weight:600; letter-spacing:-.01em; margin-top:3px; line-height:1.15; }
+.tile.hero .tile-value { font-size:48px; line-height:1.05; margin-top:2px; }
+.tile-sub { font-size:11.5px; color:var(--text-3); margin-top:5px; }
+.tile-sub b { color:var(--text-2); font-weight:500; }
+.delta { font-size:12px; font-weight:500; }
+.delta.bad { color:var(--err); } .delta.good { color:var(--ok); } .delta.flat { color:var(--text-2); }
+.spark { display:block; margin-top:7px; }
+
+/* ---------- chart card ---------- */
+.chart-card { padding:13px 16px 8px; display:flex; flex-direction:column; }
+.chart-head { display:flex; align-items:center; gap:10px; margin-bottom:2px; }
+.chart-head h3 { margin:0; font-size:13.5px; font-weight:600; }
+.chart-head .note { font-size:11.5px; color:var(--text-3); }
+.legend { display:flex; gap:11px; flex-wrap:wrap; margin:6px 0 2px; }
+.legend span { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-2); }
+.legend i { width:9px; height:9px; border-radius:2.5px; display:block; }
+.legend i.line { height:2px; border-radius:1px; width:13px; }
+svg { display:block; }
+.ax { font-size:10.5px; fill:var(--text-3); font-variant-numeric:tabular-nums; }
+.axl { font-size:11px; fill:var(--text-2); }
+.gridline { stroke:var(--grid); stroke-width:1; shape-rendering:crispEdges; }
+.mark-label { font-size:11px; fill:var(--text-2); font-weight:500; }
+
+/* ---------- table ---------- */
+table.data { width:100%; border-collapse:collapse; font-size:var(--fs-sm); }
+table.data th { text-align:left; font-weight:500; color:var(--text-3); font-size:11px;
+  letter-spacing:.04em; text-transform:uppercase; padding:0 10px 7px; border-bottom:1px solid var(--border); }
+table.data td { padding:7px 10px; border-bottom:1px solid var(--border); vertical-align:middle;
+  font-variant-numeric:tabular-nums; }
+table.data tr:last-child td { border-bottom:0; }
+table.data tr:hover td { background:var(--surface-hi); }
+td.num, th.num { text-align:right; }
+.mono-sm { font-family:var(--mono); font-size:12px; }
+.dim { color:var(--text-3); }
+
+/* meter (fill carries severity; track is a lighter step of the same ramp) */
+.meter { width:118px; height:7px; border-radius:4px; background:var(--seq0); overflow:hidden;
+  border:1px solid var(--border); }
+.meter > i { display:block; height:100%; border-radius:4px; background:var(--accent);
+  transform-origin:left center; }
+.meter.warn > i { background:var(--amber); } .meter.over > i { background:var(--err); }
+
+/* table-view twin */
+details.tableview { margin:4px 0 2px; }
+details.tableview > summary { cursor:pointer; font-size:11.5px; color:var(--text-3); list-style:none; padding:3px 0; }
+details.tableview > summary:hover { color:var(--accent); }
+details.tableview > summary::before { content:"▸ "; }
+details.tableview[open] > summary::before { content:"▾ "; }
+.tv-wrap { max-height:190px; overflow:auto; border:1px solid var(--border); border-radius:8px; }
+
+/* tooltip */
+.tt { position:fixed; z-index:50; pointer-events:none; background:var(--surface-hi);
+  border:1px solid var(--border-strong); border-radius:8px; box-shadow:var(--shadow);
+  padding:8px 10px; font-size:12px; min-width:150px; opacity:0; transform:translateY(3px);
+  transition:opacity .12s ease, transform .12s ease; }
+.tt.on { opacity:1; transform:translateY(0); }
+.tt .tt-h { font-size:11px; color:var(--text-3); margin-bottom:5px; }
+.tt .tt-r { display:flex; align-items:center; gap:7px; justify-content:space-between; line-height:1.55; }
+.tt .tt-r i { width:8px; height:8px; border-radius:2px; display:block; flex:0 0 auto; }
+.tt .tt-r span { color:var(--text-2); flex:1; }
+.tt .tt-r b { font-weight:500; font-variant-numeric:tabular-nums; }
+.tt .tt-tot { border-top:1px solid var(--border); margin-top:5px; padding-top:5px; }
+
+/* ---------- motion: entry, live tick, count-up ---------- */
+.anim-col { transform-box:fill-box; transform-origin:bottom; animation:growY .42s cubic-bezier(.2,.7,.3,1) backwards; }
+@keyframes growY { from { transform:scaleY(0); } to { transform:scaleY(1); } }
+.anim-draw { stroke-dasharray:var(--len); stroke-dashoffset:var(--len);
+  animation:draw .6s cubic-bezier(.35,.6,.25,1) forwards; }
+@keyframes draw { to { stroke-dashoffset:0; } }
+.anim-fade { animation:fade .45s ease backwards; }
+@keyframes fade { from{opacity:0} to{opacity:1} }
+.tick { transition:height .5s cubic-bezier(.2,.7,.3,1), y .5s cubic-bezier(.2,.7,.3,1); }
+.cell { transition:fill .3s ease; }
+html.no-anim *, html.no-anim *::before, html.no-anim *::after {
+  animation:none !important; transition:none !important; }
+html.no-anim .anim-draw { stroke-dashoffset:0 !important; }
+@media (prefers-reduced-motion: reduce) {
+  .anim-col,.anim-draw,.anim-fade { animation:none; stroke-dashoffset:0; }
+  .tick,.cell,.tt { transition:none; }
+  .pulse .wave { animation:none; } .chip.live .dot { animation:none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="titlebar">
+    <div class="brand">lm<b>gw</b></div>
+    <div class="pulse">
+      <svg width="54" height="14" viewBox="0 0 54 14"><path class="wave"
+        d="M0,7 C6,1 10,13 16,7 C22,1 26,13 32,7 C38,1 42,13 48,7 C51,4.5 52.5,5.5 54,7"/></svg>
+      <span class="label">live</span>
+      <span class="rate"><span class="n" id="tokrate">128</span> tok/s</span>
+    </div>
+    <div class="spacer"></div>
+    <button class="tb-btn" id="themebtn">light theme</button>
+  </div>
+
+  <nav class="sidebar">
+    <div class="nav-eyebrow">Watch</div>
+    <a class="nav-item"><span class="nav-dot"></span>Overview</a>
+    <a class="nav-item"><span class="nav-dot"></span>Traffic</a>
+    <a class="nav-item" aria-current="page"><span class="nav-dot"></span>Usage</a>
+    <div class="nav-eyebrow">Serve</div>
+    <a class="nav-item"><span class="nav-dot"></span>Models</a>
+    <a class="nav-item"><span class="nav-dot"></span>Upstreams</a>
+    <a class="nav-item"><span class="nav-dot"></span>MCP</a>
+    <div class="nav-eyebrow">Use</div>
+    <a class="nav-item"><span class="nav-dot"></span>Chat</a>
+    <a class="nav-item"><span class="nav-dot"></span>Docs</a>
+    <a class="nav-item"><span class="nav-dot"></span>Audio lab</a>
+    <div class="nav-eyebrow">Manage</div>
+    <a class="nav-item"><span class="nav-dot"></span>Settings</a>
+  </nav>
+
+  <main class="content density-airy">
+    <div class="page-head">
+      <h1>Usage</h1>
+      <span class="sub">20 Aug – 18 Sep 2026 · Europe/Berlin · hourly buckets rolled to days</span>
+    </div>
+
+    <!-- one filter row above everything it scopes -->
+    <div class="filters">
+      <div class="seg" id="rangeseg">
+        <button class="seg-btn">24 h</button>
+        <button class="seg-btn">7 d</button>
+        <button class="seg-btn active">30 d</button>
+        <button class="seg-btn">12 mo</button>
+        <button class="seg-btn">custom…</button>
+      </div>
+      <span class="lbl">group by</span>
+      <select class="selectish"><option>alias</option><option>key</option><option>upstream</option><option>class</option></select>
+      <span class="lbl">class</span>
+      <select class="selectish"><option>all</option><option>chat</option><option>aux (embed/rerank)</option><option>audio</option><option>tool</option></select>
+      <span class="lbl">key</span>
+      <select class="selectish"><option>all keys</option><option>laptop-cli</option><option>kilo-agent</option><option>internal:quickdoc-ingest</option></select>
+      <div class="spacer"></div>
+      <span class="chip live"><span class="dot"></span>live · today updating</span>
+      <button class="tb-btn">Export CSV…</button>
+    </div>
+
+    <!-- tiles -->
+    <div class="tiles" id="tiles"></div>
+
+    <div class="grid">
+      <div class="card chart-card col8" id="c-spend"></div>
+      <div class="card chart-card col4" id="c-budget"></div>
+
+      <div class="card chart-card col6" id="c-tokens"></div>
+      <div class="card chart-card col6" id="c-latency"></div>
+
+      <div class="card chart-card col7" id="c-share"></div>
+      <div class="card chart-card col5" id="c-local"></div>
+
+      <div class="card chart-card col8" id="c-perf"></div>
+      <div class="card chart-card col4" id="c-heat"></div>
+
+      <div class="card chart-card col8" id="c-keys"></div>
+      <div class="card chart-card col4" id="c-errors"></div>
+    </div>
+  </main>
+</div>
+
+<div class="tt" id="tt"></div>
+
+<script>
+/* `?static` renders one still frame — no entry animation, no live tick.
+   The page is otherwise identical; this is what a screenshot wants. */
+const STATIC = /static/.test(location.search) || /static/.test(location.hash);
+if (STATIC) document.documentElement.classList.add('no-anim');
+if (/theme=light/.test(location.search)) {
+  document.documentElement.dataset.theme = 'light';
+  addEventListener('DOMContentLoaded',()=>document.getElementById('themebtn').textContent='dark theme');
+}
+
+/* ============================ synthetic data ============================ */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd = mulberry32(20260918);
+const DAYS = 30;
+const END = new Date(2026, 8, 18);
+const dates = Array.from({length:DAYS}, (_,i) => new Date(END.getTime() - (DAYS-1-i)*864e5));
+const dlabel = d => d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'});
+const dow = d => d.getDay();               // 0 = Sun
+const weekend = d => dow(d)===0 || dow(d)===6;
+
+/* Colour slots are assigned per ENTITY, in fixed order, and never by rank. */
+const E = {
+  opus:   {label:'claude-opus-5',     c:'var(--c1)', cloud:true },
+  mini:   {label:'gpt-5-mini',        c:'var(--c2)', cloud:true },
+  qwen:   {label:'qwen3.8',           c:'var(--c3)', cloud:false},
+  flash:  {label:'gemini-3-flash',    c:'var(--c4)', cloud:true },
+  ds:     {label:'deepseek-v4-flash', c:'var(--c5)', cloud:false},
+  bge:    {label:'embed/bge-m3',      c:'var(--c6)', cloud:false},
+  other:  {label:'Other',             c:'var(--c-other)', cloud:true},
+};
+
+/* daily cost in euro — cloud aliases only: a local model is free_local, so it
+   cannot appear in a spend chart at all (spec §2.3/§2.4). */
+const spend = dates.map((d,i) => {
+  const w = weekend(d) ? 0.35 : 1;
+  const trend = 0.75 + i/DAYS*0.55;
+  const spike = (i===21) ? 2.6 : 1;                       // an agent loop, one Tuesday
+  const j = () => 0.75 + rnd()*0.5;
+  return {
+    d,
+    opus:  +(2.10*w*trend*spike*j()).toFixed(2),
+    mini:  +(0.42*w*trend*j()).toFixed(2),
+    flash: +(0.31*w*trend*j()).toFixed(2),
+    other: +(0.12*w*j()).toFixed(2),
+    unpricedReq: Math.round(6*w*j()) + (i>24?9:0),        // an upstream with no catalog price
+    unpricedTok: Math.round(38000*w*j()),
+  };
+});
+const SPEND_KEYS = ['opus','mini','flash','other'];
+const dayTotal = r => SPEND_KEYS.reduce((s,k)=>s+r[k],0);
+const spendTotal = spend.reduce((s,r)=>s+dayTotal(r),0);
+const prevTotal = spendTotal * 0.86;                       // previous 30 d
+const unpricedReqTotal = spend.reduce((s,r)=>s+r.unpricedReq,0);
+const unpricedTokTotal = spend.reduce((s,r)=>s+r.unpricedTok,0);
+
+/* requests + tokens, cloud AND local */
+const traffic = dates.map((d,i) => {
+  const w = weekend(d) ? 0.4 : 1, j = () => 0.8+rnd()*0.4;
+  const cloudReq = Math.round(210*w*j()), localReq = Math.round(640*w*j());
+  return { d,
+    reqCloud: cloudReq, reqLocal: localReq,
+    tokIn:  Math.round((1.35e6*w + (i===21?2.1e6:0))*j()),
+    tokOut: Math.round(0.42e6*w*j()),
+    tokInLocal: Math.round(3.9e6*w*j()), tokOutLocal: Math.round(1.25e6*w*j()),
+    p50: Math.round(420 + 180*rnd() + (i>19?90:0)),
+    p95: Math.round(2100 + 900*rnd() + (i>19?700:0)),
+    errUpstream: Math.round(rnd()*7*w), errHold: (i===11||i===12)?Math.round(14+rnd()*9):Math.round(rnd()*2),
+    errBudget: (i===26)?7:0, errTimeout: Math.round(rnd()*3*w),
+  };
+});
+const tokInTotal    = traffic.reduce((s,r)=>s+r.tokIn,0);
+const tokOutTotal   = traffic.reduce((s,r)=>s+r.tokOut,0);
+const localTokTotal = traffic.reduce((s,r)=>s+r.tokInLocal+r.tokOutLocal,0);
+const cloudTokTotal = tokInTotal + tokOutTotal;
+const reqTotal      = traffic.reduce((s,r)=>s+r.reqCloud+r.reqLocal,0);
+const errTotal      = traffic.reduce((s,r)=>s+r.errUpstream+r.errHold+r.errBudget+r.errTimeout,0);
+
+/* local decode throughput — the llama.cpp image bump on 08 Sep costs qwen3.8 ~18 % */
+const perf = dates.map((d,i) => ({ d,
+  qwen: +( (i<20 ? 41 : 33.5) + rnd()*2.2 ).toFixed(1),
+  ds:   +( 96 + rnd()*6 ).toFixed(1),
+}));
+
+/* heatmap: weekday × hour request counts */
+const HOURS = 24, DOWS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const heat = DOWS.map((name,r) => ({ name, cells: Array.from({length:HOURS}, (_,h) => {
+  const workday = r < 5, work = h>=9 && h<=19;
+  let v = (workday?1:0.25) * (work?1:0.12) * (60+rnd()*55);
+  if (h===3) v += 45 + rnd()*25;                       // the nightly corpus ingest
+  if (workday && (h===10||h===15)) v *= 1.3;
+  return Math.round(v);
+})}));
+const heatMax = Math.max(...heat.flatMap(r=>r.cells));
+
+const keys = [
+  {name:'laptop-cli',               scope:'all aliases',            spend:38.92, budget:60,  rpm:120, req:4821,  last:'2 min ago',  kind:'key'},
+  {name:'kilo-agent',               scope:'allow  claude-*, qwen*', spend:24.15, budget:25,  rpm:60,  req:9930,  last:'just now',   kind:'key'},
+  {name:'home-assistant',           scope:'allow  gemini-3-flash',  spend:1.04,  budget:5,   rpm:20,  req:612,   last:'1 h ago',    kind:'key'},
+  {name:'internal:quickdoc-ingest', scope:'aux + chat (extract)',   spend:10.40, budget:10,  rpm:0,   req:1483,  last:'03:14',      kind:'int'},
+  {name:'internal:admin-chat',      scope:'all aliases',            spend:2.88,  budget:0,   rpm:0,   req:206,   last:'11 min ago', kind:'int'},
+];
+
+/* ============================ tiny svg helpers ============================ */
+const NS='http://www.w3.org/2000/svg';
+function mk(tag, attrs={}, parent){ const e=document.createElementNS(NS,tag);
+  for(const k in attrs) if(attrs[k]!==undefined&&attrs[k]!==null) e.setAttribute(k,attrs[k]);
+  if(parent) parent.appendChild(e); return e; }
+function topRound(x,y,w,h,r){ r=Math.max(0,Math.min(r,w/2,h));
+  return `M${x},${y+h}L${x},${y+r}Q${x},${y} ${x+r},${y}L${x+w-r},${y}Q${x+w},${y} ${x+w},${y+r}L${x+w},${y+h}Z`; }
+function botRound(x,y,w,h,r){ r=Math.max(0,Math.min(r,w/2,h));
+  return `M${x},${y}L${x+w},${y}L${x+w},${y+h-r}Q${x+w},${y+h} ${x+w-r},${y+h}L${x+r},${y+h}Q${x},${y+h} ${x},${y+h-r}Z`; }
+function rightRound(x,y,w,h,r){ r=Math.max(0,Math.min(r,h/2,w));
+  return `M${x},${y}L${x+w-r},${y}Q${x+w},${y} ${x+w},${y+r}L${x+w},${y+h-r}Q${x+w},${y+h} ${x+w-r},${y+h}L${x},${y+h}Z`; }
+function ticks(max, n=4){ const raw=max/n, mag=Math.pow(10,Math.floor(Math.log10(raw))); const norm=raw/mag;
+  const step=(norm<=1?1:norm<=2?2:norm<=2.5?2.5:norm<=5?5:10)*mag;
+  const out=[]; for(let v=0; v<=max*1.0001; v+=step) out.push(+v.toFixed(6)); return out; }
+const eur = v => '€' + v.toFixed(v<10?2:v<1000?2:0).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+const compact = v => v>=1e9 ? (v/1e9).toFixed(1)+'B' : v>=1e6 ? (v/1e6).toFixed(1)+'M'
+                  : v>=1e3 ? (v/1e3).toFixed(v>=1e4?0:1)+'K' : String(Math.round(v));
+const pct = v => (v*100).toFixed(v<0.1?1:0)+'%';
+
+let ANIM = true;                         // entry animation: first render only
+function head(el, title, note){ el.innerHTML='';
+  const h=document.createElement('div'); h.className='chart-head';
+  h.innerHTML = `<h3>${title}</h3><span class="note">${note||''}</span>`; el.appendChild(h); return h; }
+function legend(el, items){ const l=document.createElement('div'); l.className='legend';
+  l.innerHTML = items.map(i=>`<span><i class="${i.line?'line':''}" style="background:${i.c}"></i>${i.t}</span>`).join('');
+  el.appendChild(l); return l; }
+function tableView(el, headers, rows){
+  const d=document.createElement('details'); d.className='tableview';
+  d.innerHTML = `<summary>Table view</summary><div class="tv-wrap"><table class="data density-dense">
+    <thead><tr>${headers.map((h,i)=>`<th class="${i?'num':''}">${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i?'num':''}">${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  el.appendChild(d);
+}
+
+/* tooltip */
+const tt = document.getElementById('tt');
+function showTT(evt, html){ tt.innerHTML=html; tt.classList.add('on');
+  const pad=14, w=tt.offsetWidth, h=tt.offsetHeight;
+  let x=evt.clientX+pad, y=evt.clientY-h-pad;
+  if(x+w>innerWidth-8) x=evt.clientX-w-pad; if(y<8) y=evt.clientY+pad;
+  tt.style.left=x+'px'; tt.style.top=y+'px'; }
+function hideTT(){ tt.classList.remove('on'); }
+function ttRows(rows, total){
+  return rows.map(r=>`<div class="tt-r"><i style="background:${r.c}"></i><span>${r.t}</span><b>${r.v}</b></div>`).join('')
+    + (total?`<div class="tt-r tt-tot"><span>${total.t}</span><b>${total.v}</b></div>`:''); }
+
+/* ============================== tiles ============================== */
+function sparkline(vals, w=104, h=26, c='var(--accent)'){
+  const s=mk('svg',{width:w,height:h,class:'spark'});
+  const max=Math.max(...vals), min=Math.min(...vals), sc=v=>h-2-((v-min)/((max-min)||1))*(h-5);
+  const pts=vals.map((v,i)=>[2+i*(w-4)/(vals.length-1), sc(v)]);
+  mk('path',{d:'M'+pts.map(p=>p.join(',')).join('L'),fill:'none',stroke:'var(--text-3)','stroke-width':1.5,
+             'stroke-linejoin':'round','stroke-linecap':'round'},s);
+  const cut=Math.floor(vals.length*0.75);
+  mk('path',{d:'M'+pts.slice(cut).map(p=>p.join(',')).join('L'),fill:'none',stroke:c,'stroke-width':2,
+             'stroke-linejoin':'round','stroke-linecap':'round'},s);
+  const last=pts[pts.length-1];
+  mk('circle',{cx:last[0],cy:last[1],r:3,fill:c,stroke:'var(--surface)','stroke-width':2},s);
+  return s;
+}
+function countUp(node, to, fmt){
+  if(STATIC || matchMedia('(prefers-reduced-motion: reduce)').matches){ node.textContent=fmt(to); return; }
+  const t0=performance.now(), dur=520, from=0;
+  (function step(t){ const k=Math.max(0,Math.min(1,(t-t0)/dur)), e=1-Math.pow(1-k,3);
+    node.textContent=fmt(from+(to-from)*e); if(k<1) requestAnimationFrame(step); })(performance.now());
+}
+function renderTiles(){
+  const host=document.getElementById('tiles'); host.innerHTML='';
+  const deltaPct = (spendTotal-prevTotal)/prevTotal;
+  const items=[
+    {label:'Spend · 30 d', hero:true, val:spendTotal, fmt:eur,
+     sub:`<b>${unpricedReqTotal.toLocaleString()}</b> requests (${compact(unpricedTokTotal)} tokens) unpriced`,
+     delta:deltaPct, good:'down', spark:spend.map(dayTotal), c:'var(--c1)'},
+    {label:'Requests', val:reqTotal, fmt:v=>compact(v), sub:'cloud + local, all classes',
+     delta:0.11, good:null, spark:traffic.map(r=>r.reqCloud+r.reqLocal), c:'var(--c1)'},
+    {label:'Tokens in / out', val:tokInTotal+localTokTotal*0.75, fmt:v=>compact(v),
+     sub:`out <b>${compact(tokOutTotal+localTokTotal*0.25)}</b> · ratio 3.1 : 1`,
+     delta:0.07, good:null, spark:traffic.map(r=>r.tokIn+r.tokInLocal), c:'var(--c1)'},
+    {label:'p95 total', val:2680, fmt:v=>Math.round(v)+' ms', sub:'p50 <b>512 ms</b> · TTFB p95 <b>840 ms</b>',
+     delta:0.19, good:'down', spark:traffic.map(r=>r.p95), c:'var(--amber)'},
+    {label:'Error rate', val:errTotal/reqTotal, fmt:v=>pct(v), sub:`<b>${errTotal}</b> of ${compact(reqTotal)} requests`,
+     delta:-0.22, good:'down', spark:traffic.map(r=>r.errUpstream+r.errHold+r.errBudget+r.errTimeout), c:'var(--err)'},
+    {label:'Served locally', val:localTokTotal/(localTokTotal+cloudTokTotal), fmt:v=>pct(v),
+     sub:`<b>${compact(localTokTotal)}</b> tokens never left the house`, delta:0.05, good:'up',
+     spark:traffic.map(r=>r.tokInLocal+r.tokOutLocal), c:'var(--c3)'},
+  ];
+  items.forEach((it,i)=>{
+    const d=document.createElement('div'); d.className='card tile anim-fade'+(it.hero?' hero':'');
+    d.style.animationDelay=(i*45)+'ms';
+    const moved = Math.abs(it.delta)>0.005;
+    const dcls = (!it.good || !moved) ? 'flat'
+      : ((it.delta>0) === (it.good==='up') ? 'good' : 'bad');
+    const dsign = it.delta>0?'+':'';
+    d.innerHTML = `<div class="tile-label">${it.label}</div>
+      <div class="tile-value"></div>
+      <div class="tile-sub">${it.sub}</div>
+      <div class="tile-sub"><span class="delta ${dcls}">${dsign}${(it.delta*100).toFixed(0)}%</span>
+        <span class="dim">vs previous 30 d</span></div>`;
+    d.appendChild(sparkline(it.spark, it.hero?150:104, 26, it.c));
+    host.appendChild(d);
+    countUp(d.querySelector('.tile-value'), it.val, it.fmt);
+  });
+}
+
+/* ============================ plot scaffolding ============================ */
+function plot(el, h, m){
+  const w = Math.max(320, el.clientWidth - 32);
+  const s = mk('svg',{width:w,height:h,viewBox:`0 0 ${w} ${h}`});
+  el.appendChild(s);
+  return {s, w, h, m, iw:w-m.l-m.r, ih:h-m.t-m.b};
+}
+function yGrid(p, max, fmt, n){
+  const tv = ticks(max, n||4);
+  tv.forEach(v => { const y = p.m.t + p.ih - (v/max)*p.ih;
+    mk('line',{x1:p.m.l,x2:p.w-p.m.r,y1:y,y2:y,class:'gridline'},p.s);
+    mk('text',{x:p.m.l-8,y:y+3.5,class:'ax','text-anchor':'end'},p.s).textContent = fmt(v); });
+}
+function xDays(p, every){
+  dates.forEach((d,i) => { if(i%(every||5)) return;
+    const x = p.m.l + (i+0.5)*(p.iw/DAYS);
+    mk('text',{x,y:p.h-6,class:'ax','text-anchor':'middle'},p.s).textContent = dlabel(d); });
+}
+function hatchDefs(s){
+  const defs = mk('defs',{},s);
+  const pat = mk('pattern',{id:'hatch',width:6,height:6,patternUnits:'userSpaceOnUse',patternTransform:'rotate(45)'},defs);
+  mk('rect',{width:6,height:6,fill:'var(--surface)'},pat);
+  mk('line',{x1:0,y1:0,x2:0,y2:6,stroke:'var(--text-3)','stroke-width':2.4},pat);
+}
+/* invisible per-band hit targets (>= 24px where the band allows) */
+function bands(p, onEnter){
+  const bw = p.iw/DAYS;
+  dates.forEach((d,i)=>{
+    const r = mk('rect',{x:p.m.l+i*bw,y:p.m.t,width:bw,height:p.ih,fill:'transparent'},p.s);
+    r.addEventListener('mousemove', e=>onEnter(e,i));
+    r.addEventListener('mouseleave', hideTT);
+  });
+}
+
+/* ========================= 1 · spend over time ========================= */
+let spendLastG = null;
+function renderSpend(entry){
+  const el = document.getElementById('c-spend');
+  head(el,'Spend over time','stacked by alias · local models are free_local and never appear here');
+  legend(el, [E.opus,E.mini,E.flash,E.other].map(e=>({c:e.c,t:e.label}))
+             .concat([{c:'var(--text-3)',t:'unpriced (no price known)'}]));
+  const p = plot(el, 236, {l:50,r:16,t:12,b:34});
+  hatchDefs(p.s);
+  const max = Math.max(...spend.map(dayTotal))*1.12;
+  yGrid(p, max, v=>eur(v));
+  const bw = Math.min(24, (p.iw/DAYS)*0.62), gap = 2;
+  const peak = spend.reduce((a,r,i)=>dayTotal(r)>dayTotal(spend[a])?i:a,0);
+  spend.forEach((r,i)=>{
+    const g = mk('g',{},p.s);
+    if(entry){ g.setAttribute('class','anim-col'); g.style.animationDelay=(i*9)+'ms'; }
+    const x = p.m.l + i*(p.iw/DAYS) + (p.iw/DAYS-bw)/2;
+    let acc = 0;
+    SPEND_KEYS.forEach((k,si)=>{
+      const v = r[k]; if(v<=0) return;
+      const hFull = (v/max)*p.ih;
+      const y = p.m.t + p.ih - ((acc+v)/max)*p.ih;
+      const isTop = SPEND_KEYS.slice(si+1).every(kk=>r[kk]<=0);
+      const h = Math.max(1, hFull - (si? gap : 0));      /* 2px surface gap between fills */
+      mk('path',{d: isTop ? topRound(x,y,bw,h,4) : `M${x},${y}h${bw}v${h}h${-bw}Z`, fill:E[k].c},g);
+      acc += v;
+    });
+    if(r.unpricedReq>0){                                  /* the honesty rail, not a value */
+      mk('rect',{x, y:p.m.t+p.ih+5, width:bw, height:5, fill:'url(#hatch)', rx:2},p.s);
+    }
+    if(i===peak){
+      mk('text',{x:x+bw/2, y:p.m.t+p.ih-(dayTotal(r)/max)*p.ih-7, class:'mark-label','text-anchor':'middle'},p.s)
+        .textContent = eur(dayTotal(r));
+    }
+    if(i===DAYS-1) spendLastG = g;
+  });
+  xDays(p,5);
+  bands(p,(e,i)=>{ const r=spend[i];
+    showTT(e, `<div class="tt-h">${r.d.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short'})}</div>`
+      + ttRows(SPEND_KEYS.filter(k=>r[k]>0).map(k=>({c:E[k].c,t:E[k].label,v:eur(r[k])})),
+               {t:'total', v:eur(dayTotal(r))})
+      + `<div class="tt-r"><i style="background:var(--text-3)"></i><span>unpriced</span><b>${r.unpricedReq} req</b></div>`);
+  });
+  tableView(el, ['Day','claude-opus-5','gpt-5-mini','gemini-3-flash','Other','Unpriced req','Total'],
+    spend.map(r=>[dlabel(r.d),eur(r.opus),eur(r.mini),eur(r.flash),eur(r.other),r.unpricedReq,eur(dayTotal(r))]));
+}
+
+/* ==================== 2 · cumulative spend vs budget ==================== */
+function renderBudget(entry){
+  const el = document.getElementById('c-budget');
+  head(el,'This period vs budget','dashed = linear projection to 30 Sep');
+  legend(el,[{c:'var(--c1)',t:'cumulative spend',line:true},{c:'var(--amber)',t:'budget €90',line:true}]);
+  const p = plot(el, 236, {l:50,r:46,t:12,b:34});
+  const BUDGET = 90;
+  let acc=0; const cum = spend.map(r=>acc+=dayTotal(r));
+  const proj = cum[cum.length-1] * (30/DAYS) * 1.04;
+  const max = Math.max(BUDGET, proj)*1.1;
+  yGrid(p, max, v=>eur(v));
+  const X = i => p.m.l + (i/(DAYS-1))*(p.iw*0.78);
+  const Y = v => p.m.t + p.ih - (v/max)*p.ih;
+  /* budget threshold: a SOLID rule — dashing is reserved for projection */
+  mk('line',{x1:p.m.l,x2:p.w-p.m.r,y1:Y(BUDGET),y2:Y(BUDGET),stroke:'var(--amber)','stroke-width':1.5},p.s);
+  mk('text',{x:p.m.l+4,y:Y(BUDGET)-6,class:'mark-label'},p.s).textContent='budget €90';
+  const line = 'M'+cum.map((v,i)=>`${X(i)},${Y(v)}`).join('L');
+  mk('path',{d:line+`L${X(DAYS-1)},${Y(0)}L${X(0)},${Y(0)}Z`,fill:'var(--c1)','fill-opacity':.10},p.s);
+  const path = mk('path',{d:line,fill:'none',stroke:'var(--c1)','stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'},p.s);
+  if(entry){ const L=path.getTotalLength(); path.style.setProperty('--len',L); path.setAttribute('class','anim-draw'); }
+  mk('path',{d:`M${X(DAYS-1)},${Y(cum[DAYS-1])}L${p.m.l+p.iw},${Y(proj)}`,fill:'none',stroke:'var(--c1)',
+             'stroke-width':2,'stroke-dasharray':'5 5','stroke-opacity':.55,'stroke-linecap':'round'},p.s);
+  mk('circle',{cx:X(DAYS-1),cy:Y(cum[DAYS-1]),r:4,fill:'var(--c1)',stroke:'var(--surface)','stroke-width':2},p.s);
+  mk('text',{x:X(DAYS-1)-6,y:Y(cum[DAYS-1])-9,class:'mark-label','text-anchor':'end'},p.s).textContent=eur(cum[DAYS-1]);
+  mk('text',{x:p.m.l+p.iw,y:Y(proj)+16,class:'ax','text-anchor':'end'},p.s).textContent='proj. '+eur(proj);
+  xDays(p,7);
+  bands(p,(e,i)=>showTT(e,`<div class="tt-h">${dlabel(dates[i])}</div>`
+    + ttRows([{c:'var(--c1)',t:'cumulative',v:eur(cum[i])},{c:'var(--amber)',t:'of budget',v:pct(cum[i]/BUDGET)}])));
+}
+
+/* ======================= 3 · tokens in / out ======================= */
+function renderTokens(entry){
+  const el = document.getElementById('c-tokens');
+  head(el,'Tokens in / out','diverging from zero · the ratio is the shape of the workload');
+  legend(el,[{c:'var(--c1)',t:'input (prompt)'},{c:'var(--c2)',t:'output (completion)'}]);
+  const p = plot(el, 214, {l:52,r:16,t:12,b:30});
+  const inMax = Math.max(...traffic.map(r=>r.tokIn+r.tokInLocal));
+  const outMax = Math.max(...traffic.map(r=>r.tokOut+r.tokOutLocal));
+  const mid = p.m.t + p.ih*(inMax/(inMax+outMax));
+  const upH = p.ih - (mid-p.m.t), dnH = mid-p.m.t;
+  [0.5,1].forEach(f=>{
+    mk('line',{x1:p.m.l,x2:p.w-p.m.r,y1:mid-dnH*f,y2:mid-dnH*f,class:'gridline'},p.s);
+    mk('text',{x:p.m.l-8,y:mid-dnH*f+3.5,class:'ax','text-anchor':'end'},p.s).textContent=compact(inMax*f);
+  });
+  /* the output half is shorter: one tick, or the two labels collide */
+  mk('line',{x1:p.m.l,x2:p.w-p.m.r,y1:mid+upH,y2:mid+upH,class:'gridline'},p.s);
+  mk('text',{x:p.m.l-8,y:mid+upH+3.5,class:'ax','text-anchor':'end'},p.s).textContent=compact(outMax);
+  mk('line',{x1:p.m.l,x2:p.w-p.m.r,y1:mid,y2:mid,stroke:'var(--border-strong)','stroke-width':1},p.s);
+  const bw = Math.min(20,(p.iw/DAYS)*0.6);
+  traffic.forEach((r,i)=>{
+    const g=mk('g',{},p.s);
+    if(entry){ g.setAttribute('class','anim-fade'); g.style.animationDelay=(i*8)+'ms'; }
+    const x = p.m.l + i*(p.iw/DAYS)+(p.iw/DAYS-bw)/2;
+    const hi = ((r.tokIn+r.tokInLocal)/inMax)*dnH, ho=((r.tokOut+r.tokOutLocal)/outMax)*upH;
+    mk('path',{d:topRound(x,mid-hi,bw,hi-1,4),fill:'var(--c1)'},g);
+    mk('path',{d:botRound(x,mid+1,bw,Math.max(1,ho-1),4),fill:'var(--c2)'},g);
+  });
+  xDays(p,6);
+  bands(p,(e,i)=>{const r=traffic[i];
+    showTT(e,`<div class="tt-h">${dlabel(r.d)}</div>`+ttRows([
+      {c:'var(--c1)',t:'input',v:compact(r.tokIn+r.tokInLocal)},
+      {c:'var(--c2)',t:'output',v:compact(r.tokOut+r.tokOutLocal)}],
+      {t:'ratio',v:((r.tokIn+r.tokInLocal)/(r.tokOut+r.tokOutLocal)).toFixed(1)+' : 1'}));});
+  tableView(el,['Day','Input','Output','Ratio'],traffic.map(r=>[dlabel(r.d),
+    compact(r.tokIn+r.tokInLocal),compact(r.tokOut+r.tokOutLocal),
+    ((r.tokIn+r.tokInLocal)/(r.tokOut+r.tokOutLocal)).toFixed(1)+' : 1']));
+}
+
+/* ======================== 4 · latency ======================== */
+function renderLatency(entry){
+  const el = document.getElementById('c-latency');
+  head(el,'Latency','from the stored histograms — percentiles are not averaged');
+  legend(el,[{c:'var(--c1)',t:'p50 total',line:true},{c:'var(--c2)',t:'p95 total',line:true}]);
+  const p = plot(el, 214, {l:52,r:44,t:12,b:30});
+  const max = Math.max(...traffic.map(r=>r.p95))*1.15;
+  yGrid(p,max,v=>Math.round(v)+' ms');
+  const X=i=>p.m.l+(i+0.5)*(p.iw/DAYS), Y=v=>p.m.t+p.ih-(v/max)*p.ih;
+  const p50='M'+traffic.map((r,i)=>`${X(i)},${Y(r.p50)}`).join('L');
+  const p95='M'+traffic.map((r,i)=>`${X(i)},${Y(r.p95)}`).join('L');
+  mk('path',{d:p95+'L'+traffic.map((r,i)=>`${X(DAYS-1-i)},${Y(traffic[DAYS-1-i].p50)}`).join('L')+'Z',
+             fill:'var(--c2)','fill-opacity':.10},p.s);
+  [[p95,'var(--c2)'],[p50,'var(--c1)']].forEach(([d,c])=>{
+    const pa=mk('path',{d,fill:'none',stroke:c,'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'},p.s);
+    if(entry){ const L=pa.getTotalLength(); pa.style.setProperty('--len',L); pa.setAttribute('class','anim-draw'); }});
+  const last=traffic[DAYS-1];
+  [[last.p95,'var(--c2)','p95'],[last.p50,'var(--c1)','p50']].forEach(([v,c,t])=>{
+    mk('circle',{cx:X(DAYS-1),cy:Y(v),r:4,fill:c,stroke:'var(--surface)','stroke-width':2},p.s);
+    mk('text',{x:X(DAYS-1)+9,y:Y(v)+4,class:'mark-label'},p.s).textContent=Math.round(v)+' ms';});
+  xDays(p,6);
+  bands(p,(e,i)=>{const r=traffic[i];
+    showTT(e,`<div class="tt-h">${dlabel(r.d)}</div>`+ttRows([
+      {c:'var(--c1)',t:'p50',v:r.p50+' ms'},{c:'var(--c2)',t:'p95',v:r.p95+' ms'}]));});
+  tableView(el,['Day','p50','p95'],traffic.map(r=>[dlabel(r.d),r.p50+' ms',r.p95+' ms']));
+}
+
+/* ===================== 5 · where it went (two shares) ===================== */
+function renderShare(entry){
+  const el = document.getElementById('c-share');
+  head(el,'Where it went','share of cost and of tokens, same row order — never a pie');
+  const rows = [
+    {e:E.opus,  cost:spend.reduce((s,r)=>s+r.opus,0),  tok: 9.1e6},
+    {e:E.qwen,  cost:0,                                 tok:41.2e6},
+    {e:E.mini,  cost:spend.reduce((s,r)=>s+r.mini,0),  tok: 6.4e6},
+    {e:E.ds,    cost:0,                                 tok:18.7e6},
+    {e:E.flash, cost:spend.reduce((s,r)=>s+r.flash,0), tok: 5.2e6},
+    {e:E.bge,   cost:0,                                 tok:12.9e6},
+    {e:E.other, cost:spend.reduce((s,r)=>s+r.other,0), tok: 1.8e6},
+  ];
+  const wrap=document.createElement('div');
+  wrap.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:6px';
+  el.appendChild(wrap);
+  [['Cost','cost',v=>eur(v)],['Tokens','tok',v=>compact(v)]].forEach(([title,key,fmt],ci)=>{
+    const col=document.createElement('div');
+    col.innerHTML=`<div class="note" style="font-size:11.5px;color:var(--text-3);margin-bottom:4px">${title}</div>`;
+    wrap.appendChild(col);
+    const max=Math.max(...rows.map(r=>r[key]))||1;
+    const w=Math.max(200,col.clientWidth||300), lh=26, h=rows.length*lh+6;
+    const s=mk('svg',{width:w,height:h,viewBox:`0 0 ${w} ${h}`});
+    col.appendChild(s);
+    const lx=118, bw=w-lx-62;
+    rows.forEach((r,i)=>{
+      const y=i*lh+4, bh=Math.min(16,lh-10);
+      mk('text',{x:0,y:y+bh/2+4,class:'ax','text-anchor':'start','font-family':'var(--mono)'},s).textContent=r.e.label;
+      mk('rect',{x:lx,y,width:bw,height:bh,fill:'var(--seq0)',rx:3},s);
+      const vw=Math.max(2,(r[key]/max)*bw);
+      const path=mk('path',{d:rightRound(lx,y,vw,bh,4),fill:r[key]>0?r.e.c:'var(--text-3)',
+                            'fill-opacity':r[key]>0?1:.28},s);
+      if(entry){ path.style.transformBox='fill-box'; path.style.transformOrigin='left center';
+        path.animate([{transform:'scaleX(0)'},{transform:'scaleX(1)'}],{duration:420,delay:i*35,easing:'cubic-bezier(.2,.7,.3,1)',fill:'backwards'}); }
+      const lab=mk('text',{x:lx+vw+7,y:y+bh/2+4,class:'ax','text-anchor':'start'},s);
+      lab.textContent = r[key]>0 ? fmt(r[key]) : (ci? fmt(r[key]) : 'free · local');
+      const hit=mk('rect',{x:0,y:y-3,width:w,height:lh,fill:'transparent'},s);
+      hit.addEventListener('mousemove',e=>showTT(e,`<div class="tt-h">${r.e.label}</div>`+ttRows([
+        {c:r.e.c,t:'cost',v:r.cost>0?eur(r.cost):'free (local)'},
+        {c:r.e.c,t:'tokens',v:compact(r.tok)},
+        {c:r.e.c,t:'per Mtok',v:r.cost>0?eur(r.cost/(r.tok/1e6)):'—'}])));
+      hit.addEventListener('mouseleave',hideTT);
+    });
+  });
+}
+
+/* ==================== 6 · local vs cloud + counterfactual ==================== */
+function renderLocal(entry){
+  const el = document.getElementById('c-local');
+  head(el,'Local vs cloud','tokens, 30 d');
+  const p = plot(el, 74, {l:0,r:0,t:14,b:26});
+  const tot = localTokTotal+cloudTokTotal, lw=(localTokTotal/tot)*p.w;
+  const g=mk('g',{},p.s);
+  mk('rect',{x:0,y:14,width:lw-1,height:26,fill:'var(--c3)',rx:4},g);
+  mk('rect',{x:lw+1,y:14,width:p.w-lw-1,height:26,fill:'var(--c1)',rx:4},g);
+  if(entry) g.animate([{opacity:0},{opacity:1}],{duration:400,fill:'backwards'});
+  mk('text',{x:10,y:31,fill:'var(--bg0)','font-size':12,'font-weight':600},p.s).textContent=pct(localTokTotal/tot)+' local';
+  mk('text',{x:p.w-10,y:31,fill:'var(--bg0)','font-size':12,'font-weight':600,'text-anchor':'end'},p.s).textContent=pct(cloudTokTotal/tot);
+  mk('text',{x:0,y:58,class:'ax'},p.s).textContent=compact(localTokTotal)+' tokens · qwen3.8, deepseek-v4-flash, embed/bge-m3';
+  const box=document.createElement('div');
+  box.style.cssText='margin-top:6px;padding-top:12px;border-top:1px solid var(--border)';
+  const cf = localTokTotal/1e6*3.85;
+  box.innerHTML = `<div class="tile-label">Counterfactual</div>
+    <div class="tile-value" style="font-size:34px">${eur(cf)}</div>
+    <div class="tile-sub">what those ${compact(localTokTotal)} local tokens <b>would</b> have cost at
+      <b>claude-opus-5</b>'s price. Not a saving — nobody would have run all of it there.
+      <span class="dim">(Settings → compare local against)</span></div>`;
+  el.appendChild(box);
+}
+
+/* ================== 7 · local performance (the regression) ================== */
+function renderPerf(entry){
+  const el = document.getElementById('c-perf');
+  head(el,'Local decode throughput','tok/s per model per day, from the stored llama.cpp timings');
+  legend(el,[{c:E.qwen.c,t:'qwen3.8',line:true},{c:E.ds.c,t:'deepseek-v4-flash',line:true}]);
+  const p = plot(el, 200, {l:48,r:60,t:12,b:30});
+  const max=Math.max(...perf.map(r=>r.ds))*1.2;
+  yGrid(p,max,v=>Math.round(v));
+  const X=i=>p.m.l+(i+0.5)*(p.iw/DAYS), Y=v=>p.m.t+p.ih-(v/max)*p.ih;
+  /* annotation: the llama.cpp image bump */
+  const bx=X(19.5);
+  mk('line',{x1:bx,x2:bx,y1:p.m.t,y2:p.m.t+p.ih,stroke:'var(--amber)','stroke-width':1,'stroke-opacity':.8},p.s);
+  mk('text',{x:bx+6,y:p.m.t+12,class:'ax',fill:'var(--amber)'},p.s).textContent='image bump';
+  [['qwen',E.qwen.c],['ds',E.ds.c]].forEach(([k,c])=>{
+    const d='M'+perf.map((r,i)=>`${X(i)},${Y(r[k])}`).join('L');
+    const pa=mk('path',{d,fill:'none',stroke:c,'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'},p.s);
+    if(entry){const L=pa.getTotalLength();pa.style.setProperty('--len',L);pa.setAttribute('class','anim-draw');}
+    const v=perf[DAYS-1][k];
+    mk('circle',{cx:X(DAYS-1),cy:Y(v),r:4,fill:c,stroke:'var(--surface)','stroke-width':2},p.s);
+    mk('text',{x:X(DAYS-1)+9,y:Y(v)+4,class:'mark-label'},p.s).textContent=v+' tok/s';
+  });
+  xDays(p,6);
+  bands(p,(e,i)=>showTT(e,`<div class="tt-h">${dlabel(dates[i])}</div>`+ttRows([
+    {c:E.qwen.c,t:'qwen3.8',v:perf[i].qwen+' tok/s'},
+    {c:E.ds.c,t:'deepseek-v4-flash',v:perf[i].ds+' tok/s'}])));
+  const strip=document.createElement('div');
+  strip.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:8px;padding-top:10px;border-top:1px solid var(--border)';
+  strip.innerHTML = [
+    ['KV cache reuse','68%','of prompt tokens never recomputed'],
+    ['Draft acceptance','74%','deepseek-v4-flash MTP heads'],
+    ['qwen3.8 since 08 Sep','−18%','41.2 → 33.7 tok/s after the image bump'],
+  ].map(([l,v,s],i)=>`<div><div class="tile-label">${l}</div>
+     <div class="tile-value" style="font-size:19px;${i===2?'color:var(--err)':''}">${v}</div>
+     <div class="tile-sub">${s}</div></div>`).join('');
+  el.appendChild(strip);
+  tableView(el,['Day','qwen3.8','deepseek-v4-flash'],perf.map(r=>[dlabel(r.d),r.qwen+' tok/s',r.ds+' tok/s']));
+}
+
+/* ========================= 8 · when (heatmap) ========================= */
+function renderHeat(){
+  const el = document.getElementById('c-heat');
+  head(el,'When','requests · weekday × hour, local time');
+  const p = plot(el, 196, {l:34,r:6,t:10,b:28});
+  const cw=(p.iw)/HOURS, ch=(p.ih)/7;
+  const steps=['var(--seq0)','var(--seq1)','var(--seq2)','var(--seq3)','var(--seq4)','var(--seq5)'];
+  heat.forEach((row,r)=>{
+    mk('text',{x:p.m.l-7,y:p.m.t+r*ch+ch/2+3.5,class:'ax','text-anchor':'end'},p.s).textContent=row.name;
+    row.cells.forEach((v,h)=>{
+      const k=v/heatMax, idx = v===0?0 : Math.min(5, 1+Math.floor(k*4.999));
+      const c=mk('rect',{x:p.m.l+h*cw+1,y:p.m.t+r*ch+1,width:cw-2,height:ch-2,rx:2.5,
+                         fill:steps[idx],class:'cell'},p.s);
+      c.addEventListener('mousemove',e=>showTT(e,`<div class="tt-h">${row.name} ${String(h).padStart(2,'0')}:00</div>`
+        +ttRows([{c:steps[idx],t:'requests',v:v.toLocaleString()}])));
+      c.addEventListener('mouseleave',hideTT);
+    });
+  });
+  [0,6,12,18].forEach(h=>mk('text',{x:p.m.l+h*cw+cw/2,y:p.h-14,class:'ax','text-anchor':'middle'},p.s)
+    .textContent=String(h).padStart(2,'0'));
+  const sc=document.createElement('div');
+  sc.style.cssText='display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-3);margin-top:2px';
+  sc.innerHTML='0'+steps.slice(1).map(c=>`<i style="width:16px;height:9px;border-radius:2px;background:${c};display:block"></i>`).join('')
+    +heatMax.toLocaleString()+' req/h';
+  el.appendChild(sc);
+  /* the three facts the grid is actually there to surface */
+  let best={v:-1};
+  heat.forEach((row,r)=>row.cells.forEach((v,h)=>{ if(v>best.v) best={v,d:row.name,h}; }));
+  const night = Math.round(heat.reduce((s2,r)=>s2+r.cells[3],0)/7);
+  const wk = heat.slice(5).flatMap(r=>r.cells).reduce((a,b)=>a+b,0);
+  const all = heat.flatMap(r=>r.cells).reduce((a,b)=>a+b,0);
+  const facts=document.createElement('div');
+  facts.style.cssText='margin-top:12px;padding-top:11px;border-top:1px solid var(--border);display:grid;gap:9px';
+  facts.innerHTML=[
+    ['Busiest hour', `${best.d} ${String(best.h).padStart(2,'0')}:00`, best.v.toLocaleString()+' req/h'],
+    ['Nightly corpus ingest', '03:00 every day', night.toLocaleString()+' req/h avg'],
+    ['Weekend share', pct(wk/all), 'of all requests'],
+  ].map(([l,v,s2])=>`<div style="display:flex;align-items:baseline;gap:8px">
+      <span class="tile-label" style="flex:1">${l}</span>
+      <b style="font-size:13px;font-weight:600">${v}</b>
+      <span class="dim" style="font-size:11.5px">${s2}</span></div>`).join('');
+  el.appendChild(facts);
+}
+
+/* ======================= 9 · keys & policy ======================= */
+function renderKeys(){
+  const el = document.getElementById('c-keys');
+  head(el,'Keys & policy','spend against budget · scope · rate limit');
+  const t=document.createElement('div'); t.className='density-dense'; t.style.marginTop='6px';
+  t.innerHTML = `<table class="data"><thead><tr>
+      <th>Key</th><th>Scope</th><th>Spend vs budget</th><th class="num">rpm</th>
+      <th class="num">Requests</th><th class="num">Last used</th></tr></thead><tbody>
+    ${keys.map(k=>{
+      const ratio = k.budget? k.spend/k.budget : 0;
+      const cls = !k.budget ? '' : ratio>1 ? 'over' : ratio>0.8 ? 'warn' : '';
+      const note = !k.budget ? '<span class="dim">no budget</span>'
+        : ratio>1 ? `<span style="color:var(--err)">${eur(k.spend)} of ${eur(k.budget)} — over by ${eur(k.spend-k.budget)}</span>`
+        : `${eur(k.spend)} <span class="dim">of ${eur(k.budget)}</span>`;
+      return `<tr>
+        <td><span class="mono-sm">${k.name}</span>${k.kind==='int'?' <span class="chip" style="height:18px;font-size:10px">internal</span>':''}</td>
+        <td class="mono-sm dim">${k.scope}</td>
+        <td><div style="display:flex;align-items:center;gap:9px">
+            <div class="meter ${cls}"><i style="width:${Math.min(100,ratio*100)}%"></i></div>
+            <span style="font-size:11.5px">${note}</span></div></td>
+        <td class="num">${k.rpm||'—'}</td><td class="num">${k.req.toLocaleString()}</td>
+        <td class="num dim">${k.last}</td></tr>`;}).join('')}
+    </tbody></table>`;
+  el.appendChild(t);
+  const foot=document.createElement('div');
+  foot.style.cssText='font-size:11.5px;color:var(--text-3);margin-top:9px;padding-top:9px;border-top:1px solid var(--border)';
+  foot.innerHTML = `<b style="color:var(--err)">internal:quickdoc-ingest</b> crossed its budget on 14 Sep — cost is only
+    known after a response, so one request always crosses the line. Refusals since: <b>7</b> ·
+    <span class="mono-sm">403 key_budget</span> (deliberately not a 429 — a monthly budget will not clear on retry).`;
+  el.appendChild(foot);
+}
+
+/* ========================= 10 · errors ========================= */
+function renderErrors(entry){
+  const el = document.getElementById('c-errors');
+  head(el,'Refusals & errors','click a column to open Traffic filtered');
+  legend(el,[{c:'var(--err)',t:'upstream 5xx'},{c:'var(--amber)',t:'gpu_hold'},
+             {c:'var(--c4)',t:'key_budget'},{c:'var(--text-3)',t:'timeout'}]);
+  const p = plot(el, 168, {l:34,r:12,t:10,b:28});
+  const KS=[['errUpstream','var(--err)'],['errHold','var(--amber)'],['errBudget','var(--c4)'],['errTimeout','var(--text-3)']];
+  const max=Math.max(...traffic.map(r=>KS.reduce((s,[k])=>s+r[k],0)))*1.15;
+  yGrid(p,max,v=>Math.round(v),3);
+  const bw=Math.min(16,(p.iw/DAYS)*0.6);
+  traffic.forEach((r,i)=>{
+    const g=mk('g',{},p.s);
+    if(entry){g.setAttribute('class','anim-col');g.style.animationDelay=(i*9)+'ms';}
+    const x=p.m.l+i*(p.iw/DAYS)+(p.iw/DAYS-bw)/2; let acc=0;
+    KS.forEach(([k,c],si)=>{ const v=r[k]; if(!v) return;
+      const hF=(v/max)*p.ih, y=p.m.t+p.ih-((acc+v)/max)*p.ih;
+      const isTop=KS.slice(si+1).every(([kk])=>!r[kk]);
+      mk('path',{d:isTop?topRound(x,y,bw,Math.max(1,hF-(si?2:0)),3):`M${x},${y}h${bw}v${Math.max(1,hF-(si?2:0))}h${-bw}Z`,fill:c},g);
+      acc+=v; });
+  });
+  xDays(p,9);
+  bands(p,(e,i)=>{const r=traffic[i];
+    showTT(e,`<div class="tt-h">${dlabel(r.d)}</div>`+ttRows(
+      KS.filter(([k])=>r[k]).map(([k,c])=>({c,t:k.replace('err','').toLowerCase(),v:r[k]})),
+      {t:'total',v:KS.reduce((s,[k])=>s+r[k],0)}));});
+}
+
+/* ============================ bootstrap ============================ */
+function renderAll(entry){
+  renderTiles();
+  renderSpend(entry); renderBudget(entry); renderTokens(entry); renderLatency(entry);
+  renderShare(entry); renderLocal(entry); renderPerf(entry); renderHeat(); renderKeys(); renderErrors(entry);
+}
+renderAll(!STATIC);
+
+let rt=null;
+addEventListener('resize',()=>{ clearTimeout(rt); rt=setTimeout(()=>renderAll(false),180); });
+
+document.getElementById('themebtn').addEventListener('click',e=>{
+  const h=document.documentElement, dark=h.dataset.theme==='dark';
+  h.dataset.theme = dark?'light':'dark';
+  e.target.textContent = dark?'dark theme':'light theme';
+  renderAll(false);
+});
+
+/* live tick: today's column grows as Request frames land on the SSE bus.
+   The only continuously moving thing on the page — and it moves because the
+   data does. (Real page: the same bump, driven by the telemetry bus.) */
+const reduce = STATIC || matchMedia('(prefers-reduced-motion: reduce)').matches;
+if(!reduce) setInterval(()=>{
+  const before = dayTotal(spend[DAYS-1]);
+  spend[DAYS-1].opus = +(spend[DAYS-1].opus + 0.06 + rnd()*0.14).toFixed(2);
+  spend[DAYS-1].mini = +(spend[DAYS-1].mini + rnd()*0.03).toFixed(2);
+  traffic[DAYS-1].reqCloud += Math.round(2+rnd()*6);
+  renderSpend(false); renderTiles();
+  const after = dayTotal(spend[DAYS-1]);
+  if(spendLastG && after>0){
+    spendLastG.style.transformBox='fill-box'; spendLastG.style.transformOrigin='bottom';
+    spendLastG.style.transition='none';
+    spendLastG.style.transform=`scaleY(${before/after})`;
+    void spendLastG.getBoundingClientRect();
+    spendLastG.style.transition='transform .55s cubic-bezier(.2,.7,.3,1)';
+    spendLastG.style.transform='scaleY(1)';
+  }
+  document.getElementById('tokrate').textContent = Math.round(90+rnd()*90);
+}, 2600);
+</script>
+</body>
+</html>

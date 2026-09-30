@@ -1,0 +1,19 @@
+{
+  "identifier": "remote-ui",
+  "description": "Allow the gateway web UI (served from localhost into the webview) to drive the window frame: drag, resize, minimize/maximize, close-to-tray, its own zoom level (the interface-scale setting), and the system file picker an agent's directory/file config field opens to bind a host mount.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+  },
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-is-maximized",
+    "core:webview:allow-set-webview-zoom",
+    "dialog:allow-open"
+  ]
+}

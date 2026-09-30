@@ -1,0 +1,16 @@
+[package]
+name = "lmgw-api-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Serde DTOs shared by the lmgw admin JSON API (server) and the Leptos UI (client)"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# JSON Schema for every DTO (api-docs design §3.1), behind `schema` so a
+# client that only wants the wire types (lmgw-ui) never pulls it in.
+schemars = { version = "1.2", optional = true }
+
+[features]
+schema = ["dep:schemars"]

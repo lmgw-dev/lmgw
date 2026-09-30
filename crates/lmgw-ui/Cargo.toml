@@ -1,0 +1,53 @@
+[package]
+name = "lmgw-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Leptos (CSR/WASM) dashboard for lmgw, built with Trunk, served embedded by lmgw-core"
+
+[dependencies]
+lmgw-api-types = { path = "../lmgw-api-types" }
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+console_error_panic_hook = "0.1"
+gloo-net = { version = "0.6", default-features = false, features = ["http", "eventsource", "json"] }
+futures = "0.3"
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+wasm-streams = "0.5"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+  "CustomEvent", "HtmlDialogElement", "Navigator", "Clipboard", "Storage",
+  # Usage charts: reduced-motion query, resize-aware chart widths, tooltip placement.
+  "MediaQueryList", "CssStyleDeclaration",
+  # Element sizes (a chart follows its card, not the window).
+  "HtmlElement", "ResizeObserver", "ResizeObserverEntry", "DomRectReadOnly",
+  # Bringing a control into view inside a sideways-scrolling table card (an
+  # armed ConfirmButton, a Select's picked option).
+  "ScrollIntoViewOptions", "ScrollLogicalPosition",
+  # Popovers placed from their anchor's rectangle, and the bubbling `change` a
+  # custom control fires so a guarded form sees it.
+  "DomRect", "EventInit", "HtmlCollection", "FocusOptions",
+  "AbortController", "AbortSignal", "ReadableStream",
+  # The API reference page's tester: `credentials: omit` for a pasted key or
+  # no credential, so the dashboard's own session cookie is never attached
+  # behind a client key's back.
+  "RequestCredentials",
+  # Interface scale: window-level Ctrl +/- and Ctrl+wheel listeners, the
+  # latter registered non-passive so it can stop the page scrolling too.
+  "KeyboardEvent", "WheelEvent", "AddEventListenerOptions",
+  # Chat: `?t=` URL sync via history.replaceState.
+  "History",
+  # `/` focuses the first visible search box of the page, whichever kind.
+  "NodeList",
+  # Audio lab: multipart uploads, and Blob URLs for result playback/download.
+  "Blob", "BlobPropertyBag", "File", "FileList", "FormData", "HtmlInputElement", "Url",
+  # Image lab: "send to edit" rebuilds a result into the upload's File, which
+  # has to carry the media type the picture actually is.
+  "FilePropertyBag",
+  # Chat attachments: drop-onto-the-column and paste-an-image, both read off
+  # the browser's own drag/clipboard payload rather than a picked <input>.
+  "DragEvent", "DataTransfer", "ClipboardEvent",
+] }

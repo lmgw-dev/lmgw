@@ -1,0 +1,10 @@
+/target
+*.sqlite
+*.sqlite-*
+/src-tauri/gen
+scripts/__pycache__/
+# ci/build.sh output (the RPM + latest.json); CI artifacts, never committed
+/dist/
+# Kept locally, not published: the idea list and the internal change log
+/docs/ideas.md
+/docs/release-notes.md

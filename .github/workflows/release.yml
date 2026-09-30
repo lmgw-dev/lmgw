@@ -1,0 +1,174 @@
+# Public releases, one per pushed tag v<X.Y.Z>. Development happens on a
+# private GitLab; `main` and the tag are pushed here deliberately when a
+# version is ready. A push to main alone only runs ci.yml.
+#
+# The version is the tag's, and ci/build.sh refuses a tag that does not match
+# the version in Cargo.toml: scripts/release.sh bumps both and tags in one go.
+# The release notes are the annotated tag's message. The build polls the public
+# default feed, this repository's `releases/latest/download/latest.json`, which
+# is why every release is marked latest and carries latest.json next to the RPM.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release, upload assets
+
+# One release at a time and never cancelled half-way: a newer push waits for
+# the running one (GitHub keeps only the newest pending run).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Build and publish
+    # Not in forks: their builds would still poll this repository's feed.
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    # Current Fedora, as on GitLab, so the RPM's webkit2gtk4.1 / appindicator
+    # SONAME dependencies match the hosts it is installed on.
+    container:
+      image: fedora:latest
+    # A cold LTO (codegen-units = 1) build on a 4-core runner.
+    timeout-minutes: 300
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      # The token itself (contents: write) is handed only to the steps that
+      # publish, never to the build: every dependency's build script runs there.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # git for a real clone; tar + zstd for actions/cache inside the container;
+      # gh + jq to publish.
+      - name: Install checkout, cache and publish tools
+        run: dnf -y install git-core tar zstd gh jq
+      - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes; keep the write token out of .git/config.
+          persist-credentials: false
+
+      # See ci.yml: GITHUB_ENV, because `github.workspace` is the host path.
+      - name: Keep the cargo home and Trunk's tool cache in the workspace
+        run: |
+          echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$GITHUB_WORKSPACE/.cache" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Registry + cargo-tauri/trunk + Trunk's tools, shared with ci.yml.
+      # target/ is deliberately not cached: releases are rare, a release
+      # target/ is large, and the 10 GB repository budget is better spent on
+      # ci.yml's.
+      - name: Restore the cargo home
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo/registry/index/
+            .cargo/registry/cache/
+            .cargo/git/db/
+            .cargo/bin/
+            .cache/trunk/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+
+      - name: Install build dependencies
+        run: bash ci/install-build-deps.sh
+
+      - name: Build the RPM and latest.json
+        run: bash ci/build.sh
+
+      - name: Read the release from the manifest
+        id: manifest
+        run: |
+          version="$(jq -er .version dist/latest.json)"
+          rpm="$(jq -er .rpm.file dist/latest.json)"
+          url="$(jq -er .rpm.url dist/latest.json)"
+          want="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${rpm}"
+          if [[ "$url" != "$want" ]]; then
+            echo "::error::latest.json points at $url, but this release serves $want"
+            exit 1
+          fi
+          if [[ ! -f "dist/$rpm" ]]; then
+            echo "::error::latest.json names dist/$rpm, which does not exist"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "rpm=$rpm" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release v${{ steps.manifest.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          RPM: ${{ steps.manifest.outputs.rpm }}
+        run: |
+          tag="v${VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # A re-run of this tag, so the release (or the draft a failed
+            # upload left behind) is already there. Replace the assets — RPM
+            # first, then the manifest that names its sha256.
+            gh release upload "$tag" "dist/${RPM}" --clobber
+            gh release upload "$tag" dist/latest.json --clobber
+            gh release edit "$tag" --draft=false --latest
+          else
+            # The notes are the annotated tag's message (checkout leaves only
+            # a lightweight copy of the tag, so ask the API). A lightweight
+            # tag gets GitHub's generated notes instead.
+            ref="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')"
+            notes=""
+            if [[ "$ref" == "tag "* ]]; then
+              notes="$(gh api "repos/${GH_REPO}/git/tags/${ref#tag }" --jq .message)"
+            fi
+            if [[ -n "${notes//[[:space:]]/}" ]]; then
+              notes_args=(--notes "$notes")
+            else
+              notes_args=(--generate-notes)
+            fi
+            # With assets, gh creates a draft, uploads, then publishes: the
+            # release never appears without both files.
+            gh release create "$tag" "dist/${RPM}" dist/latest.json \
+              --title "lmgw ${VERSION}" \
+              "${notes_args[@]}" \
+              --verify-tag \
+              --latest
+          fi
+
+      # Best effort, after the release exists, so it can never hold up the RPM.
+      # Reuses the release binary compiled above (cargo has nothing to redo)
+      # and only runs Tauri's linuxdeploy-based bundler, which downloads
+      # linuxdeploy and its plugins — hence no token in this step. Caveat: an
+      # AppImage built on current Fedora bundles against its glibc and will not
+      # start on distributions with an older one.
+      - name: AppImage (best effort)
+        id: appimage
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+          # linuxdeploy and its appimage plugin are AppImages themselves, and a
+          # container has no FUSE: extract them to /tmp and run from there.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          # linuxdeploy's bundled strip predates Fedora's binutils and fails on
+          # newer ELF sections; Fedora's libraries ship stripped anyway.
+          NO_STRIP: "true"
+        run: |
+          # The bundler copies xdg-open into the AppDir and fails without it.
+          dnf -y install xdg-utils
+          rm -rf target/release/bundle/appimage
+          cargo tauri build --bundles appimage
+          # By its exact version, like the RPM: never whatever else is lying there.
+          appimage="$(ls -1 target/release/bundle/appimage/*_"${VERSION}"_*.AppImage | head -n1)"
+          echo "path=$appimage" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the AppImage
+        if: steps.appimage.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          APPIMAGE: ${{ steps.appimage.outputs.path }}
+        run: gh release upload "v${VERSION}" "$APPIMAGE" --clobber

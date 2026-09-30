@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 22 22">
+  <!-- Colour tray, final candidate: white gate behind the coloured lanes, everything with a 1 px dark (#1E2226) outline so it holds on light and dark panels without recolouring. -->
+  <path d="M5 16V9a6 6 0 0 1 12 0v7" fill="none" stroke="#1E2226" stroke-width="4"/>
+  <path d="M5 16V9a6 6 0 0 1 12 0v7" fill="none" stroke="#fcfcfc" stroke-width="2"/>
+  <path d="M8 7.5L3.2 22H7L9 7.5zM10.5 7.5L9.1 22h3.8l-1.4-14.5zM13 7.5L15 22h3.8L14 7.5z" fill="#1E2226" stroke="#1E2226" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M8 7.5L3.2 22H7L9 7.5z" fill="#A56EF6"/>
+  <path d="M10.5 7.5L9.1 22h3.8l-1.4-14.5z" fill="#3DAEE9"/>
+  <path d="M13 7.5L15 22h3.8L14 7.5z" fill="#2DC9A6"/>
+</svg>

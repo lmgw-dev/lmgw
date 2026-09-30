@@ -1,0 +1,19 @@
+[
+ {"nav": "/chat"},
+ {"js": "(() => { document.getElementById('wp1-render')?.remove(); const el = document.createElement('div'); el.id = 'wp1-render'; el.className = 'md'; el.style.cssText = 'position:absolute;left:0;top:0;width:600px;background:var(--bg1);z-index:99999'; el.innerHTML = '<p>Inline <span class=\"math math-inline\">e^{i\\\\pi}+1=0</span> here.</p><p><span class=\"math math-display\">\\\\int_0^1 x\\\\,dx</span></p><pre><code class=\"language-mermaid\">graph TD; A[Start] --> B{Ok?}; B -->|yes| C[Done]</code></pre><pre><code class=\"language-mermaid\">graph TD; A --> </code></pre>'; document.body.appendChild(el); window.lmgwDecorateCode(el, true); return 'decorated'; })()"},
+ {"wait": 3},
+ {"expect": "!!document.querySelector('#wp1-render .math-inline .katex')", "label": "inline math rendered by KaTeX"},
+ {"expect": "!!document.querySelector('#wp1-render .math-display .katex-display')", "label": "display math rendered by KaTeX"},
+ {"expect": "!!document.querySelector('#wp1-render .mermaid-wrap .mermaid-view svg')", "label": "mermaid block rendered to an SVG"},
+ {"expect": "document.querySelectorAll('#wp1-render .mermaid-wrap').length === 1 && !!document.querySelector('#wp1-render .mermaid-error')", "label": "a broken diagram keeps its code block and shows the error"},
+ {"js": "(() => { document.querySelector('#wp1-render .mermaid-wrap > .code-tools button').click(); return 'toggled'; })()"},
+ {"expect": "getComputedStyle(document.querySelector('#wp1-render .mermaid-src pre')).display !== 'none' && getComputedStyle(document.querySelector('#wp1-render .mermaid-view')).display === 'none'", "label": "Code toggle shows the source"},
+ {"shot": "chat-render"},
+ {"js": "(() => { document.getElementById('wp1-render')?.remove(); return 'cleaned'; })()"},
+ {"js": "(() => { document.getElementById('wp1-colors')?.remove(); const el = document.createElement('div'); el.id = 'wp1-colors'; el.className = 'md'; el.style.cssText = 'position:absolute;left:0;top:0;width:600px;background:var(--bg1);z-index:99999'; el.innerHTML = '<pre><code class=\"language-mermaid\"></code></pre>'; el.querySelector('code').textContent = 'graph TD\\n  A[Pastel] --> B[Plain]\\n  style A fill:#f9f,stroke:#333,color:#fff'; document.body.appendChild(el); window.lmgwDecorateCode(el, true); return 'decorated'; })()"},
+ {"until": "!!document.querySelector('#wp1-colors .mermaid-view svg')", "timeout": 15},
+ {"expect": "(() => { const r = document.querySelector(\"#wp1-colors g.node[id*='flowchart-A-'] rect.label-container\"); if (!r) return false; const cs = getComputedStyle(r); const [red, g, b] = cs.fill.match(/\\d+/g).map(Number); const probe = document.createElement('div'); probe.style.color = 'var(--border-strong)'; document.body.appendChild(probe); const border = getComputedStyle(probe).color; probe.remove(); const dark = getComputedStyle(document.documentElement).colorScheme.includes('dark'); return red > g && b > g && (dark ? red < 128 : red > 200 && cs.fill !== 'rgb(255, 153, 255)') && cs.stroke === border; })()", "label": "a model's pastel style (fill:#f9f, stroke:#333) lands on the palette: a pink tint, --border-strong"},
+ {"expect": "document.querySelector('#wp1-colors .mermaid-src code').textContent.includes('fill:#f9f,stroke:#333')", "label": "the diagram's Code view keeps the source as written"},
+ {"shot": "chat-render-colors"},
+ {"js": "(() => { document.getElementById('wp1-colors')?.remove(); return 'cleaned'; })()"}
+]

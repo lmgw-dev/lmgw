@@ -1,0 +1,454 @@
+[
+ {
+  "js": "'SETUP: ECHO=1 STREAM_DELAY=0.02 scripts/mock-openai.py 9291 &  then  scripts/chat-actions-setup.sh <owner token>  (dev instance on :8899). Run: scripts/ui-drive.py scripts/drive/chat-actions.json --token <token>'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "(async()=>{const r=await fetch('/chat/api/threads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model_alias:'fake-echo',kind:'chat'})});const t=await r.json();return t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async t=>{window.__clip=t}}}); 'clipboard stubbed'"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "hello one"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "hello two"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-user-text')].map(e=>e.textContent).join('|')==='hello one|hello two'",
+  "label": "two user bubbles"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).join('|')==='Echo: hello one|Echo: hello two'",
+  "label": "the echo upstream answered both"
+ },
+ {
+  "expect": "document.querySelectorAll('.chat-col .msg-actions').length===4",
+  "label": "an action row under every settled message"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .msg-answered-by')].map(e=>e.textContent.trim()).join('|')==='fake-echo|fake-echo'",
+  "label": "each reply names the model that answered"
+ },
+ {
+  "expect": "!document.querySelector('.msg-unsaved')",
+  "label": "no reply of a normal turn is marked unsaved"
+ },
+ {
+  "expect": "!document.querySelector('.chat-col .msg-actions button[aria-label=\"Continue\"]') === false",
+  "label": "Continue is offered (llama-server route) on the last reply only"
+ },
+ {
+  "expect": "document.querySelectorAll('.chat-col .msg-actions button[aria-label=\"Continue\"]').length===1",
+  "label": "exactly one Continue"
+ },
+ {
+  "shot": "chat-actions-rows"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Copy\"]",
+  "nth": 3
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "window.__clip==='Echo: hello two'",
+  "label": "Copy puts the markdown source on the clipboard"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Edit\"]",
+  "nth": 3
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!!document.querySelector('.msg-edit-ta')",
+  "label": "the reply opens in an editor"
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.msg-edit-ta');t.value='EDITED reply';t.dispatchEvent(new Event('input',{bubbles:true}))})()"
+ },
+ {
+  "shot": "chat-actions-edit"
+ },
+ {
+  "click": ".msg-edit-btns .btn.primary"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim())[1]==='EDITED reply'",
+  "label": "an assistant edit is in place, no resend"
+ },
+ {
+  "expect": "!document.querySelector('.msg-edit-ta')",
+  "label": "the editor closed"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-user-text')].map(e=>e.textContent).length===2",
+  "label": "still two user messages"
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{const id=new URLSearchParams(location.search).get('t');const d=await (await fetch('/chat/api/threads/'+id)).json();const m=d.messages;return m[3].content==='EDITED reply'})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "and it is stored"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Edit\"]",
+  "nth": 0
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.msg-edit-note').textContent.includes('discards 3 later messages')",
+  "label": "the editor says how many messages go"
+ },
+ {
+  "expect": "document.querySelector('.msg-edit-btns .btn.primary').textContent==='Save & send'",
+  "label": "a user edit is Save & send"
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.msg-edit-ta');t.value='hello ONE';t.dispatchEvent(new Event('input',{bubbles:true}))})()"
+ },
+ {
+  "click": ".msg-edit-btns .btn.primary"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-user-text')].map(e=>e.textContent).join('|')==='hello ONE'",
+  "label": "later messages dropped, text replaced"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).join('|')==='Echo: hello ONE'",
+  "label": "and answered again"
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{const id=new URLSearchParams(location.search).get('t');const d=await (await fetch('/chat/api/threads/'+id)).json();const m=d.messages;return m.length===2&&m[0].content==='hello ONE'})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "stored the same"
+ },
+ {
+  "js": "(async()=>{const id=new URLSearchParams(location.search).get('t');const d=await (await fetch('/chat/api/threads/'+id)).json();const m=d.messages;return m[1].id})()"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Regenerate\"]",
+  "nth": 0
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).join('|')==='Echo: hello ONE'",
+  "label": "regenerate answers again"
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{const id=new URLSearchParams(location.search).get('t');const d=await (await fetch('/chat/api/threads/'+id)).json();const m=d.messages;return m.length===2&&m[1].id>0})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "the reply row was replaced"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Continue\"]",
+  "nth": 0
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim())[0]==='Echo: hello ONE…and then some more words.'",
+  "label": "continue appends to the same bubble"
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{const id=new URLSearchParams(location.search).get('t');const d=await (await fetch('/chat/api/threads/'+id)).json();const m=d.messages;return m.length===2&&m[1].content==='Echo: hello ONE…and then some more words.'})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "and to the same stored row"
+ },
+ {
+  "expect": "document.querySelectorAll('.chat-col .msg-assistant').length===1",
+  "label": "no second reply bubble"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "third"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).length===2",
+  "label": "two replies"
+ },
+ {
+  "click": ".chat-col .msg-actions .confirm button[title^=\"Answer again\"]",
+  "nth": 0
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!![...document.querySelectorAll('.msg-actions .confirm .btn.danger')].find(b=>b.textContent.includes('discards 2 later messages'))",
+  "label": "regenerate confirms and states the count"
+ },
+ {
+  "shot": "chat-actions-confirm"
+ },
+ {
+  "click": ".msg-actions .confirm .btn.danger"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-user-text')].map(e=>e.textContent).join('|')==='hello ONE'&&[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).length===1",
+  "label": "confirmed: everything after is gone, one fresh reply"
+ },
+ {
+  "click": ".chat-col .msg-actions .confirm button[title=\"Delete this message\"]",
+  "nth": 1
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "click": ".msg-actions .confirm .btn.danger"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "[...document.querySelectorAll('.msg-user-text')].map(e=>e.textContent).length===1&&[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).length===0",
+  "label": "Delete removes just that message"
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{const id=new URLSearchParams(location.search).get('t');const d=await (await fetch('/chat/api/threads/'+id)).json();const m=d.messages;return m.length===1&&m[0].role==='user'})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "and it is gone server-side"
+ },
+ {
+  "click": ".thread-tools button[title^=\"New temporary chat\"]"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "!!document.querySelector('.temp-strip')",
+  "label": "a temporary chat shows its banner"
+ },
+ {
+  "expect": "document.querySelector('.temp-strip').textContent.startsWith('Temporary — not saved. Discarded when you leave it or lmgw restarts.')",
+  "label": "banner text"
+ },
+ {
+  "expect": "new URLSearchParams(location.search).get('t')<0",
+  "label": "?t= carries the negative id"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.thread-group')].some(g=>g.textContent.startsWith('Temporary'))",
+  "label": "listed in the Temporary group"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "secret"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim())[0]==='Echo: secret'",
+  "label": "a reply streams in a temporary chat"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Edit\"]",
+  "nth": 1
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.msg-edit-ta');t.value='edited in temp';t.dispatchEvent(new Event('input',{bubbles:true}))})()"
+ },
+ {
+  "click": ".msg-edit-btns .btn.primary"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim())[0]==='edited in temp'",
+  "label": "message actions work in a temporary chat"
+ },
+ {
+  "shot": "chat-actions-temp"
+ },
+ {
+  "click": ".temp-strip .btn"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "!document.querySelector('.temp-strip')",
+  "label": "Keep: the banner is gone"
+ },
+ {
+  "expect": "new URLSearchParams(location.search).get('t')>0",
+  "label": "and the URL moved to the stored id"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim())[0]==='edited in temp'",
+  "label": "the kept chat holds the conversation"
+ },
+ {
+  "expect": "![...document.querySelectorAll('.thread-group')].some(g=>g.textContent.startsWith('Temporary'))",
+  "label": "no Temporary group left"
+ },
+ {
+  "click": ".thread-tools button[title^=\"New temporary chat\"]"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "gone soon"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "(async()=>{const t=(await (await fetch('/chat/api/threads')).json()); window.__temp=t.temporary.map(x=>x.id); return window.__temp})()"
+ },
+ {
+  "expect": "window.__temp.length===1",
+  "label": "one temporary chat alive"
+ },
+ {
+  "click": ".thread-row:not(.open)",
+  "nth": 0
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "(async()=>{const t=(await (await fetch('/chat/api/threads')).json()); return t.temporary.length})()"
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{return (await (await fetch('/chat/api/threads')).json()).temporary.length===0})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "leaving it discarded it"
+ },
+ {
+  "expect": "!document.querySelector('.temp-strip')",
+  "label": "the banner is gone with it"
+ },
+ {
+  "click": ".thread-tools button[title^=\"New temporary chat\"]"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "!!document.querySelector('.thread-x')",
+  "label": "a temp chat that survived a reload is listed with an X"
+ },
+ {
+  "click": ".thread-x"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{return (await (await fetch('/chat/api/threads')).json()).temporary.length===0})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "X discards it"
+ },
+ {
+  "click": ".thread-tools button[title^=\"New temporary chat\"]"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "(async()=>{window.__v=false;try{window.__v=await ((async()=>{return (await (await fetch('/chat/api/threads')).json()).temporary.length===0})())}catch(e){window.__v=String(e)===''}})()"
+ },
+ {
+  "expect": "window.__v",
+  "label": "leaving the Chat page discards it"
+ }
+]

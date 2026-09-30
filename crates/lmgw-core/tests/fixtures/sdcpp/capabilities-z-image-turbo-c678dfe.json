@@ -1,0 +1,264 @@
+{
+  "current_mode": "img_gen",
+  "defaults": {
+    "auto_resize_ref_image": true,
+    "batch_count": 1,
+    "cache_mode": "",
+    "cache_option": "",
+    "clip_skip": -1,
+    "control_strength": 0.8999999761581421,
+    "height": 1024,
+    "hires": {
+      "custom_sigmas": [],
+      "denoising_strength": 0.699999988079071,
+      "enabled": false,
+      "scale": 2.0,
+      "steps": 0,
+      "target_height": 0,
+      "target_width": 0,
+      "upscale_tile_size": 128,
+      "upscaler": "Latent"
+    },
+    "increase_ref_index": false,
+    "ip_adapter_strength": 1.0,
+    "negative_prompt": "",
+    "output_compression": 100,
+    "output_format": "png",
+    "prompt": "",
+    "qwen_image_layers": 3,
+    "sample_params": {
+      "eta": null,
+      "flow_shift": null,
+      "guidance": {
+        "distilled_guidance": 3.5,
+        "img_cfg": null,
+        "slg": {
+          "layer_end": 0.20000000298023224,
+          "layer_start": 0.009999999776482582,
+          "layers": [
+            7,
+            8,
+            9
+          ],
+          "scale": 0.0
+        },
+        "txt_cfg": 1.0
+      },
+      "sample_method": "default",
+      "sample_steps": 8,
+      "scheduler": "default",
+      "shifted_timestep": 0
+    },
+    "scm_mask": "",
+    "scm_policy_dynamic": true,
+    "seed": 42,
+    "strength": 0.75,
+    "vae_tiling_params": {
+      "enabled": false,
+      "extra_tiling_args": "",
+      "rel_size_x": 0.0,
+      "rel_size_y": 0.0,
+      "target_overlap": 0.5,
+      "temporal_tiling": false,
+      "tile_size_x": 0,
+      "tile_size_y": 0
+    },
+    "width": 1024
+  },
+  "defaults_by_mode": {
+    "img_gen": {
+      "auto_resize_ref_image": true,
+      "batch_count": 1,
+      "cache_mode": "",
+      "cache_option": "",
+      "clip_skip": -1,
+      "control_strength": 0.8999999761581421,
+      "height": 1024,
+      "hires": {
+        "custom_sigmas": [],
+        "denoising_strength": 0.699999988079071,
+        "enabled": false,
+        "scale": 2.0,
+        "steps": 0,
+        "target_height": 0,
+        "target_width": 0,
+        "upscale_tile_size": 128,
+        "upscaler": "Latent"
+      },
+      "increase_ref_index": false,
+      "ip_adapter_strength": 1.0,
+      "negative_prompt": "",
+      "output_compression": 100,
+      "output_format": "png",
+      "prompt": "",
+      "qwen_image_layers": 3,
+      "sample_params": {
+        "eta": null,
+        "flow_shift": null,
+        "guidance": {
+          "distilled_guidance": 3.5,
+          "img_cfg": null,
+          "slg": {
+            "layer_end": 0.20000000298023224,
+            "layer_start": 0.009999999776482582,
+            "layers": [
+              7,
+              8,
+              9
+            ],
+            "scale": 0.0
+          },
+          "txt_cfg": 1.0
+        },
+        "sample_method": "default",
+        "sample_steps": 8,
+        "scheduler": "default",
+        "shifted_timestep": 0
+      },
+      "scm_mask": "",
+      "scm_policy_dynamic": true,
+      "seed": 42,
+      "strength": 0.75,
+      "vae_tiling_params": {
+        "enabled": false,
+        "extra_tiling_args": "",
+        "rel_size_x": 0.0,
+        "rel_size_y": 0.0,
+        "target_overlap": 0.5,
+        "temporal_tiling": false,
+        "tile_size_x": 0,
+        "tile_size_y": 0
+      },
+      "width": 1024
+    }
+  },
+  "features": {
+    "cache": true,
+    "cancel_generating": false,
+    "cancel_queued": true,
+    "control_image": true,
+    "hires": true,
+    "init_image": true,
+    "ip_adapter_image": true,
+    "lora": true,
+    "mask_image": true,
+    "ref_images": true,
+    "vae_tiling": true
+  },
+  "features_by_mode": {
+    "img_gen": {
+      "cache": true,
+      "cancel_generating": false,
+      "cancel_queued": true,
+      "control_image": true,
+      "hires": true,
+      "init_image": true,
+      "ip_adapter_image": true,
+      "lora": true,
+      "mask_image": true,
+      "ref_images": true,
+      "vae_tiling": true
+    }
+  },
+  "limits": {
+    "max_batch_count": 8,
+    "max_height": 4096,
+    "max_queue_size": 64,
+    "max_width": 4096,
+    "min_height": 64,
+    "min_width": 64
+  },
+  "loras": [],
+  "model": {
+    "name": "z_image_turbo-Q4_K.gguf",
+    "path": "/models/leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q4_K.gguf",
+    "stem": "z_image_turbo-Q4_K"
+  },
+  "output_formats": [
+    "png",
+    "jpeg",
+    "webp"
+  ],
+  "output_formats_by_mode": {
+    "img_gen": [
+      "png",
+      "jpeg",
+      "webp"
+    ]
+  },
+  "samplers": [
+    "euler",
+    "euler_a",
+    "heun",
+    "dpm2",
+    "dpm++2s_a",
+    "dpm++2m",
+    "dpm++2mv2",
+    "ipndm",
+    "ipndm_v",
+    "lcm",
+    "ddim_trailing",
+    "tcd",
+    "res_multistep",
+    "res_2s",
+    "er_sde",
+    "euler_cfg_pp",
+    "euler_a_cfg_pp",
+    "euler_ge",
+    "dpm++2m_sde",
+    "dpm++2m_sde_bt",
+    "lms"
+  ],
+  "schedulers": [
+    "discrete",
+    "normal",
+    "karras",
+    "exponential",
+    "ays",
+    "gits",
+    "sgm_uniform",
+    "simple",
+    "smoothstep",
+    "kl_optimal",
+    "lcm",
+    "bong_tangent",
+    "ltx2",
+    "logit_normal",
+    "flux2",
+    "flux",
+    "beta",
+    "llada_image"
+  ],
+  "supported_modes": [
+    "img_gen"
+  ],
+  "upscalers": [
+    {
+      "name": "None"
+    },
+    {
+      "name": "Lanczos"
+    },
+    {
+      "name": "Nearest"
+    },
+    {
+      "name": "Latent"
+    },
+    {
+      "name": "Latent (nearest)"
+    },
+    {
+      "name": "Latent (nearest-exact)"
+    },
+    {
+      "name": "Latent (antialiased)"
+    },
+    {
+      "name": "Latent (bicubic)"
+    },
+    {
+      "name": "Latent (bicubic antialiased)"
+    }
+  ]
+}

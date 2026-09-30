@@ -1,0 +1,14 @@
+{
+  "name": "models/gemini-embedding-001",
+  "version": "001",
+  "displayName": "Gemini Embedding 001",
+  "description": "Obtain a distributed representation of a text.",
+  "inputTokenLimit": 2048,
+  "outputTokenLimit": 1,
+  "supportedGenerationMethods": [
+    "embedContent",
+    "countTextTokens",
+    "countTokens",
+    "asyncBatchEmbedContent"
+  ]
+}

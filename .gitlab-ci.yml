@@ -1,0 +1,74 @@
+# CI for lmgw — build the RPM on every push to `main` and publish it (plus an
+# updater manifest the app polls) to this project's GitLab *generic* package
+# registry. These are the private test builds, versioned <Cargo.toml version>+
+# <pipeline IID> so each sorts after the release it follows; public releases are
+# built from v<X.Y.Z> tags on GitHub by .github/workflows/release.yml, from the
+# same ci/build.sh. Tags build nothing here.
+#
+# Self-hosted runners are tag-selected (docker / macos); the Linux build uses
+# the `docker` tag for every job by default.
+#
+# REQUIRED CI/CD variable (Settings → CI/CD → Variables), set by the owner:
+#   LMGW_UPDATE_DEPLOY_TOKEN — masked; the token of a project deploy token
+#     (Settings → Repository → Deploy tokens) with ONLY the
+#     `read_package_registry` scope. ci/build.sh compiles it into the test
+#     builds, together with this registry's `latest/latest.json` as their update
+#     feed, so an installed test build can read the private registry. It ends
+#     up in the RPM, hence read-only. If you mark it *protected*, `main` must be
+#     a protected branch or the variable never reaches the job. Missing, the
+#     build still succeeds but warns, and its updater cannot reach the feed.
+default:
+  tags: [docker]
+
+stages:
+  - build
+  - publish
+
+# Only run for `main` (push, web, or API trigger). Skips MRs and other branches.
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+variables:
+  # Keep cargo's registry/cache + installed binaries inside the project so
+  # GitLab can cache them between pipelines.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  # Same for Trunk's tool cache: it fetches wasm-bindgen-cli and wasm-opt from
+  # GitHub on first use, and $HOME is not cached. Without this every pipeline
+  # re-downloads them and a GitHub hiccup fails the build.
+  XDG_CACHE_HOME: "$CI_PROJECT_DIR/.cache"
+
+build:
+  stage: build
+  # Track current Fedora so the RPM's webkit2gtk4.1 / appindicator SONAME deps
+  # match the runtime host. Pin to a specific tag (e.g. fedora:42) if you'd
+  # rather have reproducible builds than auto-tracking.
+  image: fedora:latest
+  interruptible: true
+  cache:
+    key: cargo-lmgw
+    paths:
+      - .cargo/registry/
+      - .cargo/bin/
+      - .cache/trunk/
+      - target/
+  before_script:
+    - bash ci/install-build-deps.sh
+  script:
+    - bash ci/build.sh
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+publish:
+  stage: publish
+  image: fedora:latest
+  needs: ["build"]
+  # Serialize publishes so the mutable `latest/latest.json` upload can't race a
+  # concurrent pipeline.
+  resource_group: registry-latest
+  before_script:
+    - dnf -y install curl >/dev/null
+  script:
+    - bash ci/publish.sh

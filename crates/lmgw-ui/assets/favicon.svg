@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- lmgw app icon, final candidate: a white gate with three lanes running
+       through it toward you - local (Breeze blue) in the middle and widest,
+       cloud to the sides (violet, teal). The lanes are in front of the gate:
+       each leg's inner foot is cut along the lane edge, leaving a gap.
+       No clipPath / mask / filter, so Qt and rsvg render it the same. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#252B34"/>
+      <stop offset="1" stop-color="#14181E"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#tile)"/>
+  <path d="M224 760V438A288 288 0 0 1 800 438V760H727L664 640.2V438A152 152 0 0 0 360 438V640.2L297 760Z" fill="#F4F6F8"/>
+  <path d="M503 420L186.8 1020.9A224 224 0 0 0 224 1024L363.4 1024L509 420Z" fill="#A56EF6"/>
+  <path d="M510.2 420L413 1024L611 1024L513.8 420Z" fill="#3DAEE9"/>
+  <path d="M521 420L837.2 1020.9A224 224 0 0 1 800 1024L660.6 1024L515 420Z" fill="#2DC9A6"/>
+</svg>

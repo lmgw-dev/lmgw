@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "id": "mail-labeler",
+  "name": "Mail labeler",
+  "description": "Classifies unread Gmail into labels. Nothing is written until you apply.",
+  "version": "3.0.0",
+  "model": {
+    "alias": "{{config.model}}",
+    "temperature": 0.0
+  },
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "format": "model_alias",
+          "title": "Model",
+          "description": "The alias each classify call runs on. One call per message, so a small local model is the usual choice."
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "title": "Categories",
+          "description": "The taxonomy the model must pick from. Widen it here and re-run the attention rows; \"Other\" is added automatically as the catch-all.",
+          "default": [
+            "Newsletter",
+            "Promotions",
+            "Notifications",
+            "Social",
+            "Personal",
+            "Work",
+            "Finance",
+            "Receipts",
+            "Travel",
+            "Spam"
+          ]
+        },
+        "label_prefix": {
+          "type": "string",
+          "title": "Label prefix",
+          "default": "lmgw",
+          "description": "Parent label; empty applies bare category names"
+        },
+        "limit": {
+          "type": "integer",
+          "title": "Limit",
+          "default": 50,
+          "minimum": 1,
+          "description": "How many unread messages one run lists. It is passed straight to the Gmail search as maxResults; Gmail itself returns at most 500 in one page, so a larger number here cannot list more."
+        },
+        "concurrency": {
+          "type": "integer",
+          "title": "Concurrency",
+          "default": 4,
+          "minimum": 1,
+          "description": "Parallel classify calls; match the local server's -np"
+        }
+      },
+      "required": [
+        "model"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "label": "gws",
+      "allowed": [
+        "gws__gmail_search",
+        "gws__gmail_get",
+        "gws__gmail_listLabels",
+        "gws__gmail_createLabel",
+        "gws__gmail_batchModify"
+      ],
+      "install": {
+        "kind": "git",
+        "ref": "https://github.com/gemini-cli-extensions/workspace",
+        "notes": "Clone and build it, then run the headless login once (npm run auth-utils -- login). Register it on the MCP page as a stdio server: command 'node', args ['workspace-server/dist/index.js'], cwd the clone, tool_prefix 'gws'. These five are every tool the steps name, so nothing else the server offers is in reach of a run. Run dist/index.js directly rather than scripts/start.js — start.js reinstalls on every launch and switches the tool names to dots. Disable gws__gmail_send and gws__gmail_sendDraft on the MCP page so no thread that attaches the whole label can send."
+      }
+    }
+  ],
+  "run": {
+    "kind": "batch",
+    "source": {
+      "tool": "gws__gmail_search",
+      "args": {
+        "query": "is:unread in:inbox",
+        "maxResults": "{{config.limit}}"
+      }
+    },
+    "items_path": "/messages",
+    "item": {
+      "id": "{{item.id}}",
+      "fetch": {
+        "tool": "gws__gmail_get",
+        "args": {
+          "messageId": "{{item.id}}",
+          "format": "full"
+        }
+      },
+      "columns": {
+        "date": "{{fetched.date}}",
+        "from": "{{fetched.from}}",
+        "subject": "{{fetched.subject}}"
+      },
+      "system": "You are an email triage assistant. Read the email and pick the single best-fitting category from this list: {{config.categories}}. If none clearly fit, pick Other.",
+      "user": "From: {{fetched.from}}\nTo: {{fetched.to}}\nDate: {{fetched.date}}\nSubject: {{fetched.subject}}\n\n{{fetched.body}}",
+      "output": {
+        "field": "category",
+        "enum_from": "config.categories",
+        "fallback": "Other"
+      },
+      "concurrency": "{{config.concurrency}}"
+    },
+    "review": {
+      "editable": [
+        "category"
+      ]
+    },
+    "apply": {
+      "script": [
+        "export async function apply(ctx) {",
+        "  const prefix = ctx.config.label_prefix ? ctx.config.label_prefix + '/' : '';",
+        "  const listed = await ctx.tools.call('gws__gmail_listLabels', {});",
+        "  const byName = new Map((listed.labels ?? []).map(l => [l.name, l.id]));",
+        "  const groups = new Map();",
+        "  for (const r of ctx.rows) {",
+        "    if (!r.category) {",
+        "      ctx.log(`skipping ${r.id}: the review row carries no category`);",
+        "      continue;",
+        "    }",
+        "    const name = prefix + r.category;",
+        "    if (!groups.has(name)) groups.set(name, []);",
+        "    groups.get(name).push(r.id);",
+        "  }",
+        "  for (const name of groups.keys()) {",
+        "    if (!byName.has(name)) {",
+        "      const made = await ctx.tools.call('gws__gmail_createLabel', { name });",
+        "      byName.set(name, made.id);",
+        "      ctx.log(`created label ${name}`);",
+        "    }",
+        "  }",
+        "  let applied = 0;",
+        "  for (const [name, messageIds] of groups) {",
+        "    await ctx.tools.call('gws__gmail_batchModify',",
+        "      { messageIds, addLabelIds: [byName.get(name)] });",
+        "    applied += messageIds.length;",
+        "    ctx.log(`labelled ${messageIds.length} message(s) ${name}`);",
+        "  }",
+        "  return { applied, labels: [...groups.keys()] };",
+        "}"
+      ],
+      "output": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "integer"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "applied",
+          "labels"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,401 @@
+[
+ {
+  "js": "'SETUP: ECHO=1 STREAM_DELAY=0.02 scripts/mock-openai.py 9291 &  then  scripts/chat-actions-setup.sh <owner token>  (dev instance on :8899). Run: scripts/ui-drive.py scripts/drive/chat-folders.json --token <token> --base http://127.0.0.1:8899. Wipes every chat thread and folder of that instance first.'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=await j('/chat/api/folders');for(const x of f.folders)await j('/chat/api/folders/'+x.id+'/delete',{threads:'delete'});const t=await j('/chat/api/threads?archived=all');for(const x of t.threads)await j('/chat/api/threads/'+x.id+'/delete',{});return 'clean'})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".thread-tools button[title^='New folder']"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "document.activeElement&&document.activeElement.classList.contains('folder-rename')",
+  "label": "a new folder opens straight into rename"
+ },
+ {
+  "type": "Projects"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "expect": "[...document.querySelectorAll('.thread-folder .folder-name')].map(e=>e.textContent).join('|')==='Projects'",
+  "label": "the folder is named Projects"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 2
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open] .folder-settings')",
+  "label": "Folder settings opens as a modal"
+ },
+ {
+  "click": "dialog[open] .mp-btn"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "click": "dialog[open] .mp-row[title='fake-echo']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "dialog[open] textarea.ta"
+ },
+ {
+  "type": "You are terse."
+ },
+ {
+  "click": "dialog[open] input.mono",
+  "nth": 3
+ },
+ {
+  "type": "40"
+ },
+ {
+  "shot": "chat-folders-settings"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]')",
+  "label": "Save closes the modal"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=(await j('/chat/api/folders')).folders[0];return JSON.stringify(f.defaults)})()"
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const d=(await j('/chat/api/folders')).folders[0].defaults;return d.model_alias==='fake-echo'&&d.system_prompt==='You are terse.'&&d.top_k===40&&d.temperature===null})()",
+  "label": "defaults stored: model, prompt, top_k; the rest unset"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 0
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t');const t=(await j('/chat/api/threads/'+id)).thread;return t.folder_id===1&&t.model_alias==='fake-echo'&&t.system_prompt==='You are terse.'&&t.top_k===40})()",
+  "label": "New chat here starts from the folder's defaults"
+ },
+ {
+  "expect": "document.querySelector('.chat-head .mp-val')?.textContent.includes('fake-echo')",
+  "label": "the header shows the folder's model"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "in the folder"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===1",
+  "label": "the thread is listed once, under its folder"
+ },
+ {
+  "expect": "document.querySelectorAll('.chat-col .msg-actions [title^=\"Answer\"]').length===2",
+  "label": "Regenerate is offered on the user message and on the reply"
+ },
+ {
+  "click": ".chat-col .msg-actions [title^='Answer this message']"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "click": ".chat-col .msg-actions .btn.danger"
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant .md')].map(e=>e.textContent.trim()).join('|')==='Echo: in the folder'",
+  "label": "regenerating a user message answers it again"
+ },
+ {
+  "click": ".thread-tools .row .btn"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "loose one"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row').length===2&&document.querySelectorAll('.thread-row.nested').length===1",
+  "label": "one thread in the folder, one under its date"
+ },
+ {
+  "js": "(()=>{const row=[...document.querySelectorAll('.thread-row:not(.nested)')][0];const dt=new DataTransfer();row.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:dt}));return 'dragstart'})()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!!document.querySelector('.thread-dropzone')",
+  "label": "the No folder zone shows while dragging"
+ },
+ {
+  "js": "(async()=>{const h=document.querySelector('.thread-folder');const dt=new DataTransfer();h.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:dt}));await new Promise(r=>setTimeout(r,60));const over=h.classList.contains('drop-over');h.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));return 'over='+over})()"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===2&&document.querySelectorAll('.thread-row').length===2",
+  "label": "dropped on the folder header: both threads sit in it, each once"
+ },
+ {
+  "expect": "!document.querySelector('.thread-dropzone')",
+  "label": "the zone is gone after the drop"
+ },
+ {
+  "js": "(()=>{const row=[...document.querySelectorAll('.thread-row.nested')][0];row.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:new DataTransfer()}));return 'dragstart'})()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(()=>{const z=document.querySelector('.thread-dropzone');z.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:new DataTransfer()}));return 'drop'})()"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===1",
+  "label": "dropped on No folder: it left the folder"
+ },
+ {
+  "click": ".thread-row:not(.nested) .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "[...document.querySelectorAll('.thread-row:not(.nested) .menu-pop .menu-item')].map(e=>e.textContent).join('|')"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.thread-row:not(.nested) .menu-pop .menu-item')].some(e=>e.textContent==='Move to…')",
+  "label": "the row menu has Move to…"
+ },
+ {
+  "js": "[...document.querySelectorAll('.thread-row:not(.nested) .menu-pop .menu-item')].find(e=>e.textContent==='Move to…').getBoundingClientRect().top>0"
+ },
+ {
+  "click": ".thread-row:not(.nested) .menu-pop .menu-item",
+  "nth": 1
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "shot": "chat-folders-move"
+ },
+ {
+  "click": "dialog[open] .move-list .btn",
+  "nth": 1
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===2",
+  "label": "Move to… filed it into the folder"
+ },
+ {
+  "click": ".thread-folder .folder-name"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row').length===0&&!!document.querySelector('.folder-chev.collapsed')&&document.querySelector('.thread-folder .count').textContent==='2'",
+  "label": "collapsed: header with its count of 2, no rows"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "!!document.querySelector('.folder-chev.collapsed')&&document.querySelectorAll('.thread-row').length===0",
+  "label": "the collapsed state survives a reload"
+ },
+ {
+  "shot": "chat-folders-collapsed"
+ },
+ {
+  "click": ".thread-folder .folder-name"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===2",
+  "label": "expanded again"
+ },
+ {
+  "click": ".thread-q"
+ },
+ {
+  "type": "projects"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===2",
+  "label": "filtering by the folder's name shows its threads inside it"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const t=(await j('/chat/api/threads')).threads[0];await j('/chat/api/threads/'+t.id+'/archive',{archived:true});return t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 5
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "shot": "chat-folders-delete"
+ },
+ {
+  "expect": "[...document.querySelectorAll('dialog[open] .btn')].some(b=>b.textContent.includes('keep the chats'))",
+  "label": "the delete dialog offers keeping the chats"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn:not(.ghost):not(.danger)"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-folder').length===0",
+  "label": "the folder is gone"
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const t=(await j('/chat/api/threads?archived=all')).threads;return t.length===2&&t.every(x=>x.folder_id===null)})()",
+  "label": "its threads were kept, without a folder"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=await j('/chat/api/folders',{name:'Scratch'});const t=await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat',folder_id:f.id});return t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 5
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.danger"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "js": "[...document.querySelectorAll('dialog[open] .modal-foot .btn')].map(b=>b.textContent).join('|')"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.danger"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-folder').length===0",
+  "label": "the folder is gone"
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const t=(await j('/chat/api/threads?archived=all')).threads;return t.length===2})()",
+  "label": "its thread was deleted with it, the others stay"
+ }
+]

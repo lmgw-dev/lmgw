@@ -1,0 +1,25 @@
+-- The learned transient peak of one image pipeline (image-generation design
+-- §9, §12.4 — the one genuinely new mechanism in that spec).
+--
+-- Why a column rather than a derived figure: the gap it closes cannot be
+-- derived from anything on disk. Measured on the 4090, Z-Image-Turbo Q4_K is
+-- 7.1 GiB resident when idle and needs 13.7 GiB while it renders one 1024²
+-- image — the compute buffers are allocated per job and freed after it, and no
+-- file size, GGUF header or flag says how big they are. An admission ledger
+-- that reads the driver with the pipeline idle sees that 6.6 GiB as free,
+-- admits a chat model into it, and the next generation OOMs.
+--
+-- So lmgw learns the figure instead of inventing a multiplier:
+-- `peak_extra_bytes` is the largest `used - idle` delta the VRAM sampler has
+-- observed on the device while this row had a request in flight (see
+-- `vram::peak`). NULL means nothing has been learned yet, which is a *visible*
+-- state — `GET /api/vram` says so on the resident, and admission charges
+-- nothing it has not measured. `peak_learned_at` is when the stored figure was
+-- observed, so a surface can say how old it is.
+--
+-- Monotonic by construction (a later 256² job never lowers what a 1024² job
+-- taught), and reset to NULL by `ops::image_model_set` whenever `files` or
+-- `args` change: a different pipeline, or `offload_to_cpu` / `vae_tiling` /
+-- a new default size, is a different peak.
+ALTER TABLE image_models ADD COLUMN peak_extra_bytes INTEGER;
+ALTER TABLE image_models ADD COLUMN peak_learned_at  TEXT;

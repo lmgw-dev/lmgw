@@ -1,0 +1,26 @@
+{
+  "id": "openai/text-embed-4",
+  "name": "OpenAI: Text Embed 4",
+  "created": 1780000000,
+  "description": "Synthetic fixture (no embedding model was present in the captured Kilo sample as of 2026-09-17) — exercises the OpenAI-protocol task derivation rule: task = embedding iff architecture.output_modalities == [\"embedding\"].",
+  "architecture": {
+    "modality": "text->embedding",
+    "input_modalities": ["text"],
+    "output_modalities": ["embedding"],
+    "tokenizer": "Other"
+  },
+  "top_provider": {
+    "is_moderated": false,
+    "context_length": 8191,
+    "max_completion_tokens": 1
+  },
+  "pricing": {
+    "prompt": "0.00000013",
+    "completion": "0"
+  },
+  "context_length": 8191,
+  "supported_parameters": [
+    "max_tokens"
+  ],
+  "opencode": {}
+}

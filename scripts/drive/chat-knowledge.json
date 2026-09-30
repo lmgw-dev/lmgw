@@ -1,0 +1,535 @@
+[
+ {
+  "js": "'SETUP: ECHO=1 EMBED_DIMS=64 STREAM_DELAY=0.02 scripts/mock-openai.py 9291 &  scripts/dev-instance.sh  then  scripts/chat-actions-setup.sh <owner token> and scripts/knowledge-setup.sh <owner token> (dev instance on :8899). Run: scripts/ui-drive.py scripts/drive/chat-knowledge.json --token <token> --base http://127.0.0.1:8899. Wipes every knowledge base, chat thread and folder of that instance first.'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=await j('/chat/api/folders');for(const x of f.folders)await j('/chat/api/folders/'+x.id+'/delete',{threads:'delete'});const t=await j('/chat/api/threads?archived=all');for(const x of t.threads)await j('/chat/api/threads/'+x.id+'/delete',{});const b=await j('/api/knowledge/bases');for(const k of b.bases)await j('/api/knowledge/bases/'+k.id+'/delete',{});const tax=await j('/api/knowledge/bases',{name:'Taxes',description:'tax papers',embed_alias:'fake-embed'});await j('/api/knowledge/bases',{name:'Recipes',embed_alias:'fake-embed'});const fd=new FormData();fd.append('file',new File(['# Taxes 2025\\n\\nThe tax return was filed in March.\\n\\n## Refund\\n\\nThe refund of 412 EUR arrived in May.\\n\\n## Costs\\n\\nThe accountant charged 300 EUR and the software 40 EUR.\\n'],'notes.md',{type:'text/markdown'}));const up=await fetch('/api/knowledge/bases/'+(tax.id||tax.base?.id)+'/files',{method:'POST',body:fd});return 'fixtures '+up.status})()"
+ },
+ {
+  "until": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const b=await j('/api/knowledge/bases');const t=b.bases.find(k=>k.name==='Taxes');return !!t&&t.counts.ready===1})()",
+  "label": "the Taxes base has one ready file",
+  "timeout": 60
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'});return r.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "(()=>{const r=document.querySelector('.dock-rail'); if (r) r.click(); return r ? 'opened' : 'already open'; })()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('.chat-settings .kb-section')",
+  "label": "Thread settings has a Knowledge section"
+ },
+ {
+  "until": "document.querySelectorAll('.kb-section .kb-pick input[type=checkbox]').length===2",
+  "label": "both bases are listed as ticks",
+  "timeout": 10
+ },
+ {
+  "expect": "[...document.querySelectorAll('.kb-section .kb-pick')].find(r=>r.textContent.includes('Recipes')).textContent.includes('⚠')",
+  "label": "a base with no ready file carries a warning"
+ },
+ {
+  "expect": "![...document.querySelectorAll('.kb-section .kb-pick')].find(r=>r.textContent.includes('Taxes')).textContent.includes('⚠')",
+  "label": "a ready base carries none"
+ },
+ {
+  "expect": "document.querySelector('.kb-section .kb-mode').textContent.includes('Auto:')",
+  "label": "Auto is explained"
+ },
+ {
+  "click": ".kb-section .seg-btn",
+  "nth": 1
+ },
+ {
+  "expect": "document.querySelector('.kb-section .kb-mode').textContent.includes('Needs a model that calls tools')&&!document.querySelector('.kb-section input[inputmode=numeric]')",
+  "label": "Tool is explained and hides the budget"
+ },
+ {
+  "click": ".kb-section .seg-btn",
+  "nth": 0
+ },
+ {
+  "expect": "document.querySelector('.kb-section input[inputmode=numeric]').placeholder.includes('4000')",
+  "label": "the budget box shows the setting's value"
+ },
+ {
+  "js": "[...document.querySelectorAll('.kb-section .kb-pick')].find(r=>r.textContent.includes('Taxes')).querySelector('input').click()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!!document.querySelector('.chat-settings .count.attn')",
+  "label": "ticking marks the settings unsaved"
+ },
+ {
+  "shot": "chat-knowledge-settings"
+ },
+ {
+  "click": ".chat-settings-save .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t')||(await j('/chat/api/threads')).threads[0].id;const t=(await j('/chat/api/threads/'+id)).thread;return t.kb_ids.length===1&&t.kb_mode==='auto'&&t.kb_budget_tokens===null})()",
+  "label": "Save stores the base, auto mode, no budget"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-head .type-badge')].some(b=>b.textContent==='1 kb')",
+  "label": "the chat head badges one knowledge base"
+ },
+ {
+  "expect": "!document.querySelector('.chat-settings .count.attn')",
+  "label": "saved: no unsaved mark"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "what was the refund in May?"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.chat-col .kb-ctx')",
+  "label": "the retrieval summary appears",
+  "timeout": 30
+ },
+ {
+  "until": "document.querySelector('.chat-col .msg-assistant .md')&&document.querySelector('.chat-col .msg-assistant .md').textContent.includes('Echo:')&&!document.querySelector('.caret')",
+  "label": "the answer settles",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('.kb-ctx summary').textContent.includes('excerpt')&&document.querySelector('.kb-ctx summary').textContent.includes('from Taxes')&&document.querySelector('.kb-ctx summary').textContent.includes('tokens')",
+  "label": "the summary reads 'N excerpts from Taxes · n tokens'"
+ },
+ {
+  "expect": "!document.querySelector('.kb-ctx').open",
+  "label": "it is collapsed"
+ },
+ {
+  "expect": "document.querySelector('.kb-ctx').compareDocumentPosition(document.querySelector('.msg-assistant .md'))&Node.DOCUMENT_POSITION_FOLLOWING",
+  "label": "it sits above the answer"
+ },
+ {
+  "expect": "document.querySelectorAll('.md .cite[data-cite=\"1\"]').length===1",
+  "label": "[1] in the answer is a citation badge"
+ },
+ {
+  "expect": "document.querySelector('.md .cite').title.includes('notes.md')",
+  "label": "hovering it names the file"
+ },
+ {
+  "expect": "document.querySelector('.md').textContent.includes('[9]')&&!document.querySelector('.md .cite[data-cite=\"9\"]')",
+  "label": "[9] has no excerpt and stays text"
+ },
+ {
+  "expect": "document.querySelector('.md code')&&document.querySelector('.md code').textContent.includes('code[1]')&&!document.querySelector('.md code .cite')",
+  "label": "inline code is not touched"
+ },
+ {
+  "shot": "chat-knowledge-answer"
+ },
+ {
+  "click": ".md .cite"
+ },
+ {
+  "until": "document.querySelector('dialog[open] mark#kb-hl')",
+  "label": "a citation opens the source viewer with the chunk highlighted",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelector('dialog[open] mark#kb-hl').textContent.includes('refund')",
+  "label": "the highlighted passage is the refund"
+ },
+ {
+  "shot": "chat-knowledge-source"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]')",
+  "label": "Esc closes the viewer"
+ },
+ {
+  "click": ".kb-ctx summary"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.kb-ctx').open&&document.querySelectorAll('.kb-ex').length>=1",
+  "label": "the summary expands to numbered excerpts"
+ },
+ {
+  "expect": "document.querySelector('.kb-ex').textContent.includes('notes.md')&&document.querySelector('.kb-ex .kb-ex-n').textContent==='1'",
+  "label": "an excerpt shows its number and file"
+ },
+ {
+  "shot": "chat-knowledge-excerpts"
+ },
+ {
+  "click": ".kb-ex"
+ },
+ {
+  "until": "document.querySelector('dialog[open] mark#kb-hl')",
+  "label": "an excerpt opens the source viewer too",
+  "timeout": 30
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "!!document.querySelector('.chat-col .kb-ctx')&&!!document.querySelector('.md .cite[data-cite=\"1\"]')",
+  "label": "a reload shows the stored retrieval and its citations"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-head .type-badge')].some(b=>b.textContent==='1 kb')",
+  "label": "the badge survives the reload"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=(await j('/chat/api/threads')).threads[0].id;await j('/chat/api/threads/'+id+'/settings',{kb_mode:'tool'});return id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-head .type-badge')].some(b=>b.textContent==='kb: tool')",
+  "label": "a thread with knowledge in tool mode shows 'kb: tool'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'});return r.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "!document.querySelector('.chat-head .type-badge')||![...document.querySelectorAll('.chat-head .type-badge')].some(b=>/kb/.test(b.textContent))",
+  "label": "the new thread has no knowledge"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "from my notes #Tax"
+ },
+ {
+  "until": "document.querySelector('.kb-pop:popover-open .mp-row')",
+  "label": "typing # opens the picker",
+  "timeout": 10
+ },
+ {
+  "expect": "document.querySelectorAll('.kb-pop .mp-row').length===1&&document.querySelector('.kb-pop .mp-row').textContent.includes('Taxes')",
+  "label": "it is filtered by what follows the #"
+ },
+ {
+  "shot": "chat-knowledge-picker"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.composer-input').value==='from my notes '",
+  "label": "Enter picks: the #query text is removed"
+ },
+ {
+  "expect": "document.querySelectorAll('.draft-chips .kb-chip').length===1&&document.querySelector('.draft-chips .kb-chip').textContent.includes('Taxes')",
+  "label": "a knowledge chip is added"
+ },
+ {
+  "expect": "!document.querySelector('.kb-pop:popover-open')",
+  "label": "the picker closes"
+ },
+ {
+  "type": "what was the refund"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.chat-col .kb-ctx')",
+  "label": "the send carried kb_refs: a retrieval appears",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.caret')&&document.querySelector('.chat-col .msg-assistant .md').textContent.includes('Echo:')",
+  "label": "the answer settles",
+  "timeout": 30
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-user .kb-chip').length===1&&document.querySelectorAll('.draft-chips .kb-chip').length===0",
+  "label": "the sent bubble shows the chip, the composer is clear"
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t');const m=(await j('/chat/api/threads/'+id)).messages;return m[0].kb_refs.length===1&&m[1].role==='assistant'&&m[0].context&&m[0].context.excerpts.length>=1})()",
+  "label": "the user message stores kb_refs and context"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "x #"
+ },
+ {
+  "until": "document.querySelector('.kb-pop:popover-open .mp-row')",
+  "label": "a bare # lists every base",
+  "timeout": 10
+ },
+ {
+  "expect": "document.querySelectorAll('.kb-pop .mp-row').length===2",
+  "label": "both bases are offered"
+ },
+ {
+  "key": "ArrowDown"
+ },
+ {
+  "expect": "document.querySelectorAll('.kb-pop .mp-row')[1].classList.contains('active')",
+  "label": "ArrowDown moves the highlight"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!document.querySelector('.kb-pop:popover-open')&&document.querySelector('.composer-input').value==='x #'",
+  "label": "Esc closes the picker and keeps the text"
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.composer-input');t.value='';t.dispatchEvent(new Event('input',{bubbles:true}));return 'cleared'})()"
+ },
+ {
+  "click": ".composer-kb"
+ },
+ {
+  "until": "document.querySelector('.kb-pop:popover-open .mp-row')",
+  "label": "the knowledge button opens the same list",
+  "timeout": 10
+ },
+ {
+  "click": ".kb-pop .mp-row",
+  "nth": 1
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelectorAll('.draft-chips .kb-chip').length===1",
+  "label": "picking from the button adds a chip"
+ },
+ {
+  "click": ".draft-chips .kb-chip .chip-x"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "document.querySelectorAll('.draft-chips .kb-chip').length===0",
+  "label": "the chip's ✕ removes it"
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Edit\"]",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-editor .kb-chip').length===1",
+  "label": "the user editor carries the kb chip"
+ },
+ {
+  "click": ".msg-editor .kb-chip .chip-x"
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.msg-edit-ta');t.focus();return 'ok'})()"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "!document.querySelector('.msg-edit-btns .btn.primary').disabled",
+  "label": "removing a chip alone makes the edit savable"
+ },
+ {
+  "click": ".msg-edit-btns .btn.primary"
+ },
+ {
+  "until": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t');const m=(await j('/chat/api/threads/'+id)).messages;return m.length===2&&m[0].kb_refs.length===0&&!m[0].context})()",
+  "label": "the edit stored no kb_refs and no stale context",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.caret')&&document.querySelectorAll('.chat-col .kb-ctx').length===0",
+  "label": "no retrieval is shown for the edited message",
+  "timeout": 30
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const r=await j('/chat/api/folders',{name:'Papers'});return JSON.stringify(r)})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 2
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open] .folder-settings .kb-section')",
+  "label": "Folder settings has the Knowledge section"
+ },
+ {
+  "js": "[...document.querySelectorAll('dialog[open] .kb-section .kb-pick')].find(r=>r.textContent.includes('Taxes')).querySelector('input').click()"
+ },
+ {
+  "click": "dialog[open] .kb-section .seg-btn",
+  "nth": 1
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=(await j('/chat/api/folders')).folders[0];return f.defaults.kb_ids.length===1&&f.defaults.kb_mode==='tool'})()",
+  "label": "the folder stores the base and tool mode"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 2
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "document.querySelectorAll('dialog[open] .kb-section .kb-pick input:checked').length===1&&document.querySelectorAll('dialog[open] .kb-section .seg-btn.active')[0].textContent==='Tool'",
+  "label": "reopened, the form shows what the folder holds"
+ },
+ {
+  "click": "dialog[open] textarea.ta"
+ },
+ {
+  "type": "Be brief."
+ },
+ {
+  "shot": "chat-knowledge-folder"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=(await j('/chat/api/folders')).folders[0];return f.defaults.system_prompt==='Be brief.'&&f.defaults.kb_ids.length===1&&f.defaults.kb_mode==='tool'})()",
+  "label": "saving the form again does not drop the kb fields"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 0
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const id=new URLSearchParams(location.search).get('t');const t=(await j('/chat/api/threads/'+id)).thread;return t.kb_ids.length===1&&t.kb_mode==='tool'})()",
+  "label": "a new chat in the folder starts with its knowledge"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-head .type-badge')].some(b=>b.textContent==='kb: tool')",
+  "label": "and shows the tool badge"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const b=await j('/api/knowledge/bases');const k=b.bases.find(x=>x.name==='Taxes');await j('/api/knowledge/bases/'+k.id+'/delete',{});return 'deleted'})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "(()=>{const r=document.querySelector('.dock-rail'); if (r) r.click(); return 'ok'})()"
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('.kb-section .kb-gone')&&document.querySelector('.kb-section .kb-gone').textContent.includes('deleted')",
+  "label": "an id that no longer exists shows as deleted"
+ },
+ {
+  "shot": "chat-knowledge-deleted"
+ },
+ {
+  "click": ".kb-section .kb-gone .chip-x"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!document.querySelector('.kb-section .kb-gone')",
+  "label": "its ✕ removes it from the list"
+ }
+]

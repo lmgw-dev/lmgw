@@ -1,0 +1,143 @@
+[
+ {
+  "js": "'SETUP: ECHO=1 STREAM_DELAY=0.02 scripts/mock-openai.py 9291 &  then  scripts/chat-actions-setup.sh <owner token>  (dev instance on :8899). Run: scripts/ui-drive.py scripts/drive/chat-export.json --token <token> --base http://127.0.0.1:8899. Wipes every chat thread and folder of that instance first. Checks the Export entries exist and that their hrefs answer 200 with the right Content-Disposition; the file save itself is not clicked (a headless browser has no Downloads UI; the desktop app path is in the release notes).'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=await j('/chat/api/folders');for(const x of f.folders)await j('/chat/api/folders/'+x.id+'/delete',{threads:'delete'});const t=await j('/chat/api/threads?archived=all');for(const x of t.threads)await j('/chat/api/threads/'+x.id+'/delete',{});const fo=await j('/chat/api/folders',{name:'Reports',defaults:{}});const th=await j('/chat/api/threads',{model_alias:'fake-echo',folder_id:fo.id});await (await fetch('/chat/api/threads/'+th.id+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:'Viele Grüße'})})).text();const t2=await j('/chat/api/threads',{model_alias:'fake-echo'});await (await fetch('/chat/api/threads/'+t2.id+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content:'second thread'})})).text();window.__ids={folder:fo.id,thread:th.id,other:t2.id};return JSON.stringify(window.__ids)})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".thread-row .row-menu-btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).filter(t=>t.startsWith('Export')).join('|')==='Export as Markdown|Export as JSON'",
+  "label": "the thread row menu has Export as Markdown and JSON"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).filter(t=>t.startsWith('Export')).join('|')==='Export folder (Markdown, zip)|Export folder (JSON, zip)'",
+  "label": "the folder menu has the two zip exports"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-row .thread-title, .thread-row"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!!document.querySelector('.chat-head .export-menu')",
+  "label": "the chat head has an Export menu"
+ },
+ {
+  "click": ".chat-head .export-menu button"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Export as Markdown|Export as JSON'",
+  "label": "the head's Export menu lists both formats"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-tools .export-all .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".menu-pop .menu-item",
+  "nth": 0
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open]') && [...document.querySelectorAll('dialog[open] button')].some(b=>b.textContent.trim()==='Download')",
+  "label": "Export all opens a dialog with a Download button"
+ },
+ {
+  "shot": "chat-export-all"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "(async()=>{const l=await (await fetch('/chat/api/threads')).json();const th0=l.threads.find(x=>x.title==='Viele Grüße');const thread=th0.id;const folder=th0.folder_id;const out=[];for(const [u,ct,cd,test] of [['/chat/api/threads/'+thread+'/export?format=md','text/markdown','attachment','# Viele Grüße'],['/chat/api/threads/'+thread+'/export?format=json','application/json','attachment','lmgw.chat.v1'],['/chat/api/folders/'+folder+'/export?format=md&archived=all','application/zip','attachment',null],['/chat/api/export?format=json&archived=all','application/zip','attachment',null]]){const r=await fetch(u);const h=r.headers.get('content-disposition')||'';const b=new Uint8Array(await r.arrayBuffer());const txt=test?new TextDecoder().decode(b):'';const ok=r.status===200&&(r.headers.get('content-type')||'').startsWith(ct)&&h.startsWith('attachment; filename=\"')&&(!test||txt.includes(test))&&(test||(b[0]===0x50&&b[1]===0x4b));out.push(u+' -> '+r.status+' '+h+' '+b.length+'B '+(ok?'OK':'BAD'));}window.__exp=out;return out.join('\\n')})()"
+ },
+ {
+  "expect": "window.__exp.length===4 && window.__exp.every(x=>x.endsWith('OK'))",
+  "label": "export URLs answer 200 with attachment headers and the right body"
+ },
+ {
+  "expect": "window.__exp[0].includes(\"filename*=UTF-8''lmgw-chat-\") && window.__exp[0].includes('gr%C3%BC%C3%9Fe')",
+  "label": "a non-ASCII title is in the RFC 5987 filename*"
+ },
+ {
+  "click": ".thread-tools button[title^='New temporary chat']"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!!document.querySelector('.temp-strip .export-menu')",
+  "label": "the temporary banner has an Export menu"
+ },
+ {
+  "click": ".temp-strip .export-menu button"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Export as Markdown|Export as JSON'",
+  "label": "the banner's Export lists both formats"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "js": "(async()=>{const t=await (await fetch('/chat/api/threads')).json();const id=t.temporary[0].id;const r=await fetch('/chat/api/threads/'+id+'/export?format=md');const md=await r.text();window.__temp=r.status+' '+r.headers.get('content-disposition')+' '+md.startsWith('# ');return window.__temp})()"
+ },
+ {
+  "expect": "/^200 attachment; filename=\"lmgw-chat-temp\\d+-.*true$/.test(window.__temp)",
+  "label": "a temporary chat exports from memory"
+ },
+ {
+  "shot": "chat-export-temp"
+ }
+]

@@ -1,0 +1,113 @@
+[
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "'needs the mock at STREAM_DELAY=4 (ECHO=1 STREAM_DELAY=4 scripts/mock-openai.py PORT) and the fake-echo alias; each case leaves Chat mid-stream, waits for the server to finish, and checks the STORED reply is complete'"
+ },
+ {
+  "js": "(async()=>{const j=(u,b)=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});const t=await (await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'})).json();await (await j(`/chat/api/threads/${t.id}/send`,{content:\"one two three\"})).text();const d=await (await fetch(`/chat/api/threads/${t.id}`)).json();const a=d.messages.find(m=>m.role==='assistant');await j(`/chat/api/threads/${t.id}/messages/${a.id}/edit`,{content:\"OLD\"});localStorage.setItem('lvR',t.id);return t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "click": ".chat-col .msg-assistant .msg-actions button[aria-label=\"Regenerate\"]"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "until": "(async()=>{const id=localStorage.getItem('lvR');const d=await (await fetch('/chat/api/threads/'+id)).json();return d.messages.filter(m=>m.role==='assistant').map(m=>m.content).join('|')})().then(s=>s===\"Echo: one two three\")",
+  "timeout": 45,
+  "label": "regenerate: leaving Chat mid-stream, the stored reply ends up complete"
+ },
+ {
+  "js": "(async()=>{const j=(u,b)=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});const t=await (await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'})).json();await (await j(`/chat/api/threads/${t.id}/send`,{content:\"alpha beta gamma\"})).text();localStorage.setItem('lvE',t.id);return t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Edit\"]",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "(()=>{const t=document.querySelector('.msg-edit-ta');t.value='edited words here';t.dispatchEvent(new Event('input',{bubbles:true}));return 'ok'})()"
+ },
+ {
+  "click": ".msg-edit-btns .btn.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "until": "(async()=>{const id=localStorage.getItem('lvE');const d=await (await fetch('/chat/api/threads/'+id)).json();return d.messages.filter(m=>m.role==='assistant').map(m=>m.content).join('|')})().then(s=>s===\"Echo: edited words here\")",
+  "timeout": 45,
+  "label": "edit and send: leaving Chat mid-stream, the stored reply ends up complete (and the edit applied)"
+ },
+ {
+  "js": "(async()=>{const j=(u,b)=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});const t=await (await j('/chat/api/threads',{model_alias:'fake-echo',kind:'chat'})).json();await (await j(`/chat/api/threads/${t.id}/send`,{content:\"x y\"})).text();localStorage.setItem('lvC',t.id);return t.id})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "click": ".chat-col .msg-actions button[aria-label=\"Continue\"]"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "until": "(async()=>{const id=localStorage.getItem('lvC');const d=await (await fetch('/chat/api/threads/'+id)).json();return d.messages.filter(m=>m.role==='assistant').map(m=>m.content).join('|')})().then(s=>s===\"Echo: x y\\u2026and then some more words.\")",
+  "timeout": 60,
+  "label": "continue: leaving Chat mid-stream, the stored reply is the prefix plus the full continuation"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.chat-col .msg-assistant')].some(m=>m.textContent.includes('Echo: x y')&&m.textContent.includes('and then some more words.'))",
+  "label": "re-opened later, the thread shows the complete reply"
+ },
+ {
+  "go": "/knowledge"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!!document.querySelector('.page')",
+  "label": "other pages still work (a wasm panic would have killed them)"
+ }
+]

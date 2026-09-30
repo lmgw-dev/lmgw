@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 22 22">
+  <!-- Colour tray, final candidate: white gate behind the coloured lanes, everything with a 1 px dark (#1E2226) outline so it holds on light and dark panels without recolouring. GPU-hold state: bottom-right pause badge in a transparent clearance ring (convention of src-tauri/icons/tray-hold-source.svg). -->
+  <defs>
+    <mask id="clear">
+      <rect width="22" height="22" fill="#fff"/>
+      <circle cx="812" cy="812" r="240" fill="#000" transform="scale(.021484375)"/>
+    </mask>
+    <mask id="pause-bars">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <rect x="702" y="727" width="60" height="170" rx="10" fill="#000"/>
+      <rect x="862" y="727" width="60" height="170" rx="10" fill="#000"/>
+    </mask>
+  </defs>
+  <g mask="url(#clear)">
+    <path d="M5 16V9a6 6 0 0 1 12 0v7" fill="none" stroke="#1E2226" stroke-width="4"/>
+    <path d="M5 16V9a6 6 0 0 1 12 0v7" fill="none" stroke="#fcfcfc" stroke-width="2"/>
+    <path d="M8 7.5L3.2 22H7L9 7.5zM10.5 7.5L9.1 22h3.8l-1.4-14.5zM13 7.5L15 22h3.8L14 7.5z" fill="#1E2226" stroke="#1E2226" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M8 7.5L3.2 22H7L9 7.5z" fill="#A56EF6"/>
+    <path d="M10.5 7.5L9.1 22h3.8l-1.4-14.5z" fill="#3DAEE9"/>
+    <path d="M13 7.5L15 22h3.8L14 7.5z" fill="#2DC9A6"/>
+  </g>
+  <!-- pause badge, same geometry as tray-hold-source.svg; white disc with a dark rim and
+       dark bars instead of punched ones, so it also shows on a light panel -->
+  <g transform="scale(.021484375)">
+    <circle cx="812" cy="812" r="190" fill="#fcfcfc" stroke="#1E2226" stroke-width="40"/>
+    <rect x="702" y="727" width="60" height="170" rx="10" fill="#1E2226"/>
+    <rect x="862" y="727" width="60" height="170" rx="10" fill="#1E2226"/>
+  </g>
+</svg>

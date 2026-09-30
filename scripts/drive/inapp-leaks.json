@@ -1,0 +1,351 @@
+[
+ {
+  "nav": "/"
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/chat"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/audio-lab"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/image-lab"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/agents"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/models"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/downloads"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/docs"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/upstreams"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/mcp-servers"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/traffic"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/usage"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/wiring"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/settings"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/api-reference"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
+    "go": "/api-reference?op=post_v1_chat_completions",
+    "via": "history"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "snap": "warm"
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/chat"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/audio-lab"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/image-lab"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/agents"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/models"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/downloads"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/docs"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/upstreams"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/mcp-servers"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/traffic"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/usage"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/wiring"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/settings"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/api-reference"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/api-reference?op=post_v1_chat_completions",
+    "via": "history"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "snap": "after"
+ },
+ {
+  "same": [
+   "warm",
+   "after"
+  ],
+  "nodes": 50,
+  "label": "three more in-app visits to every sidebar page leave no listener, interval, observer or detached DOM behind"
+ }
+]

@@ -1,0 +1,113 @@
+//! `ops-bench`: benchmark runs (benchmark design §8.1). Each op takes an
+//! api-types `bench_ops` argument struct and answers a `bench_ops` response —
+//! `web/api.rs`'s `bench_*` arms, `ops/bench.rs`.
+
+use lmgw_api_types::bench_ops as dto;
+
+use super::{OpArgs, OpDoc, Resp};
+
+const TAG: &str = "ops-bench";
+
+pub(super) const OPS: &[OpDoc] = &[
+    OpDoc {
+        name: "bench_plan",
+        tag: TAG,
+        summary: "Preview a benchmark run: settings, command line, points, probes, what it stops",
+        description: None,
+        tool: Some("lmgw__bench_plan"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchPlan>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "bench_start",
+        tag: TAG,
+        summary: "Start a benchmark run of a local chat model",
+        description: None,
+        tool: Some("lmgw__bench_start"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchStarted>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: Some(
+            "stops every model on the GPU (all classes) and refuses local traffic, or sends it \
+             to its fallback, until the run ends",
+        ),
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "bench_runs",
+        tag: TAG,
+        summary: "List benchmark runs with their headline numbers, newest first",
+        description: None,
+        tool: Some("lmgw__bench_runs"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchRunsArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchRunsResponse>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "bench_run",
+        tag: TAG,
+        summary: "One whole benchmark run, compared with its previous comparable run",
+        description: None,
+        tool: Some("lmgw__bench_run"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchRunArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchRunDetail>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "bench_cancel",
+        tag: TAG,
+        summary: "Cancel the running benchmark run",
+        description: None,
+        tool: Some("lmgw__bench_cancel"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchCancelArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchDone>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "bench_run_set",
+        tag: TAG,
+        summary: "Edit a benchmark run's notes",
+        description: Some("The owner's free-text notes on one run (dashboard only)."),
+        tool: None,
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchRunSetArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchDone>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
+        name: "bench_delete",
+        tag: TAG,
+        summary: "Delete a finished benchmark run",
+        description: None,
+        tool: Some("lmgw__bench_delete"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchDeleteArgs>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::BenchDone>()),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+];

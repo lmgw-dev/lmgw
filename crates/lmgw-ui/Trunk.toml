@@ -1,0 +1,9 @@
+# Built into dist/, which lmgw-core embeds (release) or serves from disk
+# (debug). Dev loop: `trunk watch` here + a debug lmgw-core; rust-embed's
+# debug mode picks up every rebuild without recompiling the server.
+#
+# The SPA owns `/` since the P8 cutover, so asset URLs are root-relative.
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "/"

@@ -1,0 +1,21 @@
+[
+ {
+  "nav": "/"
+ },
+ {
+  "js": "(async () => { const go = p => { history.pushState(null, '', p); dispatchEvent(new PopStateEvent('popstate')); }; const sl = ms => new Promise(r => setTimeout(r, ms)); const R = [\"/\", \"/chat\", \"/audio-lab\", \"/image-lab\", \"/agents\", \"/agents/mail-labeler\", \"/agents/mail-labeler/runs\", \"/agents/folder-chat\", \"/agents/folder-chat/definition\", \"/agents/docs-librarian\", \"/models\", \"/models/catalog\", \"/models/local/new\", \"/downloads\", \"/docs\", \"/docs/requests\", \"/docs/playground\", \"/docs/eval\", \"/upstreams\", \"/mcp-servers\", \"/traffic\", \"/traffic/conversations\", \"/usage\", \"/usage/keys\", \"/usage/prices\", \"/wiring\", \"/settings\", \"/settings/runtimes\", \"/api-reference\", \"/api-reference?op=post_v1_chat_completions\"]; for (const d of [10, 25, 50, 90, 140, 220, 350]) { const seq = [...R].sort(() => Math.random() - 0.5); for (const p of seq) { go(p); await sl(d); } } go('/'); return 'done'; })()"
+ },
+ {
+  "wait": 4
+ },
+ {
+  "js": "(async () => { const go = p => { history.pushState(null, '', p); dispatchEvent(new PopStateEvent('popstate')); }; const sl = ms => new Promise(r => setTimeout(r, ms)); const R = [\"/\", \"/chat\", \"/audio-lab\", \"/image-lab\", \"/agents\", \"/agents/mail-labeler\", \"/agents/mail-labeler/runs\", \"/agents/folder-chat\", \"/agents/folder-chat/definition\", \"/agents/docs-librarian\", \"/models\", \"/models/catalog\", \"/models/local/new\", \"/downloads\", \"/docs\", \"/docs/requests\", \"/docs/playground\", \"/docs/eval\", \"/upstreams\", \"/mcp-servers\", \"/traffic\", \"/traffic/conversations\", \"/usage\", \"/usage/keys\", \"/usage/prices\", \"/wiring\", \"/settings\", \"/settings/runtimes\", \"/api-reference\", \"/api-reference?op=post_v1_chat_completions\"]; for (const d of [10, 25, 50, 90, 140, 220, 350]) { const seq = [...R].sort(() => Math.random() - 0.5); for (const p of seq) { go(p); await sl(d); } } go('/'); return 'done'; })()"
+ },
+ {
+  "wait": 4
+ },
+ {
+  "expect": "document.querySelector('nav.sidebar a.nav-item')",
+  "label": "the app is still mounted (and no wasm panic was logged)"
+ }
+]

@@ -1,0 +1,30 @@
+-- The managed aux/audio upstream rows go away (per-model containers §5).
+--
+-- `llama-aux` and `audiocpp` were persisted `upstreams` rows whose `base_url`
+-- tracked a class-wide router port and whose `expose_all` flag fanned that
+-- router's HTTP catalog into `GET /v1/models`. With one container per model
+-- there is no class-wide port to point at and no always-on catalog to fetch,
+-- so both rows describe a thing that no longer exists. Their *names* survive
+-- in code as never-persisted synthetic upstreams (`config::AUX_UPSTREAM_NAME`
+-- / `AUDIO_UPSTREAM_NAME`, ids -2 / -3), which is what keeps quickdoc corpus
+-- pins (`embed_upstream = 'llama-aux'`) matching with zero data migration.
+--
+-- Matched on the exact managed names, because that is all that ever
+-- distinguished these rows from an owner's own upstream — and an owner's own
+-- row by one of these names would be a name collision the 0018 repair already
+-- knows how to move out of the way, not a row this is entitled to delete
+-- silently. Which is why `models` is checked first, in Rust, before the
+-- migrator runs at all: `models.upstream_id` is `ON DELETE CASCADE`, so an
+-- alias pointing here would be *deleted* by this statement without a word.
+-- `store::refuse_if_aliases_pin_the_managed_upstreams` refuses the whole
+-- upgrade and names the aliases instead. (Owner-verified: the live deployment
+-- has none.)
+--
+-- `hidden_passthrough_models` rows are allowed to cascade in silence, and that
+-- is the deliberate difference: they are hide-preferences *for a passthrough
+-- surface that no longer exists*. There is no expose-all fan-out for these two
+-- classes any more, so there is nothing left for a "hide this catalog entry"
+-- row to modify — it is not data being lost, it is a preference whose subject
+-- was deleted. Exposure for aux/audio is now the `enabled` column on the model
+-- row itself.
+DELETE FROM upstreams WHERE name IN ('llama-aux', 'audiocpp');

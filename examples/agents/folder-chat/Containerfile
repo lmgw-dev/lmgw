@@ -1,0 +1,34 @@
+# fedora-minimal:44 is the runtime, not a build stage: build.sh builds
+# `folder-chat` on the host with `cargo build --release` and COPYs the
+# resulting binary in below. Pinning the same Fedora release as the build
+# host means the host-built binary links against the same glibc this image
+# ships — a binary built on a newer release can refuse to run against an
+# older glibc in here. build.sh reads the release from this FROM line and
+# refuses to build on a host of another one (FOLDER_CHAT_ALLOW_RELEASE_MISMATCH=1
+# overrides); change both together.
+FROM registry.fedoraproject.org/fedora-minimal:44
+
+# pdftotext, for PDF chunking, and pdftoppm, for the page images a vision
+# model reads (src/pdf.rs).
+RUN microdnf install -y poppler-utils && microdnf clean all
+
+COPY folder-chat /usr/local/bin/folder-chat
+COPY agent.json /lmgw/agent.json
+
+# No USER line: agent.json declares a mount field (`folder`), so lmgw always
+# starts this image with --userns=keep-id — the container's process runs as
+# the owner's own host uid, never root, whatever this Containerfile says
+# (docs/agents.md §5). That uid does not exist in the image's /etc/passwd, so
+# every file the process must read or execute has to be world-readable, and
+# the binary world-executable, rather than owned by a uid that only exists on
+# the host.
+RUN chmod 0755 /usr/local/bin/folder-chat && chmod 0644 /lmgw/agent.json
+
+# The root filesystem is read-only at runtime (--read-only --tmpfs /tmp,
+# docs/agents.md §5; this manifest does not set limits.read_only: false). The
+# binary never writes there — the only thing it ever writes is the hidden
+# index directory inside the mounted folder, /lmgw/mounts/folder/.lmgw-folder-chat.
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/folder-chat"]

@@ -1,0 +1,32 @@
+[package]
+name = "quickdoc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "quickdoc: versioned documentation corpora with hybrid BM25 + exact-KNN retrieval"
+
+[features]
+# The HTTP `Embedder` (§3). Off by default so the base crate carries no HTTP
+# stack; lmgw-core turns it on, which is also what makes it compile in
+# `cargo test --workspace`.
+http = ["dep:reqwest"]
+
+[dependencies]
+async-trait = "0.1.89"
+# f16 embeddings from day one (§5): the KNN scan is memory-bandwidth-bound, so
+# halving the resident matrix is the whole win.
+half = "2.7.1"
+hex = "0.4.3"
+# Only for the optional `http` feature; same line lmgw-core pins.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"], optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+# Same sqlx line as lmgw-core — one libsqlite3-sys in the workspace, and the
+# bundled SQLite 3.51.3 already carries FTS5.
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }

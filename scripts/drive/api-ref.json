@@ -1,0 +1,173 @@
+[
+ {
+  "nav": "/api-reference?op=get_api_status"
+ },
+ {
+  "expect": "document.querySelectorAll('.op-item').length > 50",
+  "label": "the rail lists operations from the live OpenAPI doc"
+ },
+ {
+  "expect": "document.querySelector('.action-bar .api-op-path')?.textContent === '/api/status'",
+  "label": "deep link ?op= selects operation A (get_api_status)"
+ },
+ {
+  "click": ".op-item[data-op='post_v1_chat_completions']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.action-bar .api-op-path')?.textContent === '/v1/chat/completions'",
+  "label": "rail click switches A to B (post_v1_chat_completions)"
+ },
+ {
+  "click": ".op-item[data-op='get_api_status']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.action-bar .api-op-path')?.textContent === '/api/status'",
+  "label": "rail click switches B back to A with no panic"
+ },
+ {
+  "click": ".op-item[data-op='post_v1_chat_completions']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".api-identity .facet",
+  "nth": 0
+ },
+ {
+  "click": ".model-picker button.select-btn"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "type": "mock-chat"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "js": "(() => { const f = [...document.querySelectorAll('.api-try .field')].find(x => x.querySelector('.field-unit')?.textContent === 'application/json'); const ta = f && f.querySelector('textarea'); if (!ta) return 'no body textarea'; const v = JSON.parse(ta.value || '{}'); v.stream = true; ta.value = JSON.stringify(v, null, 2); ta.dispatchEvent(new Event('input', {bubbles: true})); return v; })()"
+ },
+ {
+  "click": ".tester-send"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "window.__f0 = document.querySelectorAll('.resp-sse .frame').length"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "document.querySelectorAll('.resp-sse .frame').length > window.__f0",
+  "label": "streaming post_v1_chat_completions against the mock alias: frame count grows"
+ },
+ {
+  "expect": "(document.querySelector('.assembled')?.textContent || '').trim().length > 0",
+  "label": "the assembled SSE text is non-empty"
+ },
+ {
+  "click": ".api-identity .facet",
+  "nth": 1
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "click": ".api-identity input[type=password]"
+ },
+ {
+  "type": "sk-SENTINEL-123"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "click": ".api-op-bar button.btn.ghost.sm",
+  "nth": 0
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "(document.querySelector('pre.curl-preview')?.textContent || '').includes('$LMGW_KEY')",
+  "label": "Copy as curl always names the $LMGW_KEY placeholder"
+ },
+ {
+  "expect": "!(document.querySelector('pre.curl-preview')?.textContent || '').includes('sk-SENTINEL-123')",
+  "label": "Copy as curl never contains the pasted key"
+ },
+ {
+  "click": ".api-identity .facet",
+  "nth": 0
+ },
+ {
+  "click": ".op-item[data-op='post_v1_audio_transcriptions']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!!document.querySelector('.api-try input[type=file]')",
+  "label": "a multipart op (post_v1_audio_transcriptions) shows a file input"
+ },
+ {
+  "click": ".op-item[data-op='post_v1_chat_completions']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".tester-send"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.api-op-bar button.btn.ghost.sm')].some(b => b.textContent.trim() === 'Stop')",
+  "label": "Stop appears while the stream is in flight"
+ },
+ {
+  "click": ".api-op-bar button.btn.ghost.sm",
+  "nth": 1
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!document.querySelector('.api-op-bar .tester-send[disabled]')",
+  "label": "Send is enabled again after Stop"
+ },
+ {
+  "click": ".tester-send"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "[...document.querySelectorAll('.api-op-bar button.btn.ghost.sm')].some(b => b.textContent.trim() === 'Stop')",
+  "label": "Stop-then-Send: sending again after Stop starts a fresh stream"
+ },
+ {
+  "go": "/"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "location.pathname === '/'",
+  "label": "leaving the page while a stream runs does not hang or panic"
+ }
+]

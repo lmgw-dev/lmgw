@@ -1,0 +1,93 @@
+[
+ {
+  "nav": "/"
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "js": "location.pathname"
+ },
+ {
+  "js": "(() => { const el = [...document.querySelectorAll('.page .field input.input')].find(i => (i.type==='text'||i.type==='number') && !i.disabled && i.checkVisibility()); if (!el) return null; el.focus(); el.select(); return el.closest('.field').querySelector('label').innerText; })()"
+ },
+ {
+  "type": "77"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.save-bar.dirty')",
+  "label": "the draft is dirty"
+ },
+ {
+  "go": "/traffic"
+ },
+ {
+  "expect": "location.pathname === '/settings' && [...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on Settings'))",
+  "label": "A: Overview\u2192Settings (link), edit, sidebar Traffic asks"
+ },
+ {
+  "click": "dialog[open] .btn.primary"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "go": "/settings/usage-cost"
+ },
+ {
+  "expect": "location.pathname === '/settings/usage-cost' && !document.querySelector('dialog[open]')",
+  "label": "A: a Settings category tab does not ask"
+ },
+ {
+  "expect": "document.querySelector('.save-bar.dirty')",
+  "label": "A: the draft survives the tab switch"
+ },
+ {
+  "click": ".save-bar .btn.ghost"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "go": "/models"
+ },
+ {
+  "go": "/settings"
+ },
+ {
+  "js": "(() => { const el = [...document.querySelectorAll('.page .field input.input')].find(i => (i.type==='text'||i.type==='number') && !i.disabled && i.checkVisibility()); el.focus(); el.select(); return true; })()"
+ },
+ {
+  "type": "77"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "go": "/settings/retention"
+ },
+ {
+  "expect": "location.pathname === '/settings/retention' && !document.querySelector('dialog[open]')",
+  "label": "B: Models\u2192Settings, a category tab does not ask"
+ },
+ {
+  "go": "/models"
+ },
+ {
+  "expect": "location.pathname.startsWith('/settings') && [...document.querySelectorAll('dialog[open]')].some(d => d.innerText.includes('Unsaved changes on Settings'))",
+  "label": "B: sidebar Models asks"
+ },
+ {
+  "click": "dialog[open] .btn.danger"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "location.pathname === '/models'",
+  "label": "B: Leave and discard goes to Models"
+ }
+]
