@@ -12,6 +12,11 @@ use serde::Deserialize;
 use crate::state::SharedState;
 use crate::store::{self, HfModelRow};
 
+mod listing;
+mod resolve;
+pub use listing::{list_repo_files, list_tree, ListFailure};
+pub use resolve::{get_with_commit, listing_refusal, resolve_url};
+
 pub const HF_BASE: &str = "https://huggingface.co";
 
 /// The four download targets, one per managed container class.
@@ -121,6 +126,16 @@ pub fn models_dir_or_refuse(
     Ok(dir)
 }
 
+/// [`models_dir_or_refuse`] for a write into it: a dev instance also refuses a
+/// models dir outside its own data dir ([`SharedState`]'s
+/// `refuse_shared_models_dir`), so a dev copy's download, retry or delete
+/// never lands in the installed app's tree.
+pub fn models_dir_to_write(state: &SharedState, target: &str) -> Result<String, String> {
+    let dir = models_dir_or_refuse(&state.snapshot().settings, target)?;
+    state.refuse_shared_models_dir(std::path::Path::new(&dir))?;
+    Ok(dir)
+}
+
 /// The sentence a gated repo gets instead of a bare HTTP status (design §2.7).
 ///
 /// `black-forest-labs/FLUX.1-schnell` answers **401** to an unauthenticated
@@ -222,6 +237,16 @@ pub fn validate_repo(repo: &str) -> Result<(), String> {
     }
 }
 
+/// A revision as it goes into a hub URL path: a branch, tag or commit name
+/// without `/` (no `refs/pr/…`), which every revision lmgw asks for is —
+/// `main`, or the commit a spec pins.
+pub fn validate_revision(revision: &str) -> Result<(), String> {
+    match valid_name_part(revision) {
+        true => Ok(()),
+        false => Err(format!("invalid revision `{revision}`")),
+    }
+}
+
 /// Path of a repo file inside the models dir: `<owner>/<name>/<file>`.
 /// Rejects anything that could escape the models dir.
 pub fn dest_rel_path(repo: &str, file: &str) -> Result<String, String> {
@@ -278,6 +303,19 @@ pub fn split_part_name(file: &str) -> Option<(&str, u32, u32)> {
     Some((prefix, n, total))
 }
 
+/// Whether `a` and `b` name the same file, or two shards of one split GGUF:
+/// a spec may list one shard, and a download fetches every sibling
+/// ([`expand_parts`]), so a tracked shard belongs to whatever lists its set.
+pub fn same_split_set(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (split_part_name(a), split_part_name(b)) {
+        (Some((pa, _, ta)), Some((pb, _, tb))) => pa == pb && ta == tb,
+        _ => false,
+    }
+}
+
 /// Default local-model id for a downloaded file: stem without the split-part
 /// suffix (`a/b/foo-00001-of-00002.gguf` → `foo`).
 pub fn suggest_model_id(file: &str) -> String {
@@ -286,10 +324,6 @@ pub fn suggest_model_id(file: &str) -> String {
         Some((prefix, _, _)) => prefix.to_string(),
         None => base.strip_suffix(".gguf").unwrap_or(base).to_string(),
     }
-}
-
-pub fn resolve_url(repo: &str, file: &str) -> String {
-    format!("{}/{repo}/resolve/main/{file}", hf_base())
 }
 
 /// All GGUF files under the models dir, as sorted paths relative to it
@@ -379,35 +413,49 @@ pub struct HfFile {
     pub kind: String,
 }
 
-/// Files of a repo (`GET /api/models/{repo}/tree/main?recursive=true`).
-pub async fn list_repo_files(
-    http: &reqwest::Client,
-    token: &str,
-    repo: &str,
-) -> Result<Vec<HfFile>, String> {
-    validate_repo(repo)?;
-    let url = format!("{}/api/models/{repo}/tree/main?recursive=true", hf_base());
-    let mut rb = http.get(&url);
-    if !token.is_empty() {
-        rb = rb.bearer_auth(token);
-    }
-    let resp = rb
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| format!("HF API: {e}"))?;
-    let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("HF API: {e}"))?;
-    if !status.is_success() {
-        // A gated repo answers 401 to the *listing* too, so "which files does
-        // this have" fails before a download is ever queued — which is why the
-        // sentence belongs here and not only on the transfer (§2.7).
-        if let Some(sentence) = hub_refusal(status, &body, repo, !token.is_empty()) {
-            return Err(sentence);
+/// The `rel="next"` target of a `Link` header (RFC 8288), if it names one.
+pub fn next_link(header: &str) -> Option<String> {
+    let mut rest = header;
+    while let Some(open) = rest.find('<') {
+        let close = open + rest[open..].find('>')?;
+        let target = &rest[open + 1..close];
+        let after = &rest[close + 1..];
+        let params = &after[..after.find('<').unwrap_or(after.len())];
+        let is_next = params.split(';').any(|p| {
+            let p = p.trim().trim_end_matches(',').trim();
+            p.split_once('=').is_some_and(|(k, v)| {
+                k.trim().eq_ignore_ascii_case("rel")
+                    && v.trim()
+                        .trim_matches('"')
+                        .split_whitespace()
+                        .any(|r| r.eq_ignore_ascii_case("next"))
+            })
+        });
+        if is_next {
+            return Some(target.to_string());
         }
-        return Err(format!("HF API {url}: {status}"));
+        rest = &after[params.len()..];
     }
-    parse_tree_json(&body)
+    None
+}
+
+/// Seconds until the hub's rate-limit window resets: the `t=` of its
+/// `RateLimit` header (`"api";r=0;t=55`), else a `Retry-After` in seconds.
+pub fn ratelimit_reset(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let from_ratelimit = headers
+        .get("ratelimit")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(';')
+                .find_map(|p| p.trim().strip_prefix("t="))
+                .and_then(|t| t.trim().parse().ok())
+        });
+    from_ratelimit.or_else(|| {
+        headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+    })
 }
 
 pub fn parse_tree_json(json: &str) -> Result<Vec<HfFile>, String> {
@@ -433,14 +481,16 @@ pub(crate) fn etag_from_headers(headers: &reqwest::header::HeaderMap) -> Option<
         .filter(|s| !s.is_empty())
 }
 
-/// Current ETag of a repo file (HEAD on the resolve URL, redirects followed).
+/// Current ETag of a repo file at `revision` (HEAD on the resolve URL,
+/// redirects followed).
 pub async fn remote_etag(
     http: &reqwest::Client,
     token: &str,
     repo: &str,
+    revision: &str,
     file: &str,
 ) -> Result<Option<String>, String> {
-    let url = resolve_url(repo, file);
+    let url = resolve_url(repo, revision, file);
     let mut rb = http.head(&url);
     if !token.is_empty() {
         rb = rb.bearer_auth(token);
@@ -464,20 +514,79 @@ pub async fn remote_etag(
 
 /// Compare the remote ETag against the recorded one; flags the row
 /// `update_available` when they differ. Returns whether an update was found.
+///
+/// The revision compared against is [`crate::audio::pins::tracked_revision`]:
+/// under `audio.catalog_revision = pinned` an audio catalog file is compared
+/// with the commit its spec pins now, so a pin the spec moved is offered and
+/// no update the spec does not endorse is; under `latest`, and for every
+/// other row, against `main`.
 pub async fn check_update(state: &SharedState, row: &HfModelRow) -> Result<bool, String> {
+    let catalog = match row.target == "audio" {
+        true => crate::web::audio::catalog_cached(state).await,
+        false => None,
+    };
+    let mode = state.snapshot().settings.audio.catalog_revision;
+    let revision = crate::audio::pins::tracked_revision(row, catalog.as_ref(), mode);
+    check_update_at(state, row, revision).await
+}
+
+/// [`check_update`] against `revision`.
+///
+/// A row flagged earlier whose file now matches the remote one goes back to
+/// `done`: the flag came from a check against another revision (one taken
+/// under `latest`, before the setting went back to `pinned`), and Update
+/// would fetch the same bytes again. A remote that names no ETag clears
+/// nothing — that is "cannot tell", not "the same".
+///
+/// A file that matches at another revision than the row's (a pin the spec
+/// moved, with this file unchanged between the two) is that revision's
+/// file: the row records it, so nothing goes on saying an update would
+/// take a pin that offers no update.
+pub async fn check_update_at(
+    state: &SharedState,
+    row: &HfModelRow,
+    revision: &str,
+) -> Result<bool, String> {
     let token = state.snapshot().settings.hf_token.clone();
-    let remote = remote_etag(&state.http, &token, &row.repo, &row.file).await?;
+    let remote = remote_etag(&state.http, &token, &row.repo, revision, &row.file).await?;
     let changed = match (&row.etag, &remote) {
         (Some(local), Some(remote)) => local != remote,
         (None, Some(_)) => true,
         (_, None) => false, // no remote etag → can't tell
     };
-    if changed {
-        store::set_hf_status(&state.db, row.id, "update_available", None)
+    let same = matches!((&row.etag, &remote), (Some(l), Some(r)) if l == r);
+    let status = match (changed, same) {
+        (true, _) => Some("update_available"),
+        (false, true) if row.status == "update_available" => Some("done"),
+        _ => None,
+    };
+    if let Some(status) = status {
+        store::set_hf_status(&state.db, row.id, status, None)
             .await
             .map_err(|e| e.to_string())?;
     }
+    if same {
+        record_matched(state, row, revision).await?;
+    }
     Ok(changed)
+}
+
+/// The row's file has the same ETag at `revision` as the one it recorded:
+/// it is that revision's file, and the row tracks it (and, when `revision`
+/// is a commit, names it as where the bytes came from). Nothing to do when
+/// the row tracks `revision` already.
+pub(crate) async fn record_matched(
+    state: &SharedState,
+    row: &HfModelRow,
+    revision: &str,
+) -> Result<(), String> {
+    if revision == row.revision() {
+        return Ok(());
+    }
+    let commit = crate::audio::pins::is_commit(revision).then(|| revision.to_ascii_lowercase());
+    store::set_hf_revision_matched(&state.db, row.id, revision, commit.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -559,6 +668,37 @@ mod tests {
         assert_eq!(f[0].path, "a.gguf");
         assert_eq!(f[0].size, Some(123));
         assert_eq!(f[1].path, "MTP/b.gguf");
+    }
+
+    #[test]
+    fn link_headers_name_the_next_page() {
+        let h = r#"<https://huggingface.co/api/models/a/b/tree/main?recursive=true&cursor=eyJm>; rel="next""#;
+        assert_eq!(
+            next_link(h).as_deref(),
+            Some("https://huggingface.co/api/models/a/b/tree/main?recursive=true&cursor=eyJm")
+        );
+        // Several links, the next one not first; params in any case/spacing.
+        let h = r#"<https://h/p1>; rel="prev", <https://h/p3>;REL = "next last""#;
+        assert_eq!(next_link(h).as_deref(), Some("https://h/p3"));
+        assert_eq!(
+            next_link("<https://h/p3>; rel=next").as_deref(),
+            Some("https://h/p3")
+        );
+        // The last page: no next.
+        assert_eq!(next_link(r#"<https://h/p1>; rel="prev""#), None);
+        assert_eq!(next_link(""), None);
+        assert_eq!(next_link("<broken; rel=next"), None);
+    }
+
+    #[test]
+    fn the_rate_limit_reset_comes_from_the_hub_headers() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let mut h = HeaderMap::new();
+        assert_eq!(ratelimit_reset(&h), None);
+        h.insert(RETRY_AFTER, HeaderValue::from_static("30"));
+        assert_eq!(ratelimit_reset(&h), Some(30));
+        h.insert("ratelimit", HeaderValue::from_static("\"api\";r=0;t=55"));
+        assert_eq!(ratelimit_reset(&h), Some(55), "the hub's own header wins");
     }
 
     #[test]

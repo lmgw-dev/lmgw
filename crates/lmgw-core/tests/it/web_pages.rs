@@ -1809,6 +1809,8 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
                 mode: "offline".into(),
                 lazy: None,
                 busy_timeout_ms: None,
+                backend: None,
+                threads: None,
                 load_options: Default::default(),
                 session_options: Default::default(),
                 default_request_options: Default::default(),
@@ -2572,12 +2574,14 @@ async fn the_settings_plane_carries_the_image_class_and_makes_its_two_directorie
 }
 
 /// The dashboard's HTML carries the narrow CSP that keeps replies from loading
-/// remote images; API responses and non-HTML assets do not.
+/// remote images, and the Permissions Policy that keeps the microphone the
+/// dashboard's own (chat-voice §13.1); API responses and non-HTML assets
+/// carry neither.
 #[tokio::test]
 async fn the_dashboard_html_carries_the_narrow_csp_and_the_api_does_not() {
     let state = AppState::init_for_tests().await.unwrap();
     let base = serve(state).await;
-    let csp = |path: &'static str| {
+    let headers = |path: &'static str| {
         let base = &base;
         async move {
             let r = base
@@ -2586,22 +2590,32 @@ async fn the_dashboard_html_carries_the_narrow_csp_and_the_api_does_not() {
                 .send()
                 .await
                 .unwrap();
+            let get = |name: &str| {
+                r.headers()
+                    .get(name)
+                    .map(|v| v.to_str().unwrap().to_string())
+            };
             (
                 r.status().as_u16(),
-                r.headers()
-                    .get("content-security-policy")
-                    .map(|v| v.to_str().unwrap().to_string()),
+                get("content-security-policy"),
+                get("permissions-policy"),
             )
         }
     };
     let want = "img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'";
+    let policy = "microphone=(self), camera=(), display-capture=()";
     for path in ["/", "/chat", "/agents/docs-librarian"] {
-        let (status, got) = csp(path).await;
+        let (status, csp, permissions) = headers(path).await;
         assert_eq!(status, 200, "{path}");
-        assert_eq!(got.as_deref(), Some(want), "{path}");
+        assert_eq!(csp.as_deref(), Some(want), "{path}");
+        assert_eq!(permissions.as_deref(), Some(policy), "{path}");
     }
-    let (_, got) = csp("/v1/models").await;
-    assert_eq!(got, None, "/v1/models");
-    let (_, got) = csp("/vendor/highlight.js").await;
-    assert_eq!(got, None, "js asset");
+    for (path, what) in [
+        ("/v1/models", "/v1/models"),
+        ("/vendor/highlight.js", "js asset"),
+    ] {
+        let (_, csp, permissions) = headers(path).await;
+        assert_eq!(csp, None, "{what}");
+        assert_eq!(permissions, None, "{what}");
+    }
 }

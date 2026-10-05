@@ -35,8 +35,36 @@ pub struct SettingsFull {
     pub chat_system_prompt_builtin: String,
     /// How a text PDF attached in Chat starts out: `text | images | ask`.
     pub chat_pdf_mode: String,
-    /// Speech-to-text alias for Chat audio attachments; empty = none.
+    /// The Chat's speech-to-text alias — dictation, realtime mode and audio
+    /// attachments; empty = `realtime.asr_alias`.
     pub chat_stt_alias: String,
+    /// The Chat's text-to-speech alias; empty = `realtime.tts_alias`.
+    pub chat_tts_alias: String,
+    /// The Chat's voice, chosen for the Chat's text-to-speech model; empty =
+    /// none named, so realtime's chain decides (`realtime.default_voice`,
+    /// then the model's default). A thread that speaks with another model
+    /// does not take it.
+    pub chat_voice: String,
+    /// The Chat's speech instructions; empty = `realtime.speech_instructions`.
+    pub chat_speech_style: String,
+    /// The language the user speaks (ISO 639-1), what the speech-to-text
+    /// model is told; empty = none.
+    pub chat_voice_language: String,
+    /// The language replies are in (ISO 639-1): the model answers in it
+    /// and the voice speaks it; empty = `chat_voice_language`.
+    pub chat_voice_reply_language: String,
+    /// Where the Chat's own speech models (as saved) do not take their
+    /// language as set — an ASR that detects `chat_voice_language` itself, a
+    /// voice that cannot speak the reply language; empty without a language.
+    pub chat_voice_language_notes: Vec<crate::chat_voice::LanguageNote>,
+    /// Read Chat replies aloud as they stream.
+    pub chat_read_aloud: bool,
+    /// `semantic_vad | server_vad | push_to_talk`.
+    pub chat_turn_detection: String,
+    /// `off | local`: whether a voice turn goes to the chat model as audio
+    /// when it is a local model lmgw runs that takes audio input
+    /// (experimental; a cloud model never gets audio).
+    pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (> 0).
     pub chat_kb_budget_tokens: u32,
     /// `off | read_only | full`.
@@ -103,9 +131,30 @@ pub struct SettingsFull {
     pub audio: AudioSettings,
     /// The stable-diffusion.cpp class (image-generation design §4).
     pub image: ImageSettings,
+    /// `GET /v1/realtime`, spoken conversations (realtime design §12).
+    pub realtime: crate::realtime::RealtimeSettings,
     pub api_keys: Vec<ApiKeyRow>,
     pub data_dir: String,
     pub version: String,
+    /// This machine's CPUs, read once (a derived fact, never settable): the
+    /// thread count an audio row switched to the CPU runs with when it names
+    /// none.
+    pub host_cpu: HostCpu,
+}
+
+/// This machine's CPUs (`SettingsFull::host_cpu`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HostCpu {
+    /// Physical cores, or the logical count when the topology is unreadable
+    /// (`source`).
+    pub physical_cores: u32,
+    /// Online logical CPUs, SMT siblings included.
+    pub logical_cpus: u32,
+    /// `topology` (counted from the kernel's CPU topology) | `logical` (the
+    /// topology could not be read, so the logical count stands in).
+    pub source: String,
 }
 
 /// Mirror of `config::HoldSettings` (gpu-hold design §3.1). `active` is
@@ -196,6 +245,12 @@ pub struct AudioSettings {
     pub public_prefix: String,
     /// See [`RouterSettings::request_timeout_seconds`].
     pub request_timeout_seconds: u64,
+    /// The local speech-to-text model that writes voice-library clip
+    /// transcripts. Empty = none: nothing is transcribed automatically.
+    pub voice_transcribe_alias: String,
+    /// What an audio catalog download takes: `pinned` (the commit the spec
+    /// pins, `main` where it pins none — the default) or `latest` (`main`).
+    pub catalog_revision: String,
 }
 
 /// Mirror of `config::ImageSettings`. The same four fields as

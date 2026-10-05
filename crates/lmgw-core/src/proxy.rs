@@ -14,6 +14,7 @@ pub use chat::*;
 mod chat_stream;
 pub(crate) use chat_stream::*;
 mod legacy;
+pub(crate) mod reasoning_fit;
 pub use legacy::*;
 mod count;
 pub use count::*;
@@ -26,11 +27,20 @@ pub use audio::*;
 mod multipart;
 use multipart::*;
 mod transcribe;
-pub use transcribe::transcribe;
+pub use transcribe::{local_asr_row, transcribe, transcribe_as, transcribe_local_only};
+pub(crate) use transcribe::{
+    transcribe_dictation, transcribe_for, transcribe_turn, warm as transcribe_warm,
+};
 mod image;
+pub(crate) mod synthesize;
 pub use image::*;
 mod route_guards;
 pub(crate) use route_guards::*;
+mod stop;
+pub(crate) use stop::{
+    canceled, is_canceled, produced_chars, row_status, stopped, stopped_usage, unanswered_usage,
+};
+pub use stop::{stop_pair, StopHandle, StopSignal};
 // Public for `server::build_router`, which merges its `routes()` at the root.
 pub mod tokenize;
 

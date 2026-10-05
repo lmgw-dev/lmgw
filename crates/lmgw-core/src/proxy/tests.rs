@@ -416,7 +416,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
     // A "chat" row: streamed = true (the chat path is SSE), real tokens, 200.
     record_in_process(
         InProcessLog {
-            client_key: None,
+            key: KeyRef::default(),
             ingress_proto: "chat",
             alias: "inproc",
             route: &route,
@@ -443,7 +443,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
     // A "workflow" row: non-streamed, an error, to cover that branch too.
     record_in_process(
         InProcessLog {
-            client_key: Some("key-a".into()),
+            key: KeyRef::named(Some("key-a".into())),
             ingress_proto: "workflow",
             alias: "inproc",
             route: &route,

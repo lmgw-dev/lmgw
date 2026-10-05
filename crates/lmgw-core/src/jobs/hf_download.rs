@@ -94,7 +94,9 @@ impl JobExecutor for HfDownloadExecutor {
 async fn transfer(ctx: &JobCtx, row: &HfModelRow) -> Result<JobOutcome, String> {
     let state = &ctx.state;
     let snap = state.snapshot();
-    let models_dir = hf::models_dir_or_refuse(&snap.settings, &row.target)?;
+    // Every transfer asks, not only the verbs that queue one: boot resumes
+    // the rows a previous run left queued or downloading, straight into here.
+    let models_dir = hf::models_dir_to_write(state, &row.target)?;
     store::set_hf_status(&state.db, row.id, "downloading", None)
         .await
         .map_err(|e| e.to_string())?;
@@ -113,26 +115,52 @@ async fn transfer(ctx: &JobCtx, row: &HfModelRow) -> Result<JobOutcome, String> 
         detail: detail.clone(),
     };
 
-    let url = hf::resolve_url(&row.repo, &row.file);
-    let mut rb = state.http.get(&url);
-    if !snap.settings.hf_token.is_empty() {
-        rb = rb.bearer_auth(&snap.settings.hf_token);
-    }
-    let mut resp = rb.send().await.map_err(|e| format!("GET {url}: {e}"))?;
+    // The revision the row asks for: `main`, or the commit an audio catalog
+    // spec pins. The commit the hub resolves it to is recorded with the file.
+    let revision = row.revision();
+    let url = hf::resolve_url(&row.repo, revision, &row.file);
+    let (mut resp, commit) = hf::get_with_commit(
+        &state.proxy_http,
+        &state.http,
+        &snap.settings.hf_token,
+        &url,
+    )
+    .await?;
     if !resp.status().is_success() {
         // The row's `error` is what the Downloads page and `lmgw__hf_downloads`
         // show, so a gated repo says what to do about it rather than "GET …:
         // 401 Unauthorized" (design §2.7). The body is read first because a 403
         // only counts when the hub says it is about the licence.
         let status = resp.status();
+        let error_code = resp
+            .headers()
+            .get("x-error-code")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let body = resp.text().await.unwrap_or_default();
         if let Some(sentence) =
             hf::hub_refusal(status, &body, &row.repo, !snap.settings.hf_token.is_empty())
         {
             return Err(sentence);
         }
+        // A pin that is gone is not swapped for `main` behind the owner's
+        // back; the sentence says how to take the latest instead. Only when
+        // it is gone: a rate limit or a 5xx is not a reason to give up the
+        // pin, and `main` would meet it too.
+        if revision != crate::audio::pins::MAIN
+            && crate::audio::pins::pin_is_missing(status.as_u16(), error_code.as_deref())
+        {
+            return Err(format!(
+                "GET {url}: {status} — {}",
+                crate::audio::pins::no_fallback(&row.repo, revision)
+            ));
+        }
         return Err(format!("GET {url}: {status}"));
     }
+    // No header (a mirror, a mock): the revision asked for when that is a
+    // commit — those bytes are its by definition — else unknown.
+    let commit = commit
+        .or_else(|| crate::audio::pins::is_commit(revision).then(|| revision.to_ascii_lowercase()));
     let etag = hf::etag_from_headers(resp.headers());
     let total = resp.content_length();
     ctx.progress(report(0, total)).await;
@@ -176,14 +204,34 @@ async fn transfer(ctx: &JobCtx, row: &HfModelRow) -> Result<JobOutcome, String> 
     tokio::fs::rename(&tmp, &dest)
         .await
         .map_err(|e| format!("renaming to {}: {e}", dest.display()))?;
-    store::mark_hf_done(&state.db, row.id, etag.as_deref(), received as i64)
-        .await
-        .map_err(|e| e.to_string())?;
-    tracing::info!("hf download done: {} ({} bytes)", dest.display(), received);
+    store::mark_hf_done(
+        &state.db,
+        row.id,
+        etag.as_deref(),
+        received as i64,
+        revision,
+        commit.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    tracing::info!(
+        "hf download done: {} ({} bytes, {revision} at {})",
+        dest.display(),
+        received,
+        commit.as_deref().unwrap_or("an unknown commit")
+    );
+    // A new GGUF beside a row's weights can change what that row renders
+    // (the direct-file pick): a running container is stopped for apply.
+    if row.target == "audio" {
+        crate::runtime::audio::stop_stale(state, &format!("the download of {}", row.dest_path))
+            .await;
+    }
     Ok(JobOutcome::Done(json!({
         "hf_model_id": row.id,
         "dest_path": row.dest_path,
         "bytes": received,
         "etag": etag,
+        "requested_revision": revision,
+        "resolved_commit": commit,
     })))
 }

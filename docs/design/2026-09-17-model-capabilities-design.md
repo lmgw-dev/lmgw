@@ -133,7 +133,9 @@ Field rules:
   the audio.cpp task name for the other audio tasks (`gen`, `clon`, `vc`,
   `svc`, `s2s`, `sep`, `vad`, `diar`, `align`, `vdes`, `spk`) |
   `image_generation` | `image_edit` | `video_generation`
-  *(rev 2026-09-21: the stable-diffusion.cpp class)*. Drives `endpoints`.
+  *(rev 2026-09-21: the stable-diffusion.cpp class)* | `realtime` *(rev
+  2026-10-02: an OpenAI Realtime model, which no lmgw route serves — its
+  `endpoints` are empty)*. Drives `endpoints` (`capabilities::task`).
   The three image values are picked by the row's own columns, not by a probe,
   because exposure cannot wait for a container: `edit` ⇒ `image_edit`, a
   `modes` list that is `vid_gen` and nothing else ⇒ `video_generation`,
@@ -395,6 +397,24 @@ catalog says nothing about modalities; the model-name hints (`-tts`,
 `-image`, `native-audio`) are not promoted to facts — the note says "the
 provider catalog does not state input modalities".
 
+*(rev 2026-10-02, realtime live run 3 D1)* **One exception, for `task` on
+the OpenAI protocol.** A stock `api.openai.com` list states no modalities at
+all, so every entry was `chat`: `gpt-4o-mini-tts` and
+`gpt-4o-mini-transcribe` advertised the chat routes and `/v1/realtime`, and
+a realtime session, the realtime settings' save and the Chat's
+transcription setting refused them as the speech models they are. When an
+OpenAI-protocol entry states no output modalities (`ModelInfo.task` is then
+`None`, and the dashboard's catalog table shows none), its task is what
+OpenAI's naming says (`capabilities::task::by_name`): `tts` as a word of the
+name (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`) ⇒ `tts`; `transcribe` in it or
+a word starting `whisper` (`whisper-1`, `distil-whisper-…`) ⇒ `asr`; an
+OpenAI Realtime name (`gpt-realtime*`, `gpt-4o*-realtime*`) ⇒ `realtime`,
+no endpoints — never a chat model; anything else `chat`. A note says the
+name decided. The routes come from one table (`capabilities::task::endpoints`):
+`/v1/audio/speech` for `tts`/`vdes`, `/v1/audio/transcriptions` for `asr`,
+on the OpenAI protocol only. Gemini's hints stay unpromoted: its catalog
+does state its methods.
+
 The 5-minute catalog cache already exists; the new fields ride in it.
 
 ## 5. Reasoning control plane
@@ -454,9 +474,9 @@ maps the normalised triple, so no cell can contradict another.
 | Route | `enabled=false` | `enabled=true` alone | `effort=L` | `budget=N` |
 |---|---|---|---|---|
 | llama-server (`UpstreamKind::LlamaServer`, local rows) | `chat_template_kwargs.enable_thinking: false` and no `reasoning_effort` key at all *(rev 2: a live probe of the shipped build showed `reasoning_effort: "none"` does not switch thinking off there — that special case is newer than the build — and Qwen3.8's template raises on an unknown level)* | `chat_template_kwargs.enable_thinking: true` | `reasoning_effort: L` + `chat_template_kwargs.enable_thinking: true` (so a `--reasoning off` row honours it) | `reasoning_budget_tokens: N` — forwarded; whether the running llama.cpp build honours a per-request budget is the build's business (the shipped build did not in the probe), so `control` for local rows does not list the budget header |
-| generic OpenAI-protocol upstream | `reasoning_effort: "none"` | ignored ⇒ `enabled` | `reasoning_effort: L` | ignored ⇒ `budget` |
-| Anthropic upstream | `thinking: {type: "disabled"}` | `thinking: {type: "adaptive"}` | `thinking: {type: "adaptive"}`, `output_config: {effort: L}` | `thinking: {type: "enabled", budget_tokens: N}`; `max_tokens` raised to `N + 1024` when smaller (the API requires it) |
-| Gemini upstream | `generationConfig.thinkingConfig.thinkingBudget: 0` | ignored ⇒ `enabled` | `thinkingConfig.thinkingLevel: L` | `thinkingConfig.thinkingBudget: N` |
+| generic OpenAI-protocol upstream | `reasoning_effort: "none"` — fitted to the model (§5.6) | ignored ⇒ `enabled` | `reasoning_effort: L` | ignored ⇒ `budget` |
+| Anthropic upstream | `thinking: {type: "disabled"}` — fitted to the model (§5.6) | `thinking: {type: "adaptive"}` | `thinking: {type: "adaptive"}`, `output_config: {effort: L}` | `thinking: {type: "enabled", budget_tokens: N}`; `max_tokens` raised to `N + 1024` when smaller (the API requires it) |
+| Gemini upstream | `generationConfig.thinkingConfig.thinkingBudget: 0` — fitted to the model (§5.6): `thinkingLevel: "minimal"` unless known otherwise | ignored ⇒ `enabled` | `thinkingConfig.thinkingLevel: L` | `thinkingConfig.thinkingBudget: N` |
 
 `chat_template_kwargs` on the llama-server route is an **object-level deep
 merge** *(rev)*: the client's object (from passthrough) first, control keys
@@ -476,7 +496,8 @@ effort is the way, the notes say so too.
 `reasoning_ignored(protocol, upstream_kind, &control) -> Vec<&'static str>`
 (the table's "ignored" cells) and stamped on the response as
 `x-lmgw-reasoning-ignored: enabled,budget` next to `x-lmgw-fallback`. The
-`Egress` trait signature does not change.
+`Egress` trait signature does not change. An off the fit (§5.6) sent in
+another form adds `enabled`.
 
 ### 5.4 Anthropic `max_tokens` default *(rev)*
 
@@ -494,6 +515,106 @@ and already parsed; only the egress default changes.
 
 `reasoning.effort` is finally read (`ingress/responses.rs`) and feeds the
 same control; the agent loop in `agent.rs` inherits it through `Params`.
+
+### 5.6 Fitting an off to a cloud model *(rev 2026-10-04)*
+
+The `enabled=false` cells above are each protocol's own spelling of off, and
+not every cloud model takes it. The Chat asks for off by itself — every voice
+turn whose thread leaves reasoning alone (chat-voice design §8.5), realtime
+the same (realtime §7.6) — so a model that refused it broke a conversation
+nobody had configured reasoning for, including a cloud fallback under the
+GPU hold. Probed through a dev gateway on 2026-10-04, one-line synthetic
+prompts:
+
+| Model | What it does with an off |
+|---|---|
+| `gpt-4.1-nano` | 400 "Unrecognized request argument supplied: reasoning_effort"; no `reasoning_effort` at all answers |
+| `gpt-5-nano` | 400 "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'." |
+| `gpt-5.4-nano` | takes `"none"` (0 reasoning tokens) |
+| `gemini-flash-lite-latest` | 400 "Request contains an invalid argument." on `thinkingBudget: 0`; takes `thinkingLevel: "minimal"` (0 reasoning tokens), `"low"`, a positive budget, and no config |
+| `gemini-flash-latest` | takes `thinkingBudget: 0` and thinks anyway (51 reasoning tokens); 400 "Thinking level MINIMAL is not supported for this model. Please retry with other thinking level." |
+| `gemini-pro-latest` | the same refusal of `minimal` |
+| `gemini-2.5-flash` | takes `thinkingBudget: 0` (0 reasoning tokens); 400 "Thinking level is not supported for this model." |
+
+No Anthropic-protocol upstream was configured to probe.
+
+**The rule.** An off on a cloud route (`UpstreamKind::Generic`) is fitted
+before it goes out (`proxy/reasoning_fit`):
+
+- a model that does not reason, or has no control to take, gets **no
+  reasoning control**;
+- a model that reasons and cannot stop gets **its lowest level**;
+- a model that can stop gets the protocol's own off (the table above).
+
+Decided, in this order, from:
+
+1. **The model's capabilities**, as `/v1/models` derives them — the upstream
+   catalog's entry (cached, the listing's own lookup) with the owner's
+   override of an alias onto that model over it. `kind: fixed`, or
+   `enabled: false` ⇒ no control. `can_disable: true`, or `none` among the
+   levels ⇒ the off. `can_disable: false` ⇒ the lowest level, or no control
+   when there are no levels. Levels without `none` ⇒ the lowest level — on
+   the OpenAI protocol, where the levels are the values of the very control
+   the off is one of, and on Gemini, whose off is a level anyway; not on
+   Anthropic, whose off is a thinking type of its own that the effort levels
+   say nothing about. A bare `toggle` settles nothing.
+2. **What the provider said before** on this route (below).
+3. **The protocol's default**: the off on OpenAI and Anthropic;
+   `thinkingLevel: "minimal"` on Gemini, whose catalog says only *that* a
+   model thinks — the current models cannot stop, and `minimal` is the least
+   level there is.
+
+**A refusal, and the last resort** *(rev 2026-10-04, the owner's ruling: a
+model that cannot run without reasoning runs with it, not into an error)*.
+When an off went out in any form but none and the provider answers `400` (or
+`422`), the send is made again:
+
+1. **once** with what the message says the model takes, when it names the
+   control (`reasoning_effort`; Gemini and Anthropic `thinking…`): the least
+   of a "Supported values are: …" list; one level up when the refused level
+   is named; Gemini's budget off when its level control itself is refused
+   (2.5); otherwise no control;
+2. otherwise, or when that form is refused too: with **no reasoning control
+   at all**, so the model reasons as it does by default. A refusal that names
+   nothing — Gemini's bare "invalid argument" — goes here directly: only the
+   retry can tell whether the off was what it refused, and a refusal about
+   something else is refused again and stands. One lmgw can tell is about
+   something else — the prompt does not fit the context (llama-server's own
+   refusal, or a message naming the context length) — stands at once, rather
+   than sending the prompt twice.
+
+At most three sends. Each refused attempt keeps a request row of its own
+(status 400, its message saying what was retried with); an answer that is
+not an error makes the form what the route gets from now on, kept in memory
+per upstream, base URL and model for the process's life — together with the
+form that was refused, so a lesson corrects the capabilities only where the
+provider refused exactly the form they give. This applies whatever decided
+the first form: capabilities can be wrong too.
+
+**Nothing silent.** Every off sent in another form is an INFO line naming
+the model, what went out, and why; each retry is one more. The response
+reports `enabled` in `x-lmgw-reasoning-ignored`, the Chat's `done` in
+`reasoning_ignored`. The model's `/v1/models` notes say what an off becomes
+there. The Chat also reads the answer: a model that reasoned although the
+off went out — a local template that does not read `enable_thinking`, a
+cloud model that thinks anyway — is an INFO line and `enabled` too, and the
+`done` frame's `reasoning_note` says in one sentence what happened (its
+lowest level, every off refused, or reasoned anyway), for the composer's
+and voice mode's status lines (chat-voice design §8.5).
+
+**Only off is fitted.** An explicit "on", level or budget goes out as asked,
+and a model that refuses it answers with the provider's own error: a request
+that wants thinking from a model without it should hear so rather than be
+served something else. Local llama-server rows are unchanged: their off is
+the template's `enable_thinking: false`, with no `reasoning_effort` beside
+it. Nothing there errors on it: llama-server reads the kwarg (over a row's
+`--reasoning` default), its one refusal around it (a prefill) is for
+thinking *on*, and a template that does not read the variable — a model that
+always thinks — simply reasons, which the Chat observes and reports as
+above. Not fitted: the native `/v1/responses` passthrough (the client's
+body, with `reasoning.effort` injected as asked; an off injects nothing
+there and is reported ignored), and the token counters, which send nothing
+to generate.
 
 ## 6. Audio input for chat
 
@@ -525,6 +646,19 @@ catalog leaves (a stock OpenAI alias's modalities, `tool_calls.kind: text`
 with a `format`). Sequenced after the derived path but inside this change
 *(rev — it is the escape hatch that keeps "unknown" from meaning "ask the
 owner")*.
+
+*(rev 2026-10-02, realtime live run 3 N6)* **A `task` that changes the
+task brings its routes.** Merged field by field, an override of `task`
+alone left the derived `endpoints` in place — a cloud alias the owner
+declared a TTS model went on advertising the chat routes. Unless the
+override names `endpoints` too, they become the new task's on the model's
+protocol (`capabilities::task::endpoints`); over an unreadable row, `task`
+alone now makes a whole object. *(rev 2026-10-02, realtime R4 M3)* That
+needed `source` too — the schema has no default for it, so `{task}` alone
+failed "missing field `source`", the capabilities stayed unknown, and
+realtime and its settings refused the alias. `source` is lmgw's to set
+(`owner` after any override), so one the merged object lacks is filled in
+before the shape check.
 
 ## 8. Work packages *(rev: controls land before they are advertised)*
 

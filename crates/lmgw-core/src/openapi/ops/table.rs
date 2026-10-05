@@ -61,7 +61,7 @@ pub(crate) struct OpDoc {
     pub example: Option<&'static str>,
 }
 
-/// Every op, in [`crate::web::op_names::all`]'s order — 81 in total (§4.7).
+/// Every op, in [`crate::web::op_names::all`]'s order — 83 in total (§4.7).
 /// `openapi_ops.rs`'s `every_listed_op_is_documented_and_vice_versa` is what
 /// proves the two agree.
 pub(crate) fn table() -> Vec<OpDoc> {

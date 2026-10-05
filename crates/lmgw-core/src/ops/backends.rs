@@ -204,12 +204,23 @@ pub async fn build_set(
     Ok(resp)
 }
 
+/// A `cpus` this podman cannot enforce is refused on save, with what to
+/// delegate, rather than failing the next run after its clone. When podman
+/// cannot be asked the definition is saved as it is, and the note saying so
+/// comes back with the save — not only in a later run's log.
+async fn cpus_enforceable(state: &SharedState, spec: &BuildSpec) -> Result<Vec<String>, String> {
+    run::check_cpus(&Podman::of(state), spec.cpus.as_deref())
+        .await
+        .map(|note| note.into_iter().collect())
+}
+
 async fn build_set_inner(
     state: &SharedState,
     args: BuildSetArgs,
 ) -> Result<BuildSetResponse, String> {
-    let built = |b: Build| BuildSetResponse {
+    let built = |b: Build, notes: Vec<String>| BuildSetResponse {
         build: Some(b),
+        notes,
         ..BuildSetResponse::default()
     };
     match args.action {
@@ -218,8 +229,9 @@ async fn build_set_inner(
                 .spec
                 .ok_or("create needs spec: the new build's fields")?;
             let spec = validate::validate_build(spec)?;
+            let notes = cpus_enforceable(state, &spec).await?;
             let id = store::insert_build(&state.db, &spec).await.map_err(db)?;
-            Ok(built(get_build(state, id).await?))
+            Ok(built(get_build(state, id).await?, notes))
         }
         BuildSetAction::Update => {
             let id = args.id.ok_or("update needs the build's id")?;
@@ -228,10 +240,11 @@ async fn build_set_inner(
                  definition)",
             )?;
             let spec = validate::validate_build(spec)?;
+            let notes = cpus_enforceable(state, &spec).await?;
             store::update_build(&state.db, id, &spec)
                 .await
                 .map_err(db)?;
-            Ok(built(get_build(state, id).await?))
+            Ok(built(get_build(state, id).await?, notes))
         }
         BuildSetAction::Duplicate => {
             let id = args
@@ -241,7 +254,7 @@ async fn build_set_inner(
                 store::duplicate_build(&state.db, id, args.slug.as_deref(), args.name.as_deref())
                     .await
                     .map_err(db)?;
-            Ok(built(get_build(state, copy).await?))
+            Ok(built(get_build(state, copy).await?, Vec::new()))
         }
         BuildSetAction::Delete => {
             let id = args.id.ok_or("delete needs the build's id")?;

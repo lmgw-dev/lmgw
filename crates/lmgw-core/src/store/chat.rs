@@ -76,6 +76,9 @@ pub struct ChatThread {
     /// The auto-mode retrieval budget; `None` = the owner's
     /// `chat_kb_budget_tokens`.
     pub kb_budget_tokens: Option<i64>,
+    /// The thread's own voice settings (chat-voice design §2.2); every
+    /// absent field inherits Settings → Chat → Voice.
+    pub voice: ThreadVoice,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -108,6 +111,9 @@ pub struct ChatMessageRow {
     /// GPU-hold or outside-VRAM fallback, a ladder climb's fallback, a
     /// candidate alias's pick. `None` when `model` itself answered.
     pub answered_by: Option<String>,
+    /// How the turn was spoken (chat-voice design §3); `None` for a typed
+    /// turn.
+    pub voice: Option<MessageVoice>,
     pub created_at: String,
 }
 
@@ -147,6 +153,7 @@ fn chat_thread_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatThread {
         kb_ids: id_list(row.get::<String, _>("kb_ids").as_str()),
         kb_mode: KbMode::parse(row.get::<String, _>("kb_mode").as_str()).unwrap_or_default(),
         kb_budget_tokens: row.get("kb_budget_tokens"),
+        voice: ThreadVoice::from_stored(row.get::<String, _>("voice").as_str()),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -166,6 +173,7 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
         context: context_from_column(row.get("context")),
         model: row.get("model"),
         answered_by: row.get("answered_by"),
+        voice: MessageVoice::from_stored(row.get("voice")),
         created_at: row.get("created_at"),
     }
 }
@@ -405,18 +413,42 @@ pub async fn sweep_chat_threads(
 }
 
 /// Write a thread's editable settings as `t` holds them — title, model,
-/// prompt, sampling, reasoning overrides, the MCP servers it attaches and its
-/// knowledge bases — to the row `t.id` (the conversation's settings form).
-pub async fn update_chat_thread_settings(pool: &SqlitePool, t: &ChatThread) -> DbResult<()> {
+/// prompt, sampling, reasoning overrides, the MCP servers it attaches, its
+/// knowledge bases and its voice — to the row `t.id` (the conversation's
+/// settings form). With [`SeedWrite::Keep`] the voice's seed is the one
+/// stored when the write lands, not `t`'s copy: a seed drawn since `t` was
+/// read survives (chat-voice design §2.2). The voice as stored, `None` when
+/// there is no such row.
+pub async fn update_chat_thread_settings(
+    pool: &SqlitePool,
+    t: &ChatThread,
+    seed: SeedWrite,
+) -> DbResult<Option<ThreadVoice>> {
     let mcp = serde_json::to_string(&t.mcp_tools).unwrap_or_else(|_| "[]".to_string());
-    sqlx::query(
+    let mut voice = t.voice.clone();
+    if seed == SeedWrite::Keep {
+        voice.seed = None;
+    }
+    // SET expressions read the row as it was, so `voice` on the right is the
+    // stored one: its seed is laid over the new object. The JSON functions
+    // run only on valid JSON — a malformed stored `voice` makes them raise,
+    // which `AND` does not prevent and a `CASE` does.
+    // The stored seed is kept when the draw would keep it (`seed_held!`).
+    let stored: Option<String> = sqlx::query_scalar(concat!(
         "UPDATE chat_threads SET title=?2, model_alias=?3, system_prompt=?4, temperature=?5,
          max_tokens=?6, mcp_tools=?7, reasoning_enabled=?8, reasoning_effort=?9,
          reasoning_budget=?10, top_p=?11, top_k=?12, min_p=?13, repeat_penalty=?14,
          presence_penalty=?15, frequency_penalty=?16, seed=?17, stop=?18,
          kb_ids=?19, kb_mode=?20, kb_budget_tokens=?21,
-         updated_at=datetime('now') WHERE id=?1",
-    )
+         voice = CASE
+           WHEN ?23 AND ",
+        seed_held!(),
+        "
+           THEN json_set(?22, '$.seed', json_extract(voice, '$.seed'))
+           ELSE ?22 END,
+         updated_at=datetime('now') WHERE id=?1
+         RETURNING voice",
+    ))
     .bind(t.id)
     .bind(&t.title)
     .bind(&t.model_alias)
@@ -438,9 +470,11 @@ pub async fn update_chat_thread_settings(pool: &SqlitePool, t: &ChatThread) -> D
     .bind(id_list_json(&t.kb_ids))
     .bind(t.kb_mode.as_str())
     .bind(t.kb_budget_tokens)
-    .execute(pool)
+    .bind(voice.to_stored())
+    .bind(seed == SeedWrite::Keep)
+    .fetch_optional(pool)
     .await?;
-    Ok(())
+    Ok(stored.as_deref().map(ThreadVoice::from_stored))
 }
 
 /// Set just the title (used to auto-name a thread from its first user message).

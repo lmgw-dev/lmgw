@@ -1,0 +1,105 @@
+[
+ {
+  "js": "'Chat voice §8.5, the 2026-10-04 ruling: a voice turn whose model reasons although the turn asked for reasoning off shows the reasoning in the thread (the collapsed thinking block, live and after the read-back), never speaks or captions it, and says so once on the panel status line; the timing readout names the reasoning time. Against an in-page bound session (scripts/realtime-mock.js, which sends reasoning frames as the server does) and the fake microphone of the panel drive; no model runs. Run: scripts/ui-drive.py scripts/drive/chat-voice-reasoning.json --mute-audio --base <dev gateway> --token-file <its token> (the clips from scripts/drive/make-voice-fixtures.py in target/chat-voice/fixtures/voice-de.js).'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "script": "scripts/realtime-mock.js"
+ },
+ {
+  "script": "target/chat-voice/fixtures/voice-de.js"
+ },
+ {
+  "script": "scripts/drive/fake-voice.js"
+ },
+ {
+  "js": "window.fakeVoice.install()"
+ },
+ {
+  "js": "window.lmgwRealtimeMock.patchThread({})"
+ },
+ {
+  "click": "button[title^='New temporary chat']"
+ },
+ {
+  "until": "location.search.startsWith('?t=-') && !!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
+  "timeout": 15,
+  "label": "a temporary chat whose voice button is enabled"
+ },
+ {
+  "js": "window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 400, audioMs: 2400, question: 'Wie spät ist es?', reply: 'Es ist halb neun. Bis gleich.', reasoning: 'Der Nutzer fragt nach der Uhrzeit. Ich antworte knapp und freundlich.', reasoningNote: 'nano-mock cannot switch reasoning off; it reasons at its lowest level (minimal)'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "voice mode is live"
+ },
+ {
+  "js": "window.__done = window.lmgwRealtimeMock.respond(); 'responding'"
+ },
+ {
+  "until": "(() => { const d = [...document.querySelectorAll('.msg-assistant')].pop()?.querySelector('details.reasoning'); return !!d && /Uhrzeit/.test(d.textContent); })()",
+  "timeout": 10,
+  "label": "live: the reply bubble shows the reasoning in its thinking block"
+ },
+ {
+  "expect": "(() => { const d = [...document.querySelectorAll('.msg-assistant')].pop().querySelector('details.reasoning'); return !d.open && /thinking/.test(d.querySelector('summary').textContent); })()",
+  "label": "the thinking block is collapsed, as in a text turn"
+ },
+ {
+  "until": "(document.querySelector('[data-rt-status] [data-note=reasoning]')?.textContent || '').includes('nano-mock cannot switch reasoning off; it reasons at its lowest level (minimal)')",
+  "timeout": 10,
+  "label": "the panel's status line says the model reasoned although off was asked"
+ },
+ {
+  "until": "window.__done.then(() => true)",
+  "timeout": 20,
+  "label": "the response played out"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "shot": "voice-reasoning-live"
+ },
+ {
+  "expect": "(() => { const p = document.querySelector('[data-rt-panel]'); const spoken = p.dataset.voiceSpoken || ''; return /halb neun/.test(spoken) && !/Uhrzeit|freundlich/.test(spoken); })()",
+  "label": "the spoken words are the reply's, none of the reasoning"
+ },
+ {
+  "expect": "(() => { const a = [...document.querySelectorAll('.msg-assistant')].pop(); return /halb neun/.test(a.querySelector('.md').textContent) && !/Uhrzeit/.test(a.querySelector('.md').textContent); })()",
+  "label": "the reply's text holds no reasoning"
+ },
+ {
+  "expect": "document.querySelectorAll('[data-rt-status] [data-note=reasoning]').length === 1",
+  "label": "said once"
+ },
+ {
+  "expect": "/reasoning 1\\.2 s/.test(document.querySelector('[data-rt-timing]')?.textContent || '')",
+  "label": "the timing readout names the reasoning time"
+ },
+ {
+  "js": "document.querySelector('[data-rt-timing]').textContent"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "Esc leaves voice mode"
+ },
+ {
+  "until": "(() => { const a = [...document.querySelectorAll('.msg-assistant')].pop(); const d = a?.querySelector('details.reasoning'); return !!d && /Uhrzeit/.test(d.textContent) && /halb neun/.test(a.querySelector('.md').textContent); })()",
+  "timeout": 10,
+  "label": "after the read-back the reply still shows its reasoning block and its text"
+ },
+ {
+  "shot": "voice-reasoning-after"
+ }
+]

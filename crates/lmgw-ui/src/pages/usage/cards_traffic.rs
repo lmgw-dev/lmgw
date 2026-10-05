@@ -12,6 +12,9 @@ use crate::widgets::ShowMore;
 
 use super::*;
 
+/// A chart point `(x, y)`, and the pair of points a latency band is drawn between.
+type Band = ((f64, f64), (f64, f64));
+
 // ---------------------------------------------------------------------------
 // 4 · tokens in / out
 // ---------------------------------------------------------------------------
@@ -54,7 +57,7 @@ pub(super) fn TokensCard(
                     let up_h = p.ih() * (in_max / span);
                     let dn_h = p.ih() - up_h;
                     let mid = p.t + up_h;
-                    let bw = (p.band_w(n) * 0.6).min(20.0).max(1.0);
+                    let bw = (p.band_w(n) * 0.6).clamp(1.0, 20.0);
                     let mut axis: Vec<AnyView> = Vec::new();
                     for f in [0.5_f64, 1.0] {
                         let y = mid - up_h * f;
@@ -277,12 +280,12 @@ pub(super) fn LatencyCard(
                     let lo = pts(|q| q.p50_total_ms);
                     // The band only exists where both ends were measured.
                     let bands: Vec<AnyView> = {
-                        let paired: Vec<Option<((f64, f64), (f64, f64))>> = (0..n)
+                        let paired: Vec<Option<Band>> = (0..n)
                             .map(|i| hi[i].zip(lo[i]))
                             .collect();
                         let mut out = Vec::new();
-                        let mut run: Vec<((f64, f64), (f64, f64))> = Vec::new();
-                        let mut flush = |run: &mut Vec<((f64, f64), (f64, f64))>| {
+                        let mut run: Vec<Band> = Vec::new();
+                        let mut flush = |run: &mut Vec<Band>| {
                             if run.len() > 1 {
                                 let up: Vec<(f64, f64)> = run.iter().map(|(a, _)| *a).collect();
                                 let dn: Vec<(f64, f64)> = run.iter().map(|(_, b)| *b).collect();

@@ -10,6 +10,7 @@ use lmgw_core::capabilities::{
     apply_owner_override, Derived, ModelCapabilities, ReasoningCaps, StructuredOutputCaps,
     ToolCallCaps,
 };
+use lmgw_core::config::Protocol;
 use serde_json::json;
 
 /// The design §2.1 example row: Qwen3.8 served with reasoning on at `low`,
@@ -53,6 +54,7 @@ fn derived_row() -> Derived {
             json_schema: Some(true),
             json_object: Some(true),
         }),
+        speech: None,
         source: "gguf+config".to_string(),
     };
     Derived {
@@ -87,6 +89,7 @@ fn a_nested_reasoning_key_is_replaced_while_its_siblings_survive() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "reasoning": { "kind": "toggle" } } }),
+        Protocol::Openai,
     )
     .unwrap();
     let r = out.capabilities.unwrap().reasoning.unwrap();
@@ -105,6 +108,7 @@ fn a_top_level_sibling_the_override_never_mentions_survives() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "vision": false } }),
+        Protocol::Openai,
     )
     .unwrap();
     let caps = out.capabilities.unwrap();
@@ -121,6 +125,7 @@ fn null_deletes_a_key_rather_than_setting_it_to_a_default() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "vision": null } }),
+        Protocol::Openai,
     )
     .unwrap();
     assert_eq!(out.capabilities.unwrap().vision, None);
@@ -131,6 +136,7 @@ fn an_array_is_replaced_whole_not_merged_element_by_element() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "reasoning": { "levels": ["low", "high"] } } }),
+        Protocol::Openai,
     )
     .unwrap();
     let r = out.capabilities.unwrap().reasoning.unwrap();
@@ -142,6 +148,7 @@ fn source_becomes_owner_whenever_the_capabilities_object_is_touched() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "vision": false } }),
+        Protocol::Openai,
     )
     .unwrap();
     assert_eq!(out.capabilities.unwrap().source, "owner");
@@ -149,7 +156,12 @@ fn source_becomes_owner_whenever_the_capabilities_object_is_touched() {
 
 #[test]
 fn capabilities_absent_from_the_override_leaves_the_source_alone() {
-    let out = apply_owner_override(derived_row(), &json!({ "max_output_tokens": 1024 })).unwrap();
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "max_output_tokens": 1024 }),
+        Protocol::Openai,
+    )
+    .unwrap();
     assert_eq!(out.capabilities.unwrap().source, "gguf+config");
 }
 
@@ -159,11 +171,20 @@ fn capabilities_absent_from_the_override_leaves_the_source_alone() {
 
 #[test]
 fn max_output_tokens_can_be_set_and_cleared() {
-    let out = apply_owner_override(derived_row(), &json!({ "max_output_tokens": 65536 })).unwrap();
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "max_output_tokens": 65536 }),
+        Protocol::Openai,
+    )
+    .unwrap();
     assert_eq!(out.max_output_tokens, Some(65536));
 
-    let cleared =
-        apply_owner_override(derived_row(), &json!({ "max_output_tokens": null })).unwrap();
+    let cleared = apply_owner_override(
+        derived_row(),
+        &json!({ "max_output_tokens": null }),
+        Protocol::Openai,
+    )
+    .unwrap();
     assert_eq!(cleared.max_output_tokens, None);
 }
 
@@ -172,6 +193,7 @@ fn notes_are_appended_not_replaced() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "notes": ["hand-verified against a live probe"] }),
+        Protocol::Openai,
     )
     .unwrap();
     assert_eq!(
@@ -204,6 +226,7 @@ fn an_override_onto_a_none_derived_object_becomes_the_whole_object() {
                 "source": "catalog",
             }
         }),
+        Protocol::Openai,
     )
     .unwrap();
     let caps = out
@@ -225,6 +248,7 @@ fn an_override_onto_a_none_derived_object_without_task_is_refused() {
     let err = apply_owner_override(
         unreadable,
         &json!({ "capabilities": { "endpoints": ["/v1/chat/completions"] } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("task"), "{err}");
@@ -236,20 +260,30 @@ fn an_override_onto_a_none_derived_object_without_task_is_refused() {
 
 #[test]
 fn a_non_object_override_is_refused() {
-    let err = apply_owner_override(derived_row(), &json!(["not", "an", "object"])).unwrap_err();
+    let err = apply_owner_override(
+        derived_row(),
+        &json!(["not", "an", "object"]),
+        Protocol::Openai,
+    )
+    .unwrap_err();
     assert!(err.contains("object"), "{err}");
 }
 
 #[test]
 fn an_unknown_top_level_key_is_refused_and_named() {
-    let err = apply_owner_override(derived_row(), &json!({ "bogus_key": 1 })).unwrap_err();
+    let err = apply_owner_override(derived_row(), &json!({ "bogus_key": 1 }), Protocol::Openai)
+        .unwrap_err();
     assert!(err.contains("bogus_key"), "{err}");
 }
 
 #[test]
 fn a_non_object_capabilities_value_is_refused_and_named() {
-    let err = apply_owner_override(derived_row(), &json!({ "capabilities": "not an object" }))
-        .unwrap_err();
+    let err = apply_owner_override(
+        derived_row(),
+        &json!({ "capabilities": "not an object" }),
+        Protocol::Openai,
+    )
+    .unwrap_err();
     assert!(err.contains("capabilities"), "{err}");
 }
 
@@ -259,6 +293,7 @@ fn a_capabilities_shape_that_fails_to_deserialise_is_refused() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "reasoning": { "kind": 123 } } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("capabilities"), "{err}");
@@ -266,14 +301,23 @@ fn a_capabilities_shape_that_fails_to_deserialise_is_refused() {
 
 #[test]
 fn a_non_array_notes_value_is_refused() {
-    let err = apply_owner_override(derived_row(), &json!({ "notes": "not an array" })).unwrap_err();
+    let err = apply_owner_override(
+        derived_row(),
+        &json!({ "notes": "not an array" }),
+        Protocol::Openai,
+    )
+    .unwrap_err();
     assert!(err.contains("notes"), "{err}");
 }
 
 #[test]
 fn a_non_numeric_max_output_tokens_is_refused() {
-    let err =
-        apply_owner_override(derived_row(), &json!({ "max_output_tokens": "a lot" })).unwrap_err();
+    let err = apply_owner_override(
+        derived_row(),
+        &json!({ "max_output_tokens": "a lot" }),
+        Protocol::Openai,
+    )
+    .unwrap_err();
     assert!(err.contains("max_output_tokens"), "{err}");
 }
 
@@ -286,6 +330,7 @@ fn the_minimal_write_time_base_accepts_a_well_formed_override() {
     let out = apply_owner_override(
         minimal_base(),
         &json!({ "capabilities": { "input_modalities": ["text", "image"] } }),
+        Protocol::Openai,
     )
     .unwrap();
     let caps = out.capabilities.unwrap();
@@ -309,6 +354,7 @@ fn a_misspelled_capability_key_is_refused_and_named() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "visionn": true } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("visionn"), "{err}");
@@ -316,6 +362,7 @@ fn a_misspelled_capability_key_is_refused_and_named() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "tool_calls": { "kindd": "native" } } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("kindd"), "{err}");
@@ -329,6 +376,7 @@ fn an_out_of_vocabulary_kind_is_refused_and_named() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "reasoning": { "kind": "levelz" } } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("reasoning.kind"), "{err}");
@@ -337,6 +385,7 @@ fn an_out_of_vocabulary_kind_is_refused_and_named() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "tool_calls": { "kind": "structured" } } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("tool_calls.kind"), "{err}");
@@ -345,6 +394,7 @@ fn an_out_of_vocabulary_kind_is_refused_and_named() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "tool_calls": { "kind": "text" } } }),
+        Protocol::Openai,
     )
     .unwrap();
     assert_eq!(out.capabilities.unwrap().tool_calls.unwrap().kind, "text");
@@ -355,6 +405,7 @@ fn an_unknown_task_or_modality_is_refused_and_named() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "task": "chatt" } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("task"), "{err}");
@@ -363,6 +414,7 @@ fn an_unknown_task_or_modality_is_refused_and_named() {
     let err = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "input_modalities": ["text", "images"] } }),
+        Protocol::Openai,
     )
     .unwrap_err();
     assert!(err.contains("input_modalities"), "{err}");
@@ -373,6 +425,7 @@ fn an_unknown_task_or_modality_is_refused_and_named() {
     let out = apply_owner_override(
         derived_row(),
         &json!({ "capabilities": { "task": "diar", "input_modalities": ["text", "pdf"] } }),
+        Protocol::Openai,
     )
     .unwrap();
     assert_eq!(out.capabilities.unwrap().task, "diar");
@@ -383,7 +436,12 @@ fn an_unknown_task_or_modality_is_refused_and_named() {
 /// off the model.
 #[test]
 fn a_hand_set_max_output_tokens_is_attributed_in_a_note() {
-    let out = apply_owner_override(derived_row(), &json!({ "max_output_tokens": 65536 })).unwrap();
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "max_output_tokens": 65536 }),
+        Protocol::Openai,
+    )
+    .unwrap();
     assert_eq!(out.max_output_tokens, Some(65536));
     assert_eq!(
         out.notes.last().map(String::as_str),
@@ -399,11 +457,101 @@ fn a_hand_set_max_output_tokens_is_attributed_in_a_note() {
     );
 
     // Clearing one leaves nothing to attribute.
-    let cleared =
-        apply_owner_override(derived_row(), &json!({ "max_output_tokens": null })).unwrap();
+    let cleared = apply_owner_override(
+        derived_row(),
+        &json!({ "max_output_tokens": null }),
+        Protocol::Openai,
+    )
+    .unwrap();
     assert!(
         !cleared.notes.iter().any(|n| n.contains("set by the owner")),
         "{:?}",
         cleared.notes
     );
+}
+
+// ---------------------------------------------------------------------------
+// A task brings its routes (realtime live run 3, N6)
+// ---------------------------------------------------------------------------
+
+/// The owner declared a cloud alias a text-to-speech model; it went on
+/// advertising the chat routes, so a client following `endpoints` sent it
+/// chat. A changed task brings its own routes — on the alias' protocol —
+/// unless the override names them too.
+#[test]
+fn an_override_that_changes_the_task_changes_the_endpoints() {
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "capabilities": { "task": "tts" } }),
+        Protocol::Openai,
+    )
+    .unwrap();
+    let caps = out.capabilities.unwrap();
+    assert_eq!(caps.task, "tts");
+    assert_eq!(caps.endpoints, ["/v1/audio/speech"]);
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "capabilities": { "task": "asr" } }),
+        Protocol::Openai,
+    )
+    .unwrap();
+    assert_eq!(
+        out.capabilities.unwrap().endpoints,
+        ["/v1/audio/transcriptions"]
+    );
+    // `/v1/audio/*` serves the OpenAI protocol only.
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "capabilities": { "task": "tts" } }),
+        Protocol::Gemini,
+    )
+    .unwrap();
+    assert!(out.capabilities.unwrap().endpoints.is_empty());
+    // Back to chat: the chat routes of the protocol.
+    let mut tts = derived_row();
+    if let Some(c) = tts.capabilities.as_mut() {
+        c.task = "tts".into();
+        c.endpoints = vec!["/v1/audio/speech".into()];
+    }
+    let out = apply_owner_override(
+        tts,
+        &json!({ "capabilities": { "task": "chat" } }),
+        Protocol::Anthropic,
+    )
+    .unwrap();
+    assert_eq!(
+        out.capabilities.unwrap().endpoints,
+        ["/v1/chat/completions", "/v1/messages", "/v1/responses"]
+    );
+    // Routes the owner names win; the same task leaves them alone.
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "capabilities": { "task": "tts", "endpoints": ["/v1/x"] } }),
+        Protocol::Openai,
+    )
+    .unwrap();
+    assert_eq!(out.capabilities.unwrap().endpoints, ["/v1/x"]);
+    let out = apply_owner_override(
+        derived_row(),
+        &json!({ "capabilities": { "task": "chat" } }),
+        Protocol::Openai,
+    )
+    .unwrap();
+    assert_eq!(
+        out.capabilities.unwrap().endpoints,
+        derived_row().capabilities.unwrap().endpoints
+    );
+    // Over nothing derived, a task alone is a whole object now: its routes
+    // come with it, and `source` is lmgw's to set (R4 M3: it failed
+    // "missing field `source`", so the capabilities stayed unknown and
+    // realtime refused the alias).
+    let out = apply_owner_override(
+        Derived::default(),
+        &json!({ "capabilities": { "task": "tts" } }),
+        Protocol::Openai,
+    )
+    .unwrap();
+    let caps = out.capabilities.unwrap();
+    assert_eq!(caps.endpoints, ["/v1/audio/speech"]);
+    assert_eq!((caps.task.as_str(), caps.source.as_str()), ("tts", "owner"));
 }

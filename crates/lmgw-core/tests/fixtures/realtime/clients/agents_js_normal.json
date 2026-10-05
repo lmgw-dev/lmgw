@@ -1,0 +1,685 @@
+[
+ {
+  "request_line": "GET /v1/realtime HTTP/1.1",
+  "path": "/v1/realtime",
+  "query": "",
+  "headers": [
+   [
+    "Authorization",
+    "Bearer sk-test-dummy"
+   ],
+   [
+    "User-Agent",
+    "Agents/JavaScript 0.18.0"
+   ],
+   [
+    "X-OpenAI-Agents-SDK",
+    "openai-agents-sdk.0.18.0"
+   ],
+   [
+    "Sec-WebSocket-Version",
+    "13"
+   ],
+   [
+    "Sec-WebSocket-Key",
+    "4h5IoLuSby7Vm2ifMIkiGg=="
+   ],
+   [
+    "Connection",
+    "Upgrade"
+   ],
+   [
+    "Upgrade",
+    "websocket"
+   ],
+   [
+    "Sec-WebSocket-Extensions",
+    "permessage-deflate; client_max_window_bits"
+   ],
+   [
+    "Host",
+    "127.0.0.1:9100"
+   ]
+  ],
+  "t": 1.125,
+  "offered_subprotocols": [],
+  "frames": [
+   {
+    "dir": "server->client",
+    "t": 1.125,
+    "event": {
+     "type": "session.created",
+     "session": {
+      "type": "realtime",
+      "id": "sess_5c5711b3944d",
+      "object": "realtime.session",
+      "model": "gpt-realtime",
+      "expires_at": 1790816385,
+      "output_modalities": [
+       "audio"
+      ],
+      "instructions": "",
+      "tools": [],
+      "tool_choice": "auto",
+      "max_output_tokens": "inf",
+      "tracing": null,
+      "truncation": "auto",
+      "prompt": null,
+      "include": null,
+      "audio": {
+       "input": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "transcription": null,
+        "noise_reduction": null,
+        "turn_detection": {
+         "type": "server_vad",
+         "threshold": 0.5,
+         "prefix_padding_ms": 300,
+         "silence_duration_ms": 200,
+         "idle_timeout_ms": null,
+         "create_response": true,
+         "interrupt_response": true
+        }
+       },
+       "output": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "voice": "marin",
+        "speed": 1.0
+       }
+      }
+     },
+     "event_id": "event_aca74698b5ad4624"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 1.129,
+    "event": {
+     "type": "session.update",
+     "session": {
+      "type": "realtime",
+      "instructions": "You are a helpful voice assistant.",
+      "model": "gpt-realtime-2.1",
+      "output_modalities": [
+       "audio"
+      ],
+      "audio": {
+       "input": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "noise_reduction": null,
+        "transcription": {
+         "model": "gpt-4o-mini-transcribe"
+        },
+        "turn_detection": {
+         "type": "semantic_vad"
+        }
+       },
+       "output": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "speed": 1
+       }
+      },
+      "tools": [
+       {
+        "type": "function",
+        "name": "get_time",
+        "description": "Get the current time",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "tz": {
+           "description": "IANA timezone",
+           "anyOf": [
+            {
+             "type": "string",
+             "description": "IANA timezone"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "tz"
+         ],
+         "additionalProperties": false,
+         "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+       }
+      ]
+     }
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.13,
+    "event": {
+     "type": "session.updated",
+     "session": {
+      "type": "realtime",
+      "id": "sess_5c5711b3944d",
+      "object": "realtime.session",
+      "model": "gpt-realtime-2.1",
+      "expires_at": 1790816385,
+      "output_modalities": [
+       "audio"
+      ],
+      "instructions": "You are a helpful voice assistant.",
+      "tools": [
+       {
+        "type": "function",
+        "name": "get_time",
+        "description": "Get the current time",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "tz": {
+           "description": "IANA timezone",
+           "anyOf": [
+            {
+             "type": "string",
+             "description": "IANA timezone"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "tz"
+         ],
+         "additionalProperties": false,
+         "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+       }
+      ],
+      "tool_choice": "auto",
+      "max_output_tokens": "inf",
+      "tracing": null,
+      "truncation": "auto",
+      "prompt": null,
+      "include": null,
+      "audio": {
+       "input": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "transcription": {
+         "model": "gpt-4o-mini-transcribe"
+        },
+        "noise_reduction": null,
+        "turn_detection": {
+         "type": "semantic_vad",
+         "threshold": 0.5,
+         "prefix_padding_ms": 300,
+         "silence_duration_ms": 200,
+         "idle_timeout_ms": null,
+         "create_response": true,
+         "interrupt_response": true
+        }
+       },
+       "output": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "voice": "marin",
+        "speed": 1
+       }
+      }
+     },
+     "event_id": "event_9548129dcb4545bd"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 1.132,
+    "event": {
+     "type": "session.update",
+     "session": {
+      "type": "realtime",
+      "tracing": "auto"
+     }
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.132,
+    "event": {
+     "type": "session.updated",
+     "session": {
+      "type": "realtime",
+      "id": "sess_5c5711b3944d",
+      "object": "realtime.session",
+      "model": "gpt-realtime-2.1",
+      "expires_at": 1790816385,
+      "output_modalities": [
+       "audio"
+      ],
+      "instructions": "You are a helpful voice assistant.",
+      "tools": [
+       {
+        "type": "function",
+        "name": "get_time",
+        "description": "Get the current time",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "tz": {
+           "description": "IANA timezone",
+           "anyOf": [
+            {
+             "type": "string",
+             "description": "IANA timezone"
+            },
+            {
+             "type": "null"
+            }
+           ]
+          }
+         },
+         "required": [
+          "tz"
+         ],
+         "additionalProperties": false,
+         "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+       }
+      ],
+      "tool_choice": "auto",
+      "max_output_tokens": "inf",
+      "tracing": "auto",
+      "truncation": "auto",
+      "prompt": null,
+      "include": null,
+      "audio": {
+       "input": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "transcription": {
+         "model": "gpt-4o-mini-transcribe"
+        },
+        "noise_reduction": null,
+        "turn_detection": {
+         "type": "semantic_vad",
+         "threshold": 0.5,
+         "prefix_padding_ms": 300,
+         "silence_duration_ms": 200,
+         "idle_timeout_ms": null,
+         "create_response": true,
+         "interrupt_response": true
+        }
+       },
+       "output": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "voice": "marin",
+        "speed": 1
+       }
+      }
+     },
+     "event_id": "event_0d7e7baa340d4d7b"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 1.63,
+    "event": {
+     "type": "conversation.item.create",
+     "item": {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "Hallo"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.63,
+    "event": {
+     "type": "conversation.item.added",
+     "previous_item_id": null,
+     "item": {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "Hallo"
+       }
+      ],
+      "id": "item_585b397b"
+     },
+     "event_id": "event_caf900947b8e4872"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "conversation.item.done",
+     "previous_item_id": null,
+     "item": {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "Hallo"
+       }
+      ],
+      "id": "item_585b397b"
+     },
+     "event_id": "event_1ab2f971bcd74c91"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 1.631,
+    "event": {
+     "type": "response.create",
+     "event_id": "agents_js_response_create_1"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.created",
+     "response": {
+      "id": "resp_1",
+      "object": "realtime.response",
+      "status": "in_progress",
+      "status_details": null,
+      "output": [],
+      "conversation_id": "conv_1",
+      "output_modalities": [
+       "audio"
+      ],
+      "max_output_tokens": "inf",
+      "audio": {
+       "output": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "voice": "marin"
+       }
+      },
+      "usage": null,
+      "metadata": null
+     },
+     "event_id": "event_f1b1ad5afbe04f6c"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.output_item.added",
+     "response_id": "resp_1",
+     "output_index": 0,
+     "item": {
+      "id": "item_1a",
+      "object": "realtime.item",
+      "type": "message",
+      "status": "in_progress",
+      "role": "assistant",
+      "content": []
+     },
+     "event_id": "event_1a3310b212d74eb3"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "conversation.item.added",
+     "previous_item_id": null,
+     "item": {
+      "id": "item_1a",
+      "object": "realtime.item",
+      "type": "message",
+      "status": "in_progress",
+      "role": "assistant",
+      "content": []
+     },
+     "event_id": "event_9f51fcf12d7a4af4"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.content_part.added",
+     "response_id": "resp_1",
+     "item_id": "item_1a",
+     "output_index": 0,
+     "content_index": 0,
+     "part": {
+      "type": "output_audio",
+      "transcript": ""
+     },
+     "event_id": "event_9e34abd89f5c488e"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.output_audio_transcript.delta",
+     "delta": "Hallo!",
+     "response_id": "resp_1",
+     "item_id": "item_1a",
+     "output_index": 0,
+     "content_index": 0,
+     "event_id": "event_0a57e97e11224463"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.output_audio.delta",
+     "delta": "<base64 len=6400>",
+     "response_id": "resp_1",
+     "item_id": "item_1a",
+     "output_index": 0,
+     "content_index": 0,
+     "event_id": "event_8cacb9dcfa6e43f1"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.output_audio.done",
+     "response_id": "resp_1",
+     "item_id": "item_1a",
+     "output_index": 0,
+     "content_index": 0,
+     "event_id": "event_1dc3b12766c14ce3"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.output_audio_transcript.done",
+     "transcript": "Hallo!",
+     "response_id": "resp_1",
+     "item_id": "item_1a",
+     "output_index": 0,
+     "content_index": 0,
+     "event_id": "event_baf298f2a825434f"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.content_part.done",
+     "part": {
+      "type": "output_audio",
+      "transcript": "Hallo!"
+     },
+     "response_id": "resp_1",
+     "item_id": "item_1a",
+     "output_index": 0,
+     "content_index": 0,
+     "event_id": "event_def8a6418f1148c4"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.output_item.done",
+     "response_id": "resp_1",
+     "output_index": 0,
+     "item": {
+      "id": "item_1a",
+      "object": "realtime.item",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "output_audio",
+        "transcript": "Hallo!"
+       }
+      ]
+     },
+     "event_id": "event_006a130d8bbe4e75"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "conversation.item.done",
+     "previous_item_id": null,
+     "item": {
+      "id": "item_1a",
+      "object": "realtime.item",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "output_audio",
+        "transcript": "Hallo!"
+       }
+      ]
+     },
+     "event_id": "event_99b1ad7802464eef"
+    }
+   },
+   {
+    "dir": "server->client",
+    "t": 1.631,
+    "event": {
+     "type": "response.done",
+     "response": {
+      "id": "resp_1",
+      "object": "realtime.response",
+      "status": "completed",
+      "status_details": null,
+      "output": [
+       {
+        "id": "item_1a",
+        "object": "realtime.item",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [
+         {
+          "type": "output_audio",
+          "transcript": "Hallo!"
+         }
+        ]
+       }
+      ],
+      "conversation_id": "conv_1",
+      "output_modalities": [
+       "audio"
+      ],
+      "max_output_tokens": "inf",
+      "audio": {
+       "output": {
+        "format": {
+         "type": "audio/pcm",
+         "rate": 24000
+        },
+        "voice": "marin"
+       }
+      },
+      "usage": {
+       "total_tokens": 20,
+       "input_tokens": 12,
+       "output_tokens": 8,
+       "input_token_details": {
+        "cached_tokens": 0,
+        "text_tokens": 12,
+        "audio_tokens": 0
+       },
+       "output_token_details": {
+        "text_tokens": 4,
+        "audio_tokens": 4
+       }
+      },
+      "metadata": null
+     },
+     "event_id": "event_8c6e3225f0594d08"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 3.133,
+    "event": {
+     "type": "input_audio_buffer.append",
+     "audio": "<base64 len=12800>"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 3.634,
+    "event": {
+     "type": "input_audio_buffer.append",
+     "audio": "<base64 len=12800>"
+    }
+   },
+   {
+    "dir": "client->server",
+    "t": 3.634,
+    "event": {
+     "type": "input_audio_buffer.commit"
+    }
+   }
+  ]
+ }
+]

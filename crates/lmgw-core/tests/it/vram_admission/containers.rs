@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// Hold a request's transient ([`Until`]): until the driver was read after
+/// `reads` reads — bounded far above any sampler's interval, so a sampler
+/// that never comes fails the test's own assertion instead of hanging it —
+/// or for its time.
+fn hold(world: &Arc<Mutex<World>>, until: Until, reads: u64) {
+    match until {
+        Until::For(lasts) => std::thread::sleep(lasts),
+        Until::Sampled => {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while world.lock().unwrap().process_reads == reads
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+
 /// One model's container: `/health` for the readiness poll (§10.3), `/slots`
 /// for the eviction busy probe (§10.7), and the inference routes a forwarded
 /// request lands on.
@@ -64,6 +82,81 @@ pub(super) async fn container(world: Arc<Mutex<World>>) -> MockServer {
         })))
         .mount(&server)
         .await;
+
+    // An audio.cpp container (realtime design §9.4): its readiness route,
+    // which answers before any model is loaded, and the two inference routes,
+    // whose first answer is what loads the model — the driver's figure for
+    // this port's model grows to `World::loaded_bytes` the moment one runs.
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+    for (route, wav) in [
+        ("/v1/audio/speech", true),
+        ("/v1/audio/transcriptions", false),
+    ] {
+        let w = world.clone();
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(move |req: &Request| {
+                let world = w.clone();
+                // `stream_format: audio` is answered with raw PCM, chunked
+                // (audio-class gap 8).
+                let raw_pcm = serde_json::from_slice::<Value>(&req.body)
+                    .ok()
+                    .is_some_and(|b| b["stream_format"] == "audio");
+                let mut w = w.lock().unwrap();
+                let model = w.ports.get(&port).cloned().unwrap_or_default();
+                let loaded = w.loaded_bytes.get(&model).copied();
+                if let Some(bytes) = loaded {
+                    w.size.insert(model.clone(), bytes);
+                }
+                w.audio_calls.push(model.clone());
+                let delay = Duration::ZERO;
+                if let Some(&t) = w.transient.get(&model) {
+                    // Held, then dropped back before the answer leaves:
+                    // this blocks the fake container's own server, which
+                    // nothing else needs meanwhile (the driver is read in
+                    // process).
+                    w.size.insert(model.clone(), t.bytes);
+                    let (back, reads) = (loaded.unwrap_or(t.bytes), w.process_reads);
+                    drop(w);
+                    hold(&world, t.until, reads);
+                    w = world.lock().unwrap();
+                    w.size.insert(model.clone(), back);
+                }
+                if let Some(&n) = w.sse_bytes.get(&model).filter(|_| wav && raw_pcm) {
+                    return ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/octet-stream")
+                        .set_body_raw(vec![0u8; n], "application/octet-stream")
+                        .set_delay(delay);
+                }
+                if let Some(&n) = w.sse_bytes.get(&model).filter(|_| wav) {
+                    let frame = "data: {\"type\":\"speech.audio.delta\",\"audio\":\"AAAA\"}\n\n";
+                    let body = frame.repeat(n / frame.len() + 1).into_bytes();
+                    return ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_raw(body, "text/event-stream")
+                        .set_delay(delay);
+                }
+                if wav {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "audio/wav")
+                        .set_body_bytes(crate::support::realtime_tts::wav(
+                            &crate::support::realtime_tts::speech(100),
+                            24_000,
+                        ))
+                        .set_delay(delay)
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"text": "hello"}))
+                        .set_delay(delay)
+                }
+            })
+            .mount(&server)
+            .await;
+    }
 
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))

@@ -14,7 +14,7 @@
 //! arms (§4.7): a name not listed here is unreachable, and adding an op means
 //! adding it here, which is what forces it into the docs.
 
-/// The 56 arms of [`super::api::op`]'s own `match` — everything dispatched
+/// The 57 arms of [`super::api::op`]'s own `match` — everything dispatched
 /// there directly, including the legacy `embed_model_set` spelling.
 pub const MAIN_OPS: &[&str] = &[
     "upstream_set",
@@ -35,6 +35,7 @@ pub const MAIN_OPS: &[&str] = &[
     "prices_sync",
     "tool_set",
     "update_check",
+    "realtime_budget",
     "job_cancel",
     "response_chain_delete",
     "responses_gc",
@@ -44,6 +45,7 @@ pub const MAIN_OPS: &[&str] = &[
     "container",
     "hold_set",
     "audio_catalog",
+    "voice_transcribe",
     "image_recipes",
     "image_recipe_add",
     "local_model_test",
@@ -115,8 +117,9 @@ pub const KEY_OPS: &[&str] = &[
 pub const SETTINGS_OPS: &[&str] = &["settings_set_full"];
 
 /// Every op name, in list order — `MAIN_OPS`, then `AGENT_OPS`, `KEY_OPS`,
-/// `SETTINGS_OPS`. 81 in total (§4.7, plus the benchmark design's seven,
-/// §8.1).
+/// `SETTINGS_OPS`. 83 in total (§4.7, plus the benchmark design's seven,
+/// §8.1, `voice_transcribe`, audio-class gap 5, and the realtime design's
+/// `realtime_budget`, §12).
 pub fn all() -> impl Iterator<Item = &'static str> {
     MAIN_OPS
         .iter()
@@ -126,7 +129,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
-/// Is `name` one of the 81? What `op()` checks before it looks at its own
+/// Is `name` one of the 83? What `op()` checks before it looks at its own
 /// arms (§4.7): unlisted means unreachable, whatever a `match` arm below it
 /// might otherwise have answered.
 pub fn is_op(name: &str) -> bool {
@@ -150,9 +153,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_four_lists_are_81_names_with_no_duplicate() {
+    fn the_four_lists_are_82_names_with_no_duplicate() {
         let all: Vec<&str> = all().collect();
-        assert_eq!(all.len(), 81, "{all:#?}");
+        assert_eq!(all.len(), 83, "{all:#?}");
         let set: HashSet<&str> = all.iter().copied().collect();
         assert_eq!(set.len(), all.len(), "a name appears in more than one list");
     }

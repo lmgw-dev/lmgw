@@ -90,7 +90,7 @@ custom URL), then:
 | `dockerfile`, `target` | Default auto (the preset's candidates for the engine+backend). Chosen **at the base commit**, before any extras are merged — see §16. |
 | `edits` | Starts as the preset's Dockerfile edits, shown and editable (find/replace, `required` flag, a `role` so switches like `ccache` off can drop every edit of that role even if you customized it). |
 | `ccache` | On by default. `ccache_max_size` defaults to `10G`. |
-| `cpus` | `--cpuset-cpus` range; empty = all cores (`-j$(nproc)` follows). |
+| `cpus` | `--cpuset-cpus` range; empty = all cores (`-j$(nproc)` follows). Needs podman's `cpuset` cgroup controller; a rootless podman has it only when `user@.service` delegates it (stock Fedora delegates `cpu io memory pids`), so a save and a run refuse without it and name the `Delegate=` drop-in. CPUs the host does not have online (`/sys/devices/system/cpu/online`) are refused the same way, and a save that could not ask podman says so in the editor (`notes` on `build_set`). Not translated to anything else: `podman build` has no `--cpus`, a CPU quota leaves `nproc` at every host core, and RUN steps do not inherit a `taskset` affinity. |
 | `build_args` | Extra `KEY=VALUE` lines. |
 | `keep_layers` | Off by default (`--layers=false`) — no multi-GB intermediate stages left behind. |
 | `keep_runs` | New builds default to **3** in the editor; empty/unset means keep every run's image forever. |
@@ -493,6 +493,13 @@ on it, report back": `lmgw__build_set` → `lmgw__build_run` → poll
   the single front door and proxies only the API, and holding the port closed
   until the model loads (or rewriting `--host`/`--port`) is part of lmgw's own
   start sequence.
+- **audio.cpp images get eSpeak NG** (`runtime-espeak`, not required): the
+  three audio profiles append `libespeak-ng1 espeak-ng-data` to upstream's
+  runtime-stage `apt-get install` line, about 10 MB, so Kokoro and the other
+  phonemizing families load. Upstream's images (ghcr `full-cuda12` too) lack
+  it. A build that stores its own edit list (any build saved before this
+  edit existed and then customized) keeps that list: reset it to the preset
+  or append the edit, then rebuild and re-apply the audio containers.
 - **audio.cpp and stable-diffusion.cpp default to CUDA 13.0.0**, not their
   own upstream Dockerfile defaults — chosen because 13.0.0 is what works on
   driver 615.71 for all four engines and shares a base image, at the cost of

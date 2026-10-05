@@ -10,61 +10,48 @@
 //! the prefilled editor — family/task/voice config is not derivable from the
 //! files alone.
 
+mod view_state;
+
+use std::collections::HashMap;
+
+use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{AudioCatalog, AudioCatalogInstall, AudioFamily, AudioPackage, DownloadsView};
 use serde_json::json;
+use wasm_bindgen::JsCast;
 
 use crate::fmt::hue_for;
 use crate::widgets::use_toasts;
+use view_state::{live_of, Landed, Live, Slot};
 
-/// Live state of one package's files, joined from `/api/hf/downloads`.
-#[derive(Clone, Copy, PartialEq)]
-enum Live {
-    /// Nothing of this package is moving.
-    Idle,
-    /// Queued or transferring; `Some(pct)` once a total is known.
-    Running(Option<u64>),
-    Failed,
+type CatalogResource = LocalResource<crate::api::Result<AudioCatalog>>;
+
+/// What the list area shows. A Memo of its own, so the `.cat-list` (and the
+/// keyed rows in it) is built only when this changes — a re-read of the
+/// catalog lands in the rows that are already there.
+#[derive(Clone, PartialEq)]
+enum ListState {
+    Loading,
+    Failed(String),
+    Empty,
+    Ready,
 }
 
-/// `watching` is `(package id, download row id)` — a package queued a moment
-/// ago has rows the catalog snapshot does not know about yet.
-fn live_of(pkg: &AudioPackage, dv: Option<&DownloadsView>, watching: &[(String, i64)]) -> Live {
-    let mine: Vec<i64> = watching
-        .iter()
-        .filter(|(p, _)| *p == pkg.id)
-        .map(|(_, id)| *id)
-        .collect();
-    let Some(dv) = dv else {
-        return match mine.is_empty() {
-            true => Live::Idle,
-            false => Live::Running(None),
-        };
-    };
-    let rows: Vec<_> = dv
-        .downloads
-        .iter()
-        .filter(|d| pkg.download_ids.contains(&d.id) || mine.contains(&d.id))
-        .collect();
-    if rows.is_empty() && !mine.is_empty() {
-        return Live::Running(None);
-    }
-    if rows.iter().any(|d| d.status == "failed") {
-        return Live::Failed;
-    }
-    let running: Vec<_> = rows
-        .iter()
-        .filter(|d| matches!(d.status.as_str(), "queued" | "downloading"))
-        .collect();
-    if running.is_empty() {
-        return Live::Idle;
-    }
-    let pcts: Vec<u64> = running.iter().filter_map(|d| d.percent).collect();
-    match pcts.len() == running.len() && !pcts.is_empty() {
-        true => Live::Running(Some(pcts.iter().sum::<u64>() / pcts.len() as u64)),
-        false => Live::Running(None),
-    }
+/// The family ids of a read catalog, in the catalog's order; `None` while
+/// nothing (or an error) has been read.
+fn family_ids(c: &Option<crate::api::Result<AudioCatalog>>) -> Option<Vec<String>> {
+    let c = c.as_ref()?.as_ref().ok()?;
+    Some(c.families.iter().map(|f| f.family.clone()).collect())
+}
+
+/// One field of a row's current value; the default once the row has left
+/// the catalog (it goes from the list with the next order update).
+fn now<S, T: Default>(m: Memo<Option<S>>, pick: impl FnOnce(&S) -> T) -> T
+where
+    S: Send + Sync + 'static,
+{
+    m.with(|v| v.as_ref().map(pick).unwrap_or_default())
 }
 
 #[component]
@@ -73,9 +60,18 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
     let editors = expect_context::<super::models::Editors>();
 
     let reload = RwSignal::new(0u32);
+    // The newest ask (`reload`'s count) a catalog read has answered. Set as
+    // the read returns, before it is on screen: a landed download waits for
+    // a read asked after it ([`Landed::asked`]), not just the next one in —
+    // that may have left before the files did.
+    let answered = StoredValue::new(0u32);
     let catalog = LocalResource::new(move || {
-        reload.get();
-        crate::api::get::<AudioCatalog>("/api/audio/catalog")
+        let asked = reload.get();
+        async move {
+            let read = crate::api::get::<AudioCatalog>("/api/audio/catalog").await;
+            answered.update_value(|a| *a = (*a).max(asked));
+            read
+        }
     });
     let dl_reload = RwSignal::new(0u32);
     let downloads = LocalResource::new(move || {
@@ -87,65 +83,146 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
     // `(package id, download row id)` queued from here, so a package turns
     // amber before the first progress poll has come back.
     let watching = RwSignal::new(Vec::<(String, i64)>::new());
-    let was_running = RwSignal::new(false);
+    // Rows that stopped moving and the catalog read that will count them:
+    // their package shows "finishing" rather than offering a download of
+    // files that are on disk.
+    let landed = RwSignal::new(Vec::<Landed>::new());
+    // What was moving at the last look ([`view_state::moving`]).
+    let before = StoredValue::new(Vec::<(String, i64)>::new());
+
+    // The families in the order the list shows them. The catalog sorts what is
+    // here first, and it is re-read unasked (the poll, below, once a download
+    // lands): following that order while the browser is open moved a family
+    // out from under the pointer. So the order is seeded when the browser
+    // opens and only merged into while it is open.
+    let order = RwSignal::new(Vec::<String>::new());
+    // Open/closed per family id, as the user left it. A family not in here
+    // shows its default, decided once when its row is built. Lives as long as
+    // the Models page does (the modal keeps its children), so a close and
+    // reopen keeps it.
+    let open_fams = RwSignal::new(HashMap::<String, bool>::new());
+    let list_ref = NodeRef::<html::Div>::new();
+    // Set when the browser opens: the next catalog read re-seeds the order
+    // instead of merging into it. That read is the one the open asks for —
+    // the catalog held at that moment is the one from before closing, and the
+    // poll does not run while closed, so a download that landed meanwhile is
+    // only in the fresh read.
+    let reseed = StoredValue::new(false);
+
+    Effect::new(move |_| {
+        let Some(incoming) = catalog.with(family_ids) else {
+            return;
+        };
+        let reseeding = reseed.get_value();
+        reseed.set_value(false);
+        let after = order.with_untracked(|o| view_state::after_read(o, &incoming, reseeding));
+        if let Some(view_state::AfterRead {
+            order: next,
+            to_top,
+        }) = after
+        {
+            order.set(next);
+            // A new order on open: the list starts from the top rather than
+            // at an offset into it. Next frame, once the rows are in it.
+            if to_top {
+                request_animation_frame(move || {
+                    if let Some(el) = list_ref.get_untracked() {
+                        el.set_scroll_top(0);
+                    }
+                });
+            }
+        }
+    });
 
     // Reopening the browser re-reads both sides: a download may have finished
-    // (or been started elsewhere) while it was closed.
+    // (or been started elsewhere) while it was closed. What was installed
+    // since floats up with that read — on open, not later under the pointer.
     Effect::new(move |_| {
         if open.get() {
+            reseed.set_value(true);
             reload.update(|n| *n += 1);
             dl_reload.update(|n| *n += 1);
         }
     });
 
-    // Anything of this catalog still moving? Untracked: this drives the poll,
-    // it must not subscribe it to its own writes.
-    let running_now = move || {
-        let watched: Vec<i64> = watching
-            .get_untracked()
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect();
-        let rows = downloads
-            .get_untracked()
-            .and_then(|r| r.ok())
-            .map(|v| v.downloads)
-            .unwrap_or_default();
-        let ids: Vec<i64> = catalog
-            .get_untracked()
-            .and_then(|r| r.ok())
-            .map(|c| {
-                c.families
-                    .iter()
-                    .flat_map(|f| f.packages.iter().flat_map(|p| p.download_ids.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        ids.iter().chain(watched.iter()).any(|id| {
-            match rows.iter().find(|r| r.id == *id) {
-                Some(r) => matches!(r.status.as_str(), "queued" | "downloading"),
-                // Queued a moment ago and not in this (older) snapshot yet.
-                None => watched.contains(id),
-            }
+    // What the last refresh could not do (a repo it could not list, a spec
+    // file that did not load), shown until the next refresh replaces it.
+    let warnings = Memo::new(move |_| {
+        catalog.with(|c| {
+            c.as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map(|c| c.warnings.clone())
+                .unwrap_or_default()
         })
-    };
+    });
+
+    let list_state = Memo::new(move |_| {
+        catalog.with(|c| match c {
+            None => ListState::Loading,
+            Some(Err(e)) => ListState::Failed(e.to_string()),
+            Some(Ok(c)) if c.families.is_empty() => ListState::Empty,
+            Some(Ok(_)) => ListState::Ready,
+        })
+    });
+
+    // Every look at the rows: what stopped moving since the last one re-reads
+    // the catalog at once, so its package turns "installed" as soon as its
+    // own files are in. The catalog used to be re-read only once nothing
+    // moved at all, and a package done before the others offered "Download"
+    // again until the last of them landed.
+    Effect::new(move |_| {
+        let looked = catalog.with(|c| {
+            downloads.with(|d| {
+                let d = match d {
+                    // A failed list read is no look: nothing stopped.
+                    Some(Err(_)) => return None,
+                    d => d.as_ref().and_then(|r| r.as_ref().ok()),
+                };
+                let c = c.as_ref().and_then(|r| r.as_ref().ok());
+                Some(watching.with(|w| view_state::moving(c, d, w)))
+            })
+        });
+        let Some(now) = looked else {
+            return;
+        };
+        let fresh = landed.with_untracked(|l| {
+            watching.with_untracked(|w| before.with_value(|b| view_state::landings(b, w, &now, l)))
+        });
+        before.set_value(now);
+        if fresh.is_empty() {
+            return;
+        }
+        let asked = reload.get_untracked() + 1;
+        landed.update(|l| {
+            l.extend(
+                fresh
+                    .into_iter()
+                    .map(|(package, id)| Landed { package, id, asked }),
+            )
+        });
+        reload.set(asked);
+    });
+
+    // A catalog read is in: the landed rows it was asked after are counted
+    // in it, and their packages show what it says.
+    Effect::new(move |_| {
+        catalog.track();
+        let answered = answered.get_value();
+        let (waiting, watched) = landed
+            .with_untracked(|l| watching.with_untracked(|w| view_state::settle(l, w, answered)));
+        if waiting.len() != landed.with_untracked(Vec::len) {
+            landed.set(waiting);
+            watching.set(watched);
+        }
+    });
 
     // Poll only while something is actually moving — the old UI's rule, kept.
+    // "Moving" is the last look's: a list read that failed keeps the poll
+    // going rather than reading as everything done.
     let handle = set_interval_with_handle(
         move || {
-            if !open.get_untracked() {
-                return;
-            }
-            if running_now() {
-                was_running.set(true);
+            if open.get_untracked() && !before.with_value(Vec::is_empty) {
                 dl_reload.update(|n| *n += 1);
-            } else if was_running.get_untracked() {
-                // Everything landed: drop the local watch list and re-read the
-                // catalog so the packages flip to "installed".
-                was_running.set(false);
-                watching.set(Vec::new());
-                dl_reload.update(|n| *n += 1);
-                reload.update(|n| *n += 1);
             }
         },
         std::time::Duration::from_secs(2),
@@ -192,7 +269,6 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
                 Ok(r) => {
                     let pkg = r.package.clone();
                     watching.update(|w| w.extend(r.downloads.iter().map(|d| (pkg.clone(), d.id))));
-                    was_running.set(true);
                     dl_reload.update(|n| *n += 1);
                     toasts.ok(r.message);
                 }
@@ -204,10 +280,12 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
     // Downloaded → the editor, prefilled from the package. Creating the row is
     // the user's click, exactly as it was on the old page.
     //
-    // The family comes along, not just the package: a spec that names the
-    // voices its family ships (`ui.builtin_voices`) can fill the preset map
-    // too, and a TTS row without presets is the one that samples a new random
-    // speaker on every request.
+    // The family comes along, not just the package: its default voice becomes
+    // the row's inline default preset, so a TTS row speaks one voice when a
+    // request names none instead of sampling a new random speaker. The voices
+    // the family ships are not copied into presets any more — lmgw knows them
+    // by name from the spec and the package itself (`GET /v1/audio/voices`
+    // lists them), and a preset per built-in voice only shadowed them.
     let create = move |f: AudioFamily, pkg: AudioPackage| {
         let mut m = super::models::blank_audio_model();
         m.model_id = pkg.suggested_model_id;
@@ -215,12 +293,8 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
         m.path = pkg.suggested_path;
         m.task = pkg.suggested_task;
         m.mode = pkg.suggested_mode;
-        for v in &f.builtin_voices {
-            m.voice_presets
-                .insert(v.clone(), json!({ "voice_id": v.clone() }));
-        }
-        if !f.default_voice.is_empty() && m.voice_presets.contains_key(&f.default_voice) {
-            m.default_voice_preset = Some(json!(f.default_voice.clone()));
+        if !f.default_voice.is_empty() {
+            m.default_voice_preset = Some(json!({ "voice_id": f.default_voice.clone() }));
         }
         open.set(false);
         editors.audio.set(Some(m));
@@ -248,14 +322,36 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
             </div>
 
             {move || refresh_err.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
+            {move || {
+                let lines = warnings.get();
+                let n = lines.len();
+                let lines = lines.into_iter().map(|l| view! { <div>{l}</div> }).collect_view();
+                // Offline, every repo fails alike: past a few, a count to
+                // open rather than a wall pushing the list off the dialog.
+                match n {
+                    0 => ().into_any(),
+                    1..=3 => view! { <div class="wiz-err">{lines}</div> }.into_any(),
+                    _ => {
+                        view! {
+                            <details class="wiz-err">
+                                <summary>{format!("{n} warnings from the last refresh")}</summary>
+                                {lines}
+                            </details>
+                        }
+                            .into_any()
+                    }
+                }
+            }}
 
-            {move || match catalog.get() {
-                None => view! { <div class="dim" style="margin-top:12px">"Loading…"</div> }.into_any(),
-                Some(Err(e)) => {
-                    view! { <div class="wiz-err">"Failed to load the catalog: " {e.to_string()}</div> }
+            {move || match list_state.get() {
+                ListState::Loading => {
+                    view! { <div class="dim" style="margin-top:12px">"Loading…"</div> }.into_any()
+                }
+                ListState::Failed(e) => {
+                    view! { <div class="wiz-err">"Failed to load the catalog: " {e}</div> }
                         .into_any()
                 }
-                Some(Ok(c)) if c.families.is_empty() => {
+                ListState::Empty => {
                     view! {
                         <div class="empty">
                             "No catalog cached yet — refresh to fetch audio.cpp's model specs."
@@ -263,33 +359,24 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
                     }
                         .into_any()
                 }
-                Some(Ok(c)) => {
-                    // Families with something on disk open themselves (the old
-                    // page's rule); with nothing installed anywhere the first
-                    // one opens, so the browser never reads as a wall of
-                    // closed rows.
-                    let none_here = !c.families.iter().any(|f| f.any_installed || f.served);
+                // Keyed by family id: a re-read updates the rows in place,
+                // so each `<details>` keeps its own family.
+                ListState::Ready => {
                     view! {
-                        <div class="cat-list">
-                            {c
-                                .families
-                                .into_iter()
-                                .enumerate()
-                                .map(|(i, f)| {
-                                    let open_it = f.any_installed || f.served
-                                        || (none_here && i == 0);
-                                    view! {
-                                        <FamilyBlock
-                                            f=f
-                                            open_it=open_it
-                                            downloads=downloads
-                                            watching=watching
-                                            install=install
-                                            create=create
-                                        />
-                                    }
-                                })
-                                .collect_view()}
+                        <div class="cat-list" node_ref=list_ref>
+                            <For each=move || order.get() key=|id| id.clone() let:id>
+                                <FamilyBlock
+                                    id=id
+                                    catalog=catalog
+                                    order=order
+                                    open_fams=open_fams
+                                    downloads=downloads
+                                    watching=watching
+                                    landed=landed
+                                    install=install
+                                    create=create
+                                />
+                            </For>
                         </div>
                     }
                         .into_any()
@@ -301,92 +388,173 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
 
 #[component]
 fn FamilyBlock(
-    f: AudioFamily,
-    open_it: bool,
+    id: String,
+    catalog: CatalogResource,
+    order: RwSignal<Vec<String>>,
+    open_fams: RwSignal<HashMap<String, bool>>,
     downloads: LocalResource<crate::api::Result<DownloadsView>>,
     watching: RwSignal<Vec<(String, i64)>>,
+    landed: RwSignal<Vec<Landed>>,
     install: impl Fn(String, String) + Copy + Send + Sync + 'static,
     create: impl Fn(AudioFamily, AudioPackage) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    // The whole family travels to the package rows, because the editor
-    // prefill reads more than the package: voices, and the family name.
-    let fam_row = f.clone();
-    let packages = f.packages.clone();
-    let tasks = f.tasks.join(", ");
-    let languages = f.languages.join(", ");
-    let hue = hue_for(&f.family);
-    let status = f.status.clone();
-    let tags = f.tags.join(" · ");
-    let summary = f.summary.clone();
-    let docs = f.docs.clone();
-    let voices = f.builtin_voices.join(", ");
-    let default_voice = f.default_voice.clone();
-    let options = f.options.clone();
+    // This family as the catalog has it now. A re-read that left it as it was
+    // (most of them) changes nothing on screen.
+    let fam = {
+        let id = id.clone();
+        Memo::new(move |_| {
+            catalog.with(|c| {
+                c.as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .and_then(|c| c.families.iter().find(|f| f.family == id).cloned())
+            })
+        })
+    };
+    let default = catalog.with_untracked(|c| {
+        let families = c
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|c| c.families.as_slice())
+            .unwrap_or_default();
+        order.with_untracked(|o| view_state::default_open(families, o, &id))
+    });
+    let hue = hue_for(&id);
+    let shown_open = {
+        let id = id.clone();
+        move || open_fams.with(|m| m.get(&id).copied().unwrap_or(default))
+    };
+    // Only the user's own toggles are written: setting `open` from the map
+    // fires `toggle` too, and that one agrees with what is shown already.
+    let on_toggle = {
+        let shown_open = shown_open.clone();
+        move |ev: leptos::ev::Event| {
+            let now = ev
+                .current_target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|el| el.has_attribute("open"));
+            if shown_open() != now {
+                open_fams.update(|m| {
+                    m.insert(id.clone(), now);
+                });
+            }
+        }
+    };
+    // Its own Memo, so a download landing (which changes the family) does
+    // not rebuild the options block and close it.
+    let options = Memo::new(move |_| now(fam, |f| f.options.clone()));
+    let package_ids = move || {
+        now(fam, |f| {
+            f.packages.iter().map(|p| p.id.clone()).collect::<Vec<_>>()
+        })
+    };
     view! {
-        <details class="cat-fam" open=open_it>
+        <details class="cat-fam" prop:open=shown_open on:toggle=on_toggle>
             <summary>
                 <span class="model-chip" style=format!("--hue:{hue}")>
                     <i></i>
-                    {f.display_name.clone()}
+                    {move || now(fam, |f| f.display_name.clone())}
                 </span>
-                {(!f.category.is_empty()).then(|| view! { <span class="type-badge">{f.category.clone()}</span> })}
+                {move || {
+                    let c = now(fam, |f| f.category.clone());
+                    (!c.is_empty()).then(|| view! { <span class="type-badge">{c}</span> })
+                }}
                 // Upstream's own word for how finished this family is —
                 // worth knowing before a multi-GiB download.
-                {(!status.is_empty() && status != "supported")
-                    .then(|| view! { <span class="chip warn">{status.clone()}</span> })}
-                <span class="dim mono-sm">{tasks}</span>
+                {move || {
+                    let status = now(fam, |f| f.status.clone());
+                    (!status.is_empty() && status != "supported")
+                        .then(|| view! { <span class="chip warn">{status}</span> })
+                }}
+                <span class="dim mono-sm">{move || now(fam, |f| f.tasks.join(", "))}</span>
                 <span class="spacer" style="flex:1"></span>
-                {f.served
-                    .then(|| view! { <span class="chip ok"><span class="dot"></span>"serving"</span> })}
-                {(f.any_installed && !f.served)
-                    .then(|| view! { <span class="chip ok"><span class="dot"></span>"installed"</span> })}
+                {move || {
+                    now(fam, |f| f.served)
+                        .then(|| view! { <span class="chip ok"><span class="dot"></span>"serving"</span> })
+                }}
+                {move || {
+                    now(fam, |f| f.any_installed && !f.served)
+                        .then(|| view! { <span class="chip ok"><span class="dot"></span>"installed"</span> })
+                }}
+                // A row of this family that loads none of its packages: the
+                // sentence says which row and why.
+                {move || {
+                    let note = now(fam, |f| f.serving_note.clone());
+                    (!note.is_empty())
+                        .then(|| {
+                            view! {
+                                <span class="chip warn" title=note>
+                                    <span class="dot"></span>"row matches no package"
+                                </span>
+                            }
+                        })
+                }}
             </summary>
             <div class="cat-body">
-                {(!f.description.is_empty()).then(|| view! { <p class="dim">{f.description.clone()}</p> })}
-                {(!summary.is_empty()).then(|| view! { <p class="dim">{summary.clone()}</p> })}
-                {(!tags.is_empty())
-                    .then(|| view! { <div class="dim mini-note">{tags.clone()}</div> })}
-                {(!languages.is_empty())
-                    .then(|| view! { <div class="dim mini-note">"Languages: " {languages}</div> })}
-                {(!voices.is_empty())
-                    .then(|| {
-                        let note = match default_voice.is_empty() {
-                            true => format!("Built-in voices: {voices}"),
-                            false => format!(
-                                "Built-in voices: {voices} (default: {default_voice})",
-                            ),
-                        };
-                        view! { <div class="dim mini-note">{note}</div> }
-                    })}
-                {(!docs.is_empty())
-                    .then(|| {
-                        view! {
-                            <div class="dim mini-note">
-                                "Docs: "
-                                {docs
-                                    .iter()
-                                    .map(|d| {
-                                        let href = format!(
-                                            "https://github.com/0xShug0/audio.cpp/blob/main/{d}",
-                                        );
-                                        view! {
-                                            <a href=href target="_blank" rel="noreferrer">
-                                                {d.clone()}
-                                            </a>
-                                            " "
-                                        }
-                                    })
-                                    .collect_view()}
-                            </div>
-                        }
-                    })}
-                <FamilyOptions options=options/>
-                <For each=move || packages.clone() key=|p| p.id.clone() let:p>
+                {move || {
+                    let d = now(fam, |f| f.description.clone());
+                    (!d.is_empty()).then(|| view! { <p class="dim">{d}</p> })
+                }}
+                {move || {
+                    let s = now(fam, |f| f.summary.clone());
+                    (!s.is_empty()).then(|| view! { <p class="dim">{s}</p> })
+                }}
+                {move || {
+                    let tags = now(fam, |f| f.tags.join(" · "));
+                    (!tags.is_empty()).then(|| view! { <div class="dim mini-note">{tags}</div> })
+                }}
+                {move || {
+                    let languages = now(fam, |f| f.languages.join(", "));
+                    (!languages.is_empty())
+                        .then(|| view! { <div class="dim mini-note">"Languages: " {languages}</div> })
+                }}
+                {move || {
+                    let (voices, default_voice) = now(fam, |f| {
+                        (f.builtin_voices.join(", "), f.default_voice.clone())
+                    });
+                    (!voices.is_empty())
+                        .then(|| {
+                            let note = match default_voice.is_empty() {
+                                true => format!("Built-in voices: {voices}"),
+                                false => format!(
+                                    "Built-in voices: {voices} (default: {default_voice})",
+                                ),
+                            };
+                            view! { <div class="dim mini-note">{note}</div> }
+                        })
+                }}
+                {move || {
+                    let docs = now(fam, |f| f.docs.clone());
+                    (!docs.is_empty())
+                        .then(|| {
+                            view! {
+                                <div class="dim mini-note">
+                                    "Docs: "
+                                    {docs
+                                        .into_iter()
+                                        .map(|d| {
+                                            let href = format!(
+                                                "https://github.com/0xShug0/audio.cpp/blob/main/{d}",
+                                            );
+                                            view! {
+                                                <a href=href target="_blank" rel="noreferrer">
+                                                    {d}
+                                                </a>
+                                                " "
+                                            }
+                                        })
+                                        .collect_view()}
+                                </div>
+                            }
+                        })
+                }}
+                {move || view! { <FamilyOptions options=options.get()/> }}
+                <For each=package_ids key=|p| p.clone() let:pid>
                     <PackageRow
-                        family=fam_row.clone()
-                        p=p
+                        family=fam
+                        id=pid
                         downloads=downloads
                         watching=watching
+                        landed=landed
                         install=install
                         create=create
                     />
@@ -480,17 +648,9 @@ fn OptionLine(o: lmgw_api_types::AudioFamilyOption) -> impl IntoView {
     }
 }
 
-#[component]
-fn PackageRow(
-    family: AudioFamily,
-    p: AudioPackage,
-    downloads: LocalResource<crate::api::Result<DownloadsView>>,
-    watching: RwSignal<Vec<(String, i64)>>,
-    install: impl Fn(String, String) + Copy + Send + Sync + 'static,
-    create: impl Fn(AudioFamily, AudioPackage) + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let pkg = StoredValue::new(p.clone());
-    let fam = StoredValue::new(family);
+/// The meta line under a package: what it is, its files and size, where they
+/// come from, and what stands in the way of installing it.
+fn package_meta(p: &AudioPackage) -> String {
     let spec = match p.precision.is_empty() {
         true => p.format.clone(),
         false => format!("{} · {}", p.format, p.precision),
@@ -518,24 +678,107 @@ fn PackageRow(
     if !p.unavailable_reason.is_empty() {
         meta.push(p.unavailable_reason.clone());
     }
-    let meta = meta.join(" · ");
-    let installed = p.installed;
-    let partial = p.partial;
-    let served = p.served;
-    let downloadable = !p.repo.is_empty();
-    let repo = p.repo.clone();
+    // Where it is not already the title of "not published yet": a repo that
+    // could not be listed, a file nobody looked for yet, or a downloaded
+    // package the hub has since dropped files of.
+    if !p.availability_note.is_empty() && !view_state::download_blocked(p) {
+        meta.push(p.availability_note.clone());
+    }
+    meta.join(" · ")
+}
+
+#[component]
+fn PackageRow(
+    family: Memo<Option<AudioFamily>>,
+    id: String,
+    downloads: LocalResource<crate::api::Result<DownloadsView>>,
+    watching: RwSignal<Vec<(String, i64)>>,
+    landed: RwSignal<Vec<Landed>>,
+    install: impl Fn(String, String) + Copy + Send + Sync + 'static,
+    create: impl Fn(AudioFamily, AudioPackage) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    // The package as its family has it now: a re-read that flips it to
+    // downloaded updates this row where it is.
+    let pkg = Memo::new(move |_| {
+        family.with(|f| {
+            f.as_ref()
+                .and_then(|f| f.packages.iter().find(|p| p.id == id).cloned())
+        })
+    });
+    let installed = move || now(pkg, |p| p.installed);
+    let partial = move || now(pkg, |p| p.partial);
+    // Downloaded once and short of files now — the spec grew (audio-class
+    // gap 4): the download fetches only what is missing.
+    let incomplete = move || now(pkg, |p| p.incomplete);
+    let served = move || now(pkg, |p| p.served);
+    let missing = move || now(pkg, |p| p.missing_files.join(", "));
 
     let live = move || {
         let dv = downloads.get().and_then(|r| r.ok());
         let watched = watching.get();
-        pkg.with_value(|p| live_of(p, dv.as_ref(), &watched))
+        let landed = landed.get();
+        pkg.with(|p| {
+            p.as_ref()
+                .map(|p| live_of(p, dv.as_ref(), &watched, &landed))
+                .unwrap_or(Live::Idle)
+        })
     };
 
     view! {
         <div class="cat-pkg">
             <div class="cat-pkg-main">
-                <span class="mono-sm">{p.display_name.clone()}</span>
-                {p.recommended.then(|| view! { <span class="type-badge">"recommended"</span> })}
+                <span class="mono-sm">{move || now(pkg, |p| p.display_name.clone())}</span>
+                {move || {
+                    now(pkg, |p| p.recommended)
+                        .then(|| view! { <span class="type-badge">"recommended"</span> })
+                }}
+                // The spec's pin, and whether downloads follow it (the
+                // audio.catalog_revision setting).
+                {move || {
+                    let (pin, followed) = now(pkg, |p| (p.pinned_commit.clone(), p.pin_followed));
+                    (!pin.is_empty())
+                        .then(|| {
+                            let short = pin.get(..7).unwrap_or(&pin).to_string();
+                            let (label, title) = match followed {
+                                true => (
+                                    format!("pinned to {short} by the spec"),
+                                    format!(
+                                        "Downloads take commit {pin}, the one the audio.cpp spec \
+                                         pins — not the latest upload to the repo",
+                                    ),
+                                ),
+                                false => (
+                                    format!("spec pins {short} · taking latest"),
+                                    format!(
+                                        "The audio.cpp spec pins commit {pin}; downloads take the \
+                                         latest (main) because Settings → Runtimes → Audio → \
+                                         Catalog downloads is 'latest'",
+                                    ),
+                                ),
+                            };
+                            view! { <span class="type-badge mono-sm" title=title>{label}</span> }
+                        })
+                }}
+                // A revision the spec names that is not a commit (a tag, a
+                // short hash): lmgw pins only to a full commit, so it takes
+                // main — said here rather than left to the DTO.
+                {move || {
+                    let (pin, rev) = now(pkg, |p| (p.pinned_commit.clone(), p.revision.clone()));
+                    let rev = rev.trim().to_string();
+                    (pin.is_empty() && !rev.is_empty() && rev != "main")
+                        .then(|| {
+                            let title = format!(
+                                "The audio.cpp spec names revision '{rev}' for this package. \
+                                 lmgw follows a pin only when it is a full commit hash, so \
+                                 downloads take the latest (main)",
+                            );
+                            view! {
+                                <span class="type-badge mono-sm" title=title>
+                                    {format!("spec names {rev} · lmgw takes main")}
+                                </span>
+                            }
+                        })
+                }}
                 <span class="spacer" style="flex:1"></span>
                 {move || match live() {
                     Live::Running(_) => {
@@ -546,26 +789,67 @@ fn PackageRow(
                         view! { <span class="chip err"><span class="dot"></span>"failed"</span> }
                             .into_any()
                     }
-                    Live::Idle if served => {
-                        view! { <span class="chip ok"><span class="dot"></span>"serving"</span> }
+                    Live::Finishing => {
+                        view! { <span class="chip live"><span class="dot"></span>"finishing"</span> }
                             .into_any()
                     }
-                    Live::Idle if installed => {
-                        view! { <span class="chip ok"><span class="dot"></span>"downloaded"</span> }
+                    Live::Idle if served() && incomplete() => {
+                        view! {
+                            <span class="chip warn" title=format!("missing: {}", missing())>
+                                <span class="dot"></span>"serving · incomplete"
+                            </span>
+                        }
                             .into_any()
                     }
-                    Live::Idle if partial => {
-                        view! { <span class="chip warn"><span class="dot"></span>"incomplete"</span> }
+                    Live::Idle if served() => {
+                        let by = now(pkg, |p| p.served_by.join(", "));
+                        let from = now(pkg, |p| p.downloaded_from.clone());
+                        view! {
+                            <span class="chip ok" title=format!("served by {by}\n{from}")>
+                                <span class="dot"></span>"serving"
+                            </span>
+                        }
+                            .into_any()
+                    }
+                    Live::Idle if installed() => {
+                        let from = now(pkg, |p| p.downloaded_from.clone());
+                        view! {
+                            <span class="chip ok" title=from>
+                                <span class="dot"></span>"downloaded"
+                            </span>
+                        }
+                            .into_any()
+                    }
+                    Live::Idle if partial() => {
+                        view! {
+                            <span class="chip warn" title=format!("missing: {}", missing())>
+                                <span class="dot"></span>"incomplete"
+                            </span>
+                        }
                             .into_any()
                     }
                     Live::Idle => ().into_any(),
                 }}
+                // A row points at this package's files but not at this
+                // package: the sentence says which row and what settles it.
                 {move || {
-                    if !downloadable {
+                    let why = now(pkg, |p| p.serving_unclear.clone());
+                    (!why.is_empty())
+                        .then(|| {
+                            view! {
+                                <span class="chip warn" title=why>
+                                    <span class="dot"></span>"variant unclear"
+                                </span>
+                            }
+                        })
+                }}
+                {move || {
+                    let repo = now(pkg, |p| p.repo.clone());
+                    if repo.is_empty() {
                         // Upstream's own words where it has them: several
                         // families are deliberately not redistributed, and
                         // the answer is a local conversion, not a wait.
-                        let why = pkg.with_value(|p| p.unavailable_reason.clone());
+                        let why = now(pkg, |p| p.unavailable_reason.clone());
                         let label = match why.is_empty() {
                             true => "no download source".to_string(),
                             false => "not distributed".to_string(),
@@ -575,40 +859,81 @@ fn PackageRow(
                         }
                             .into_any();
                     }
-                    match (live(), installed) {
-                        (Live::Running(pct), _) => {
+                    // The spec is ahead of the published weights: the queue
+                    // would refuse the download, so this says it where the
+                    // button would be, with the files and the listing date.
+                    let blocked = now(pkg, view_state::download_blocked);
+                    if blocked && !matches!(live(), Live::Running(_) | Live::Finishing) {
+                        let why = now(pkg, |p| p.availability_note.clone());
+                        return view! {
+                            <span class="dim mono-sm" title=why>"not published yet"</span>
+                        }
+                            .into_any();
+                    }
+                    match view_state::slot(live(), installed()) {
+                        Slot::Progress(pct) => {
                             let label = match pct {
                                 Some(p) => format!("{p} %"),
                                 None => "queued…".to_string(),
                             };
                             view! { <span class="dim mono-sm">{label}</span> }.into_any()
                         }
-                        (_, true) => {
+                        Slot::Finishing => {
+                            view! { <span class="dim mono-sm">"finishing…"</span> }.into_any()
+                        }
+                        Slot::Create => {
                             view! {
                                 <button
                                     class="btn primary"
                                     title="Create an audio model from this package"
-                                    on:click=move |_| create(
-                                        fam.get_value(),
-                                        pkg.get_value(),
-                                    )
+                                    on:click=move |_| {
+                                        if let (Some(f), Some(p)) = (
+                                            family.get_untracked(),
+                                            pkg.get_untracked(),
+                                        ) {
+                                            create(f, p);
+                                        }
+                                    }
                                 >
                                     "Create model"
                                 </button>
                             }
                                 .into_any()
                         }
-                        (_, false) => {
+                        Slot::Download => {
+                            let (label, title) = match (incomplete(), partial()) {
+                                (true, _) => (
+                                    "Complete install",
+                                    now(pkg, |p| {
+                                        let along = match p.pin_followed {
+                                            true => " — and any installed file from another \
+                                                     commit than the pin whose bytes changed \
+                                                     there, so the package is one commit \
+                                                     again (an unchanged one is recorded at \
+                                                     the pin)",
+                                            false => "",
+                                        };
+                                        format!(
+                                            "Download the {} file(s) this package lacks from \
+                                             {repo}: {}{along}",
+                                            p.missing_files.len(),
+                                            p.missing_files.join(", ")
+                                        )
+                                    }),
+                                ),
+                                (_, true) => ("Resume download", format!("Download from {repo}")),
+                                _ => ("Download", format!("Download from {repo}")),
+                            };
                             view! {
                                 <button
                                     class="btn"
-                                    title=format!("Download from {repo}")
+                                    title=title
                                     on:click=move |_| install(
-                                        fam.with_value(|f| f.family.clone()),
-                                        pkg.with_value(|p| p.id.clone()),
+                                        now(family, |f| f.family.clone()),
+                                        now(pkg, |p| p.id.clone()),
                                     )
                                 >
-                                    {if partial { "Resume download" } else { "Download" }}
+                                    {label}
                                 </button>
                             }
                                 .into_any()
@@ -616,7 +941,7 @@ fn PackageRow(
                     }
                 }}
             </div>
-            <div class="cat-pkg-meta dim mono-sm">{meta}</div>
+            <div class="cat-pkg-meta dim mono-sm">{move || now(pkg, package_meta)}</div>
             {move || match live() {
                 Live::Running(pct) => {
                     view! {

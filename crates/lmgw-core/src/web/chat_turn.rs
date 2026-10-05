@@ -16,21 +16,19 @@
 //! history it answered (review R1 finding 1).
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::future::Future;
 
 use axum::http::StatusCode;
-use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 use super::agentchat::{self, ToolPlan, ADMIN_KIND};
 use super::chat::{err_json, run_send};
 use super::chat_attach_gate::Caps;
 use super::chat_live::Ticket;
 use super::chat_repo::ChatRepo;
+use super::chat_voice::ReadAloud;
 use super::{chat_attach, chat_knowledge, chat_reasoning, chat_sampling};
 use crate::config::{Protocol, Route, Snapshot, UpstreamKind};
 use crate::error::GatewayError;
@@ -38,8 +36,17 @@ use crate::ir::{ChatRequest, ContentPart, Message, Params, ReasoningControl, Rol
 use crate::state::{AppState, SharedState};
 use crate::store::{ChatAttachmentFull, ChatMessageRow, ChatReply, ChatThread, ContinueSave};
 
-/// A turn's SSE channel.
-pub(super) type Events = mpsc::Sender<Result<SseFrame, Infallible>>;
+mod merge;
+mod out;
+mod spoken;
+pub(crate) use out::{refuse, refuse_sent, SentAs, TurnFrame, TurnLanguage, TurnOpts, VoiceTurn};
+pub use spoken::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnForTests};
+pub(crate) use spoken::{tools_may_run, RowWatch, ToolsHeld, UserRow, AUDIO_NOT_LOCAL};
+#[cfg(test)]
+mod seam_tests;
+
+/// Where a turn's frames go: its caller's channel ([`out`]).
+pub(crate) type Events = mpsc::Sender<TurnFrame>;
 
 /// What a turn answers.
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +74,13 @@ pub(super) struct Turn {
     /// This turn's hold on its thread: cancelled by a newer turn, and the
     /// proof its history has not moved when the reply is saved.
     ticket: Ticket,
+    /// The caller's own stop ([`TurnOpts::stop`]).
+    stop: Option<crate::proxy::StopSignal>,
+    /// The request carries the user's speech as audio: it goes only to a
+    /// route this lmgw runs ([`spoken::local_only`]).
+    local_only: bool,
+    /// The pre-save barrier ([`TurnOpts::user_row`]).
+    user_row: Option<RowWatch>,
 }
 
 /// Why a turn gave up before its end.
@@ -76,6 +90,10 @@ pub(super) enum Stopped {
     Superseded,
     /// The page stopped reading: Stop, a reload, a closed tab.
     ClientGone,
+    /// The caller raised its own stop ([`TurnOpts::stop`]). The partial
+    /// reply is saved as for [`Self::ClientGone`], and the caller, which is
+    /// still reading, gets `done`.
+    Interrupted,
 }
 
 enum Persist {
@@ -104,6 +122,11 @@ pub(super) struct Reply<'a> {
     /// The turn was stopped before its end. A stopped fresh reply that
     /// produced nothing is not saved — it would be an empty bubble.
     pub stopped: bool,
+    /// The turn failed before its end (the upstream refused, the stream
+    /// broke). A failed fresh reply that produced nothing is not saved
+    /// either: the empty row would be replayed, and would keep the next send
+    /// from merging with the user message it leaves owed (§7.4).
+    pub failed: bool,
 }
 
 /// What [`Turn::persist`] came to: the saved row's id (`0`: nothing was
@@ -138,6 +161,18 @@ impl Turn {
         &self.ticket
     }
 
+    /// The request carries the user's speech as audio (voice-audio-input
+    /// design §3.4): only a route this lmgw runs may take it.
+    pub(super) fn local_only(&self) -> bool {
+        self.local_only
+    }
+
+    /// A heard voice turn's pre-save barrier, which its tools wait on too
+    /// (`spoken::tools_may_run`).
+    pub(super) fn user_row(&self) -> Option<RowWatch> {
+        self.user_row.clone()
+    }
+
     /// A continue, which only a route that takes a prefill can serve.
     pub(super) fn is_continue(&self) -> bool {
         matches!(self.persist, Persist::Append { .. })
@@ -153,12 +188,14 @@ impl Turn {
     }
 
     /// Resolves when this turn should stop: a newer turn of the thread
-    /// started (or the thread went away), or the page stopped reading `tx`.
+    /// started (or the thread went away), the page stopped reading `tx`, or
+    /// the caller raised its stop.
     pub(super) async fn stopped(&self, tx: &Events) -> Stopped {
         tokio::select! {
             biased;
             () = self.ticket.superseded() => Stopped::Superseded,
             () = tx.closed() => Stopped::ClientGone,
+            () = crate::proxy::stopped(self.stop.as_ref()) => Stopped::Interrupted,
         }
     }
 
@@ -177,25 +214,25 @@ impl Turn {
         }
     }
 
-    /// Say why the turn ended early, to a page that may still be reading
-    /// (another tab, when a newer turn replaced this one): an `error` and
-    /// `done {aborted}`. Nothing to say to a page that left.
+    /// Say why the turn ended before anything was saved, to a reader that
+    /// may still be there: a superseded turn's page (another tab, when a
+    /// newer turn replaced this one) gets an `error` and `done {aborted}`; a
+    /// caller that raised its own stop, `done {aborted}` alone — no
+    /// `message_id`, which says nothing was saved. Nothing to say to a page
+    /// that left.
     pub(super) async fn report_stop(&self, why: Stopped, tx: &Events) {
-        if why == Stopped::ClientGone {
-            return;
+        match why {
+            Stopped::ClientGone => return,
+            Stopped::Interrupted => {}
+            Stopped::Superseded => {
+                let msg = "a newer turn of this thread started (or the thread went away), so \
+                           this reply was stopped and is not saved";
+                let data = json!({ "message": msg, "code": "superseded" }).to_string();
+                let _ = tx.send(TurnFrame::new("error", data)).await;
+            }
         }
-        let msg = "a newer turn of this thread started (or the thread went away), so this reply \
-                   was stopped and is not saved";
-        let _ = tx
-            .send(Ok(SseFrame::default().event("error").data(
-                json!({ "message": msg, "code": "superseded" }).to_string(),
-            )))
-            .await;
-        let _ = tx
-            .send(Ok(SseFrame::default()
-                .event("done")
-                .data(json!({ "aborted": true }).to_string())))
-            .await;
+        let done = json!({ "aborted": true }).to_string();
+        let _ = tx.send(TurnFrame::new("done", done)).await;
     }
 
     /// The persist step: insert the reply as a new row, or append it to the
@@ -207,18 +244,29 @@ impl Turn {
     ///   delete, a newer turn — review R1 finding 1): the reply answers a
     ///   history that is gone and is dropped, and logged;
     /// - a continued row's text is no longer what the model was shown;
-    /// - a stopped fresh reply that produced nothing;
+    /// - a stopped or failed fresh reply that produced nothing;
     /// - the write failed (the thread is gone, or the DB refused), logged.
     pub(super) async fn persist(&self, state: &AppState, r: Reply<'_>) -> Persisted {
         let nothing = r.text.is_empty() && r.reasoning.is_empty() && r.ir_messages.is_none();
-        if nothing && (r.stopped || self.is_continue()) {
-            // Nothing came: a stopped reply is not an empty bubble, and a
-            // continue that added nothing leaves its row as it was.
+        if nothing && (r.stopped || r.failed || self.is_continue()) {
+            // Nothing came: a stopped or failed reply is not an empty
+            // bubble, and a continue that added nothing leaves its row as it
+            // was (and still names it: `done` says `saved` for that row,
+            // which is unchanged, not a partial reply).
             let id = match &self.persist {
                 Persist::Append { message_id, .. } => *message_id,
                 Persist::Insert => 0,
             };
             return Persisted { id, refused: false };
+        }
+        // A heard response's reply follows its user row (voice-audio-input
+        // design §3.4, `spoken::save_after`).
+        if let Some(row) = &self.user_row {
+            let superseded = self.ticket.superseded();
+            let saved = spoken::save_after(row.clone(), nothing, superseded, self.thread_id);
+            if let Some(refused) = saved.await {
+                return Persisted { id: 0, refused };
+            }
         }
         let Some(proof) = self.ticket.save_lock().await else {
             tracing::warn!(
@@ -239,6 +287,7 @@ impl Turn {
             ir_messages: r.ir_messages.map(str::to_string),
             model: Some(self.model.clone()),
             answered_by: r.answered_by,
+            voice: None,
         };
         let res = match &self.persist {
             Persist::Insert => {
@@ -296,21 +345,72 @@ pub(super) fn answered_by(snap: &Snapshot, headers: &crate::gate::GateHeaders) -
         .or_else(|| headers.candidate().map(|m| snap.local_public_name(m)))
 }
 
-/// Start one turn: read the thread's history, spawn the worker, and answer
-/// with its SSE stream (`turn` / `retrieval` / `delta` / `reasoning` / `tool`
-/// / `usage` / `stats` / `error` / `done`). The worker first runs an auto-mode
-/// knowledge retrieval when the turn has one ([`chat_knowledge`]; after the
-/// `turn` event, so the page learns its message id while the search runs),
-/// then builds the request with the thread's current settings. `caps` is
-/// [`thread_caps`](super::chat_attach_gate::thread_caps)'s, which the caller
-/// already needed for its own checks.
+/// Start one turn and answer with its frames as SSE ([`start_turn_into`],
+/// [`out::sse`]): `turn` / `retrieval` / `delta` / `reasoning` / `tool` /
+/// `usage` / `stats` / `stop` / `error` / `done`. With `speak`, the reply is
+/// also read aloud as it streams, its speech frames interleaved (the speech
+/// tee, chat-voice design §6.4).
 pub(super) async fn start_turn(
     state: &SharedState,
     repo: ChatRepo,
     thread: &ChatThread,
     mode: TurnMode,
     caps: Caps,
+    speak: Option<ReadAloud>,
 ) -> Response {
+    let started = std::time::Instant::now();
+    let (tx, rx) = mpsc::channel::<TurnFrame>(64);
+    // A reply read aloud as it streams is heard: in the thread's reply
+    // language, when it has one — once its read-aloud says its speech plan stands
+    // (chat-voice design §8.5).
+    let language = speak
+        .is_some()
+        .then(|| super::chat_voice::turn_language(&state.snapshot(), thread, true))
+        .flatten();
+    let (planned, heard) = match language {
+        Some(_) => {
+            let (planned, heard) = tokio::sync::oneshot::channel();
+            (Some(planned), Some(heard))
+        }
+        None => (None, None),
+    };
+    let opts = TurnOpts {
+        language,
+        heard,
+        ..TurnOpts::default()
+    };
+    match start_turn_into(state, repo, thread, mode, caps, tx, opts).await {
+        Ok(()) => match speak {
+            Some(read) => {
+                super::chat_voice::speaking_turn(state, repo, thread, rx, (started, planned), read)
+            }
+            None => out::sse(rx),
+        },
+        Err(refused) => refused,
+    }
+}
+
+/// Start one turn: read the thread's history, spawn the worker, and write
+/// its frames into `out`. `out` must have room for the opening `turn`
+/// frame: it is written before this returns, and a full channel is refused
+/// rather than waited on, since a caller that reads only once this returned
+/// would wait forever. The worker first runs an auto-mode knowledge retrieval when the
+/// turn has one ([`chat_knowledge`]; after the `turn` frame, so the reader
+/// learns its message id while the search runs), then builds the request
+/// with the thread's current settings. `caps` is
+/// [`thread_caps`](super::chat_attach_gate::thread_caps)'s, which the caller
+/// already needed for its own checks. `Err`: the turn was refused before it
+/// started (a continue whose reply is no longer the last message), as the
+/// response to give.
+pub(crate) async fn start_turn_into(
+    state: &SharedState,
+    repo: ChatRepo,
+    thread: &ChatThread,
+    mode: TurnMode,
+    caps: Caps,
+    out: Events,
+    opts: TurnOpts,
+) -> Result<(), Response> {
     let continue_gone = || {
         err_json(
             StatusCode::CONFLICT,
@@ -323,13 +423,38 @@ pub(super) async fn start_turn(
         // does not cancel a turn that is still answering.
         let last = repo.last_message(state, thread.id).await.ok().flatten();
         if !last.is_some_and(|m| m.id == message_id && m.role == "assistant") {
-            return continue_gone();
+            return Err(continue_gone());
         }
+    }
+    // Room for the opening `turn` frame, before the turn takes the thread: a
+    // refused call cancels no live turn and wakes no archived thread (WP11
+    // server review n6). This caller is the channel's only writer so far.
+    if matches!(
+        mode,
+        TurnMode::Fresh {
+            user_message_id: Some(_)
+        }
+    ) && out.capacity() == 0
+    {
+        let why = "the turn's channel has no room for its first frame";
+        return Err(err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", why));
     }
     // The thread's one live turn from here: the previous one is cancelled,
     // and anything that rewrites the history after this point keeps this
     // turn's reply from being saved onto it. The history is read after.
     let ticket = state.chat_live.begin(thread.id).await;
+    let TurnOpts {
+        stop,
+        voice,
+        language,
+        heard,
+        began,
+        spoken,
+        user_row,
+    } = opts;
+    if let Some(began) = began {
+        let _ = began.send(ticket.generation());
+    }
     // Turning an archived thread over restores it (chat-archive design §1).
     let _ = repo.wake(state, thread).await;
     let mut history = repo.messages(state, thread.id).await.unwrap_or_default();
@@ -341,7 +466,7 @@ pub(super) async fn start_turn(
                 .last_mut()
                 .filter(|m| m.id == message_id && m.role == "assistant")
             else {
-                return continue_gone();
+                return Err(continue_gone());
             };
             // The prefill ends where the text does: Anthropic refuses a final
             // assistant turn ending in whitespace, and a model tokenizes the
@@ -386,14 +511,12 @@ pub(super) async fn start_turn(
         mcp: thread.mcp_tools.clone(),
         kb: kb.tools,
     };
-    let (tx, rx) = mpsc::channel::<Result<SseFrame, Infallible>>(64);
+    let tx = out;
     if let Some(id) = user_message_id {
-        // A fresh channel with room: this cannot wait.
-        let _ = tx
-            .send(Ok(SseFrame::default()
-                .event("turn")
-                .data(json!({ "user_message_id": id }).to_string())))
-            .await;
+        let data = json!({ "user_message_id": id }).to_string();
+        // Room was checked before `begin`; a closed channel is a reader
+        // gone, which the turn hears itself.
+        let _ = tx.try_send(TurnFrame::new("turn", data));
     }
     let turn = Turn {
         repo,
@@ -401,6 +524,9 @@ pub(super) async fn start_turn(
         persist,
         model: thread.model_alias.clone(),
         ticket,
+        stop,
+        local_only: spoken::hears(spoken.as_deref()),
+        user_row,
     };
     let state = state.clone();
     let thread = thread.clone();
@@ -435,7 +561,7 @@ pub(super) async fn start_turn(
             for (mid, atts) in &attachments {
                 let mut parts = Vec::with_capacity(atts.len());
                 for att in atts {
-                    parts.push(chat_attach::render(&state, att, caps, &thread.model_alias).await);
+                    parts.push(chat_attach::render(&state, att, caps, &thread).await);
                 }
                 rendered.insert(*mid, parts);
             }
@@ -449,32 +575,56 @@ pub(super) async fn start_turn(
             }
         };
         drop(attachments);
-        let ir = request(&state, &thread, &history, &rendered);
+        let language = match turn.or_stop(&tx, out::heard(language, heard)).await {
+            Ok(l) => l,
+            Err(why) => {
+                turn.report_stop(why, &tx).await;
+                return;
+            }
+        };
+        let ir = request(
+            &state,
+            &thread,
+            (&history, spoken.as_deref()),
+            &rendered,
+            (voice.as_ref(), language.as_ref()),
+        );
+        // The request holds the spoken parts now; the turn keeps no copy
+        // (voice-audio-input design §4).
+        drop(spoken);
         if plan.is_empty() {
             run_send(state, turn, ir, tx).await;
         } else {
             agentchat::run_send(state, turn, ir, plan, tx).await;
         }
     });
-    Sse::new(ReceiverStream::new(rx))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    Ok(())
 }
 
-/// The turn's request: the history as IR with the thread's current settings.
+/// The turn's request: the history as IR with the thread's current settings
+/// — and, for a voice turn (chat-voice design §8.5), the spoken-style block
+/// after the thread's prompt and reasoning off unless the thread sets it;
+/// for a turn with a reply language, the languages
+/// (`chat_voice::prompt::turn_block`). `spoken`: a heard response's new
+/// turns, after the history (voice-audio-input design §3.4).
 fn request(
     state: &SharedState,
     thread: &ChatThread,
-    history: &[ChatMessageRow],
+    (history, spoken): (&[ChatMessageRow], Option<&[ContentPart]>),
     attachments: &HashMap<i64, Vec<chat_attach::Rendered>>,
+    (voice, language): (Option<&VoiceTurn>, Option<&TurnLanguage>),
 ) -> ChatRequest {
+    // A voice turn's prompt block, a language, and the reasoning (§8.5).
+    let settings = &state.snapshot().settings.realtime;
+    let (block, reasoning) = super::chat_voice::turn_block(thread, settings, voice, language);
     ChatRequest {
         model_alias: thread.model_alias.clone(),
         messages: build_messages(
             thread,
             &effective_alias(state, &thread.model_alias),
-            history,
+            (history, spoken),
             attachments,
+            block.as_deref(),
         ),
         params: Params {
             // temperature plus the thread's other sampling choices; the relay
@@ -484,7 +634,7 @@ fn request(
             max_tokens: thread.max_tokens.map(|v| v.max(0) as u32),
             // The thread's overrides, at the tier the `x-lmgw-reasoning*`
             // headers take: the route's defaults fill in around them.
-            reasoning: chat_reasoning::control(thread),
+            reasoning,
             ..chat_sampling::params_of(thread)
         },
         tools: Vec::new(),
@@ -677,12 +827,17 @@ pub(super) struct RouteFit {
 
 /// [`RouteFit`] for `route`, with `ir.params` the thread's own choices.
 /// `continuing`: `ir` ends with the reply being continued — refused by name
-/// on a route without a prefill ([`prefill_refusal`]).
+/// on a route without a prefill ([`prefill_refusal`]). `local_only`: `ir`
+/// carries the user's speech as audio — refused with `audio_not_local` on
+/// a route this lmgw does not run (voice-audio-input design §3.4).
 pub(super) fn fit_route(
     route: &Route,
     ir: &ChatRequest,
-    continuing: bool,
+    (continuing, local_only): (bool, bool),
 ) -> Result<RouteFit, GatewayError> {
+    if local_only {
+        spoken::local_only(route)?;
+    }
     let mut ignored = chat_reasoning::ignored(ir, route);
     let (params, sampling_ignored) = chat_sampling::split(&ir.params, route);
     let params_changed = !sampling_ignored.is_empty();
@@ -772,22 +927,35 @@ fn group_by_message(atts: Vec<ChatAttachmentFull>) -> HashMap<i64, Vec<ChatAttac
 /// (design §2). *New* attachments were gated by the caller (`send`); one the
 /// model cannot take that reaches here is already in history, and came out of
 /// the render as a note rather than a refusal.
+///
+/// Adjacent user messages go out as one ([`merge`]). A voice turn's
+/// `voice_block` follows the thread's prompt in the system message. A heard
+/// response's `spoken` parts follow the history as a user message, and a
+/// spoken row with no words says so ([`spoken`]).
 fn build_messages(
     thread: &ChatThread,
     answering: &str,
-    history: &[ChatMessageRow],
+    (history, spoken): (&[ChatMessageRow], Option<&[ContentPart]>),
     attachments: &HashMap<i64, Vec<chat_attach::Rendered>>,
+    voice_block: Option<&str>,
 ) -> Vec<Message> {
-    let mut msgs = Vec::with_capacity(history.len() + 1);
+    let mut msgs = merge::Messages::with_capacity(history.len() + 2);
     let sys = crate::config::expand_chat_prompt(
         thread.system_prompt.trim(),
         answering,
         chrono::Local::now().date_naive(),
     );
+    let sys = match voice_block {
+        Some(block) => super::chat_voice::with_block(sys, block),
+        None => sys,
+    };
     if thread.kind == ADMIN_KIND {
-        msgs.push(Message::text(Role::System, agentchat::system_prompt(&sys)));
+        msgs.push(
+            Message::text(Role::System, agentchat::system_prompt(&sys)),
+            None,
+        );
     } else if !sys.is_empty() {
-        msgs.push(Message::text(Role::System, sys));
+        msgs.push(Message::text(Role::System, sys), None);
     }
     for m in history {
         if let Some(raw) = &m.ir_messages {
@@ -799,7 +967,7 @@ fn build_messages(
                 let answer = final_answer(&turn, &m.content);
                 msgs.extend(turn);
                 if m.role == "assistant" && !answer.is_empty() {
-                    msgs.push(Message::text(Role::Assistant, answer.to_string()));
+                    msgs.push(Message::text(Role::Assistant, answer.to_string()), None);
                 }
                 continue;
             }
@@ -830,7 +998,9 @@ fn build_messages(
         // A user message's knowledge retrieval (chat-complete design §9.3):
         // its `<context>` block ahead of the typed text, rendered from the
         // stored context — the same bytes on every turn that replays it.
+        let mut context_at = None;
         if let Some(block) = m.context.as_ref().and_then(chat_knowledge::context_part) {
+            context_at = Some(content.len());
             content.push(block);
         }
         // The typed text — except an empty one tacked onto a message whose
@@ -838,12 +1008,24 @@ fn build_messages(
         // attachments are present", design §2). Every other empty-content
         // case (a reasoning-only turn, say) keeps its always-present text
         // part exactly as before attachments existed.
-        if !m.content.is_empty() || !had_attachment_parts {
-            content.push(ContentPart::text(m.content.clone()));
+        let text = spoken::row_text(m);
+        if !text.is_empty() || !had_attachment_parts {
+            content.push(ContentPart::text(text));
         }
-        msgs.push(Message { role, content });
+        // Two user messages in a row (a send that saved no reply, then
+        // another) go out as one: strict templates refuse the pair.
+        msgs.push(Message { role, content }, context_at);
     }
-    msgs
+    if let Some(parts) = spoken {
+        msgs.push(
+            Message {
+                role: Role::User,
+                content: parts.to_vec(),
+            },
+            None,
+        );
+    }
+    msgs.into_vec()
 }
 
 /// The part of a tool turn's `content` its stored record does not already
@@ -853,7 +1035,14 @@ fn build_messages(
 /// answer. A `content` that does not start with it (a record written some
 /// other way) is taken whole rather than guessed at.
 fn final_answer<'a>(record: &[Message], content: &'a str) -> &'a str {
-    let said: String = record
+    let said = record_said(record);
+    content.strip_prefix(said.as_str()).unwrap_or(content)
+}
+
+/// The text a tool turn's record holds: its assistant messages' text, in
+/// order — what `content` starts with, before the final answer.
+pub(super) fn record_said(record: &[Message]) -> String {
+    record
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .flat_map(|m| &m.content)
@@ -861,8 +1050,7 @@ fn final_answer<'a>(record: &[Message], content: &'a str) -> &'a str {
             ContentPart::Text { text } => Some(text.as_str()),
             _ => None,
         })
-        .collect();
-    content.strip_prefix(said.as_str()).unwrap_or(content)
+        .collect()
 }
 
 #[cfg(test)]

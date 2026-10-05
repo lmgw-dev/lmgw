@@ -295,15 +295,30 @@ pub async fn append_user_message_with_kb_refs(
     attachment_ids: &[i64],
     kb_refs: &[i64],
 ) -> DbResult<SendMessageOutcome> {
+    append_user_message_with_voice(pool, thread_id, content, attachment_ids, kb_refs, None).await
+}
+
+/// [`append_user_message_with_kb_refs`] for a spoken turn: the message
+/// carries how it was spoken (chat-voice design §3), written in the same
+/// insert.
+pub async fn append_user_message_with_voice(
+    pool: &SqlitePool,
+    thread_id: i64,
+    content: &str,
+    attachment_ids: &[i64],
+    kb_refs: &[i64],
+    voice: Option<&MessageVoice>,
+) -> DbResult<SendMessageOutcome> {
     let mut tx = pool.begin().await?;
 
     let res = sqlx::query(
-        "INSERT INTO chat_messages (thread_id, role, content, reasoning, kb_refs) \
-         VALUES (?1, 'user', ?2, '', ?3)",
+        "INSERT INTO chat_messages (thread_id, role, content, reasoning, kb_refs, voice) \
+         VALUES (?1, 'user', ?2, '', ?3, ?4)",
     )
     .bind(thread_id)
     .bind(content)
     .bind(super::chat_knowledge::id_list_json(kb_refs))
+    .bind(super::chat_voice::message_voice_json(voice))
     .execute(&mut *tx)
     .await?;
     let msg_id = res.last_insert_rowid();

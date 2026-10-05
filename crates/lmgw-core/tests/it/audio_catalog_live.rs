@@ -26,7 +26,7 @@ async fn the_published_catalog_still_parses_into_everything_lmgw_shows() {
         return;
     }
     let http = reqwest::Client::new();
-    let snapshot = lmgw_core::audio::fetch_catalog(&http)
+    let snapshot = lmgw_core::audio::fetch_catalog(&http, None)
         .await
         .expect("fetch the live catalog");
     let specs = &snapshot.specs;

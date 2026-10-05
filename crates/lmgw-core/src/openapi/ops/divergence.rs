@@ -92,6 +92,26 @@ pub const DIVERGENCES: &[Divergence] = &[
         props: &["id"],
     },
     Divergence {
+        op: "audio_model_set",
+        note: "the four option maps, the voice presets and `extra_run_args`: the tool takes \
+               them as text (JSON strings, shell-quoted args — every self-admin argument is a \
+               flat scalar); the op takes the real JSON objects and the argv array.",
+        props: &[
+            "load_options",
+            "session_options",
+            "default_request_options",
+            "voice_presets",
+            "extra_run_args",
+        ],
+    },
+    Divergence {
+        op: "audio_catalog",
+        note: "the tool also lists the catalog (`action: list`, narrowed by `family` or \
+               `search`), which the dashboard reads from `GET /api/audio/catalog`; the op only \
+               refreshes and downloads.",
+        props: &["action", "search"],
+    },
+    Divergence {
         op: "agent_run",
         note: "the op also takes `rows`, `base_job` and `values` (the review/apply loop and the \
                per-run config patch); the tool only starts `list`/`classify`.",

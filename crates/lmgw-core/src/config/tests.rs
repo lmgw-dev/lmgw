@@ -135,6 +135,8 @@ fn audio_row(mode: HoldFallbackMode, fallback: Option<&str>) -> AudioModel {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -149,6 +151,7 @@ fn audio_row(mode: HoldFallbackMode, fallback: Option<&str>) -> AudioModel {
         warm_start: false,
         hold_fallback_mode: mode,
         hold_fallback: fallback.map(String::from),
+        residency: None,
     }
 }
 

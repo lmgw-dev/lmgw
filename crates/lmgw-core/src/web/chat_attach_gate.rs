@@ -73,7 +73,8 @@ pub(super) async fn caps_for(
     }
 }
 
-/// Why `att`, a draft, cannot go to `model` — empty when it can.
+/// Why `att`, a draft, cannot go to `model` — empty when it can. `stt_set`:
+/// the thread resolves a speech-to-text alias (`chat_voice::asr_alias`).
 pub fn blockers(att: &ChatAttachmentMeta, model: &str, caps: Caps, stt_set: bool) -> Vec<String> {
     let mut out = Vec::new();
     match att.kind.as_str() {
@@ -101,7 +102,7 @@ pub fn blockers(att: &ChatAttachmentMeta, model: &str, caps: Caps, stt_set: bool
                 } else if !stt_set {
                     out.push(format!(
                         "'{model}' cannot take {} as audio and no speech-to-text model is set \
-                         (Settings → Chat)",
+                         (Settings → Chat → Voice, or this thread's voice settings)",
                         att.name
                     ));
                 }
@@ -122,7 +123,7 @@ pub(super) async fn annotate_drafts(
         return;
     }
     let caps = caps_for(state, thread, atts).await;
-    let stt_set = !state.snapshot().settings.chat_stt_alias.is_empty();
+    let stt_set = super::chat_voice::asr_alias(&state.snapshot(), thread).is_some();
     for a in atts.iter_mut().filter(|a| a.message_id.is_none()) {
         a.blockers = Some(blockers(a, &thread.model_alias, caps, stt_set));
     }

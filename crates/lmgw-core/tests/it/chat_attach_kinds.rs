@@ -688,6 +688,15 @@ async fn audio_for_a_model_that_does_not_hear_is_transcribed_at_upload() {
     );
     assert!(t.contains("hello from the memo"), "{t}");
     assert_eq!(transcriptions(&stt).await, 1, "transcribed once, at upload");
+    // The thread's own traffic, labelled as its dictation is (WP11 server
+    // review n5), not as an API client's.
+    let protos: Vec<String> = sqlx::query_scalar(
+        "SELECT ingress_proto FROM request_logs WHERE requested_alias = 'my-asr'",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(protos, ["chat"]);
 }
 
 #[tokio::test]

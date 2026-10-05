@@ -1,5 +1,6 @@
 //! The fields a thread's settings are edited with — prompt, temperature,
-//! max tokens, sampling, reasoning, tool servers — and the patch they make.
+//! max tokens, sampling, reasoning, tool servers, knowledge, voice — and the
+//! patch they make.
 //!
 //! One set of fields for two forms: the open thread's settings drawer and a
 //! folder's defaults ([`super::chat_folders`]), which are the same settings a
@@ -13,6 +14,7 @@ use super::chat::SettingsDraft;
 use super::chat_knowledge::KbSection;
 use super::chat_reasoning::{reasoning_patch, ReasoningFields};
 use super::chat_sampling::{self, SamplingFields};
+use super::chat_voice::{VoiceResolved, VoiceSection};
 use crate::widgets::tool_picker::McpPicker;
 
 /// Why the reasoning and sampling boxes as typed cannot be saved. Shown under
@@ -21,6 +23,7 @@ use crate::widgets::tool_picker::McpPicker;
 pub(super) struct DraftErrors {
     pub reasoning: Memo<Option<String>>,
     pub sampling: Memo<Option<String>>,
+    pub voice: Memo<Option<String>>,
 }
 
 impl DraftErrors {
@@ -30,6 +33,7 @@ impl DraftErrors {
                 reasoning_patch(&d.think.get(), &d.effort.get(), &d.budget.get()).err()
             }),
             sampling: Memo::new(move |_| chat_sampling::sampling_patch(&d.sampling.text()).err()),
+            voice: Memo::new(move |_| d.voice.error()),
         }
     }
 
@@ -38,6 +42,7 @@ impl DraftErrors {
     pub(super) fn any(&self) -> bool {
         self.reasoning.try_with(Option::is_some).unwrap_or(false)
             || self.sampling.try_with(Option::is_some).unwrap_or(false)
+            || self.voice.try_with(Option::is_some).unwrap_or(false)
     }
 }
 
@@ -82,16 +87,20 @@ pub(super) fn draft_patch(d: &SettingsDraft) -> Result<Value, String> {
     if let (Some(b), Some(k)) = (body.as_object_mut(), d.kb.patch()?.as_object()) {
         b.extend(k.clone());
     }
+    body["voice"] = d.voice.patch()?;
     Ok(body)
 }
 
-/// The settings boxes. `model` is the model the reasoning fields describe.
+/// The settings boxes. `model` is the model the reasoning fields describe;
+/// `voice_resolved` is the thread's voice resolution (none for a folder's
+/// defaults).
 #[component]
 pub(super) fn SettingsFields(
     draft: SettingsDraft,
     errors: DraftErrors,
     #[prop(into)] model: Signal<String>,
     prompt_label: &'static str,
+    #[prop(optional, into)] voice_resolved: Option<Signal<Option<VoiceResolved>>>,
 ) -> impl IntoView {
     let SettingsDraft {
         sys,
@@ -103,7 +112,12 @@ pub(super) fn SettingsFields(
         sampling,
         picked,
         kb,
+        voice,
     } = draft;
+    let voice_section = match voice_resolved {
+        Some(r) => view! { <VoiceSection draft=voice resolved=r/> }.into_any(),
+        None => view! { <VoiceSection draft=voice/> }.into_any(),
+    };
     view! {
         <div class="field">
             <label>{prompt_label}</label>
@@ -144,5 +158,6 @@ pub(super) fn SettingsFields(
         />
         <McpPicker picked=picked/>
         <KbSection kb=kb/>
+        {voice_section}
     }
 }

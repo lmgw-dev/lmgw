@@ -40,8 +40,11 @@ Then build and run:
 
 ```sh
 (cd crates/lmgw-ui && trunk build --release)   # must come first — lmgw-core embeds dist/
-cargo tauri build --bundles appimage           # or: cargo tauri dev
+cargo tauri build --bundles appimage
 ```
+
+`cargo tauri dev` is a development run, not a way to run lmgw: a debug build
+needs a dev data dir and keeps away from your real one (README, Development).
 
 The binary lands in `target/release/lmgw`, the AppImage under
 `target/release/bundle/appimage/`. Data lives in `~/.local/share/lmgw/`

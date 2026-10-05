@@ -68,6 +68,9 @@ pub(super) fn blank_audio_model() -> AudioModel {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        // Inherit the class: a new row runs where the class does.
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -82,6 +85,8 @@ pub(super) fn blank_audio_model() -> AudioModel {
         warm_start: false,
         hold_fallback_mode: "inherit".into(),
         hold_fallback: None,
+        // Learned by the gateway, never by the form.
+        residency: None,
     }
 }
 
@@ -462,6 +467,25 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
     }
     for v in &m.audio {
         let a = &v.model;
+        // What its container was measured to hold once loaded (realtime
+        // design §9.4) — the figure admission charges, or why it charges the
+        // on-disk size instead, which the tooltip says. A row on the CPU
+        // holds nothing on the GPU: its thread count instead.
+        let mut file = short_dir(&a.path);
+        match (v.runs_on.as_str(), v.residency_charged_bytes, &a.residency) {
+            ("cpu", _, _) => file.push_str(&format!(" · CPU · {} threads", v.threads_in_effect)),
+            (_, Some(b), _) => file.push_str(&format!(" · resident {}", human_bytes(b))),
+            (_, None, Some(r)) => file.push_str(&format!(
+                " · resident {}, previous config",
+                human_bytes(r.bytes)
+            )),
+            (_, None, None) => {}
+        }
+        let mut file_title = a.path.clone();
+        if let Some(note) = &v.residency_note {
+            file_title.push('\n');
+            file_title.push_str(note);
+        }
         out.push(Row {
             class: Class::Audio,
             id: a.id,
@@ -470,8 +494,8 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             kind: a.task.clone(),
             kind_title: format!("{} · family {} · {} mode", a.task, a.family, a.mode),
             note: String::new(),
-            file: short_dir(&a.path),
-            file_title: a.path.clone(),
+            file,
+            file_title,
             copy: a.path.clone(),
             ctx: None,
             enabled: a.enabled,
@@ -1417,11 +1441,26 @@ fn RuntimeCell(class: Class, model_id: String) -> impl IntoView {
             .as_ref()
             .is_some_and(|r| r.owner.as_deref() == Some("background"));
         let draining = r.as_ref().is_some_and(|r| r.draining_for_owner);
+        let on_cpu = r
+            .as_ref()
+            .is_some_and(|r| r.placement.as_deref() == Some("cpu"));
         view! {
             <span class=cls>
                 <span class="dot"></span>
                 {label}
             </span>
+            {on_cpu
+                .then(|| {
+                    view! {
+                        <span
+                            class="type-badge"
+                            style="margin-left:4px"
+                            title="Its container runs on the CPU: nothing on the GPU, and the GPU hold does not stop it"
+                        >
+                            "CPU"
+                        </span>
+                    }
+                })}
             {background
                 .then(|| {
                     view! {

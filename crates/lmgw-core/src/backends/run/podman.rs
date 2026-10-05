@@ -47,6 +47,12 @@ impl Podman {
         }
     }
 
+    /// A production instance's `podman` through `runner` — a test's fake.
+    #[cfg(test)]
+    pub(crate) fn with_runner(runner: Arc<dyn CommandRunner>) -> Self {
+        Self { runner, dev: false }
+    }
+
     /// On a dev instance, refuse `name` unless it is a dev name.
     fn dev_guard(&self, verb: &str, name: &str) -> Result<(), String> {
         if self.dev && !tags::is_dev_name(name) {

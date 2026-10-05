@@ -404,15 +404,18 @@ pub fn notes_for_audio(model: &AudioModel) -> Vec<String> {
         "tts" => {
             out.push(
                 "Speech: POST /v1/audio/speech with a JSON body of {model, input, voice}, \
-                 where input is the text to speak and voice names one of this model's presets. \
-                 GET /v1/audio/voices?model=<this id> lists the voice ids and presets it accepts."
+                 where input is the text to speak and voice names one of this model's voices: a \
+                 preset of this row, a voice its package ships (in any case — lmgw sends the \
+                 model's own spelling, in the field the model reads), or a voice-library clip. \
+                 GET /v1/audio/voices?model=<this id> lists them all, from lmgw's own catalog \
+                 without starting the model."
                     .to_string(),
             );
             if model.voice_presets.is_empty() && model.default_voice_preset.is_none() {
                 out.push(
                     "No voice presets are configured on this row: a model that ships its own \
-                     voice ids still answers, but a cloning model draws a new random speaker for \
-                     every request until presets are configured."
+                     voices still answers to them by name, but a cloning model draws a new random \
+                     speaker for every request until presets are configured."
                         .to_string(),
                 );
             } else {
@@ -433,6 +436,14 @@ pub fn notes_for_audio(model: &AudioModel) -> Vec<String> {
                 ));
             }
         }
+        "vdes" => out.push(
+            "Voice design: POST /v1/audio/speech with a JSON body of {model, input, \
+             instructions}, where instructions describe the voice to design (\"a warm, calm \
+             voice in her forties\") — required unless the row has a default description \
+             under its default request options (instruct); voice is not used. POST \
+             /v1/tasks/run reaches the same model with audio.cpp's own request."
+                .to_string(),
+        ),
         "asr" => {
             out.push(
                 "Transcription: POST /v1/audio/transcriptions either as multipart/form-data with \
@@ -633,11 +644,14 @@ pub fn notes_for_catalog(
         );
     }
 
+    // What an off becomes on this model (model-capabilities design §5.6):
+    // the same rule the send applies.
+    let off = crate::proxy::reasoning_fit::off_note(protocol, caps.reasoning.as_ref());
     match caps.reasoning.as_ref() {
         None => out.push(format!(
             "The catalog of upstream {upstream_name} lists no reasoning parameter for this \
              model, which is not a statement that it cannot think: no reasoning capability is \
-             published and lmgw sends no reasoning control unless a request sets one."
+             published and lmgw sends no reasoning control unless a request sets one. {off}"
         )),
         Some(r) if r.kind == "fixed" => out.push(
             "The provider catalog states this model does not think; the reasoning headers are \
@@ -653,14 +667,13 @@ pub fn notes_for_catalog(
             match protocol {
                 Protocol::Openai => out.push(format!(
                     "Reasoning: set body reasoning_effort or header x-lmgw-reasoning-effort{levels}; \
-                     x-lmgw-reasoning: off is sent upstream as reasoning_effort: \"none\". The \
-                     catalog does not state the default state."
+                     {off} The catalog does not state the default state."
                 )),
                 Protocol::Anthropic => {
                     out.push(format!(
                         "Reasoning: header x-lmgw-reasoning-effort{levels} becomes \
                          output_config.effort with thinking type adaptive, and x-lmgw-reasoning: \
-                         on|off becomes thinking type adaptive|disabled."
+                         on becomes thinking type adaptive. {off}"
                     ));
                     out.push(
                         "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, which \
@@ -668,14 +681,13 @@ pub fn notes_for_catalog(
                             .to_string(),
                     );
                 }
-                Protocol::Gemini => out.push(
+                Protocol::Gemini => out.push(format!(
                     "Reasoning: x-lmgw-reasoning-budget sets \
-                     generationConfig.thinkingConfig.thinkingBudget on this route and a budget of \
-                     0 turns thinking off; x-lmgw-reasoning-effort sets thinkingConfig.thinkingLevel \
-                     (Gemini 3 vocabulary, passed verbatim); the catalog states neither a default \
-                     nor whether this model accepts 0."
-                        .to_string(),
-                ),
+                     generationConfig.thinkingConfig.thinkingBudget on this route, and \
+                     x-lmgw-reasoning-effort sets thinkingConfig.thinkingLevel (Gemini 3 \
+                     vocabulary, passed verbatim); the catalog states no default. A budget of 0 \
+                     counts as off. {off}"
+                )),
             }
         }
     }

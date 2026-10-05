@@ -253,8 +253,9 @@ async fn image_json_call(
             route,
             headers,
             admission,
+            chunked: false,
         }),
-        Err(e) => Err((Some(route), headers, e)),
+        Err(e) => Err((Some(Box::new(route)), headers, e)),
     }
 }
 
@@ -364,8 +365,9 @@ pub async fn handle_image_edit(
                     route,
                     headers,
                     admission,
+                    chunked: false,
                 }),
-                Err(e) => Err((Some(route), headers, e)),
+                Err(e) => Err((Some(Box::new(route)), headers, e)),
             }
         }
         Err(f) => Err((f.route, f.headers, f.error)),

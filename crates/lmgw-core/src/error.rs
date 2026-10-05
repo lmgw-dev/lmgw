@@ -2,7 +2,7 @@
 
 use axum::http::StatusCode;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum GatewayError {
     #[error("unknown model alias: {0}")]
     UnknownAlias(String),
@@ -31,6 +31,15 @@ pub enum GatewayError {
     },
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// A request lmgw refuses before sending it anywhere, with a code of its
+    /// own a client can branch on — a speech request with nothing to say
+    /// but inline tags (`empty_input`), a voice-design model asked to speak
+    /// without a description (`instructions_required`). A 400
+    /// `invalid_request_error` in both dialects, like
+    /// [`BadRequest`](Self::BadRequest), which has no code beyond
+    /// `bad_request`.
+    #[error("{message}")]
+    InvalidRequest { code: &'static str, message: String },
     /// The request body is larger than the `max_body_mb` setting allows.
     ///
     /// Separate from [`BadRequest`](Self::BadRequest) purely so the message can
@@ -356,9 +365,10 @@ impl GatewayError {
             Self::Refused { status, .. } => {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::FORBIDDEN)
             }
-            Self::BadRequest(_) | Self::Unsupported(_) | Self::ContextExceeded { .. } => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::BadRequest(_)
+            | Self::InvalidRequest { .. }
+            | Self::Unsupported(_)
+            | Self::ContextExceeded { .. } => StatusCode::BAD_REQUEST,
             Self::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             // Pass client-attributable upstream statuses through, otherwise 502.
             Self::Upstream { status, .. } => match *status {
@@ -400,6 +410,7 @@ impl GatewayError {
             // refusal under the word the refusal itself used.
             Self::Refused { code, .. } => code,
             Self::BadRequest(_) => "bad_request",
+            Self::InvalidRequest { code, .. } => code,
             Self::BodyTooLarge { .. } => "body_limit",
             Self::Upstream { .. } => "upstream",
             Self::Transport(_) => "transport",
@@ -435,6 +446,7 @@ impl GatewayError {
             Self::UnknownAlias(_)
             | Self::NotFound(_)
             | Self::BadRequest(_)
+            | Self::InvalidRequest { .. }
             | Self::BodyTooLarge { .. }
             | Self::Unsupported(_)
             | Self::ContextExceeded { .. } => "invalid_request_error",
@@ -473,6 +485,7 @@ impl GatewayError {
                 _ => "permission_error",
             },
             Self::BadRequest(_)
+            | Self::InvalidRequest { .. }
             | Self::BodyTooLarge { .. }
             | Self::Unsupported(_)
             | Self::ContextExceeded { .. } => "invalid_request_error",

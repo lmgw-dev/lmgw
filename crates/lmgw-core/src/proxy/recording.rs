@@ -7,7 +7,7 @@ use std::time::Instant;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 
-use crate::config::Route;
+use crate::config::{Route, Snapshot};
 use crate::error::GatewayError;
 use crate::gate::{FallbackReason, GateHeaders};
 use crate::ingress::ClientProto;
@@ -70,6 +70,65 @@ impl RequestCtx {
     pub fn reasoning_error(&self) -> Option<&str> {
         self.reasoning.as_ref()?.as_ref().err().map(String::as_str)
     }
+
+    /// The key this request is charged to: the name it authenticated with,
+    /// and the principal's `api_keys.id` — which every row is resolved by
+    /// when it is written ([`KeyRef`]).
+    pub(crate) fn key_ref(&self) -> KeyRef {
+        KeyRef {
+            name: self.client_key.clone(),
+            id: self.principal.key_id(),
+        }
+    }
+
+    /// The key's name **now**: a request can outlive a rename (a realtime
+    /// session lasts as long as its socket), and the key keeps its id but
+    /// not its name. The captured name when the request has no key, or the
+    /// key is gone.
+    pub(crate) fn current_key_name(&self, snap: &Snapshot) -> Option<String> {
+        self.key_ref().resolve(snap).0
+    }
+}
+
+/// Whom a logged call is charged to (usage-analytics §2.2): the key's name
+/// as the caller captured it and — for a caller acting for an authenticated
+/// key — the key's `api_keys.id`.
+///
+/// **The id decides, at record time** (realtime design §11, package A review
+/// #2). A call can outlive a rename of its key, a realtime session's every
+/// call can; looked up by the name captured at the handshake, the renamed
+/// key matches no row — the row's `key_id` is NULL, its budget and
+/// tokens/minute never see the call, Usage by key loses it — and a new key
+/// created under the old name is charged instead. So a row with an id
+/// carries that key's id and its current name; one without is resolved by
+/// name, as it always was (the in-process callers that only have a label,
+/// the internal identities).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KeyRef {
+    pub name: Option<String>,
+    pub id: Option<i64>,
+}
+
+impl KeyRef {
+    /// A caller known by its label only: resolved by name, as before.
+    pub fn named(name: Option<String>) -> Self {
+        Self { name, id: None }
+    }
+
+    /// The row's `client_key` label, and the id when the caller had one. A
+    /// key deleted since keeps its id (a delete does not orphan history,
+    /// `NewRequestLog::key_id`) and the name it was last seen under.
+    fn resolve(&self, snap: &Snapshot) -> (Option<String>, Option<i64>) {
+        let Some(id) = self.id else {
+            return (self.name.clone(), None);
+        };
+        let now = snap
+            .api_keys
+            .iter()
+            .find(|k| k.id == id)
+            .map(|k| k.name.clone());
+        (now.or_else(|| self.name.clone()), Some(id))
+    }
 }
 
 pub(super) struct LogParams<'a> {
@@ -118,7 +177,7 @@ pub(super) async fn record(
         &p.alias,
         p.route.map(|r| r.upstream.id),
         p.route.map(|r| r.upstream_model.as_str()),
-        p.ctx.client_key.as_deref(),
+        &p.ctx.key_ref(),
         p.proto.as_str(),
         &usage,
     );
@@ -138,7 +197,7 @@ pub(super) async fn record(
             .note_model_call(run, &usage, priced.cost.total_micro);
     }
     let row = NewRequestLog {
-        client_key: p.ctx.client_key.clone(),
+        client_key: priced.client_key,
         ingress_proto: p.proto.as_str().to_string(),
         requested_alias: p.alias.clone(),
         upstream_id: p.route.map(|r| r.upstream.id),
@@ -205,6 +264,9 @@ pub(super) async fn record(
 /// are answered the same way for a public request, an in-process chat turn and
 /// a corpus ingest — three copies of this would drift within a month.
 pub(super) struct Priced {
+    /// The row's `client_key` label: the key's name at record time
+    /// ([`KeyRef`]).
+    pub(super) client_key: Option<String>,
     pub(super) key_id: Option<i64>,
     pub(super) cost: pricing::Cost,
 }
@@ -214,21 +276,27 @@ pub(super) fn price_call(
     alias: &str,
     upstream_id: Option<i64>,
     upstream_model: Option<&str>,
-    client_key: Option<&str>,
+    key: &KeyRef,
     ingress_proto: &str,
     usage: &Usage,
 ) -> Priced {
     let snap = state.snapshot();
-    // A real key when the caller authenticated; otherwise the synthetic
+    let (client_key, known) = key.resolve(&snap);
+    // The key's identity when the caller had one (`KeyRef`); otherwise by
+    // name — a real key's when the caller authenticated, else the synthetic
     // identity for whichever internal consumer this is.
-    let key_name = client_key
-        .map(str::to_string)
-        .or_else(|| internal_identity(ingress_proto).map(str::to_string));
-    let key_id = key_name.as_deref().and_then(|n| snap.key_id_for_name(n));
+    let key_id = known.or_else(|| {
+        client_key
+            .as_deref()
+            .or_else(|| internal_identity(ingress_proto))
+            .and_then(|n| snap.key_id_for_name(n))
+    });
     // Fold this call into the rolling windows the policy gate enforces on, so
     // a budget check never has to run a SUM on the request path and a
-    // tokens/minute limit sees the tokens that were actually spent.
-    if let Some(id) = key_id {
+    // tokens/minute limit sees the tokens that were actually spent. A key
+    // deleted while its request ran has no window left to enforce, and a
+    // fresh one for it would never be read again (A2 review 3).
+    if let Some(id) = key_id.filter(|id| snap.api_keys.iter().any(|k| k.id == *id)) {
         let tokens = usage.prompt_tokens.unwrap_or(0) + usage.completion_tokens.unwrap_or(0);
         state.policy.note_tokens(id, tokens as i64);
     }
@@ -260,7 +328,11 @@ pub(super) fn price_call(
             .note_spend(key_id.zip(key_period.as_deref()), &global_period, micro);
     }
 
-    Priced { key_id, cost }
+    Priced {
+        client_key,
+        key_id,
+        cost,
+    }
 }
 
 /// Scope + budget for one alias, logged and answered in the caller's dialect.
@@ -289,6 +361,98 @@ pub(super) async fn policy_or_refuse(
     .err()?;
     record_refusal(state, proto, ctx, alias, started, class, &e).await;
     Some(error_response(proto, &e))
+}
+
+/// [`policy_or_refuse`]'s check and row, for a caller that answers the
+/// refusal itself: a realtime session (realtime design §10.2, §10.3), which
+/// reports it as an HTTP error before the upgrade and as an `error` event on
+/// the open socket after it. The refusal writes its row all the same.
+pub(crate) async fn policy_checked(
+    state: &SharedState,
+    proto: ClientProto,
+    ctx: &RequestCtx,
+    alias: &str,
+    class: RequestClass,
+) -> Result<(), GatewayError> {
+    let snap = state.snapshot();
+    // The key's name **now**: the session outlives its handshake, and a
+    // rename keeps the key (`policy_checked_call`'s doc). By the name the
+    // handshake captured, a renamed key would match no row and be checked
+    // against no scope and no budget at all (WP2 review R7).
+    let name = ctx.current_key_name(&snap);
+    checked_as(state, proto, ctx, name.as_deref(), alias, class).await
+}
+
+/// [`policy_checked`] for the key named `key_name`.
+async fn checked_as(
+    state: &SharedState,
+    proto: ClientProto,
+    ctx: &RequestCtx,
+    key_name: Option<&str>,
+    alias: &str,
+    class: RequestClass,
+) -> Result<(), GatewayError> {
+    let started = Instant::now();
+    let snap = state.snapshot();
+    let Err(e) = crate::policy::check_alias(&state.policy, &state.db, &snap, key_name, alias).await
+    else {
+        return Ok(());
+    };
+    // `record` closes a `request_started`, and no handler opened one for a
+    // check that is not itself a model call.
+    state.telemetry.request_started();
+    record_refusal(state, proto, ctx, alias, started, class, &e).await;
+    Err(e)
+}
+
+/// [`policy_checked`] for one model call made **inside** a request that
+/// already holds its key's concurrency slot — a realtime session's calls
+/// (realtime design §10.3): scope and budget, then the call counted against
+/// the key's per-minute windows with [`crate::policy::PolicyGate::count_call`],
+/// which takes no second slot. A refusal is logged like any other.
+///
+/// **The key is looked up again, by identity, on every call.** The request
+/// it serves outlives the authentication that let it in — a realtime session
+/// lasts as long as its socket — so a key disabled or deleted since then
+/// must stop working at its next call, not at its next connection. Looked up
+/// by `api_keys.id` rather than by name, because a rename keeps the key and
+/// a delete-and-recreate under the same name is a different key.
+pub(crate) async fn policy_checked_call(
+    state: &SharedState,
+    proto: ClientProto,
+    ctx: &RequestCtx,
+    alias: &str,
+    class: RequestClass,
+) -> Result<(), GatewayError> {
+    let started = Instant::now();
+    let snap = state.snapshot();
+    let key = match ctx.principal.key_id() {
+        None => None,
+        Some(id) => match snap.api_keys.iter().find(|k| k.id == id) {
+            Some(k) if k.enabled => Some(k),
+            _ => {
+                let e = GatewayError::Unauthorized(
+                    "the API key this request was opened with has since been disabled or \
+                     deleted",
+                );
+                state.telemetry.request_started();
+                record_refusal(state, proto, ctx, alias, started, class, &e).await;
+                return Err(e);
+            }
+        },
+    };
+    // Scope and budget by the key's current name (`policy_checked`).
+    let name = key.map(|k| k.name.as_str()).or(ctx.client_key.as_deref());
+    checked_as(state, proto, ctx, name, alias, class).await?;
+    let Some(key) = key else {
+        return Ok(());
+    };
+    let Err(e) = state.policy.count_call(key, chrono::Utc::now()) else {
+        return Ok(());
+    };
+    state.telemetry.request_started();
+    record_refusal(state, proto, ctx, alias, started, class, &e).await;
+    Err(e)
 }
 
 /// The row a key-policy refusal writes, closing the caller's
@@ -349,7 +513,8 @@ pub const FALLBACK_REASON_HEADER: &str = "x-lmgw-fallback-reason";
 /// [`crate::gate::GateHeaders::stamp`] writes one or the other.
 pub const CANDIDATE_HEADER: &str = "x-lmgw-candidate";
 
-/// Reasoning controls the answering route cannot express (§5.3). Comma
+/// Reasoning controls the answering route cannot express (§5.3), and
+/// `enabled` for an off fitted to the model in another form (§5.6). Comma
 /// separated, e.g. `enabled,budget`.
 pub const REASONING_IGNORED_HEADER: &str = "x-lmgw-reasoning-ignored";
 
@@ -658,7 +823,7 @@ pub(super) type Served<T> = (Route, GateHeaders, T, Usage);
 /// — the body's `model` stays the alias the client asked for. Dropping the
 /// header on the error path would leave an owner debugging "why did my local
 /// model return 502" with nothing at all pointing at the fallback.
-pub(super) type Failed = (Option<Route>, GateHeaders, GatewayError);
+pub(super) type Failed = (Option<Box<Route>>, GateHeaders, GatewayError);
 
 /// One `request_logs` row for a refusal made in the auth middleware, before any
 /// handler ran (usage-analytics §4.2).
@@ -667,18 +832,21 @@ pub(super) type Failed = (Option<Route>, GateHeaders, GatewayError);
 /// buffer the body to read it — so the row carries `"?"`, which is the same
 /// placeholder every other pre-parse failure uses. Everything else is real:
 /// the key, the status, the error kind. Without this, `key_rate` and
-/// `key_expired` refusals exist only in the client's error handler.
+/// `key_expired` refusals exist only in the client's error handler. `proto`
+/// is the row's label: the route's — `realtime` for `GET /v1/realtime`
+/// (realtime design §11), `openai` for the rest of `/v1`.
 pub(crate) async fn record_middleware_refusal(
     state: &SharedState,
     ctx: &RequestCtx,
     e: &GatewayError,
+    proto: ClientProto,
 ) {
     let started = Instant::now();
     state.telemetry.request_started();
     record(
         LogParams {
             state,
-            proto: ClientProto::OpenaiChat,
+            proto,
             ctx,
             alias: "?".to_string(),
             route: None,
@@ -783,8 +951,17 @@ async fn record_free_form(
     status: u16,
     error: Option<(String, String)>,
 ) {
+    let priced = price_call(
+        state,
+        alias,
+        route.map(|r| r.upstream.id),
+        route.map(|r| r.upstream_model.as_str()),
+        &ctx.key_ref(),
+        ingress_proto,
+        &Usage::default(),
+    );
     let row = NewRequestLog {
-        client_key: ctx.client_key.clone(),
+        client_key: priced.client_key,
         ingress_proto: ingress_proto.to_string(),
         requested_alias: alias.to_string(),
         upstream_id: route.map(|r| r.upstream.id),
@@ -800,16 +977,7 @@ async fn record_free_form(
         streamed,
         error_kind: error.as_ref().map(|(k, _)| k.clone()),
         error_msg: error.as_ref().map(|(_, m)| m.clone()),
-        key_id: price_call(
-            state,
-            alias,
-            route.map(|r| r.upstream.id),
-            route.map(|r| r.upstream_model.as_str()),
-            ctx.client_key.as_deref(),
-            ingress_proto,
-            &Usage::default(),
-        )
-        .key_id,
+        key_id: priced.key_id,
         fallback_reason: fallback.map(|r| r.as_str().to_string()),
         // Free-form rows are the audio/task passthroughs and early refusals:
         // no usage was ever reported, so there is nothing to price. They land
@@ -848,3 +1016,6 @@ async fn record_free_form(
         rung: row.rung,
     });
 }
+
+#[cfg(test)]
+mod tests;

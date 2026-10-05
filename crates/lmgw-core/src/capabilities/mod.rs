@@ -20,6 +20,8 @@
 
 pub mod exposed;
 pub mod notes;
+pub mod speech;
+pub mod task;
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +45,8 @@ use crate::runtime::image::ImageCapabilities;
 #[serde(deny_unknown_fields)]
 pub struct ModelCapabilities {
     /// `chat` | `embedding` | `rerank` | `tts` | `asr` | an audio.cpp task
-    /// name. Drives [`endpoints`](Self::endpoints).
+    /// name | an image task | `realtime` (an OpenAI Realtime model, no lmgw
+    /// route). Drives [`endpoints`](Self::endpoints) ([`task::endpoints`]).
     pub task: String,
     /// The lmgw routes that accept this model id.
     pub endpoints: Vec<String>,
@@ -65,6 +68,12 @@ pub struct ModelCapabilities {
     pub tool_calls: Option<ToolCallCaps>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<StructuredOutputCaps>,
+    /// A text-to-speech model's expressive controls — what `instructions`,
+    /// inline tags, `language` and `stream_format` do on it
+    /// ([`speech::SpeechCaps`]). A local audio row's is derived; a cloud
+    /// alias has one only through the owner's override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech: Option<speech::SpeechCaps>,
     /// Where the facts came from: `gguf+config`, `catalog`, `config`,
     /// `owner`.
     pub source: String,
@@ -416,6 +425,7 @@ pub fn for_local_row(
             json_schema: Some(true),
             json_object: Some(true),
         }),
+        speech: None,
         source: "gguf+config".to_string(),
     };
 
@@ -682,6 +692,7 @@ pub fn for_aux(model: &AuxModel, summary: Option<&ModelSummary>) -> Derived {
             format: None,
         }),
         structured_output: None,
+        speech: None,
         source: "config".to_string(),
     };
     let notes = notes::notes_for_aux(model, projector, summary.is_none());
@@ -703,12 +714,38 @@ pub fn for_aux(model: &AuxModel, summary: Option<&ModelSummary>) -> Derived {
 /// nested `request` object lmgw relays untouched — so their modalities are
 /// audio.cpp's business, not something to guess here.
 pub fn for_audio(model: &AudioModel) -> Derived {
+    for_audio_with(model, None)
+}
+
+/// What lmgw read about an audio row besides the row itself — its speech
+/// profile's capabilities and the notes its package's facts add — for
+/// [`for_audio_with`]. The listing reads them (the GGUF, the models dir);
+/// the builder stays pure.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioFacts {
+    /// `capabilities.speech` of a text-to-speech row.
+    pub speech: Option<speech::SpeechCaps>,
+    /// Lines about the row's package: a task its variant does not run,
+    /// voices whose file is missing, voice clips without a transcript.
+    pub notes: Vec<String>,
+}
+
+/// [`for_audio`] with the facts lmgw read about the row's package.
+pub fn for_audio_with(model: &AudioModel, facts: Option<&AudioFacts>) -> Derived {
     let (input, output, endpoints): (Option<Vec<String>>, Option<Vec<String>>, Vec<&str>) =
         match model.task.as_str() {
             "tts" => (
                 Some(vec!["text".to_string()]),
                 Some(vec!["audio".to_string()]),
                 vec!["/v1/audio/speech", "/v1/audio/voices"],
+            ),
+            // Voice design speaks through the speech route too: the text is
+            // `input`, the voice is designed from `instructions`
+            // (audio-class gap 2).
+            "vdes" => (
+                Some(vec!["text".to_string()]),
+                Some(vec!["audio".to_string()]),
+                vec!["/v1/audio/speech", "/v1/tasks/run", "/v1/tasks/stream"],
             ),
             "asr" => (
                 Some(vec!["audio".to_string()]),
@@ -745,9 +782,14 @@ pub fn for_audio(model: &AudioModel) -> Derived {
             format: None,
         }),
         structured_output: None,
+        speech: facts.and_then(|f| f.speech.clone()),
         source: "config".to_string(),
     };
-    let notes = notes::notes_for_audio(model);
+    let mut notes = notes::notes_for_audio(model);
+    if let Some(f) = facts {
+        notes.extend(f.speech.as_ref().map(speech::note));
+        notes.extend(f.notes.iter().cloned());
+    }
     Derived {
         capabilities: Some(caps),
         max_output_tokens: None,
@@ -810,6 +852,7 @@ pub fn for_image(model: &ImageModel, probed: Option<&ImageCapabilities>) -> Deri
         reasoning: None,
         tool_calls: None,
         structured_output: None,
+        speech: None,
         source: "config".to_string(),
     };
     let notes = notes::notes_for_image(model, probed);
@@ -834,11 +877,18 @@ pub fn for_image(model: &ImageModel, probed: Option<&ImageCapabilities>) -> Deri
 pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) -> Derived {
     // §2.1: `task` drives `endpoints`. An embedding entry in a chat catalog is
     // reachable on `/v1/embeddings` and nowhere else, so the protocol only
-    // decides *which* chat routes a chat model gets.
-    let task = info.task.clone().unwrap_or_else(|| "chat".to_string());
+    // decides *which* chat routes a chat model gets. A catalog that states
+    // nothing (OpenAI's own) leaves the name to say it (`task::by_name`).
+    let by_name = match (&info.task, protocol) {
+        (None, Protocol::Openai) => task::by_name(&info.id),
+        _ => None,
+    };
+    let task = info
+        .task
+        .clone()
+        .or_else(|| by_name.map(str::to_string))
+        .unwrap_or_else(|| "chat".to_string());
     let endpoints = match task.as_str() {
-        "embedding" => vec!["/v1/embeddings".to_string()],
-        "rerank" => vec!["/v1/rerank".to_string()],
         // A cloud image model reaches the same two routes a local sd-server
         // row does (§5). The edits route is added only when the catalog says
         // the model takes an image *in* — for cloud there is no `edit` column
@@ -855,10 +905,7 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
             }
             v
         }
-        _ => match protocol {
-            Protocol::Openai => strings(&CHAT_ENDPOINTS_OPENAI),
-            Protocol::Anthropic | Protocol::Gemini => strings(&CHAT_ENDPOINTS_OTHER),
-        },
+        other => task::endpoints(other, protocol),
     };
 
     let vision = info
@@ -923,10 +970,14 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
                 json_schema: s.json_schema,
                 json_object: s.json_object,
             }),
+        speech: None,
         source: "catalog".to_string(),
     };
 
-    let notes = notes::notes_for_catalog(info, protocol, upstream_name, &caps);
+    let mut notes = notes::notes_for_catalog(info, protocol, upstream_name, &caps);
+    if let Some(t) = by_name {
+        notes.insert(0, task::by_name_note(upstream_name, t));
+    }
     Derived {
         capabilities: Some(caps),
         max_output_tokens: info.max_output_tokens,
@@ -949,11 +1000,19 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
 ///   base value whole; `null` deletes the key. When `derived.capabilities`
 ///   is `None` (an unreadable GGUF), the override object becomes the whole
 ///   thing, and it must then carry at least `task` — there is nothing to
-///   inherit it from. The merged object is deserialised back into
+///   inherit it from. **A `task` that changes the task brings its routes**
+///   (realtime live run 3, N6): unless the override names `endpoints`
+///   itself, they become the new task's on an upstream of `protocol`
+///   ([`task::endpoints`]) — an alias the owner declared a TTS model kept
+///   advertising the chat routes. The merged object is deserialised back into
 ///   [`ModelCapabilities`], so a shape the schema does not accept (a bad
-///   `reasoning.kind`, a missing `task`/`endpoints`/`source` after a `null`
-///   deleted it) is an `Err` naming the problem rather than a silently
-///   accepted partial object; on success `source` is set to `"owner"`.
+///   `reasoning.kind`, a missing `task`/`endpoints` after a `null` deleted
+///   it) is an `Err` naming the problem rather than a silently accepted
+///   partial object. `source` is lmgw's, not the owner's to state: it is
+///   `"owner"` on success, so one the merged object lacks — over nothing
+///   derived there is none to inherit — is not asked of the override
+///   (realtime R4 M3: a `{task}` alone over an unreadable model failed
+///   "missing field `source`").
 /// - `max_output_tokens`: a non-negative integer, or `null` to clear it.
 /// - `notes`: an array of strings, appended to `derived.notes` (never
 ///   replaces — the derived notes stay true, the owner is adding to them).
@@ -965,6 +1024,7 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
 pub fn apply_owner_override(
     mut derived: Derived,
     override_: &serde_json::Value,
+    protocol: Protocol,
 ) -> Result<Derived, String> {
     let obj = override_
         .as_object()
@@ -991,6 +1051,26 @@ pub fn apply_owner_override(
             None => serde_json::Map::new(),
         };
         deep_merge_objects(&mut merged, caps_override_obj);
+        // A changed task brings its routes, unless the owner named them too.
+        let base_task = derived.capabilities.as_ref().map(|c| c.task.as_str());
+        if let Some(task) = caps_override_obj
+            .get("task")
+            .and_then(serde_json::Value::as_str)
+            .filter(|t| Some(*t) != base_task)
+        {
+            if !caps_override_obj.contains_key("endpoints") {
+                merged.insert(
+                    "endpoints".into(),
+                    serde_json::json!(task::endpoints(task, protocol)),
+                );
+            }
+        }
+
+        // Set to "owner" below whatever it says; over nothing derived there
+        // is none to inherit, and a task alone must do.
+        merged
+            .entry("source")
+            .or_insert_with(|| serde_json::json!("owner"));
 
         if derived.capabilities.is_none() && !merged.get("task").is_some_and(|v| v.is_string()) {
             return Err(
@@ -1050,9 +1130,11 @@ pub fn apply_owner_override(
 
 /// Every `task` this schema knows (design §2.1): the routable classes plus
 /// audio.cpp's own task names, which are the ids `/v1/tasks/run` accepts, plus
-/// the image class's three (image-generation design §5).
-const KNOWN_TASKS: [&str; 20] = [
+/// the image class's three (image-generation design §5), plus an OpenAI
+/// Realtime model's ([`task::REALTIME_TASK`]), which no lmgw route serves.
+const KNOWN_TASKS: [&str; 21] = [
     "chat",
+    task::REALTIME_TASK,
     "embedding",
     "rerank",
     "tts",
@@ -1136,6 +1218,9 @@ fn validate_vocabulary(c: &ModelCapabilities) -> Result<(), String> {
                 one_of(&KNOWN_TOOL_CALL_KINDS)
             ));
         }
+    }
+    if let Some(s) = &c.speech {
+        speech::validate(s)?;
     }
     Ok(())
 }

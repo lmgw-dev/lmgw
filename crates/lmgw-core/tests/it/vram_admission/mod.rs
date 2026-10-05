@@ -45,10 +45,18 @@ mod podman;
 mod world;
 
 mod admission;
+mod audio_cpu;
+mod audio_cpu_verbs;
+mod audio_residency;
+mod audio_residency_fixes;
+mod audio_sampling;
+mod audio_stale_render;
+mod audio_voices;
 mod background_starts;
 mod chat_tool_reroute;
 mod dead_container;
 mod degradation;
+mod dev_image_start;
 mod gate_follows_running_container;
 mod gpu_hold;
 mod image_pipeline_peak;

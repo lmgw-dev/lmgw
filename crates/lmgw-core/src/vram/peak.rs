@@ -40,7 +40,12 @@
 //!   generation would otherwise write its weights into this row's peak and
 //!   keep them there forever, with the only evidence a figure on a status
 //!   page that looks plausible. A window whose residency changed teaches
-//!   nothing, which costs one generation and no correctness.
+//!   nothing, which costs one generation and no correctness. That includes
+//!   an audio model loading inside a container that was `ready` all along
+//!   (audio.cpp loads on its first request, realtime design §9.4): the
+//!   window's shape carries which audio containers hold their model
+//!   ([`Shape::audio`]), and one that is loading spoils every window it
+//!   overlaps.
 //!
 //! **A window that saw no rise teaches nothing either.** A 0 delta is
 //! indistinguishable from a job that finished between two samples (the 256²
@@ -76,7 +81,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::hf::fmt_bytes;
-use crate::runtime::registry::RuntimeState;
+use crate::runtime::registry::{RuntimeState, RuntimeView};
 use crate::runtime::Class;
 use crate::state::SharedState;
 
@@ -123,6 +128,13 @@ struct Row {
     /// Device `used` at the last sample where this row was `ready` and idle —
     /// the pipeline's idle residency, plus whatever else is on the card.
     baseline: Option<u64>,
+    /// What was on the card at that sample (WP7 review M2). A window opens
+    /// against the baseline of an *earlier* tick, so an audio model that
+    /// loaded between that tick and this one is in this tick's `used` but not
+    /// in the baseline — and would be learned as this pipeline's peak. The
+    /// window is clean only when this equals the shape it opens with, and no
+    /// audio load was in progress at the baseline either.
+    baseline_shape: Option<Shape>,
     /// The in-flight window currently open, if any.
     window: Option<Window>,
 }
@@ -145,11 +157,62 @@ struct Window {
     max_used: u64,
     /// What was resident when it opened. A window during which this changes
     /// is abandoned — see the module docs.
-    shape: Vec<(Class, String, RuntimeState)>,
+    shape: Shape,
     /// Cleared the moment the shape changes; a spoiled window is kept open
     /// (so it is not re-opened and re-spoiled every tick) and dropped when it
     /// closes.
     clean: bool,
+}
+
+/// What is on the card besides the window's own pipeline, as far as the
+/// registry and the audio residency can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Shape {
+    /// Every container that is starting or ready.
+    containers: Vec<(Class, String, RuntimeState)>,
+    /// Which ready audio containers hold their model ([`super::residency`]).
+    /// audio.cpp loads a model on its first request while its container
+    /// stays `ready`, so an audio load changes nothing above — and is a rise
+    /// of 1–3 GB on the same device-wide figure this sampler reads. A window
+    /// during which one loads (or idles out) is abandoned like one during
+    /// which a container started.
+    audio: AudioShape,
+}
+
+/// The audio half of a window's [`Shape`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct AudioShape {
+    /// `(generation, holds its model)` per ready audio container.
+    held: Vec<(u64, bool)>,
+    /// One of them is loading its model right now: a request in flight on a
+    /// container that has not answered one yet. That moves `used` for the
+    /// whole window it overlaps, whether or not it finishes inside it.
+    loading: bool,
+}
+
+impl AudioShape {
+    /// Every ready audio container in `entries`, by the residency's own rule
+    /// for whether it holds its model ([`super::residency::holds`]).
+    fn of(state: &SharedState, entries: &[RuntimeView]) -> Self {
+        let live: Vec<u64> = entries.iter().map(|e| e.generation).collect();
+        let gens = state.vram.residency.view(&live);
+        let snap = state.snapshot();
+        let now = std::time::Instant::now();
+        let mut shape = Self::default();
+        for e in entries
+            .iter()
+            .filter(|e| e.class == Class::Audio && e.state == RuntimeState::Ready)
+        {
+            let answered = gens.get(&e.generation).and_then(|g| g.last_answered);
+            let holds = super::residency::holds(answered, now, &snap.settings.audio);
+            shape.held.push((e.generation, holds));
+            if !holds && e.in_flight > 0 {
+                shape.loading = true;
+            }
+        }
+        shape.held.sort_unstable();
+        shape
+    }
 }
 
 /// The per-row sampler state. One of these lives in the task
@@ -198,11 +261,22 @@ impl PeakSampler {
         // one number for the box, because that is the granularity admission
         // decides at.
         let used: u64 = devices.iter().map(|d| d.used_bytes).sum();
-        let shape: Vec<(Class, String, RuntimeState)> = entries
+        let up: Vec<_> = entries
             .iter()
             .filter(|e| matches!(e.state, RuntimeState::Starting | RuntimeState::Ready))
-            .map(|e| (e.class, e.model_id.clone(), e.state))
+            .cloned()
             .collect();
+        let shape = Shape {
+            containers: up
+                .iter()
+                .map(|e| (e.class, e.model_id.clone(), e.state))
+                .collect(),
+            audio: AudioShape::of(state, &up),
+        };
+        // An audio model loading right now is moving `used` for the whole
+        // window it overlaps, start to end, whether or not it finishes
+        // inside it.
+        let audio_loading = shape.audio.loading;
 
         // model_id -> the delta that window ended on. Collected under the lock
         // and written outside it: the store is async and this is a `Mutex`.
@@ -217,23 +291,31 @@ impl PeakSampler {
                     // The weights are going onto the card right now, so this
                     // reading is neither an idle residency nor a job's peak.
                     row.baseline = None;
+                    row.baseline_shape = None;
                     row.window = None;
                     continue;
                 }
                 if e.in_flight > 0 {
                     match &mut row.window {
                         Some(w) => {
-                            if w.shape != shape {
+                            if w.shape != shape || audio_loading {
                                 w.clean = false;
                             }
                             w.max_used = w.max_used.max(used);
                         }
                         None => {
+                            // Against an earlier tick's baseline only when
+                            // that tick saw what this one sees, with no
+                            // audio load in progress (WP7 review M2).
+                            let baseline_matches = match &row.baseline_shape {
+                                Some(b) => *b == shape && !b.audio.loading,
+                                None => true,
+                            };
                             row.window = Some(Window {
                                 baseline: row.baseline,
                                 max_used: used,
                                 shape: shape.clone(),
-                                clean: true,
+                                clean: !audio_loading && baseline_matches,
                             })
                         }
                     }
@@ -241,11 +323,13 @@ impl PeakSampler {
                 }
                 if let Some(w) = row.window.take() {
                     // This very sample is the idle one, so it is what a window
-                    // that opened without a baseline is measured against.
+                    // that opened without a baseline is measured against —
+                    // and only when it saw what the window saw.
                     let delta = w.max_used.saturating_sub(w.baseline.unwrap_or(used));
-                    if w.clean && delta > 0 {
+                    let clean = w.clean && (w.baseline.is_some() || w.shape == shape);
+                    if clean && delta > 0 {
                         learned.push((e.model_id.clone(), delta));
-                    } else if !w.clean {
+                    } else if !clean {
                         tracing::debug!(
                             "image/{}: the in-flight window is not usable — something else \
                              started or stopped on the GPU while it was open",
@@ -254,6 +338,7 @@ impl PeakSampler {
                     }
                 }
                 row.baseline = Some(used);
+                row.baseline_shape = Some(shape.clone());
             }
         }
 

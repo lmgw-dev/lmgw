@@ -589,6 +589,55 @@ async fn the_tool_call_budget_ends_the_response_as_incomplete() {
     assert_eq!(statuses, vec!["completed", "completed", "incomplete"]);
 }
 
+/// A response the tool-call budget stopped stores a result for the call it
+/// did not make, so a chained request replays every call with its result
+/// and a strict upstream answers it (chat-voice design §7.3).
+#[tokio::test]
+async fn a_chain_after_a_budget_stop_replays_every_call_with_its_result() {
+    let mock = MockServer::start().await;
+    mount_sequence(
+        &mock,
+        vec![
+            call_reply("c1", "tools__echo", json!({"text": "one"})),
+            call_reply("c2", "tools__echo", json!({"text": "two"})),
+            text_reply("fine"),
+        ],
+    )
+    .await;
+    let (state, base) = setup(&mock.uri()).await;
+    let (mcp_url, calls) = mcp_stub().await;
+    register_mcp(&state, "stub", "tools", &mcp_url).await;
+    let tools = json!([{"type": "mcp", "server_label": "tools"}]);
+
+    let (_, first) = post(
+        &base,
+        json!({"model": "my-model", "input": "echo twice", "max_tool_calls": 1,
+               "tools": tools}),
+    )
+    .await;
+    assert_eq!(first["status"], "incomplete", "{first:#}");
+    let (status, _) = post(
+        &base,
+        json!({"model": "my-model", "input": "go on", "tools": tools,
+               "previous_response_id": first["id"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let reqs = mock.received_requests().await.unwrap();
+    let chained: Value = serde_json::from_slice(&reqs.last().unwrap().body).unwrap();
+    let msgs = chained["messages"].as_array().unwrap();
+    let c2 = msgs
+        .iter()
+        .position(|m| m["tool_calls"][0]["id"] == "c2")
+        .expect("the unmade call is replayed");
+    assert_eq!(msgs[c2 + 1]["role"], "tool", "{chained:#}");
+    assert_eq!(msgs[c2 + 1]["tool_call_id"], "c2", "{chained:#}");
+    assert!(msgs[c2 + 1].to_string().contains("not run"), "{chained:#}");
+    assert_eq!(msgs.last().unwrap()["content"], "go on");
+}
+
 /// The Settings ceiling is a ceiling: a request may lower it, never raise it.
 #[tokio::test]
 async fn a_request_cannot_raise_the_gateway_tool_call_ceiling() {
@@ -763,6 +812,41 @@ async fn sse_events(base: &str, body: Value) -> Vec<(String, Value)> {
         }
     }
     out
+}
+
+/// A stream that breaks after part of its answer: the text already relayed
+/// closes as an `incomplete` message, then `response.failed` — not as a
+/// completed answer.
+#[tokio::test]
+async fn a_stream_failing_mid_answer_closes_its_message_incomplete() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half an\"}}]}\n\n",
+                "data: {\"error\":{\"message\":\"the model fell over\"}}\n\n",
+            ),
+            "text/event-stream",
+        ))
+        .mount(&mock)
+        .await;
+    let (_state, base) = setup(&mock.uri()).await;
+    let events = sse_events(
+        &base,
+        json!({"model": "my-model", "input": "hi", "stream": true}),
+    )
+    .await;
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"response.output_text.delta"), "{names:?}");
+    assert_eq!(names.last(), Some(&"response.failed"), "{names:?}");
+    let item = events
+        .iter()
+        .find(|(n, d)| n == "response.output_item.done" && d["item"]["type"] == "message")
+        .map(|(_, d)| &d["item"])
+        .expect("the message item is closed");
+    assert_eq!(item["status"], "incomplete", "{item}");
+    assert_eq!(item["content"][0]["text"], "half an");
 }
 
 #[tokio::test]

@@ -325,6 +325,32 @@ impl PlanCache {
         .await
     }
 
+    /// The weights file an eager audio row has on the card once it is ready
+    /// ([`super::residency::selected_weights_bytes`]), memoized like
+    /// [`Self::audio`]. In `weights_bytes`; the rest of the footprint is
+    /// empty.
+    pub async fn audio_weights(&self, models_dir: &str, m: &AudioModel) -> u64 {
+        let (weight_id, family) = (m.weight_id.clone(), m.family.clone());
+        let key = format!(
+            "audio-weights|{models_dir}|{}|{}|{family}",
+            m.path,
+            weight_id.as_deref().unwrap_or_default()
+        );
+        let models = PathBuf::from(models_dir);
+        let root = models.join(m.path.trim_start_matches('/'));
+        self.get_or_insert(key, move || {
+            let bytes = super::residency::selected_weights_bytes(
+                &models,
+                &root,
+                weight_id.as_deref(),
+                &family,
+            );
+            Footprint::new(bytes, 0, None, None)
+        })
+        .await
+        .weights_bytes
+    }
+
     /// An sd-server pipeline is a *list* of files — a diffusion model, a VAE,
     /// one to three text encoders — so the estimate is their sum
     /// (image-generation design §9). A `files` key naming a directory

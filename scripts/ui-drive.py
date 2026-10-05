@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Usage: scripts/ui-drive.py STEPS.json [--size 1440x900] [--dsf 1] [--shots DIR] [--base URL] [--block-writes]
+#                            [--fake-mic WAV] [--mute-audio]
 """Drive the dashboard through a scripted interaction and check what it did.
 
 ui-matrix.py answers "does every page fit at every size"; this answers "does
@@ -28,8 +29,16 @@ STEPS.json is a list of objects, run in order:
                                       second with clickCount 2, 90 ms apart)
   {"click_at": [x, y]}                mouse click at a viewport point
   {"key": "ArrowDown", "n": 3}        press a key n times (Enter, Escape, Tab, a…)
+  {"keydown": "ControlRight"}         press a key and keep it down (ControlRight,
+  {"keyup": "ControlRight"}           ControlLeft, Shift…, Space), then let it go:
+                                      what a hold-to-talk key needs (trusted events)
+  {"mousedown": "css", "nth": 0}      press the mouse at the element's centre and
+  {"mouseup": "css", "nth": 0}        keep it down, then release it there
   {"type": "gem 12"}                  type text into the focused element
   {"js": "expr"}                      evaluate and print the result
+  {"script": "scripts/x.js"}          evaluate a file's code in the page (a
+                                      helper the later steps call: an in-page
+                                      mock, a harness), its result printed
   {"expect": "expr", "label": "…"}    evaluate (a promise is awaited, 30 s or "timeout");
                                       truthy is PASS, anything else FAIL
   {"wait": 0.5}                       sleep
@@ -54,6 +63,12 @@ so a guard/leak/panic check is a plain step list: `go` back and forth, then
 `same`. Visit each page once before the first snap: the renderer keeps a
 template of every view it has drawn, so a first visit always adds a few
 dozen detached nodes that are a cache, not a leak.
+
+--fake-mic WAV gives Chrome a fake microphone that plays WAV once (Chrome's
+--use-fake-device-for-media-stream and --use-file-for-fake-audio-capture,
+"%noloop"), grants it without a prompt, and mutes the browser (--mute-audio):
+no real microphone is opened and nothing is audible. For the chat voice drives
+(scripts/drive/chat-voice-*.json); use a TTS-generated recording.
 
 --block-writes answers every non-GET fetch in the page with a local 400 and
 records it in window.__blocked, so a destructive control can be pressed (a
@@ -80,7 +95,6 @@ import argparse
 import asyncio
 import base64
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -92,6 +106,9 @@ from pathlib import Path
 
 import websockets
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import chrome_profile  # noqa: E402
+
 KEYS = {
     # key: (code, windowsVirtualKeyCode)
     "Enter": ("Enter", 13), "Escape": ("Escape", 27), "Tab": ("Tab", 9),
@@ -100,6 +117,15 @@ KEYS = {
     "ArrowLeft": ("ArrowLeft", 37), "ArrowRight": ("ArrowRight", 39),
     "PageDown": ("PageDown", 34), "PageUp": ("PageUp", 33),
     "Home": ("Home", 36), "End": ("End", 35), "/": ("Slash", 191),
+}
+
+# Keys held down by {"keydown": …}: code -> (key, windowsVirtualKeyCode,
+# location, the modifier bit it sets while down).
+HELD = {
+    "ControlRight": ("Control", 17, 2, 2), "ControlLeft": ("Control", 17, 1, 2),
+    "ShiftLeft": ("Shift", 16, 1, 8), "ShiftRight": ("Shift", 16, 2, 8),
+    "AltLeft": ("Alt", 18, 1, 1),
+    "Space": (" ", 32, 0, 0),
 }
 
 
@@ -186,9 +212,17 @@ async def run(args, steps, token) -> int:
         port = s.getsockname()[1]
     # /tmp is a tmpfs: a Chrome profile left behind is RAM (see ui-matrix.py).
     profile = tempfile.mkdtemp(prefix="lmgw-shot-")
+    tmp_before = chrome_profile.snapshot()
+    media = ["--mute-audio", "--autoplay-policy=no-user-gesture-required"] if args.mute_audio else []
+    if args.fake_mic:
+        # A fake microphone playing the file once, granted without a prompt,
+        # and the browser muted: no real device, nothing audible.
+        media += ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                  f"--use-file-for-fake-audio-capture={Path(args.fake_mic).resolve()}%noloop",
+                  "--mute-audio"]
     chrome = subprocess.Popen(
         ["google-chrome", "--headless", "--disable-gpu", f"--remote-debugging-port={port}",
-         "--window-size=1440,900", f"--user-data-dir={profile}", "about:blank"],
+         "--window-size=1440,900", f"--user-data-dir={profile}", *media, "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     failures = 0
     try:
@@ -296,14 +330,31 @@ async def run(args, steps, token) -> int:
             async def key(k):
                 code, vk = KEYS.get(k, (f"Key{k.upper()}" if len(k) == 1 else k,
                                         ord(k.upper()) if len(k) == 1 else 0))
+                # With Ctrl or Alt held ({"keydown": "ControlRight"}) a key is a
+                # shortcut (Ctrl+C copies), not text.
+                mods = held["mods"]
                 text = k if len(k) == 1 else ("\r" if k == "Enter" else "")
+                if mods & 3:
+                    text = ""
                 down = {"type": "keyDown" if text else "rawKeyDown", "key": k, "code": code,
-                        "windowsVirtualKeyCode": vk}
+                        "windowsVirtualKeyCode": vk, "modifiers": mods}
                 if text:
                     down["text"] = text
                 await call("Input.dispatchKeyEvent", **down)
                 await call("Input.dispatchKeyEvent", type="keyUp", key=k, code=code,
-                           windowsVirtualKeyCode=vk)
+                           windowsVirtualKeyCode=vk, modifiers=mods)
+
+            held = {"mods": 0}
+
+            async def key_hold(code, down):
+                k, vk, loc, bit = HELD.get(code, (code, 0, 0, 0))
+                if down:
+                    held["mods"] |= bit
+                else:
+                    held["mods"] &= ~bit
+                await call("Input.dispatchKeyEvent", type="rawKeyDown" if down else "keyUp",
+                           key=k, code=code, windowsVirtualKeyCode=vk, location=loc,
+                           modifiers=held["mods"])
 
             await resize(args.size)
             await call("Page.enable")
@@ -378,6 +429,21 @@ async def run(args, steps, token) -> int:
                           + (f", changed {json.dumps(grew)}" if grew else ""))
                 elif "click_at" in st:
                     await mouse_click(*st["click_at"])
+                elif "keydown" in st or "keyup" in st:
+                    await key_hold(st.get("keydown") or st["keyup"], "keydown" in st)
+                elif "mousedown" in st or "mouseup" in st:
+                    sel = st.get("mousedown") or st["mouseup"]
+                    pt = await centre(sel, st.get("nth", 0))
+                    if not isinstance(pt, list):
+                        print(f"{tag} {'mousedown' if 'mousedown' in st else 'mouseup'} {sel}:"
+                              " no such element")
+                        failures += 1
+                        return
+                    if "mousedown" in st:
+                        await call("Input.dispatchMouseEvent", type="mouseMoved", x=pt[0], y=pt[1])
+                    await call("Input.dispatchMouseEvent",
+                               type="mousePressed" if "mousedown" in st else "mouseReleased",
+                               x=pt[0], y=pt[1], button="left", clickCount=1)
                 elif "key" in st:
                     for _ in range(st.get("n", 1)):
                         await key(st["key"])
@@ -392,6 +458,9 @@ async def run(args, steps, token) -> int:
                             await call("Input.insertText", text=ch)
                 elif "js" in st:
                     print(f"{tag} {json.dumps(await ev(st['js']))[:2000]}")
+                elif "script" in st:
+                    code = Path(st["script"]).read_text()
+                    print(f"{tag} script {st['script']}: {json.dumps(await ev(code))[:300]}")
                 elif "expect" in st:
                     # JS truthiness, not Python's: an element comes back as {}.
                     # A promise (an async IIFE, a fetch chain) is awaited, with a
@@ -448,11 +517,7 @@ async def run(args, steps, token) -> int:
     finally:
         chrome.terminate()
         chrome.wait()
-        for _ in range(5):
-            shutil.rmtree(profile, ignore_errors=True)
-            if not os.path.exists(profile):
-                break
-            time.sleep(0.2)
+        chrome_profile.remove(profile, tmp_before)
     return failures
 
 
@@ -470,6 +535,11 @@ def main() -> int:
     ap.add_argument("--shots", metavar="DIR", help="where {\"shot\": name} steps write")
     ap.add_argument("--block-writes", action="store_true",
                     help="answer every non-GET fetch with a local 400 (window.__blocked)")
+    ap.add_argument("--fake-mic", metavar="WAV",
+                    help="a fake microphone playing WAV once; the browser muted")
+    ap.add_argument("--mute-audio", action="store_true",
+                    help="mute the browser and let audio start without a gesture (a script's click "
+                         "may then start playback); with --fake-mic too")
     ap.add_argument("--podman-guard", default="lmgw-dev", metavar="PREFIX",
                     help="container names to compare before/after ('' disables)")
     args = ap.parse_args()

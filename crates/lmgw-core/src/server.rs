@@ -84,12 +84,18 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/tasks/stream", post(task_stream))
         .layer(axum::extract::DefaultBodyLimit::disable());
 
-    // Both `/v1` groups are `Inference` (principals §3.2), so one
-    // `route_layer` over the merged pair is the whole declaration. `route_layer`
+    // The realtime WebSocket (realtime design §10): a `GET` with no body, so
+    // neither body limit above applies, and its frames have their own explicit
+    // ceilings (`realtime.max_message_mb` / `max_frame_mb`, §10.4).
+    let realtime_api = Router::new().route("/realtime", get(crate::realtime::upgrade));
+
+    // All three `/v1` groups are `Inference` (principals §3.2), so one
+    // `route_layer` over the merged groups is the whole declaration. `route_layer`
     // rather than `layer`: it runs **after** routing, so `/v1/nonsense` is
     // still a 404 rather than a 401 that implies the route exists.
     let api = json_api
         .merge(media_api)
+        .merge(realtime_api)
         .route_layer(require(&state, Cap::Inference));
 
     // MCP gateway (northbound). Two capabilities on one path — see
@@ -195,6 +201,7 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/v1/images/edits", Cap::Inference),
     ("POST", "/v1/tasks/run", Cap::Inference),
     ("POST", "/v1/tasks/stream", Cap::Inference),
+    ("GET", "/v1/realtime", Cap::Inference),
     // -- MCP: the aggregate plane, and the self-admin plane on one path ----
     ("POST", "/mcp", Cap::Inference),
     ("GET", "/mcp", Cap::Inference),
@@ -318,6 +325,9 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/chat/api/threads/{id}/settings", Cap::Admin),
     ("POST", "/chat/api/threads/{id}/delete", Cap::Admin),
     ("POST", "/chat/api/threads/{id}/send", Cap::Admin),
+    ("POST", "/chat/api/threads/{id}/voice/warm", Cap::Admin),
+    ("POST", "/chat/api/threads/{id}/transcribe", Cap::Admin),
+    ("POST", "/chat/api/threads/{id}/speech/stop", Cap::Admin),
     ("POST", "/chat/api/threads/{id}/pin", Cap::Admin),
     ("POST", "/chat/api/threads/{id}/move", Cap::Admin),
     ("GET", "/chat/api/search", Cap::Admin),
@@ -346,6 +356,11 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
         "/chat/api/threads/{id}/messages/{mid}/regenerate",
         Cap::Admin,
     ),
+    (
+        "POST",
+        "/chat/api/threads/{id}/messages/{mid}/speak",
+        Cap::Admin,
+    ),
     ("POST", "/chat/api/threads/{id}/attachments", Cap::Admin),
     ("POST", "/chat/api/attachments/{id}/delete", Cap::Admin),
     ("GET", "/chat/api/attachments/{id}", Cap::Admin),
@@ -359,6 +374,7 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("GET", "/audio-lab/api/refs/{name}", Cap::Admin),
     ("POST", "/audio-lab/api/refs/{name}/delete", Cap::Admin),
     ("POST", "/audio-lab/api/refs/{name}/text", Cap::Admin),
+    ("POST", "/audio-lab/api/refs/{name}/transcribe", Cap::Admin),
     ("POST", "/audio-lab/api/speech", Cap::Admin),
     ("POST", "/audio-lab/api/transcriptions", Cap::Admin),
     ("POST", "/audio-lab/api/alignments", Cap::Admin),
@@ -388,14 +404,60 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("GET", "/{*path}", Cap::Public),
 ];
 
-/// Serve until `shutdown` resolves.
+/// Serve until `shutdown` resolves: [`bind`], then [`serve`].
 pub async fn run(
     state: SharedState,
     addr: std::net::SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    let listener = bind(&state, addr).await?;
+    serve(state, listener, shutdown, None).await
+}
+
+/// Refuse a dev instance on the production prefix, then bind `addr`.
+///
+/// Its own step so an entry point can act on the outcome before it serves:
+/// the shell builds its window only once this process holds the port, and
+/// never points one at whoever else does (chat-voice WP11 review m3).
+pub async fn bind(
+    state: &SharedState,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<tokio::net::TcpListener> {
+    // Before anything lists, removes or starts a container by prefix.
+    if let Some(why) =
+        crate::config::dev_prefix_refusal(state.dev(), &state.snapshot().settings.container_prefix)
+    {
+        anyhow::bail!(why);
+    }
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))
+}
+
+/// Serve on `listener` (from [`bind`]) until `shutdown` resolves.
+///
+/// `released`, when given, fires as the listener closes: right after
+/// `shutdown`, before the open connections have drained. A restart that binds
+/// the same port again waits for it instead of racing the old listener.
+pub async fn serve(
+    state: SharedState,
+    listener: tokio::net::TcpListener,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    released: Option<tokio::sync::oneshot::Sender<()>>,
+) -> anyhow::Result<()> {
+    use axum::serve::ListenerExt;
+    // `bind` asked already; a caller with a listener of its own has not.
+    if let Some(why) =
+        crate::config::dev_prefix_refusal(state.dev(), &state.snapshot().settings.container_prefix)
+    {
+        anyhow::bail!(why);
+    }
+    let addr = listener.local_addr()?;
     let app = build_router(state.clone());
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // axum drops the listener when the shutdown signal ends its accept loop;
+    // the tap closure goes with it, and so does this guard.
+    let guard = ReleasedOnDrop(released);
+    let listener = listener.tap_io(move |_| guard.held());
     tracing::info!("lmgw listening on http://{addr}");
     // The headless owner's whole login procedure: click it (§3.4). One line
     // per start, beside the listening line, at the same level and target —
@@ -429,9 +491,36 @@ pub async fn run(
     Ok(())
 }
 
+/// Fires its sender when dropped: [`serve`]'s "the listener is closed".
+struct ReleasedOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl ReleasedOnDrop {
+    /// What the tap closure calls, so the closure owns the guard.
+    fn held(&self) {}
+}
+
+impl Drop for ReleasedOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 /// Periodic log pruning + llama-server status polling (§8, §10) and
 /// restarting HF downloads interrupted by the last shutdown.
-pub fn spawn_background_tasks(state: SharedState) {
+///
+/// Once per state: [`serve`] calls it on every start, and the app's
+/// "Restart gateway" serves again on the same state, which used to start
+/// another reaper, status tick, pruner and boot pass beside the running
+/// ones on each restart. The tasks belong to the state, not to a listener.
+/// `false` when they ran already.
+pub fn spawn_background_tasks(state: SharedState) -> bool {
+    use std::sync::atomic::Ordering;
+    if state.background.swap(true, Ordering::AcqRel) {
+        tracing::debug!("background tasks run already; a restarted server shares them");
+        return false;
+    }
     // First start after the usage-analytics upgrade: build the rollups from
     // whatever request logs are already there, so the Usage page opens on the
     // month that actually happened rather than on an empty chart that reads as
@@ -483,6 +572,14 @@ pub fn spawn_background_tasks(state: SharedState) {
     // (`Registry::adopt`) instead of overwriting a live entry.
     let st = state.clone();
     tokio::spawn(async move { crate::runtime::lifecycle::boot(&st).await });
+
+    // Agent-container reconciliation and the run-dir sweep (container-runtime
+    // §6.4), beside the model runtime's boot and for the same reasons. Here
+    // rather than in `AppState::init`: both act on `container_prefix`, and a
+    // fresh data dir only gets its own prefix from the entry point's
+    // dev-instance step, between `init` and this (chat-voice WP5 review B1).
+    let st = state.clone();
+    tokio::spawn(async move { crate::agents::container::boot_reconcile(&st).await });
 
     // The idle reaper (§3.7). Its own task rather than a rider on the 5 s
     // status tick: it is the one background job that *stops containers*, and
@@ -648,6 +745,7 @@ pub fn spawn_background_tasks(state: SharedState) {
             }
         }
     });
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -819,9 +917,25 @@ async fn principal_mw(State(state): State<SharedState>, mut req: Request, next: 
     // make a browser attach on its own. A bearer principal skips the rule —
     // `curl` sends no `Origin`, and a page that holds a bearer did not get it
     // from the browser.
-    let by_cookie = crate::agents::token::presented(req.headers()).is_none()
+    //
+    // The browser's key on `/v1/realtime` (realtime design §10.1): a page
+    // cannot set headers on a WebSocket, so it offers the key as an
+    // `openai-insecure-api-key.<key>` subprotocol. Read here and only for that
+    // path — `realtime::subprotocol_key` answers `None` everywhere else —
+    // rather than in `token::presented`, which every route shares: widening
+    // that would make the header a credential on all of them. A presented
+    // bearer still wins, and like a bearer it is a deliberate credential, so
+    // the cookie rule below does not apply to it.
+    let bearer = crate::agents::token::presented(req.headers()).is_some();
+    let subprotocol_key =
+        crate::realtime::subprotocol_key(req.uri().path(), req.headers()).filter(|_| !bearer);
+    let by_cookie = !bearer
+        && subprotocol_key.is_none()
         && crate::principal::session_cookie(req.headers()).is_some();
-    let resolved = crate::principal::resolve(req.headers(), &snap);
+    let resolved = match subprotocol_key {
+        Some(key) => crate::principal::from_bearer(&snap, key),
+        None => crate::principal::resolve(req.headers(), &snap),
+    };
     // A cookie that matched nothing authenticated nothing, and the rule is
     // about cookies that authenticate — so it is a cookie which *resolved to
     // something*, refusal included, that the origin is judged for. And judged
@@ -921,6 +1035,13 @@ fn gate(
             .cloned()
             .unwrap_or_default();
         let mut pending = req.extensions().get::<Refusal>().cloned();
+        // `OriginalUri`: this layer runs inside the `/v1` nest, whose
+        // request URI has the prefix stripped.
+        let path = req
+            .extensions()
+            .get::<axum::extract::OriginalUri>()
+            .map_or_else(|| req.uri().path().to_string(), |u| u.path().to_string());
+        let label = refusal_label(&path);
 
         if admin_token {
             if let Some(spelled) = req
@@ -969,7 +1090,7 @@ fn gate(
         // sees the login card, and has no way back in but the process log.
         // It stays `Anonymous` for the handler, which is what it is.
         if let Some(refusal) = pending.filter(|_| cap != Cap::Public) {
-            return refuse(&state, &ctx, cap, refusal, req.headers()).await;
+            return refuse(&state, &ctx, cap, refusal, req.headers(), label).await;
         }
         if !ctx.principal.holds(cap, &snap) {
             // `/v1` with **Require API key** on and nothing presented: the
@@ -977,7 +1098,7 @@ fn gate(
             // release, unchanged and in its own dialect (§3.9).
             if cap == Cap::Inference && matches!(ctx.principal, Principal::Anonymous) {
                 let e = GatewayError::Unauthorized("missing or invalid gateway API key");
-                return policy_refusal(&state, &ctx, &e, req.headers()).await;
+                return policy_refusal(&state, &ctx, &e, req.headers(), label).await;
             }
             let refusal = match &ctx.principal {
                 // Nothing was presented at all, so there is no row to name —
@@ -985,7 +1106,7 @@ fn gate(
                 Principal::Anonymous => Refusal::session_required(),
                 other => Refusal::forbidden(cap, other),
             };
-            return refuse(&state, &ctx, cap, refusal, req.headers()).await;
+            return refuse(&state, &ctx, cap, refusal, req.headers(), label).await;
         }
 
         // Expiry, requests/minute, tokens/minute and concurrency
@@ -1004,17 +1125,33 @@ fn gate(
         else {
             return next.run(req).await;
         };
-        let guard = match state.policy.admit(key, chrono::Utc::now()) {
-            Ok(g) => g,
-            Err(e) => return policy_refusal(&state, &ctx, &e, req.headers()).await,
+        // A realtime session is not a model call: its calls are counted one
+        // by one as it makes them, so the upgrade takes the slot uncounted
+        // (realtime design §10.3).
+        let admitted = if path == crate::realtime::PATH {
+            state.policy.admit_session(key, chrono::Utc::now())
+        } else {
+            state.policy.admit(key, chrono::Utc::now())
         };
+        let guard = match admitted {
+            Ok(g) => g,
+            Err(e) => return policy_refusal(&state, &ctx, &e, req.headers(), label).await,
+        };
+        // Offered to the handler first: a realtime session's response is the
+        // 101, whose body ends at the upgrade, so it takes the slot into the
+        // session instead (realtime design §10.3, `SlotHandover`). Every other
+        // handler leaves it here.
+        let handover = guard.map(crate::policy::SlotHandover::new);
+        if let Some(h) = &handover {
+            req.extensions_mut().insert(h.clone());
+        }
         let resp = next.run(req).await;
         // The guard must outlive the *body*, not the handler: a streamed
         // response is built in microseconds and then drains for minutes on a
         // spawned task, so dropping here would let a `concurrency_limit` of 1
         // admit fifty concurrent streams. `hold_until_body_end` moves it into
         // the body's own lifetime, which is the thing the limit is about.
-        hold_until_body_end(resp, guard)
+        hold_until_body_end(resp, handover.and_then(|h| h.take()))
     })
 }
 
@@ -1031,6 +1168,7 @@ async fn refuse(
     cap: Cap,
     refusal: Refusal,
     headers: &axum::http::HeaderMap,
+    label: ClientProto,
 ) -> Response {
     if cap != Cap::Inference {
         return refusal.into_response();
@@ -1040,7 +1178,7 @@ async fn refuse(
         code: refusal.code,
         message: refusal.message,
     };
-    policy_refusal(state, ctx, &e, headers).await
+    policy_refusal(state, ctx, &e, headers, label).await
 }
 
 /// `X-Lmgw-Run: <job id>` — which run a request belongs to (container-runtime
@@ -1121,17 +1259,29 @@ fn hold_until_body_end(resp: Response, guard: Option<crate::policy::ConcurrencyG
     Response::from_parts(parts, axum::body::Body::from_stream(stream))
 }
 
+/// The `request_logs` label of a refusal on `path`: a realtime upgrade's
+/// rows say `realtime` like the session's own (realtime design §11), the rest
+/// of `/v1` and `/mcp` say `openai`.
+fn refusal_label(path: &str) -> ClientProto {
+    if path == crate::realtime::PATH {
+        ClientProto::Realtime
+    } else {
+        ClientProto::OpenaiChat
+    }
+}
+
 async fn policy_refusal(
     state: &SharedState,
     ctx: &RequestCtx,
     e: &GatewayError,
     headers: &axum::http::HeaderMap,
+    label: ClientProto,
 ) -> Response {
     // A refusal is traffic. Without a row, the one refusal class most likely to
     // be hit in a loop — a rate limit — is the one class Logs, Traffic and the
     // Usage page can never show, and "why did my agent stop working" is
     // answerable only from the client's side of the connection.
-    crate::proxy::record_middleware_refusal(state, ctx, e).await;
+    crate::proxy::record_middleware_refusal(state, ctx, e, label).await;
     let body = if headers.contains_key("anthropic-version") {
         e.to_anthropic_json()
     } else {
@@ -1487,6 +1637,13 @@ async fn image_edits(
 pub(crate) struct VoicesQuery {
     #[serde(default)]
     model: String,
+    /// Where the list comes from. Absent or `config`: a local audio model is
+    /// answered from lmgw's own catalog (its presets, the voices its package
+    /// ships, its embeddings and the voice library) without starting it.
+    /// `engine`: ask the model's own server — a local model's container is
+    /// started if it is down. A remote model is always asked.
+    #[serde(default)]
+    probe: Option<String>,
 }
 
 /// `GET /v1/audio/voices?model=<alias>` — voice ids/presets of a TTS model.
@@ -1498,7 +1655,14 @@ async fn audio_voices(
         let err = GatewayError::BadRequest("missing 'model' query parameter".into());
         return (err.http_status(), Json(err.to_openai_json())).into_response();
     }
-    proxy::handle_audio_voices(state, q.model.trim()).await
+    let probe = match proxy::VoicesProbe::parse(q.probe.as_deref()) {
+        Ok(p) => p,
+        Err(msg) => {
+            let err = GatewayError::BadRequest(msg);
+            return (err.http_status(), Json(err.to_openai_json())).into_response();
+        }
+    };
+    proxy::handle_audio_voices(state, q.model.trim(), probe).await
 }
 
 /// Shared body decode for the two `/v1/tasks/*` routes.
@@ -1645,7 +1809,8 @@ fn lmgw_block() -> Value {
              rerankers; 'audio/…' local audio.cpp models; 'image/…' local stable-diffusion.cpp \
              models; other prefixes are cloud upstreams passed through.",
             "A 503 whose error code is gpu_hold means local models are deliberately paused by \
-             the owner; cloud aliases still work. Do not retry in a loop.",
+             the owner; cloud aliases still work, and so do audio models that run on the CPU. \
+             Do not retry in a loop.",
             "A 503 whose error code is gpu_benchmark means a benchmark run has the GPU to \
              itself; local models come back when it finishes or is canceled, cloud aliases \
              still work. Do not retry in a loop.",
@@ -1681,7 +1846,14 @@ fn wants_anthropic(req: &Request) -> bool {
 /// when they are known; the list carries the gateway-wide `lmgw` block (model
 /// capabilities design §2).
 async fn list_models(State(state): State<SharedState>, req: Request) -> Response {
-    let models = crate::capabilities::exposed::exposed_entries(&state).await;
+    let mut models = crate::capabilities::exposed::exposed_entries(&state).await;
+    // Chat models answer voice sessions once ASR and TTS are configured
+    // (realtime design §12).
+    if crate::realtime::advertise::speaks(&state).await {
+        models
+            .iter_mut()
+            .for_each(crate::realtime::advertise::advertise);
+    }
     if wants_anthropic(&req) {
         let data: Vec<Value> = models.iter().map(anthropic_model_object).collect();
         Json(json!({
@@ -1714,7 +1886,12 @@ async fn model_by_id(
     // is also what Chat's send-time vision check resolves through, so the two
     // cannot drift (model-capabilities design; chat-archive-pin-attachments
     // review finding 9).
-    let model = crate::capabilities::exposed::exposed_entry(&state, &id).await;
+    let mut model = crate::capabilities::exposed::exposed_entry(&state, &id).await;
+    if let Some(e) = model.as_mut() {
+        if crate::realtime::advertise::speaks(&state).await {
+            crate::realtime::advertise::advertise(e);
+        }
+    }
     match &model {
         Some(e) if anthropic => Json(anthropic_model_object(e)).into_response(),
         Some(e) => Json(openai_model_object(e)).into_response(),

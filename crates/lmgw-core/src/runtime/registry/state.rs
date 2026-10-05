@@ -12,7 +12,7 @@ use crate::gate::facts::GateFacts;
 use super::*;
 use crate::runtime::descriptor::{RungCharge, RungPos};
 use crate::runtime::image::ImageCapabilities;
-use crate::runtime::Class;
+use crate::runtime::{Class, Placement};
 
 pub(super) type Key = (Class, String);
 
@@ -132,6 +132,20 @@ pub(super) struct Entry {
     /// first ledger read. `None` on a row without a ladder, which the ledger
     /// then sizes from the row exactly as before.
     pub(super) charge: Option<RungCharge>,
+    /// The configuration an audio container was **started** (or adopted)
+    /// with, as its learned residency is keyed
+    /// ([`ModelRuntime::resident_key`](crate::runtime::descriptor::ModelRuntime::resident_key),
+    /// realtime design §9.4): a reading from a container that still runs a
+    /// previous configuration — an edit while it was busy, a class image
+    /// changed without a restart — must not teach the row's current one.
+    /// `None` for every other class.
+    pub(super) resident_key: Option<String>,
+    /// Where this container computes, as it was **started** (or adopted)
+    /// ([`ModelRuntime::placement`](crate::runtime::descriptor::ModelRuntime::placement)):
+    /// a row switched to the CPU while its container kept running is still
+    /// on the GPU until that container stops. What the ledger, the hold
+    /// sweep and the residency read for a running container.
+    pub(super) placement: Placement,
     /// Sends in flight on this container, as the ladder gate counts them
     /// ([`SendGuard`]) — what a climb's drain waits for (ladder design §12
     /// entry 10). Not [`Self::in_flight`]: that counts claims, and a turn
@@ -202,6 +216,14 @@ pub struct RuntimeView {
     /// published: [`Self::rung`] is its outside form.
     #[serde(skip)]
     pub charge: Option<RungCharge>,
+    /// [`Entry::resident_key`]. Not published: it identifies a configuration
+    /// to the audio residency, and means nothing to a surface.
+    #[serde(skip)]
+    pub resident_key: Option<String>,
+    /// [`Entry::placement`]. Published only when `cpu`, so a frame of GPU
+    /// containers is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Placement::is_gpu")]
+    pub placement: Placement,
     /// Whom the container runs for ([`Entry::owner`], candidate-aliases
     /// design §4.4, §6). Absent for the owner's, so a frame without
     /// background traffic is byte for byte what it was.

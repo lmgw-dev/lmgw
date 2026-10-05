@@ -321,7 +321,7 @@ pub(crate) async fn count_text_route(
                     &r.upstream_model,
                     input,
                 )? {
-                    CountPlan::Request(rb) => Ok(rb),
+                    CountPlan::Request(rb) => Ok(*rb),
                     // The plan cannot change shape between two builds against
                     // the same upstream protocol; this arm exists because the
                     // type says it could.

@@ -8,7 +8,8 @@
 //! carry. Boot reconciliation (`runtime::registry::Registry::reconcile`,
 //! driven by `runtime::lifecycle::boot`, spawned from `server::run` below)
 //! trusts that prefix to mean "every container under it belongs to *this*
-//! gateway" and force-removes whatever it does not recognize — so a dev
+//! gateway" and force-removes whatever it does not recognize, and so does the
+//! agent-container reconciliation spawned beside it — so a dev
 //! instance sharing the production prefix can stop the real app's model
 //! containers the moment it boots. That is exactly what bit a live-check
 //! agent on 2026-09-25, which had to hand-apply migrations and forge sqlx's
@@ -46,24 +47,22 @@ async fn main() -> anyhow::Result<()> {
     // (the RPM refuses to start on a dir a newer build migrated), and the
     // prefix override below would rewrite the real app's container_prefix and
     // bind_addr. A dev run names its own dir; scripts/dev-instance.sh makes one.
-    let data_dir = std::env::var("LMGW_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .map_err(|_| {
-            anyhow::anyhow!(
-            "LMGW_DATA_DIR is not set; the headless runner does not fall back to the installed \
-             app's data dir. Use scripts/dev-instance.sh, or set LMGW_DATA_DIR to a scratch copy."
+    let data_dir = lmgw_core::state::data_dir_from_env().ok_or_else(|| {
+        anyhow::anyhow!(
+            "LMGW_DATA_DIR is not set (or empty); the headless runner does not fall back to the \
+             installed app's data dir. Use scripts/dev-instance.sh, or set LMGW_DATA_DIR to a \
+             scratch copy."
         )
-        })?;
-    let prod_dir = lmgw_core::state::default_data_dir();
-    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize())
-    {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    };
-    if same(&data_dir, &prod_dir) {
+    })?;
+    // Under either name: `default_data_dir` follows XDG_DATA_HOME, and a
+    // moved XDG_DATA_HOME leaves the installed app's dir where it was
+    // (chat-voice WP11 review m4).
+    let installed = lmgw_core::state::default_data_dir();
+    let home_default = lmgw_core::state::home_default_data_dir();
+    if lmgw_core::state::is_installed_data_dir(&data_dir, &installed, home_default.as_deref()) {
         anyhow::bail!(
-            "LMGW_DATA_DIR points at the installed app's data dir ({}); use a scratch copy",
-            prod_dir.display()
+            "LMGW_DATA_DIR ({}) is the installed app's data dir; use a scratch copy",
+            data_dir.display()
         );
     }
     // Opens and migrates the store as its first steps. Always a dev
@@ -82,9 +81,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| state.snapshot().settings.bind_addr.clone())
         .parse()?;
 
-    // The store is open and migrated; nothing has reconciled a container yet
-    // — `server::run` below is what spawns that. Last chance to steer this
-    // data dir away from the production `container_prefix` before it does.
+    // The store is open and migrated; nothing has listed or removed a
+    // container yet: `AppState::init_with` touches none, and `server::run`
+    // below spawns every pass that does — model, benchmark and agent
+    // reconciliation and the run-dir sweep (chat-voice WP5 review B1). Last
+    // chance to steer this data dir away from the production
+    // `container_prefix` before it does; `server::run` refuses a dev instance
+    // still on it.
     ensure_dev_instance_safety(&state, cli_addr.as_deref()).await?;
 
     server::run(state.clone(), addr, async {

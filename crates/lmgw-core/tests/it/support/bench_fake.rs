@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -41,6 +41,11 @@ pub struct FakeLauncher {
     pub stall_on: Mutex<Option<String>>,
     /// Notified by `rm`: the fake llama-server's connections break.
     pub rm_kills: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// How many `run`s answer as podman does when the published port was
+    /// taken before it bound it.
+    pub taken: AtomicUsize,
+    /// A port the next `free_port` hands out instead of [`Self::port`], once.
+    pub decoy: Mutex<Option<u16>>,
 }
 
 impl FakeLauncher {
@@ -74,7 +79,7 @@ pub fn out(status: i32, stdout: &str, stderr: &str) -> std::io::Result<CmdOutput
 #[async_trait::async_trait]
 impl BenchLauncher for FakeLauncher {
     fn free_port(&self) -> std::io::Result<u16> {
-        Ok(self.port)
+        Ok(self.decoy.lock().unwrap().take().unwrap_or(self.port))
     }
 
     async fn podman(&self, argv: &[String]) -> std::io::Result<CmdOutput> {
@@ -111,6 +116,18 @@ impl BenchLauncher for FakeLauncher {
                     })
                     .collect();
                 out(0, &serde_json::to_string(&rows).unwrap(), "")
+            }
+            "run"
+                if self
+                    .taken
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok() =>
+            {
+                out(
+                    126,
+                    "",
+                    "Error: rootlessport listen tcp 127.0.0.1:41234: bind: address already in use",
+                )
             }
             "rm" if self.rm_fails.load(Ordering::SeqCst) => {
                 out(125, "", "Error: container state improper")

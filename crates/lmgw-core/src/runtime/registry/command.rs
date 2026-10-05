@@ -85,13 +85,55 @@ pub type PortAllocator = Arc<dyn Fn() -> std::io::Result<u16> + Send + Sync>;
 /// There is no port range setting and no persisted port field: the ephemeral
 /// range *is* the real limit, and inventing a smaller window would only add a
 /// way to run out. The window between the listener closing and `podman run`
-/// binding is genuinely racy, and that race is handled where it surfaces —
-/// [`Registry::start_container`](crate::runtime::registry::Registry::start_container) retries once on a fresh port.
+/// binding is genuinely racy, and that race is handled where it surfaces:
+/// every `podman run` that publishes such a port retries once on a fresh one
+/// ([`PortRetry`]) — a model's start, an agent's service container and a
+/// benchmark's container.
 pub fn ephemeral_port() -> std::io::Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+/// The §10.4 retry of a `podman run` that publishes an [`ephemeral_port`]:
+/// once, and only when the port was taken between the probe listener closing
+/// and podman binding it. Not a general retry loop — any other failure is
+/// the start's answer as it is.
+///
+/// The caller collects the husk before it runs again (measured, §10.4: the
+/// failed run leaves the container object behind in `created`) and asks for
+/// a fresh port.
+#[derive(Debug, Default)]
+pub struct PortRetry {
+    used: bool,
+}
+
+impl PortRetry {
+    /// Whether a `podman run` that failed with `stderr` gets its one more
+    /// go on a fresh port. True at most once.
+    pub fn again(&mut self, stderr: &str) -> bool {
+        let again = !self.used && is_address_in_use(stderr);
+        self.used |= again;
+        again
+    }
+}
+
+/// Detection is on stderr, never on an exit code: measured (§10.4), the
+/// container object podman leaves behind reads exit 0 because it never
+/// started, and `podman run` itself exits 126 for reasons other than a port
+/// clash. Several spellings because the message comes from whichever network
+/// backend is in play (pasta, slirp4netns, rootful CNI).
+fn is_address_in_use(stderr: &str) -> bool {
+    let low = stderr.to_ascii_lowercase();
+    [
+        "address already in use",
+        "address in use",
+        "port is already allocated",
+        "cannot listen on the tcp port",
+    ]
+    .iter()
+    .any(|needle| low.contains(needle))
 }
 
 /// What [`Registry::image_facts`](crate::runtime::registry::Registry::image_facts) read about one image.
@@ -208,4 +250,31 @@ pub fn without_gpus(args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
     out.extend(HIDE_GPUS.iter().map(|s| s.to_string()));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_port_clash_is_retried_once_and_nothing_else_is() {
+        // pasta's, slirp4netns' and rootful CNI's spellings.
+        for stderr in [
+            "Error: pasta failed with exit code 1:\nFailed to bind port 41234 (Address already \
+             in use) for option '-t 127.0.0.1/41234-41234:8080-8080', exiting",
+            "Error: rootlessport listen tcp 127.0.0.1:41234: bind: address already in use",
+            "Error: cannot listen on the TCP port: listen tcp4 :41234: bind: address in use",
+            "Error: port is already allocated",
+        ] {
+            let mut retry = PortRetry::default();
+            assert!(retry.again(stderr), "{stderr}");
+            assert!(!retry.again(stderr), "only once: {stderr}");
+        }
+        let mut retry = PortRetry::default();
+        assert!(!retry.again("Error: image not known"));
+        assert!(
+            retry.again("bind: address already in use"),
+            "another failure does not use the retry up"
+        );
+    }
 }

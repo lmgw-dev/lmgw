@@ -225,7 +225,6 @@ pub fn Agents() -> impl IntoView {
             sub="A manifest each — model, prompts, tools, a config form"
             density=Density::Dense
             actions=move || {
-                let restore = restore.clone();
                 view! {
                     <input
                         class="input w-sm"

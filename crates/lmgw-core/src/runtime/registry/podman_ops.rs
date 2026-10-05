@@ -14,6 +14,15 @@ impl Registry {
         self.map().contains_key(&(class, model_id.to_string()))
     }
 
+    /// Where this model's running container computes ([`Entry::placement`]),
+    /// `None` when none is in the map. The truth for that container: its row
+    /// may have been switched since it started.
+    pub fn placement_of(&self, class: Class, model_id: &str) -> Option<crate::runtime::Placement> {
+        self.map()
+            .get(&(class, model_id.to_string()))
+            .map(|e| e.placement)
+    }
+
     /// The host port of this model's container while it is `ready` — `None`
     /// when it is starting, stopping or not there at all. For a caller that
     /// polls the live container's own routes (the pool ledger's deferred

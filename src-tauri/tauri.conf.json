@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "lmgw",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "io.github.lmgw-dev.lmgw",
   "build": {},
   "app": {
@@ -21,7 +21,23 @@
     ],
     "linux": {
       "rpm": {
-        "depends": ["git", "podman", "poppler-utils"]
+        "depends": ["git", "podman", "poppler-utils"],
+        "files": {
+          "/usr/share/licenses/lmgw/onnxruntime/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-onnxruntime",
+          "/usr/share/licenses/lmgw/onnxruntime/ThirdPartyNotices.txt": "../crates/lmgw-core/assets/realtime/ThirdPartyNotices-onnxruntime.txt",
+          "/usr/share/licenses/lmgw/silero-vad/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-silero",
+          "/usr/share/licenses/lmgw/smart-turn/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-smart-turn",
+          "/usr/share/licenses/lmgw/smart-turn/LICENSE-whisper": "../crates/lmgw-core/assets/realtime/LICENSE-whisper"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/share/licenses/lmgw/onnxruntime/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-onnxruntime",
+          "/usr/share/licenses/lmgw/onnxruntime/ThirdPartyNotices.txt": "../crates/lmgw-core/assets/realtime/ThirdPartyNotices-onnxruntime.txt",
+          "/usr/share/licenses/lmgw/silero-vad/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-silero",
+          "/usr/share/licenses/lmgw/smart-turn/LICENSE": "../crates/lmgw-core/assets/realtime/LICENSE-smart-turn",
+          "/usr/share/licenses/lmgw/smart-turn/LICENSE-whisper": "../crates/lmgw-core/assets/realtime/LICENSE-whisper"
+        }
       }
     }
   }

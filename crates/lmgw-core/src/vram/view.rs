@@ -38,6 +38,16 @@ pub struct ResidentView {
     /// an unlearned peak is a real hole in what admission can promise and a
     /// silent `null` is not a warning.
     pub peak_extra_bytes: Option<u64>,
+    /// What a `ready` audio container will still load on its first request
+    /// and the driver cannot show yet (realtime design §9.4,
+    /// [`residency`](crate::vram::residency)) — admission keeps it free on
+    /// top of the measured use. Its expected residency less what it was read
+    /// holding at rest (its CUDA context, or an eager row's weights); where
+    /// that could not be read, all of it for a lazy row and what comes on top
+    /// of its weights file for an eager one. Again after audio.cpp unloaded
+    /// it for idling. `None` while the model is loaded, and for every other
+    /// class.
+    pub pending_bytes: Option<u64>,
     /// Why the estimate is partial, when it is.
     pub note: Option<String>,
 }

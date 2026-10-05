@@ -1,0 +1,14 @@
+{
+ "summary": "Synthetic speech only: Piper TTS with the en_US-ljspeech-medium voice, plus seeded synthetic noise. No recordings of people, no voice clones, no German voice (Thorsten excluded because it is fine-tuned from lessac).",
+ "voice": {
+  "en_US-ljspeech-medium": {
+   "model_card": "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ljspeech/medium/MODEL_CARD",
+   "evidence": [
+    "\"* License: public domain\" (Dataset URL: https://keithito.com/LJ-Speech-Dataset/)",
+    "\"Trained from scratch for 1000 epochs on medium quality settings using the LJ Speech dataset.\""
+   ],
+   "model_repo_licence": "rhasspy/piper-voices HF repo metadata (https://huggingface.co/rhasspy/piper-voices): license: mit"
+  }
+ },
+ "noise": "synthetic numpy, seed 1234 (0.5 white + 0.5 pink, -50 dBFS RMS); no licence constraint"
+}

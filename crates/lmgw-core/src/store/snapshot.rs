@@ -139,6 +139,24 @@ pub async fn load_settings(pool: &SqlitePool) -> DbResult<Settings> {
         );
         settings.chat_pdf_mode = "text".to_string();
     }
+    // The Chat's voice settings (chat-voice design §2.1).
+    crate::ops::normalise_loaded_chat_voice(&mut settings);
+    // Both WebSocket limits at "no bound" leaves nothing to bound a frame
+    // with, and tungstenite reserves a frame's declared length up front — one
+    // header could abort the process (realtime design §10.4,
+    // `realtime::Limits::from_settings`).
+    if settings.realtime.max_message_mb == 0 && settings.realtime.max_frame_mb == 0 {
+        let d = crate::config::RealtimeSettings::default();
+        tracing::error!(
+            "stored settings realtime.max_message_mb and max_frame_mb are both 0 (no bound), \
+             which leaves a WebSocket frame unbounded; using the defaults ({} / {} MiB) until \
+             one of them is set",
+            d.max_message_mb,
+            d.max_frame_mb
+        );
+        settings.realtime.max_message_mb = d.max_message_mb;
+        settings.realtime.max_frame_mb = d.max_frame_mb;
+    }
     Ok(settings)
 }
 

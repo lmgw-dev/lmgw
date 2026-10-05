@@ -13,6 +13,24 @@ use crate::ir::{Completion, StreamDelta};
 pub enum ClientProto {
     OpenaiChat,
     AnthropicMessages,
+    /// `GET /v1/realtime`'s model calls and refusals (realtime design §11):
+    /// its own `request_logs` label, so a voice session's chat, ASR and TTS
+    /// rows are told from plain `openai` traffic. It never parses or
+    /// serializes a chat body itself — the session speaks its own events —
+    /// so the body shapes below are OpenAI's, whose error object the
+    /// Realtime protocol shares.
+    Realtime,
+    /// The Chat tab's in-process speech calls (chat-voice design §5, §6):
+    /// dictation's transcription and read-aloud's clauses. Labelled `chat`,
+    /// like the Chat's own model turns, so its voice traffic is told apart
+    /// from `openai` clients in Logs and is charged to the same internal
+    /// identity as its turns. Never a chat body of its own: OpenAI's shapes,
+    /// like `Realtime`.
+    Chat,
+    /// An Admin Chat thread's in-process speech calls: labelled `admin`, like
+    /// that thread's model turns (`telemetry::ADMIN_PROTO`), and charged to
+    /// the same internal identity. OpenAI's shapes, like `Chat`.
+    AdminChat,
 }
 
 impl ClientProto {
@@ -20,13 +38,18 @@ impl ClientProto {
         match self {
             Self::OpenaiChat => "openai",
             Self::AnthropicMessages => "anthropic",
+            Self::Realtime => "realtime",
+            Self::Chat => "chat",
+            Self::AdminChat => crate::telemetry::ADMIN_PROTO,
         }
     }
 
     /// Non-streaming response body for a completed request.
     pub fn serialize_completion(&self, alias: &str, c: &Completion) -> serde_json::Value {
         match self {
-            Self::OpenaiChat => openai::serialize_completion(alias, c),
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => {
+                openai::serialize_completion(alias, c)
+            }
             Self::AnthropicMessages => anthropic::serialize_completion(alias, c),
         }
     }
@@ -34,7 +57,7 @@ impl ClientProto {
     /// Error body in the client's protocol shape (§14).
     pub fn serialize_error(&self, e: &GatewayError) -> serde_json::Value {
         match self {
-            Self::OpenaiChat => e.to_openai_json(),
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => e.to_openai_json(),
             Self::AnthropicMessages => e.to_anthropic_json(),
         }
     }
@@ -43,7 +66,9 @@ impl ClientProto {
     /// wire framing.
     pub fn new_stream_encoder(&self, alias: &str) -> Box<dyn ClientStreamEncoder> {
         match self {
-            Self::OpenaiChat => Box::new(openai::OpenaiStreamEncoder::new(alias)),
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => {
+                Box::new(openai::OpenaiStreamEncoder::new(alias))
+            }
             Self::AnthropicMessages => Box::new(anthropic::AnthropicStreamEncoder::new(alias)),
         }
     }

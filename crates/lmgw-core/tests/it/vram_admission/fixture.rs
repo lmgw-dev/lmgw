@@ -178,6 +178,9 @@ pub(super) async fn fixture_n(
     // The fourth class shares the directory: `add_image_model` writes its
     // pipeline file there, and nothing else in these tests reads it.
     s.image.models_dir = dir.path().display().to_string();
+    // And the audio class (realtime design §9.4): `audio_residency` puts its
+    // model directories there.
+    s.audio.models_dir = dir.path().display().to_string();
     s.vram.headroom_mb = headroom_mb;
     s.vram.queue_timeout_seconds = 2;
     store::save_settings(&state.db, &s).await.unwrap();

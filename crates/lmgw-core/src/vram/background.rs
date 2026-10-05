@@ -96,7 +96,7 @@ pub enum BackgroundStart {
     /// The model is up and claimed for a guest: it joined a container that
     /// was already there, or started one into room it could make without
     /// disturbing the owner. `Background`-owned if this call started it.
-    Started(LocalHold),
+    Started(Box<LocalHold>),
     /// It cannot be started without disturbing the owner, and this says what
     /// is in the way. Written to read after "GPU in use by " — the gate's
     /// deferral message (`GatewayError::GpuDeferred`) — e.g. "chat/qwen
@@ -120,7 +120,9 @@ pub enum BackgroundStart {
 /// gate passes [`Restart::No`] for an alternate.
 ///
 /// Under the GPU hold this is `gpu_hold`, like every admission: nothing local
-/// takes new work then, loaded or not (gpu-hold design §2). A start it joined
+/// takes new work then, loaded or not (gpu-hold design §2) — also when the
+/// hold comes on while the join waits for a start in flight: the claim it
+/// gets then is let go at once, and the join refused. A start it joined
 /// that failed, or that a stop landed on, is that start's error (502).
 pub async fn join(
     state: &SharedState,
@@ -225,8 +227,15 @@ impl VramScheduler {
         origin: Origin,
         restart: Restart,
     ) -> Result<Option<LocalHold>, GatewayError> {
-        if let Some(block) = snap.gpu_block() {
+        if let Some(block) = snap.gpu_block_for(target.class, &target.model_id) {
             return Err(block.refusal(target.model_id.clone(), ""));
+        }
+        // The row's placement is the next start's; a join takes the running
+        // container, which may still be on the GPU after a switch to the CPU
+        // — the realtime warm load joins exactly such a container and sends
+        // it its first request, which loads the weights.
+        if let Some(refusal) = super::on_cpu::gpu_container_under_hold(state, snap, target) {
+            return Err(refusal);
         }
         // No row: nothing a hold could ever restart, and nothing this
         // gateway treats as its model.
@@ -238,9 +247,32 @@ impl VramScheduler {
             .join(target.class, &target.model_id, origin)
             .await
         {
-            Ok(Some(guard)) => Ok(Some(LocalHold::claimed(
-                state, target, alias, guard, origin, restart,
-            ))),
+            Ok(Some(guard)) => {
+                // Asked again now that the claim is taken: the join may have
+                // parked on a start in flight for as long as that start took,
+                // and the hold (or a lease) may have come on meanwhile — the
+                // checks above were this join's arrival. By where the claimed
+                // container computes, not the row: that container is what the
+                // claim's first request reaches, and a warm load's request is
+                // what puts a lazy model's weights on the card.
+                let now = state.snapshot();
+                let placement = state
+                    .runtime()
+                    .placement_of(target.class, &target.model_id)
+                    .unwrap_or(crate::runtime::Placement::Gpu);
+                let refusal =
+                    super::on_cpu::gpu_container_under_hold(state, &now, target).or_else(|| {
+                        now.gpu_block_at(placement)
+                            .map(|block| block.refusal(target.model_id.clone(), ""))
+                    });
+                if let Some(refusal) = refusal {
+                    drop(guard);
+                    return Err(refusal);
+                }
+                Ok(Some(LocalHold::claimed(
+                    state, target, alias, guard, origin, restart,
+                )))
+            }
             Ok(None) => Ok(None),
             Err(e) => Err(upstream_error(e)),
         }
@@ -290,7 +322,7 @@ impl VramScheduler {
                 )
                 .await?
             {
-                return Ok(BackgroundStart::Started(hold));
+                return Ok(BackgroundStart::Started(Box::new(hold)));
             }
             if let Some(why) = self.owner_waiting(state) {
                 return Ok(BackgroundStart::Blocked(why));
@@ -399,14 +431,14 @@ impl VramScheduler {
                         alias = %alias,
                         "{label} is up for background traffic ('{alias}')"
                     );
-                    return Ok(BackgroundStart::Started(LocalHold::claimed(
+                    return Ok(BackgroundStart::Started(Box::new(LocalHold::claimed(
                         state,
                         target,
                         alias,
                         guard,
                         Origin::Background,
                         Restart::Background,
-                    )));
+                    ))));
                 }
                 // It parked on a climb that could not start its rung, and the
                 // model is gone: look again from the top.
@@ -591,44 +623,48 @@ impl LocalHold {
             }
         }
     }
+}
 
-    /// The fresh claim for a hold whose model is gone, by this hold's
-    /// [`Restart`] rule when it is not [`Restart::Admit`] (that one is
-    /// `readmit_base`'s own admission). [`GatewayError::CandidateLost`] when
-    /// the rule says the request may not bring it back: the gate answers it
-    /// at the send by picking again (entry 45), never by a normal admission.
-    pub(super) async fn restart_candidate(&self) -> Result<LocalHold, GatewayError> {
-        let model_id = self.target.model_id.clone();
-        let lost = |detail: String| GatewayError::CandidateLost {
-            model: model_id.clone(),
-            detail,
-        };
-        match self.restart {
-            Restart::Admit => Err(GatewayError::Internal(
-                "restart_candidate is for candidate holds; an Admit hold re-admits".into(),
-            )),
-            Restart::No => Err(lost(format!(
-                "'{}' used it because it was already loaded, and a candidate alias never \
-                 starts a model it only uses while loaded",
-                self.alias
-            ))),
-            Restart::Background => {
-                let snap = self.state.snapshot();
-                let Some(runtime) = model_runtime(&snap, self.target.class, &model_id) else {
-                    return Err(lost("it is no longer configured".into()));
-                };
-                match self
-                    .state
-                    .vram
-                    .start_background_at(&self.state, &snap, &self.target, &runtime, &self.alias)
-                    .await?
-                {
-                    BackgroundStart::Started(hold) => Ok(hold),
-                    BackgroundStart::Blocked(why) => Err(lost(format!(
-                        "background traffic restarts it only without disturbing the owner, and \
-                         the GPU is in use by {why}"
-                    ))),
-                }
+/// The fresh claim for a hold whose model is gone — or a let-go claim's
+/// regain ([`super::LetGo::regain`]) — by the hold's [`Restart`] rule when
+/// it is not [`Restart::Admit`] (that one is `admit_base`'s admission).
+/// [`GatewayError::CandidateLost`] when the rule says the request may not
+/// bring it back: the gate answers it at the send by picking again (entry
+/// 45), never by a normal admission.
+pub(super) async fn restart_candidate(
+    state: &SharedState,
+    target: &Target,
+    alias: &str,
+    restart: Restart,
+) -> Result<LocalHold, GatewayError> {
+    let model_id = target.model_id.clone();
+    let lost = |detail: String| GatewayError::CandidateLost {
+        model: model_id.clone(),
+        detail,
+    };
+    match restart {
+        Restart::Admit => Err(GatewayError::Internal(
+            "restart_candidate is for candidate holds; an Admit hold re-admits".into(),
+        )),
+        Restart::No => Err(lost(format!(
+            "'{alias}' used it because it was already loaded, and a candidate alias never starts \
+             a model it only uses while loaded"
+        ))),
+        Restart::Background => {
+            let snap = state.snapshot();
+            let Some(runtime) = model_runtime(&snap, target.class, &model_id) else {
+                return Err(lost("it is no longer configured".into()));
+            };
+            match state
+                .vram
+                .start_background_at(state, &snap, target, &runtime, alias)
+                .await?
+            {
+                BackgroundStart::Started(hold) => Ok(*hold),
+                BackgroundStart::Blocked(why) => Err(lost(format!(
+                    "background traffic restarts it only without disturbing the owner, and the \
+                     GPU is in use by {why}"
+                ))),
             }
         }
     }

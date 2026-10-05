@@ -206,3 +206,5 @@ pub async fn process_env_lock() -> EnvGuard {
         _lock: lock,
     }
 }
+
+pub mod captured_log;

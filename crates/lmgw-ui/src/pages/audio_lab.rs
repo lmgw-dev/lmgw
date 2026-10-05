@@ -42,6 +42,7 @@ use crate::catalog::CatalogEntry;
 use crate::fmt::human_bytes;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
+use crate::widgets::voice_picker::voice_name;
 use crate::widgets::{use_toasts, ConfirmButton, Explain, ModelPicker, Select};
 
 // ---------------------------------------------------------------------------
@@ -97,6 +98,10 @@ struct Clip {
 struct RefsResp {
     clips: Vec<Clip>,
     error: Option<String>,
+    /// An upload's clips the settings' transcription model wrote a
+    /// transcript for — `{clip, transcript_source}` or `{clip,
+    /// transcribe_error}` each (audio-class gap 5).
+    transcribed: Vec<Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,20 +1251,6 @@ fn now_hms() -> String {
     )
 }
 
-/// audio.cpp reports voices as bare ids; a family that answers with objects is
-/// read for the usual id keys rather than rendered as `[object Object]`.
-fn voice_name(v: &Value) -> Option<String> {
-    if let Some(s) = v.as_str() {
-        return Some(s.to_string());
-    }
-    for key in ["id", "voice_id", "name"] {
-        if let Some(s) = v[key].as_str() {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // Response consumption
 // ---------------------------------------------------------------------------
@@ -2297,7 +2288,18 @@ fn VoiceLibrary(
                     Ok(r) => {
                         lab.clips.set(r.clips);
                         lab.clips_err.set(String::new());
-                        toasts.ok("clip uploaded");
+                        let failed: Vec<String> = r
+                            .transcribed
+                            .iter()
+                            .filter_map(|t| t["transcribe_error"].as_str().map(str::to_string))
+                            .collect();
+                        match (r.transcribed.len(), failed.first()) {
+                            (0, _) => toasts.ok("clip uploaded"),
+                            (_, None) => toasts.ok("clip uploaded and transcribed"),
+                            (_, Some(why)) => {
+                                toasts.warn(format!("clip uploaded, not transcribed: {why}"))
+                            }
+                        }
                     }
                     Err(e) => lab.clips_err.set(e),
                 },
@@ -2321,6 +2323,43 @@ fn VoiceLibrary(
                 }
                 Err(e) => lab.clips_err.set(e),
             }
+        });
+    };
+
+    // A local speech-to-text model writes the transcript (audio-class gap
+    // 5): the setting's, `Settings → Runtimes → Audio → Clip transcripts`.
+    // One at a time — the clip being transcribed, or `*` for all missing.
+    let transcribing = RwSignal::new(None::<String>);
+    let transcribe = move |name: String| {
+        transcribing.set(Some(name.clone()));
+        spawn_local(async move {
+            let url = format!("/audio-lab/api/refs/{}/transcribe", enc(&name));
+            match lab_post_json::<RefsResp>(url, json!({})).await {
+                Ok(r) => {
+                    lab.clips.set(r.clips);
+                    lab.clips_err.set(String::new());
+                    toasts.ok(format!("{name} transcribed"));
+                }
+                Err(e) => lab.clips_err.set(e),
+            }
+            transcribing.set(None);
+        });
+    };
+    let transcribe_missing = move |_| {
+        transcribing.set(Some("*".into()));
+        spawn_local(async move {
+            match crate::api::post::<Value, _>("/api/op/voice_transcribe", &json!({})).await {
+                Ok(v) => {
+                    let msg = v["message"].as_str().unwrap_or("transcribed").to_string();
+                    match v["failed"].as_array().is_some_and(|f| !f.is_empty()) {
+                        true => toasts.warn(msg),
+                        false => toasts.ok(msg),
+                    }
+                }
+                Err(e) => lab.clips_err.set(e.to_string()),
+            }
+            transcribing.set(None);
+            on_reload();
         });
     };
 
@@ -2408,10 +2447,16 @@ fn VoiceLibrary(
                     when=move || !lab.clips.get().is_empty()
                     fallback=|| view! { <div class="empty">"No clips yet."</div> }
                 >
-                    <For each=move || lab.clips.get() key=|c| c.name.clone() let:c>
+                    // Keyed on the transcript too, so a transcript written by
+                    // the server shows in the row's box.
+                    <For
+                        each=move || lab.clips.get()
+                        key=|c| (c.name.clone(), c.transcript.clone())
+                        let:c
+                    >
                         {
                             let name = c.name.clone();
-                            let (n2, n3) = (name.clone(), name.clone());
+                            let (n2, n3, n4) = (name.clone(), name.clone(), name.clone());
                             let text_sig = RwSignal::new(c.transcript.clone());
                             let voice = c.voice.clone();
                             view! {
@@ -2424,6 +2469,16 @@ fn VoiceLibrary(
                                         on:click=move |_| lab.preview_clip.set(Some(n2.clone()))
                                     >
                                         "▸"
+                                    </button>
+                                    <button
+                                        class="btn ghost sm"
+                                        title="Write the transcript with the local speech-to-text \
+                                               model of Settings → Runtimes → Audio → Clip \
+                                               transcripts (replaces this one)"
+                                        disabled=move || transcribing.get().is_some()
+                                        on:click=move |_| transcribe(n4.clone())
+                                    >
+                                        "ASR"
                                     </button>
                                     <ConfirmButton
                                         label="✕"
@@ -2463,9 +2518,25 @@ fn VoiceLibrary(
                         }
                     })
             }}
+            <Show when=move || transcribing.get().is_some()>
+                <div class="chip live">
+                    <i class="dot"></i>
+                    "transcribing…"
+                </div>
+            </Show>
             <div class="row" style="margin-top:auto">
                 <button class="btn ghost" on:click=move |_| on_reload()>
                     "Refresh"
+                </button>
+                <button
+                    class="btn ghost"
+                    title="Transcribe every clip without a transcript, with the local \
+                           speech-to-text model of Settings → Runtimes → Audio → Clip transcripts \
+                           — the clips never leave this machine"
+                    disabled=move || transcribing.get().is_some()
+                    on:click=transcribe_missing
+                >
+                    "Transcribe missing"
                 </button>
             </div>
             {move || {

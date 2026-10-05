@@ -1,0 +1,21 @@
+event: turn
+data: {"user_message_id":1}
+
+event: retrieval
+data: {"budget_tokens":4000,"dropped":0,"excerpts":[{"chunk_id":"9198a759195092176d5b66894dbe982fc277f8f29a78365e46827fc39a8b0de0","file":"notes.md","file_id":1,"file_sha":"f1ccb707ef1158893194d15c681dc47320e097f93e521fda64b8444a966d3fdf","heading_path":"Taxes 2025 > Refund","kb":"Taxes","kb_id":1,"page":null,"score":0.032786883413791656,"span_end":98,"span_start":50,"text":"## Refund\n\nThe refund of 412 EUR arrived in May.","tokens":20},{"chunk_id":"0adb6e2a48dee6f5dd6911b3e343e2507d555b817ec1d11e81fd806e2eaf46d8","file":"notes.md","file_id":1,"file_sha":"f1ccb707ef1158893194d15c681dc47320e097f93e521fda64b8444a966d3fdf","heading_path":"Taxes 2025","kb":"Taxes","kb_id":1,"page":null,"score":0.0320020467042923,"span_end":48,"span_start":0,"text":"# Taxes 2025\n\nThe tax return was filed in March.","tokens":19},{"chunk_id":"8fa253f6430a5cb83acea577d84d2e7425655c9c0e38b36365fb7e6bf1dcd5d5","file":"notes.md","file_id":1,"file_sha":"f1ccb707ef1158893194d15c681dc47320e097f93e521fda64b8444a966d3fdf","heading_path":"Taxes 2025 > Costs","kb":"Taxes","kb_id":1,"page":null,"score":0.016129031777381897,"span_end":180,"span_start":100,"text":"## Costs\n\n| Item | Amount |\n| --- | --- |\n| Accountant | 300 |\n| Software | 40 |","tokens":32}],"kb_ids":[1],"message_id":1,"ms":0,"notes":[],"query":"When did the refund arrive?","reused":false,"searched":["Taxes"],"tokens":71}
+
+event: delta
+data: {"text":"It arrived "}
+
+event: delta
+data: {"text":"in May [1]."}
+
+event: stop
+data: {"reason":"stop"}
+
+event: usage
+data: {"completion_tokens":5,"prompt_tokens":10}
+
+event: done
+data: {"aborted":false,"answered_by":null,"completion_tokens":5,"message_id":2,"model":"m","prompt_tokens":10,"reasoning_ignored":[],"reasoning_note":null,"saved":true,"timings":null,"total_ms":0,"ttfb_ms":0}
+

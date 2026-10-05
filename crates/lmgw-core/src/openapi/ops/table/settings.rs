@@ -43,6 +43,32 @@ pub(super) const OPS: &[OpDoc] = &[
         example: None,
     },
     OpDoc {
+        name: "realtime_budget",
+        tag: TAG,
+        summary: "Size the realtime voice cascade against the GPU",
+        description: Some(
+            "What the configured GET /v1/realtime cascade is expected to hold on the GPU, stage \
+             by stage — turn detection (CPU), the chat model, speech to text, the barge-in word \
+             check when it uses another model, text to speech — with their sum, the VRAM \
+             headroom, what lmgw may use (vram.budget_mb or the GPU's total) and what other \
+             programs hold now. Each figure is the one admission charges: a chat row's GGUF \
+             weights + KV cache, an audio row's learned residency or, before it has one, its \
+             on-disk size; a cloud stage holds nothing, and a stage with no figure is listed \
+             as unknown. An argument left out is the saved setting, so a draft can be sized \
+             before it is saved. Starts nothing.",
+        ),
+        tool: None,
+        args: OpArgs::Struct(|g| {
+            g.root_schema_for::<lmgw_api_types::realtime::RealtimeBudgetArgs>()
+        }),
+        response: Resp::Json(|g| g.root_schema_for::<lmgw_api_types::realtime::RealtimeBudget>()),
+        writes: false,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: None,
+    },
+    OpDoc {
         name: "update_check",
         tag: TAG,
         summary: "Check whether a newer lmgw release is available",

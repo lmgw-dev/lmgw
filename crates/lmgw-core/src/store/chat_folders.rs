@@ -12,8 +12,9 @@ use super::*;
 ///
 /// This struct is the one place a new thread setting joins the folders
 /// feature: add the field here and to [`ThreadDefaults::apply`], and (for the
-/// input checks) to `web::chat_folders::check_defaults`; the UI form is
-/// `ThreadDefaultsForm` in `lmgw-ui`'s `pages/chat_folders.rs`.
+/// input checks) to `web::chat_folders::check_defaults`. The UI keeps folder
+/// defaults as JSON: its folder form is the thread settings' fields
+/// (`lmgw-ui`'s `pages/chat_folders.rs`, `FolderSettingsForm`).
 ///
 /// Input is strict (`deny_unknown_fields`: a typo is a 400, not a silently
 /// ignored default); what is *stored* is read tolerantly
@@ -43,6 +44,9 @@ pub struct ThreadDefaults {
     pub kb_ids: Option<Vec<i64>>,
     pub kb_mode: Option<KbMode>,
     pub kb_budget_tokens: Option<i64>,
+    /// Voice overrides (chat-voice design §2.2), laid field by field over
+    /// the new thread's (empty) voice.
+    pub voice: Option<ThreadVoice>,
 }
 
 impl ThreadDefaults {
@@ -53,12 +57,20 @@ impl ThreadDefaults {
         let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str(text) else {
             return Self::default();
         };
+        // The voice is read on its own and tolerantly (chat-voice design
+        // §2.2): it is strict on input, so a key a newer build added inside
+        // it would fail the whole read below, and `unwrap_or_default` would
+        // wipe every default of the folder.
+        let voice = map.remove("voice").and_then(ThreadVoice::from_value);
         // Every field serializes (no skip), so the default's keys are the
         // known set — adding a field needs no second list.
         if let Ok(serde_json::Value::Object(known)) = serde_json::to_value(Self::default()) {
             map.retain(|k, _| known.contains_key(k));
         }
-        serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default()
+        let mut d: Self =
+            serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_default();
+        d.voice = voice;
+        d
     }
 
     /// Lay the set fields over `t`. Unset fields leave the thread's own
@@ -94,6 +106,9 @@ impl ThreadDefaults {
         }
         t.kb_mode = d.kb_mode.unwrap_or(t.kb_mode);
         t.kb_budget_tokens = d.kb_budget_tokens.or(t.kb_budget_tokens);
+        if let Some(v) = &d.voice {
+            t.voice.overlay(v);
+        }
     }
 }
 
@@ -247,7 +262,7 @@ pub async fn set_chat_thread_folder(
 }
 
 /// Insert a new thread built from `t`'s settings (model, prompt, sampling,
-/// reasoning, MCP servers, knowledge bases, `kind`, `folder_id`) in one statement, so a thread
+/// reasoning, MCP servers, knowledge bases, voice, `kind`, `folder_id`) in one statement, so a thread
 /// seeded from a folder's defaults never exists half-configured. Title and
 /// timestamps take the column defaults. Returns the new id.
 pub async fn create_chat_thread_from(pool: &SqlitePool, t: &ChatThread) -> DbResult<i64> {
@@ -257,9 +272,9 @@ pub async fn create_chat_thread_from(pool: &SqlitePool, t: &ChatThread) -> DbRes
            (model_alias, system_prompt, temperature, max_tokens, kind, mcp_tools,
             reasoning_enabled, reasoning_effort, reasoning_budget, folder_id,
             top_p, top_k, min_p, repeat_penalty, presence_penalty, frequency_penalty,
-            seed, stop, kb_ids, kb_mode, kb_budget_tokens)
+            seed, stop, kb_ids, kb_mode, kb_budget_tokens, voice)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21)",
+                 ?19, ?20, ?21, ?22)",
     )
     .bind(&t.model_alias)
     .bind(&t.system_prompt)
@@ -282,6 +297,7 @@ pub async fn create_chat_thread_from(pool: &SqlitePool, t: &ChatThread) -> DbRes
     .bind(super::chat_knowledge::id_list_json(&t.kb_ids))
     .bind(t.kb_mode.as_str())
     .bind(t.kb_budget_tokens)
+    .bind(t.voice.to_stored())
     .execute(pool)
     .await?;
     Ok(res.last_insert_rowid())

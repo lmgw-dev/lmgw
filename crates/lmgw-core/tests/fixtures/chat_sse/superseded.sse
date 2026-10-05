@@ -1,0 +1,9 @@
+event: turn
+data: {"user_message_id":1}
+
+event: error
+data: {"code":"superseded","message":"a newer turn of this thread started (or the thread went away), so this reply was stopped and is not saved"}
+
+event: done
+data: {"aborted":true}
+

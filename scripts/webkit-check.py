@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Usage: scripts/webkit-check.py [--base URL] [--routes /a,/b,...] [--sizes WxH,...]
 #                                 [--shots DIR] [--token-file PATH] [--json OUT]
-#                                 [--backend auto|broadway|wayland]
+#                                 [--backend auto|broadway|wayland] [--media]
 """WebKitGTK compatibility check for lmgw's dashboard.
 
 Every other UI script here (ui-matrix.py, ui-drive.py, screenshot.py) drives
@@ -40,20 +40,49 @@ checks it is open and its Save button's rect is inside the viewport — also at
 it with the dialog's own Close (✕) button. Neither interaction saves, deletes,
 tests, starts, stops or toggles anything.
 
-Exit status: 0 the run completed (see the printed report for probe PASS/FAIL),
-1 if no backend could render WebKit content at all.
+--media runs the page-audio probe of chat-voice WP6 (and WP7's dictation
+round against a mock ASR answered in the page, and WP9's voice mode against
+a bound session answered in the page, scripts/realtime-mock.js) instead of the route
+probes: scripts/media-probe.js on /chat, in a view with WebKit's mock capture
+devices and a permission handler of its own (audio granted, video denied, as
+the app shell does). It opens "the microphone" (a mock device: no real one is
+touched), runs the capture worklet at 24 and 16 kHz, plays through the player
+worklet and the page's test tone while reading the output analysers, and
+drives the Chat composer's audio devices popover (it opens a temporary chat,
+which is never saved), then reloads the page and has Test microphone open the
+input the first run stored, in a document that hides device ids again.
+Playback goes to a private PipeWire graph whose only
+sink is a null sink (pipewire, wireplumber's policy profile and
+pipewire-pulse on their own runtime, config and state dirs, removed after),
+so nothing is audible and the real audio graph is never touched; without
+those daemons the probe refuses to run. Use it with --backend broadway.
+The view runs with the private runtime dir, no session bus (a private one
+stalls WebKit 6.0's sandboxed web process), an empty XDG_CONFIG_HOME (no
+~/.config/pulse/client.conf) and no DISPLAY or WAYLAND_DISPLAY (no X11 root
+PULSE_SERVER), and while it runs the private
+graph is read every half second: a check fails unless the page's playback
+streams showed up there. Everything it starts dies with it (PR_SET_PDEATHSIG)
+and is stopped on exit, SIGTERM and SIGHUP; its work dir is
+target/webkit-check-<pid>, removed after.
+
+Exit status: 0 the run completed (see the printed report for probe PASS/FAIL;
+with --media, 2 when a media check failed), 1 if no backend could render
+WebKit content at all.
 """
 import argparse
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import private_session  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[1]
 
 DEFAULT_BASE = "http://127.0.0.1:8899"
 DEFAULT_ROUTES = ["/chat", "/mcp-servers", "/settings", "/models", "/usage", "/api-reference"]
@@ -110,21 +139,23 @@ def free_broadway_display(start=5, tries=20) -> int | None:
 
 
 def stop_broadwayd(proc, display):
-    stop_process(proc)
+    stop_quietly(proc)
     if display is not None:
         for p in broadway_sockets(display):
             if p.exists() and not socket_in_use(p):
                 p.unlink(missing_ok=True)
 
 
-def start_broadwayd(display: int, log_path: Path):
+def start_broadwayd(display: int, log_path: Path, env=None):
     log = open(log_path, "wb")
-    proc = subprocess.Popen(
+    proc = private_session.track(subprocess.Popen(
         ["gtk4-broadwayd", f":{display}"],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
-    )
+        preexec_fn=private_session.die_with_parent,
+        env=env,
+    ))
     # It either binds its socket in well under a second or it is not going to.
     for _ in range(20):
         if proc.poll() is not None:
@@ -136,21 +167,13 @@ def start_broadwayd(display: int, log_path: Path):
     return proc  # no confirmation line seen, but still alive: let it try
 
 
-def stop_process(proc):
-    if proc is None or proc.poll() is not None:
-        return
+def stop_quietly(proc):
+    """Stop one child; one that will not stop is reported, never raised, so the
+    remaining stops and the work dir's removal still happen."""
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            proc.kill()
-        proc.wait(timeout=5)
+        private_session.stop(proc, wait=5)
+    except Exception as e:  # noqa: BLE001
+        print(f"stopping pid {proc.pid}: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 # Same list and rule as src-tauri/src/main.rs (render_workaround): an explicit
@@ -168,20 +191,24 @@ def with_render_workaround(env: dict) -> dict:
     return env
 
 
-def run_worker(env: dict, spec_path: Path, result_path: Path, timeout: float):
+def run_worker(env: dict, spec_path: Path, result_path: Path, timeout: float, watch=None):
+    """Run the worker; `watch`, when given, is called about twice a second while
+    it runs (the media probe reads the private graph with it)."""
     if result_path.exists():
         result_path.unlink()
-    proc = subprocess.Popen(
+    proc = private_session.track(subprocess.Popen(
         [sys.executable, __file__, "--_worker", "--spec", str(spec_path),
          "--result", str(result_path)],
-        env=env,
-    )
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        return None, "worker timed out"
+        env=env, start_new_session=True, preexec_fn=private_session.die_with_parent,
+    ))
+    end = time.time() + timeout
+    while proc.poll() is None:
+        if time.time() > end:
+            stop_quietly(proc)
+            return None, "worker timed out"
+        if watch:
+            watch()
+        time.sleep(0.5)
     if not result_path.exists():
         return None, f"worker exited {proc.returncode} with no result"
     try:
@@ -190,8 +217,144 @@ def run_worker(env: dict, spec_path: Path, result_path: Path, timeout: float):
         return None, f"worker wrote unparseable result: {e}"
 
 
+# A private PipeWire graph for --media: nothing the probe plays can reach a
+# real device, stream or WirePlumber's memory (the same recipe as
+# scripts/shell-check.py, with one null sink).
+PW_CONF = """context.properties = {
+    module.x11.bell = false
+    module.jackdbus-detect = false
+    module.raop = false
+    module.portal = false
+}
+context.objects = [
+    { factory = adapter
+      args = { factory.name = support.null-audio-sink node.name = "probe_sink"
+               node.description = "Probe sink (null)" media.class = "Audio/Sink"
+               audio.position = [ FL FR ] priority.session = 2000 object.linger = true } }
+]
+"""
+
+BUS_CONF = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:path={path}</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default"><allow send_destination="*"/><allow own="*"/></policy>
+</busconfig>
+"""
+
+
+def clean_audio_env(env: dict) -> dict:
+    for k in list(env):
+        if k in ("PULSE_SERVER", "PIPEWIRE_REMOTE", "PIPEWIRE_RUNTIME_DIR", "PIPEWIRE_PROPS",
+                 "PULSE_RUNTIME_PATH") or k.startswith("PULSE_PROP"):
+            del env[k]
+    return env
+
+
+def private_audio(work: Path):
+    """Start the private graph; returns the variables a client needs and the
+    environment `pw-dump` reads the graph with, or None when the daemons are
+    missing."""
+    if not all(shutil.which(b) for b in ("pipewire", "wireplumber", "pipewire-pulse", "pw-dump",
+                                          "dbus-daemon")):
+        return None
+    run = work / "run"
+    run.mkdir(mode=0o700)
+    conf = work / "pw-config"
+    (conf / "pipewire" / "pipewire.conf.d").mkdir(parents=True)
+    (conf / "pipewire" / "pipewire.conf.d" / "50-media-probe.conf").write_text(PW_CONF)
+    (work / "bus.conf").write_text(BUS_CONF.format(path=run / "bus"))
+    env = clean_audio_env(dict(os.environ))
+    for k in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
+        env.pop(k, None)
+
+    def spawn(argv, log, env):
+        private_session.spawn(argv, env, work / log)
+
+    def wait(path: Path):
+        for _ in range(100):
+            if path.exists():
+                return True
+            time.sleep(0.1)
+        return False
+
+    spawn(["dbus-daemon", f"--config-file={work / 'bus.conf'}", "--nofork", "--nopidfile"],
+          "dbus.log", env)
+    if not wait(run / "bus"):
+        return None
+    env.update(XDG_RUNTIME_DIR=str(run), XDG_CONFIG_HOME=str(conf),
+               XDG_STATE_HOME=str(work / "state"),
+               DBUS_SESSION_BUS_ADDRESS=f"unix:path={run / 'bus'}")
+    spawn(["pipewire"], "pipewire.log", env)
+    if not wait(run / "pipewire-0"):
+        return None
+    spawn(["wireplumber", "-p", "policy"], "wireplumber.log", env)
+    spawn(["pipewire-pulse"], "pipewire-pulse.log", env)
+    if not wait(run / "pulse" / "native"):
+        return None
+    # The private runtime dir is the client's own XDG_RUNTIME_DIR, so the
+    # default socket paths ($XDG_RUNTIME_DIR/pulse/native, pipewire-0) are
+    # the private graph's. Not PULSE_SERVER: WebKit 6.0's web-process sandbox
+    # (bubblewrap) aborts the UI process when it is set (measured on 2.54);
+    # it binds $XDG_RUNTIME_DIR/pulse itself. Broadway's socket goes there
+    # too. Nothing else may name another server (review m5): no DISPLAY (an
+    # X11 root PULSE_SERVER property) and an empty XDG_CONFIG_HOME (a
+    # default-server in ~/.config/pulse/client.conf). And no session bus at
+    # all: the desktop's reaches its portals and a11y bus, and on the private
+    # one the daemons use (which activates nothing) WebKit 6.0's sandboxed web
+    # process stalled about a minute before its first load and never
+    # rendered, and pw-dump hung (both measured, 2.54), while a bus that is
+    # not there fails at once.
+    config = work / "config"
+    config.mkdir()
+    client = {"XDG_RUNTIME_DIR": str(run), "XDG_CONFIG_HOME": str(config),
+              "DBUS_SESSION_BUS_ADDRESS": f"unix:path={work / 'no-bus'}", "NO_AT_BRIDGE": "1",
+              "GTK_A11Y": "none",
+              # No GStreamer path to a sound card past the audio server.
+              "GST_PLUGIN_FEATURE_RANK": "alsasink:0,alsasrc:0,alsadeviceprovider:0,"
+                                         "oss4sink:0,osssink:0,pipewiresink:0,pipewiresrc:0"}
+    probe_env = clean_audio_env(dict(os.environ))
+    probe_env.update(client)
+    probe_env["PIPEWIRE_RUNTIME_DIR"] = str(run)
+    for _ in range(50):
+        out = subprocess.run(["pw-dump"], env=probe_env, capture_output=True, timeout=10).stdout
+        if b"probe_sink" in out:
+            return client, probe_env
+        time.sleep(0.2)
+    return None
+
+
+def graph_watch(probe_env: dict, seen: dict):
+    """A run_worker watch: record every Stream/Output/Audio node of the private
+    graph into `seen` (by id), and how many reads found one."""
+    def watch():
+        try:
+            r = subprocess.run(["pw-dump"], env=probe_env, capture_output=True, timeout=5)
+            dump = json.loads(r.stdout or b"[]")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError):
+            return
+        seen["reads"] = seen.get("reads", 0) + 1
+        found = False
+        for o in dump:
+            props = (o.get("info") or {}).get("props") or {}
+            if o.get("type") == "PipeWire:Interface:Node" and props.get("media.class") == "Stream/Output/Audio":
+                found = True
+                seen.setdefault("streams", {})[o["id"]] = {
+                    k: props.get(k) for k in ("application.name", "application.process.binary",
+                                              "client.api")}
+        seen["reads_with_a_stream"] = seen.get("reads_with_a_stream", 0) + found
+    return watch
+
+
 def orchestrate(args) -> int:
-    workdir = Path(tempfile.mkdtemp(prefix="lmgw-webkit-check-"))
+    # SIGTERM/SIGHUP (a harness timeout) unwind through the `finally` below.
+    private_session.unwind_on_signals()
+    # Not /tmp: it is RAM, and a SIGKILL leaves the dir behind.
+    workdir = REPO / "target" / f"webkit-check-{os.getpid()}"
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True)
     shots = Path(args.shots)
     shots.mkdir(parents=True, exist_ok=True)
     token = args.token or Path(args.token_file).read_text().strip()
@@ -204,6 +367,11 @@ def orchestrate(args) -> int:
         "sizes": sizes,
         "shots": str(shots),
         "settle_max_ms": args.wait * 1000,
+        "media": args.media,
+        # The realtime phase's session mock rides along (chat-voice WP9).
+        "probe": ((Path(__file__).parent / "realtime-mock.js").read_text() + "\n"
+                  + (Path(__file__).parent / "media-probe.js").read_text()) if args.media else None,
+        "probe_opts": {"inputLabel": "Mock audio device", "outputKind": "default"},
     }
     spec_path = workdir / "spec.json"
     result_path = workdir / "result.json"
@@ -213,9 +381,36 @@ def orchestrate(args) -> int:
     display = None
     backend_used = None
     result = None
+    audio_env = {}
+    watch = None
+    seen = {}
     try:
+        if args.media:
+            graph = private_audio(workdir)
+            if graph is None:
+                print("the media probe needs pipewire, wireplumber, pipewire-pulse, pw-dump and "
+                      "dbus-daemon: it plays only into a private graph's null sink",
+                      file=sys.stderr)
+                return 1
+            audio_env, probe_env = graph
+            watch = graph_watch(probe_env, seen)
         attempts = []
-        if args.backend in ("auto", "broadway") and shutil.which("gtk4-broadwayd"):
+        if args.media and args.backend in ("auto", "broadway") and shutil.which("gtk4-broadwayd"):
+            # Its own display in the private runtime dir: nothing else is there.
+            benv = clean_audio_env(dict(os.environ))
+            for k in ("DISPLAY", "WAYLAND_DISPLAY"):
+                benv.pop(k, None)
+            benv.update(audio_env)
+            broadwayd = start_broadwayd(5, workdir / "broadwayd.log", benv)
+            if broadwayd is None or broadwayd.poll() is not None:
+                print("gtk4-broadwayd would not start, skipping Broadway", file=sys.stderr)
+                broadwayd = None
+            else:
+                base_env = with_render_workaround(benv)
+                base_env["GDK_BACKEND"] = "broadway"
+                base_env["BROADWAY_DISPLAY"] = ":5"
+                attempts.append(("broadway", base_env))
+        elif args.backend in ("auto", "broadway") and shutil.which("gtk4-broadwayd"):
             display = free_broadway_display()
             if display is None:
                 print("no free Broadway display found in :5-:24, skipping it",
@@ -227,7 +422,8 @@ def orchestrate(args) -> int:
                           file=sys.stderr)
                     broadwayd = None
                 else:
-                    base_env = with_render_workaround(dict(os.environ))
+                    base_env = with_render_workaround(clean_audio_env(dict(os.environ)))
+                    base_env.update(audio_env)
                     base_env["GDK_BACKEND"] = "broadway"
                     base_env["BROADWAY_DISPLAY"] = f":{display}"
                     attempts.append(("broadway", base_env))
@@ -236,7 +432,7 @@ def orchestrate(args) -> int:
                     attempts.append(("broadway (software compositing)", soft_env))
 
         for name, env in attempts:
-            r, err = run_worker(env, spec_path, result_path, timeout=args.timeout)
+            r, err = run_worker(env, spec_path, result_path, timeout=args.timeout, watch=watch)
             if err:
                 print(f"[{name}] {err}", file=sys.stderr)
                 continue
@@ -249,10 +445,13 @@ def orchestrate(args) -> int:
             stop_broadwayd(broadwayd, display)
             broadwayd = None
 
-        if backend_used is None and args.backend in ("auto", "wayland"):
+        # Never a visible window for the media probe: its audio and runtime
+        # dir are private, and a Wayland window would be the desktop's.
+        if backend_used is None and args.backend in ("auto", "wayland") and not args.media:
             print("falling back to a real (visible, brief) Wayland window",
                   file=sys.stderr)
-            env = with_render_workaround(dict(os.environ))
+            env = with_render_workaround(clean_audio_env(dict(os.environ)))
+            env.update(audio_env)
             env.pop("GDK_BACKEND", None)
             env.pop("BROADWAY_DISPLAY", None)
             r, err = run_worker(env, spec_path, result_path, timeout=args.timeout)
@@ -269,12 +468,30 @@ def orchestrate(args) -> int:
                 print(json.dumps(result, indent=1)[:2000], file=sys.stderr)
             return 1
 
+        if args.media and isinstance(result.get("media"), dict):
+            # Review m5: the page's audio went into the private graph, the only
+            # server this view could reach.
+            result["media"].setdefault("checks", []).append({
+                "name": "the page's playback streams were in the private graph",
+                "ok": bool(seen.get("streams")),
+                "detail": {"graph reads": seen.get("reads", 0),
+                           "reads with a stream": seen.get("reads_with_a_stream", 0),
+                           "streams": seen.get("streams", {})}})
         report(backend_used, result, args)
         if args.json:
             Path(args.json).write_text(json.dumps(result, indent=1))
+        if args.media:
+            media = result.get("media") or {}
+            if (media.get("error") or not media.get("checks")
+                    or not all(c["ok"] for c in media["checks"])):
+                return 2
         return 0
     finally:
-        stop_broadwayd(broadwayd, display)
+        try:
+            stop_broadwayd(broadwayd, display)
+        except Exception as e:  # noqa: BLE001 - the rest still has to go
+            print(f"stopping broadwayd: {e}", file=sys.stderr)
+        private_session.stop_all(lambda m: print(m, file=sys.stderr))
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -321,6 +538,15 @@ def report(backend: str, result: dict, args) -> None:
         )
         status = "FAIL" if semantic_fail else "PASS"
         print(f"\n[{status}] {i['name']}: {json.dumps(d)[:300]}")
+    media = result.get("media")
+    if media is not None:
+        if "error" in media:
+            print(f"\n[FAIL] media probe: {media['error']}")
+        for c in media.get("checks", []):
+            print(f"\n[{'PASS' if c['ok'] else 'FAIL'}] media: {c['name']}: "
+                  f"{json.dumps(c.get('detail'))[:300]}")
+        if media.get("info"):
+            print(f"\nmedia info: {json.dumps(media['info'])[:1500]}")
     print(f"\nsnapshots: {args.shots}")
 
 
@@ -479,7 +705,39 @@ def worker_main(spec_path: str, result_path: str) -> int:
         win.set_decorated(False)
         win.set_default_size(max_w, max_h)
         session = WebKit.NetworkSession.new_ephemeral()
-        webview = WebKit.WebView(network_session=session)
+        if spec.get("media"):
+            # The probe's clicks are script clicks, not a user's gesture:
+            # allow sound without one, as a click in the app window would.
+            webview = WebKit.WebView(
+                network_session=session,
+                website_policies=WebKit.WebsitePolicies(autoplay=WebKit.AutoplayPolicy.ALLOW))
+        else:
+            webview = WebKit.WebView(network_session=session)
+        media = None
+        if spec.get("media"):
+            media = {}
+            ws = webview.get_settings()
+            ws.set_enable_media_stream(True)
+            ws.set_enable_mock_capture_devices(True)
+            ws.set_enable_webaudio(True)
+            ws.set_media_playback_requires_user_gesture(False)
+
+            # The app shell's rule (src-tauri/src/media.rs): audio only.
+            def on_permission(_wv, req):
+                if isinstance(req, WebKit.UserMediaPermissionRequest):
+                    if (WebKit.user_media_permission_is_for_audio_device(req)
+                            and not WebKit.user_media_permission_is_for_video_device(req)
+                            and not WebKit.user_media_permission_is_for_display_device(req)):
+                        req.allow()
+                    else:
+                        req.deny()
+                    return True
+                if isinstance(req, WebKit.DeviceInfoPermissionRequest):
+                    req.allow()
+                    return True
+                return False
+
+            webview.connect("permission-request", on_permission)
         # Sized before first present, so the login page (before any resize
         # step runs) is not rendered into a 0x0 view.
         webview.set_size_request(*sizes[0])
@@ -658,8 +916,75 @@ def worker_main(spec_path: str, result_path: str) -> int:
 
             return step
 
+        def make_media(opts, prefix=""):
+            # Started, then polled: a promise that never settles (an audio
+            # context that never runs) ends as a timeout naming the stage.
+            # A later phase's checks are appended, named with `prefix`.
+            def step(nxt):
+                start = (spec["probe"] + "\nwindow.__probeDone = null; window.lmgwMediaProbe("
+                         + json.dumps(opts) + ").then(r => { window.__probeDone = r; },"
+                         " e => { window.__probeDone = JSON.stringify({checks: [{name: 'the probe ran',"
+                         " ok: false, detail: String(e)}], info: {}}); }); 'started'")
+                st = {"waited": 0}
+                limit = int(os.environ.get("LMGW_WK_MEDIA_MS", "240000"))
+
+                def land(out):
+                    for c in out.get("checks") or []:
+                        c["name"] = prefix + c["name"]
+                        media.setdefault("checks", []).append(c)
+                    media.setdefault("info", {}).update(out.get("info") or {})
+                    if out.get("error"):
+                        media["error"] = out["error"]
+
+                def poll():
+                    def cb(v, e):
+                        try:
+                            done, where, so_far = json.loads(v) if v else (None, None, None)
+                        except (TypeError, ValueError):
+                            done, where, so_far = None, None, None
+                        if done:
+                            land(json.loads(done))
+                            nxt()
+                        elif st["waited"] >= limit:
+                            land({"error": f"no answer after {limit // 1000} s (stage: {where})",
+                                  "checks": so_far or []})
+                            nxt()
+                        else:
+                            st["waited"] += 500
+                            GLib.timeout_add(500, lambda: (poll(), False)[1])
+
+                    ev("JSON.stringify([window.__probeDone || null, window.__probeStage || null,"
+                       " window.__probeChecks || null])", cb)
+
+                ev(start, lambda v, e: poll())
+
+            return step
+
+        def step_reload(nxt):
+            # A fresh document: WebKitGTK hides device names and ids again.
+            wait_for_load(lambda: settle(nxt))
+            webview.reload()
+
         add(step_login)
-        for route in routes:
+        if media is not None:
+            w, h = sizes[0]
+            add(make_nav("/chat"))
+            add(make_resize(w, h))
+            add(make_measure("/chat", w, h))
+            add(make_media(spec["probe_opts"]))
+            add(step_reload)
+            add(make_media({"phase": "reopen"}, "reopen: "))
+            # Chat voice WP7: a dictation round against a mock ASR.
+            add(make_media({"phase": "dictation"}, "dictation: "))
+            # Chat voice WP9: voice mode against an in-page bound session.
+            add(make_media({"phase": "realtime"}, "realtime: "))
+            add(make_snapshot("chat_realtime_after"))
+            add(make_click("(() => { const b = document.querySelector('[data-voice-devices-btn]');"
+                           " if (!b) return JSON.stringify({error: 'no devices button'}); b.click();"
+                           " return JSON.stringify({clicked: true}); })()", "media_popover_open"))
+            add(make_wait(800))
+            add(make_snapshot("chat_media_popover"))
+        for route in (routes if media is None else []):
             add(make_nav(route))
             for w, h in sizes:
                 add(make_resize(w, h))
@@ -697,12 +1022,14 @@ def worker_main(spec_path: str, result_path: str) -> int:
                 "first_probe_note": note,
                 "measurements": measurements,
                 "interactions": interactions,
+                "media": media,
             }
             Path(result_path).write_text(json.dumps(out, indent=1))
             app.quit()
 
         # Global watchdog: however far the queue got, always write a result.
-        GLib.timeout_add(int(os.environ.get("LMGW_WK_WATCHDOG_MS", "240000")),
+        GLib.timeout_add(int(os.environ.get("LMGW_WK_WATCHDOG_MS",
+                                            "330000" if media is not None else "240000")),
                           lambda: (finish_run(), False)[1] if queue or not Path(result_path).exists() else False)
 
         run_next()
@@ -735,11 +1062,15 @@ def main() -> int:
                      help="seconds allowed per backend attempt")
     ap.add_argument("--wait", type=float, default=20.0,
                      help="most seconds to wait for a route to settle")
+    ap.add_argument("--media", action="store_true",
+                     help="run the page-audio probe (chat-voice WP6) on /chat instead")
     args = ap.parse_args()
 
     if args._worker:
         return worker_main(args.spec, args.result)
 
+    if args.media and args.timeout == 280.0:
+        args.timeout = 400.0
     args.routes = [r.strip() for r in args.routes.split(",") if r.strip()]
     args.sizes = [s.strip() for s in args.sizes.split(",") if s.strip()]
     return orchestrate(args)

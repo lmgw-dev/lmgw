@@ -345,7 +345,7 @@ async fn stop_refuses_a_busy_model_and_override_forces_it() {
     // immediately (design §3.2: "warm it", not "claim it").
     let snap = f.state.snapshot();
     let rt = model_runtime(&snap, Class::Chat, "m1").unwrap();
-    let spec = lifecycle::acquire_spec(&f.state.data_dir, &snap, &rt);
+    let spec = lifecycle::acquire_spec(&f.state, &snap, &rt);
     let guard = f.state.runtime().acquire(&spec).await.unwrap();
 
     let err = ops::container(&f.state, None, Some("m1"), "stop", false, None)

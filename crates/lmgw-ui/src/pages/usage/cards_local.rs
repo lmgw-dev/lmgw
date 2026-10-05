@@ -399,8 +399,7 @@ pub(super) fn HeatCard(heat: Src<UsageHeatResponse>, tips: Tips) -> impl IntoVie
                                 }
                                     .into_any(),
                             );
-                        for h in 0..24usize {
-                            let v = cells[row][h];
+                        for (h, &v) in cells[row].iter().enumerate() {
                             let step = charts::seq_step(v as f64, max);
                             let fill = charts::SEQ[step];
                             let tip = Tip::new(

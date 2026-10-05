@@ -20,13 +20,15 @@
 //!
 //! [`AppState`]: crate::state::AppState
 
+mod voice;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::store::{
     self, ChatAttachmentFull, ChatAttachmentMeta, ChatContext, ChatMessageRow, ChatMessageUpdate,
-    ChatReply, ChatThread, ContinueSave, DeleteAttachmentOutcome, KeptAttachment, NewAttachment,
-    SendMessageOutcome, SetModeOutcome,
+    ChatReply, ChatThread, ContinueSave, DeleteAttachmentOutcome, KeptAttachment, MessageVoice,
+    NewAttachment, SeedWrite, SendMessageOutcome, SetModeOutcome, ThreadVoice,
 };
 
 /// Every temporary thread of this gateway. `state.chat_temp`.
@@ -255,20 +257,33 @@ impl TempChats {
     }
 
     /// Write `t`'s settings over the thread `t.id` — every editable field,
-    /// as `store::update_chat_thread_settings` does; the id, the creation
-    /// time and the flags a temporary thread never has stay.
-    pub fn update_settings(&self, t: &ChatThread) -> bool {
+    /// as `store::update_chat_thread_settings` does, the seed included
+    /// ([`SeedWrite::Keep`] keeps the one held when the write lands); the
+    /// id, the creation time and the flags a temporary thread never has
+    /// stay. The voice as held, `None` when the thread is gone.
+    pub fn update_settings(&self, t: &ChatThread, seed: SeedWrite) -> Option<ThreadVoice> {
         self.with_thread(t.id, |tt| {
             let keep_created = std::mem::take(&mut tt.thread.created_at);
+            let held_seed = tt.thread.voice.seed;
             tt.thread = ChatThread {
                 created_at: keep_created,
                 pinned: false,
                 archived_at: None,
                 ..t.clone()
             };
+            if seed == SeedWrite::Keep {
+                tt.thread.voice.seed = held_seed;
+            }
             tt.touch();
+            tt.thread.voice.clone()
         })
-        .is_some()
+    }
+
+    /// Draw the thread's TTS seed on first use: `drawn` is held only where
+    /// none is (`store::draw_chat_thread_seed`, under this store's lock).
+    /// The seed in effect, `None` when the thread is gone.
+    pub fn draw_seed(&self, id: i64, drawn: u32) -> Option<u32> {
+        self.with_thread(id, |t| *t.thread.voice.seed.get_or_insert(drawn))
     }
 
     /// Set just the title — no `updated_at` bump, like the DB's.
@@ -347,6 +362,7 @@ impl TempChats {
             ir_messages: r.ir_messages.clone(),
             model: r.model.clone(),
             answered_by: r.answered_by.clone(),
+            voice: r.voice.clone(),
             created_at: now(),
             ..Default::default()
         });
@@ -381,6 +397,7 @@ impl TempChats {
             row.ir_messages = r.ir_messages.clone();
             row.model = r.model.clone();
             row.answered_by = r.answered_by.clone();
+            row.voice = row.voice.take().map(MessageVoice::continued);
             t.touch();
             ContinueSave::Saved
         })
@@ -388,8 +405,9 @@ impl TempChats {
     }
 
     /// Rewrite user message `id` for a resend, all at once —
-    /// `store::rewrite_chat_user_message`'s rule. `false` when it is not a
-    /// user message of this thread.
+    /// `store::rewrite_chat_user_message`'s rule, a changed text dropping
+    /// how it was spoken. `false` when it is not a user message of this
+    /// thread.
     pub fn rewrite_user_message(
         &self,
         thread_id: i64,
@@ -406,6 +424,11 @@ impl TempChats {
                 return false;
             };
             let row = &mut t.messages[pos];
+            // A dictated turn whose text changed is no longer what was
+            // spoken: it is a typed turn from now on (chat-voice §3).
+            if row.content != content {
+                row.voice = None;
+            }
             row.content = content.to_string();
             row.kb_refs = kb_refs.to_vec();
             row.context = None;
@@ -426,6 +449,7 @@ impl TempChats {
         content: &str,
         attachment_ids: &[i64],
         kb_refs: &[i64],
+        voice: Option<&MessageVoice>,
     ) -> Option<SendMessageOutcome> {
         let mut inner = self.lock();
         let id = inner.next_id();
@@ -456,6 +480,7 @@ impl TempChats {
             role: "user".to_string(),
             content: content.to_string(),
             kb_refs: kb_refs.to_vec(),
+            voice: voice.cloned(),
             created_at: now(),
             ..Default::default()
         });
@@ -473,6 +498,7 @@ impl TempChats {
             row.prompt_tokens = m.prompt_tokens;
             row.completion_tokens = m.completion_tokens;
             row.ir_messages = m.ir_messages.clone();
+            row.voice = m.voice.clone();
             t.touch();
             true
         })
@@ -704,7 +730,7 @@ mod tests {
         let a1 = c
             .insert_attachment(t, &NewAttachment::plain("text", "1", "text/plain", b"1"))
             .unwrap();
-        let u1 = match c.append_user_message(t, "one", &[a1], &[]).unwrap() {
+        let u1 = match c.append_user_message(t, "one", &[a1], &[], None).unwrap() {
             SendMessageOutcome::Sent(id) => id,
             SendMessageOutcome::AttachmentNotDraft => panic!("a1 is a draft"),
         };
@@ -714,7 +740,8 @@ mod tests {
         let a2 = c
             .insert_attachment(t, &NewAttachment::plain("text", "2", "text/plain", b"2"))
             .unwrap();
-        let SendMessageOutcome::Sent(u2) = c.append_user_message(t, "two", &[a2], &[]).unwrap()
+        let SendMessageOutcome::Sent(u2) =
+            c.append_user_message(t, "two", &[a2], &[], None).unwrap()
         else {
             panic!("a2 is a draft")
         };
@@ -740,16 +767,16 @@ mod tests {
             .insert_attachment(t, &NewAttachment::plain("text", "f", "text/plain", b"f"))
             .unwrap();
         assert!(matches!(
-            c.append_user_message(t, "x", &[a, a], &[]),
+            c.append_user_message(t, "x", &[a, a], &[], None),
             Some(SendMessageOutcome::AttachmentNotDraft)
         ));
         assert!(c.messages(t).is_empty(), "a refused send writes nothing");
         assert!(matches!(
-            c.append_user_message(t, "x", &[a], &[]),
+            c.append_user_message(t, "x", &[a], &[], None),
             Some(SendMessageOutcome::Sent(_))
         ));
         assert!(matches!(
-            c.append_user_message(t, "y", &[a], &[]),
+            c.append_user_message(t, "y", &[a], &[], None),
             Some(SendMessageOutcome::AttachmentNotDraft)
         ));
         assert!(matches!(
@@ -760,6 +787,16 @@ mod tests {
             c.delete_draft(-99),
             DeleteAttachmentOutcome::NotFound
         ));
+    }
+
+    #[test]
+    fn a_temporary_thread_draws_its_seed_once() {
+        // WP4 review m8: the temporary store's draw, under its lock.
+        let c = TempChats::default();
+        let t = c.create("m", "chat", "").id;
+        assert_eq!(c.draw_seed(t, 5), Some(5));
+        assert_eq!(c.draw_seed(t, 6), Some(5), "the first draw stays");
+        assert_eq!(c.draw_seed(-999, 1), None, "no such thread");
     }
 
     #[test]
@@ -774,5 +811,101 @@ mod tests {
         assert!(!c.delete_message(t2, m));
         assert_eq!(c.truncate(t2, m, true), 0);
         assert!(c.message(t1, m).is_some());
+    }
+
+    /// A spoken reply cut short, its heard part in `content`.
+    fn spoken_reply() -> ChatReply {
+        ChatReply {
+            content: "heard".into(),
+            voice: Some(MessageVoice {
+                via: store::VIA_REALTIME.into(),
+                tts: Some("tts".into()),
+                unheard: Some("not heard".into()),
+                timing: Some(store::VoiceTiming::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Temp parity with the DB (chat-voice §3): an edit keeps what the
+    /// handler hands it (the reply's voice without unheard and timing), a
+    /// continue clears the unheard rest and keeps the timing.
+    #[test]
+    fn a_spoken_reply_edits_and_continues_as_the_db_does() {
+        let c = TempChats::default();
+        let t = c.create("m", "chat", "").id;
+        let r = c.append_reply(t, &spoken_reply()).unwrap();
+        let edited = c.message(t, r).unwrap().voice.map(MessageVoice::edited);
+        assert!(c.update_message(
+            t,
+            r,
+            &ChatMessageUpdate {
+                content: "edited".into(),
+                voice: edited,
+                ..Default::default()
+            }
+        ));
+        let v = c.message(t, r).unwrap().voice.unwrap();
+        assert_eq!(
+            (v.unheard, v.timing, v.tts.as_deref()),
+            (None, None, Some("tts"))
+        );
+
+        let r = c.append_reply(t, &spoken_reply()).unwrap();
+        let saved = c.continue_reply(
+            t,
+            r,
+            "heard",
+            &ChatReply {
+                content: "heard and more".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(saved, ContinueSave::Saved);
+        let v = c.message(t, r).unwrap().voice.unwrap();
+        assert_eq!(v.unheard, None);
+        assert!(v.timing.is_some());
+    }
+
+    #[test]
+    fn a_dictated_message_rewritten_with_other_text_is_a_typed_turn() {
+        let c = TempChats::default();
+        let t = c.create("m", "chat", "").id;
+        let dictated = MessageVoice {
+            via: store::VIA_DICTATION.into(),
+            ..Default::default()
+        };
+        let Some(SendMessageOutcome::Sent(u)) =
+            c.append_user_message(t, "spoken", &[], &[], Some(&dictated))
+        else {
+            panic!("sent")
+        };
+        assert!(c.rewrite_user_message(t, u, "spoken", &[]));
+        assert!(c.message(t, u).unwrap().voice.is_some(), "unchanged text");
+        assert!(c.rewrite_user_message(t, u, "typed", &[]));
+        assert_eq!(c.message(t, u).unwrap().voice, None);
+    }
+
+    /// A settings write keeps the seed held when it lands unless it names
+    /// one (chat-voice §2.2).
+    #[test]
+    fn a_settings_write_keeps_a_seed_drawn_meanwhile() {
+        let c = TempChats::default();
+        let read = c.create("m", "chat", "");
+        // Drawn after the handler's read.
+        let mut drawn = read.clone();
+        drawn.voice.seed = Some(7);
+        assert!(c.update_settings(&drawn, SeedWrite::AsGiven).is_some());
+        let mut stale = read.clone();
+        stale.voice.voice = Some("alba".into());
+        let held = c.update_settings(&stale, SeedWrite::Keep).unwrap();
+        assert_eq!((held.voice.as_deref(), held.seed), (Some("alba"), Some(7)));
+        assert_eq!(c.thread(read.id).unwrap().voice, held);
+        let cleared = c.update_settings(&stale, SeedWrite::AsGiven).unwrap();
+        assert_eq!(cleared.seed, None);
+        assert!(c
+            .update_settings(&ChatThread::default(), SeedWrite::Keep)
+            .is_none());
     }
 }

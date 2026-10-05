@@ -139,6 +139,17 @@ fn user_content_json(parts: &[ContentPart]) -> Value {
     Value::Array(arr)
 }
 
+/// The reasoning text of an OpenAI-shaped message or delta: llama-server's
+/// and DeepSeek's `reasoning_content`, else the plain `reasoning` string
+/// OpenRouter-style gateways (Kilo) and newer vLLM send — which lmgw dropped
+/// before, so a cloud model's reasoning never reached the thread. The first
+/// wins when both come, so nothing is doubled.
+fn reasoning_text(msg: &Value) -> Option<&str> {
+    msg.get("reasoning_content")
+        .and_then(Value::as_str)
+        .or_else(|| msg.get("reasoning").and_then(Value::as_str))
+}
+
 /// Did the client send an OpenRouter-shaped `reasoning` object? That object is
 /// the vocabulary lmgw reconciles rather than replaces, and its presence
 /// changes what the scalar keys are allowed to do (§5.3).
@@ -483,11 +494,7 @@ impl Egress for OpenaiEgress {
 
         Ok(Completion {
             content,
-            reasoning: msg
-                .get("reasoning_content")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            reasoning: reasoning_text(&msg).unwrap_or_default().to_string(),
             finish_reason,
             usage: parse_usage(v.get("usage")),
             model: v
@@ -577,11 +584,11 @@ impl Egress for OpenaiEgress {
             // (not under /v1); count = number of returned token ids. A
             // single-model server ignores `model`, but forwarding it costs
             // nothing and keeps this identical to the chat path.
-            UpstreamKind::LlamaServer => Ok(CountPlan::Request(tokenize_request(
+            UpstreamKind::LlamaServer => Ok(CountPlan::Request(Box::new(tokenize_request(
                 http,
                 up,
                 &json!({"model": model, "content": text}),
-            ))),
+            )))),
             // Real OpenAI (and OAI-compatible servers without /tokenize) have
             // no token endpoint — their tokenizer is public, so count locally
             // with the model's tiktoken encoding. audio.cpp has no tokenize
@@ -744,12 +751,20 @@ pub(crate) fn parse_timings(v: Option<&Value>) -> Option<Timings> {
 /// encoding of the current GPT-4o/o-series family — and say so: the `bool` is
 /// `true` when the encoding was that guess rather than the model's own, which
 /// [`CountPlan::Guessed`] carries to the response (api-docs design §5.1).
+///
+/// Both encoders are tiktoken-rs's process-wide singletons. `o200k_base()`
+/// builds a fresh 200k-entry encoder on every call (450 ms in a debug build),
+/// and the fallback is the common case here: every local model's name is
+/// unknown to tiktoken, and the knowledge bases ask for a count on each limit
+/// lookup.
 fn tiktoken_count(model: &str, text: &str) -> (u64, bool) {
     let (n, guessed) = match tiktoken_rs::bpe_for_model(model) {
         Ok(bpe) => (bpe.encode_ordinary(text).len(), false),
         Err(_) => {
             tracing::debug!("tiktoken: unknown model '{model}', counting with o200k_base");
-            let n = match tiktoken_rs::o200k_base() {
+            let n = match tiktoken_rs::bpe_for_tokenizer(
+                tiktoken_rs::tokenizer::Tokenizer::O200kBase,
+            ) {
                 Ok(bpe) => bpe.encode_ordinary(text).len(),
                 Err(e) => {
                     tracing::error!("tiktoken: o200k_base unavailable: {e}");
@@ -812,7 +827,7 @@ impl EgressStreamDecoder for OpenaiDecoder {
             let delta = choice.get("delta").cloned().unwrap_or_default();
             // Reasoning models stream their thoughts here (with `content` null
             // until the answer begins); surface it as a distinct delta.
-            if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
+            if let Some(r) = reasoning_text(&delta) {
                 if !r.is_empty() {
                     out.push(StreamDelta::ReasoningDelta(r.to_string()));
                 }
@@ -867,3 +882,6 @@ impl EgressStreamDecoder for OpenaiDecoder {
         out
     }
 }
+
+#[cfg(test)]
+mod tests;

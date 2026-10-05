@@ -1,0 +1,32 @@
+-- The learned residency of one audio model (realtime design §9.4, WP7).
+--
+-- The audio class used to be charged its model directory's size on disk, and
+-- audio.cpp holds more than that once a model has served a request: the CUDA
+-- context and the compute buffers come on top of the weights. Measured per
+-- process on the 4090: nemotron-asr 1.48 GB against 0.93 GB on disk,
+-- qwen3-asr 3.28 GB against 2.47, pocket-tts 0.97 GB against 0.13. No single
+-- multiple of the file size fits all three, so lmgw learns the figure instead
+-- of guessing one.
+--
+-- `resident_bytes` is the largest per-process GPU memory of the row's
+-- container (its init and every process under it), read right after a
+-- request it answered successfully (see `vram::residency`). It only ever
+-- grows for one configuration. NULL means nothing has been learned yet, and
+-- the row is then charged at its on-disk size, which every surface says.
+--
+-- `resident_key` names the configuration the figure was measured under: a
+-- short hash of what changes what audio.cpp loads (family, path, task, mode,
+-- config and weight ids, spec override, load and session options, the
+-- effective image and run args, the class backend and device). A row whose
+-- key no longer matches keeps its figure but is not charged by it, and the
+-- surfaces say it was learned for a previous configuration.
+--
+-- `resident_learned_at` is when the stored figure was read
+-- (`datetime('now')`).
+--
+-- Written by its own statement only (`store::set_audio_model_residency`):
+-- `insert_audio_model` and `update_audio_model` do not name these columns, so
+-- an owner saving a row never overwrites a measurement.
+ALTER TABLE audio_models ADD COLUMN resident_bytes      INTEGER;
+ALTER TABLE audio_models ADD COLUMN resident_learned_at TEXT;
+ALTER TABLE audio_models ADD COLUMN resident_key        TEXT;

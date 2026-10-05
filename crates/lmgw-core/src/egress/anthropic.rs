@@ -442,13 +442,13 @@ impl Egress for AnthropicEgress {
         // Anthropic counts messages, not raw strings; wrap the text as a single
         // user turn (the count therefore includes minimal turn framing, which
         // the counter reports as `message_framing` — api-docs design §5.1).
-        Ok(CountPlan::Request(count_messages_request(
+        Ok(CountPlan::Request(Box::new(count_messages_request(
             http,
             up,
             model,
             &json!({"messages": [{"role": "user", "content": text}]}),
             &[],
-        )?))
+        )?)))
     }
 
     fn parse_count(&self, body: &[u8]) -> Result<u64, GatewayError> {

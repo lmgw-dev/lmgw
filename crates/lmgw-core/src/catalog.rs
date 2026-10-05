@@ -31,7 +31,7 @@ const TTL: Duration = Duration::from_secs(300);
 const ERR_TTL: Duration = Duration::from_secs(60);
 
 /// Canonical reasoning-effort vocabulary, least to most.
-const CANONICAL_LEVELS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+pub(crate) const CANONICAL_LEVELS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// One model entry from an upstream's catalog.
 #[derive(Debug, Clone, Default)]
@@ -54,7 +54,9 @@ pub struct ModelInfo {
     /// OpenAI-protocol `architecture.output_modalities`; Anthropic `[text]`
     /// when a `capabilities` object exists; Gemini never publishes this.
     pub output_modalities: Option<Vec<String>>,
-    /// `chat` | `embedding`, only when derivable per §4.
+    /// `chat` | `embedding` | `image_generation`, only when the catalog
+    /// states it (§4) — `None` for an OpenAI-protocol entry with no output
+    /// modalities, whose task `capabilities::for_catalog` reads off its name.
     pub task: Option<String>,
     /// Reasoning / effort support, when the catalog states anything about it.
     pub reasoning: Option<CatalogReasoning>,
@@ -405,7 +407,7 @@ pub fn parse_openai_entry(m: &Value) -> Option<ModelInfo> {
         max_output_tokens: m["top_provider"]["max_completion_tokens"].as_u64(),
         input_modalities: parse_modalities_openai(m, "input_modalities"),
         output_modalities: parse_modalities_openai(m, "output_modalities"),
-        task: Some(parse_task_openai(m)),
+        task: parse_task_openai(m),
         reasoning: parse_reasoning_openai(m),
         tools: parse_tools_openai(m),
         structured_output: parse_structured_output_openai(m),
@@ -465,9 +467,11 @@ pub fn parse_gemini_entry(m: &Value) -> Option<ModelInfo> {
 
 /// Extract context window from an OpenAI-shaped model object.
 /// Checks several field names used by different providers:
+///
 /// - `n_ctx`          — llama.cpp runtime context (respects --ctx-size)
 /// - `context_window` — Anthropic, Kilo, some OpenAI-compat providers
 /// - `context_length` — Together AI, Groq, others
+///
 /// Deliberately excludes `meta.n_ctx_train` (training context; ignores --ctx-size).
 fn parse_context_length_openai(m: &Value) -> Option<u64> {
     m["n_ctx"]
@@ -516,25 +520,29 @@ fn parse_modalities_openai(m: &Value, key: &str) -> Option<Vec<String>> {
 
 /// `embedding` when `output_modalities == [embedding]`; `image_generation`
 /// when the model's outputs are images and not text (image-generation design
-/// §5); else `chat`.
+/// §5); else `chat` — and `None` when the entry states no output modalities
+/// at all (a stock `api.openai.com` list): the catalog said nothing, and
+/// `capabilities::for_catalog` goes by the name then
+/// (`capabilities::task::by_name`, realtime live run 3 D1).
 ///
 /// "Images and not text" rather than "contains image": `task` is what picks a
 /// model's `endpoints`, and a chat model that can also draw (`[text, image]`,
 /// which is how the Gemini image models appear in an OpenRouter-shaped
 /// catalog) would lose `/v1/chat/completions` — the route it is actually
 /// used through — to gain an images route its provider may not even serve.
-fn parse_task_openai(m: &Value) -> String {
+fn parse_task_openai(m: &Value) -> Option<String> {
     let out: Vec<&str> = m["architecture"]["output_modalities"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
     if out.len() == 1 && out[0] == "embedding" {
-        return "embedding".to_string();
+        return Some("embedding".to_string());
     }
     if out.contains(&"image") && !out.contains(&"text") {
-        return "image_generation".to_string();
+        return Some("image_generation".to_string());
     }
-    "chat".to_string()
+    Some("chat".to_string())
 }
 
 /// `embedContent` in `supportedGenerationMethods` ⇒ `embedding`;

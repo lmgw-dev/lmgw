@@ -69,6 +69,19 @@ pub enum GgufError {
         len: u64,
         remaining: u64,
     },
+    /// The audio.cpp embedded-file table is inconsistent (offsets that do
+    /// not ascend, a names/offsets count mismatch, a file past the end of
+    /// the data array) — read by [`embedded`] only.
+    #[error("malformed audio.cpp embedded-file table: {0}")]
+    Malformed(String),
+    /// An embedded file larger than [`embedded::MAX_EMBEDDED_FILE`] — the
+    /// bound on what lmgw reads out of a GGUF header for one fact. Said, not
+    /// truncated: a half-read JSON file would be worse than none.
+    #[error(
+        "the embedded file {name} is {len} bytes, more than the {cap} bytes lmgw reads \
+         out of a GGUF for one fact"
+    )]
+    EmbeddedFileTooLarge { name: String, len: u64, cap: u64 },
     #[error("{0}")]
     Io(#[from] std::io::Error),
 }
@@ -99,6 +112,8 @@ const VT_F64: u32 = 12;
 /// model" without shipping a real GGUF. Only what a header check reads is
 /// written: string / u32 / u64 KVs and tensor names with zero-byte data.
 /// Hidden from docs because it is not a general-purpose writer.
+pub mod embedded;
+
 #[doc(hidden)]
 pub mod synth {
     fn put_str(buf: &mut Vec<u8>, s: &str) {
@@ -145,6 +160,22 @@ pub mod synth {
             for v in vals {
                 put_str(&mut b, v);
             }
+            self.kv(k, super::VT_ARRAY, &b)
+        }
+        /// An array of `uint64`s (audio.cpp's `embedded_files.offsets`).
+        pub fn arr_u64(&mut self, k: &str, vals: &[u64]) -> &mut Self {
+            let mut b = super::VT_U64.to_le_bytes().to_vec();
+            b.extend_from_slice(&(vals.len() as u64).to_le_bytes());
+            for v in vals {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            self.kv(k, super::VT_ARRAY, &b)
+        }
+        /// An array of `uint8`s (audio.cpp's `embedded_files.data`).
+        pub fn arr_u8(&mut self, k: &str, vals: &[u8]) -> &mut Self {
+            let mut b = super::VT_U8.to_le_bytes().to_vec();
+            b.extend_from_slice(&(vals.len() as u64).to_le_bytes());
+            b.extend_from_slice(vals);
             self.kv(k, super::VT_ARRAY, &b)
         }
         /// A `tokenizer.ggml.token_type`-shaped array of `int32`s.
@@ -194,6 +225,31 @@ pub mod synth {
             .u32(&format!("{arch}.block_count"), 4)
             .u32(&format!("{arch}.embedding_length"), 64)
             .u32(&format!("{arch}.pooling_type"), pooling_type);
+        h
+    }
+
+    /// A header that reads as an audio.cpp package: `audiocpp` architecture,
+    /// the family's embedded `model_spec.json`, and `files` laid out the way
+    /// audio.cpp's packer writes them — a names array, an offsets array one
+    /// longer, and one `uint8` data array holding every file back to back.
+    pub fn audiocpp(family: &str, model_spec_json: &str, files: &[(&str, &[u8])]) -> Header {
+        let mut h = Header::default();
+        let mut offsets = vec![0u64];
+        let mut data = Vec::new();
+        for (_, bytes) in files {
+            data.extend_from_slice(bytes);
+            offsets.push(data.len() as u64);
+        }
+        let names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
+        h.str("general.architecture", "audiocpp")
+            .str("general.name", "synthetic audio.cpp package")
+            .u32("audiocpp.model_spec.version", 1)
+            .str("audiocpp.model_spec.family", family)
+            .str("audiocpp.model_spec.json", model_spec_json)
+            .arr_str("audiocpp.embedded_files.names", &names)
+            .arr_u64("audiocpp.embedded_files.offsets", &offsets)
+            .arr_u8("audiocpp.embedded_files.data", &data)
+            .arr_str("audiocpp.tensor_names", &["weights/a", "weights/b"]);
         h
     }
 

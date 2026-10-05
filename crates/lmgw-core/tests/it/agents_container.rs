@@ -958,10 +958,14 @@ async fn the_run_log_is_live_while_the_container_is_still_talking() {
 
     let job = start(&base, json!({ "id": "labeler", "phase": "run" })).await;
     let mut seen = String::new();
-    for _ in 0..400 {
+    // Generous: it breaks out on the first sighting, and a full suite can starve this poll.
+    // Waits for both lines: they arrive one by one, so a poll can land between them.
+    for _ in 0..3000 {
         let d = get_json(&base, &format!("/api/agents/runs/{job}")).await;
         seen = log(&d);
-        if seen.contains("[info] listing") {
+        if seen.contains("[info] listing")
+            && seen.contains("a library printed this and it is not JSON")
+        {
             assert_eq!(d["job"]["status"], "running", "still in flight: {d}");
             break;
         }

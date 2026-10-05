@@ -29,6 +29,12 @@ pub enum ArgList {
 }
 
 impl ArgList {
+    /// Blank text: what a flat tool argument left empty sends, which means
+    /// "not supplied" there, as an empty optional string does on every tool.
+    pub fn is_blank_text(&self) -> bool {
+        matches!(self, Self::Text(t) if t.trim().is_empty())
+    }
+
     pub fn tokens(&self) -> Result<Vec<String>, String> {
         match self {
             Self::Text(t) => argv::parse_args_text(t),
@@ -71,7 +77,8 @@ pub struct AuxModelPatch {
     /// Per-model image override (§3.1); empty clears back to the class image.
     pub image: Option<String>,
     /// `podman run` args override (§3.1); name it in `clear` to revert to
-    /// inheriting the class setting.
+    /// inheriting the class setting. An empty list inherits too (it is never
+    /// stored as one); blank text leaves the current value.
     pub extra_run_args: Option<ArgList>,
     pub warm_start: Option<bool>,
     /// `inherit` (default — which for this class means *no* fallback) |
@@ -498,8 +505,12 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 idle_seconds: p.idle_seconds.unwrap_or(300),
                 enabled: p.enabled.unwrap_or(true),
                 image: opt(&p.image),
+                // A named clear wins over the value on create as on update:
+                // the editor sends a blank field as `[]` *and* names it. An
+                // empty list without the clear is no override either.
                 extra_run_args: match &p.extra_run_args {
-                    Some(a) => Some(a.tokens()?),
+                    _ if clear_has(p.clear.as_deref(), "extra_run_args") => None,
+                    Some(a) => run_args_override(Some(a.tokens()?)),
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
@@ -563,14 +574,17 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 Some(s) => Some(s.to_string()),
                 None => cur.image.clone(),
             };
+            // An empty list inherits the class; blank text is "not supplied".
             let extra_run_args = if clear_has(p.clear.as_deref(), "extra_run_args") {
                 None
             } else {
                 match &p.extra_run_args {
+                    Some(a) if a.is_blank_text() => cur.extra_run_args.clone(),
                     Some(a) => Some(a.tokens()?),
                     None => cur.extra_run_args.clone(),
                 }
             };
+            let extra_run_args = run_args_override(extra_run_args);
             let (hold_fallback_mode, hold_fallback) = resolve_aux_hold_fallback(
                 &snap,
                 &p,

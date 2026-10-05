@@ -1,7 +1,7 @@
 //! Shared application state (`Arc<AppState>`), used by HTTP handlers and the
 //! Tauri tray alike — no internal HTTP hop (§3).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -46,6 +46,19 @@ pub struct AppState {
     /// Latest fetched audio.cpp model-spec catalog (also persisted in the kv
     /// store; populated on first Audio-tab load or explicit refresh).
     pub audio_catalog: std::sync::Mutex<Option<CatalogSnapshot>>,
+    /// The audio rows' speech profiles ([`crate::audio::profile`]): what a
+    /// TTS row's engine accepts by name, read from its spec and package
+    /// GGUF once per change of either.
+    pub audio_profiles: Arc<crate::audio::profile::ProfileCache>,
+    /// The sample rate each audio row's last WAV said
+    /// ([`crate::audio::rates`]) — what a streamed answer's
+    /// `x-lmgw-sample-rate` is.
+    pub audio_rates: Arc<crate::audio::rates::SampleRates>,
+    /// Audio containers a download or a delete left on a `server.json` their
+    /// row no longer renders, because they were starting or serving then —
+    /// the idle reaper stops each once it is idle
+    /// ([`crate::runtime::audio::recheck_left`]).
+    pub audio_stale: crate::runtime::audio::LeftStale,
     /// Background jobs (§9c): HF downloads today, ingestion / re-embedding /
     /// eval runs as those land. Owns the executor registry and the live
     /// progress of everything currently running.
@@ -94,8 +107,16 @@ pub struct AppState {
     /// URL), and a `Location:` the container chooses turns lmgw into an
     /// arbitrary-URL fetcher whose answer is relayed on the dashboard's own
     /// origin. A proxy forwards a 3xx; it does not follow it.
+    ///
+    /// A Hugging Face download takes its first hop with it too
+    /// ([`crate::hf::get_with_commit`]): the hub names the commit only on its
+    /// own redirect, which reqwest would follow past.
     pub proxy_http: reqwest::Client,
     pub catalog: CatalogCache,
+    /// How a reasoning "off" goes out on the cloud models whose provider
+    /// refused the protocol's own off form (model-capabilities design §5.6):
+    /// learned from the refusal, kept per route for the process's life.
+    pub(crate) reasoning_learned: crate::proxy::reasoning_fit::Learned,
     /// GGUF header cache (model capabilities design §3.5): one entry per
     /// absolute path, validated against the file's `(len, mtime)` on every
     /// hit. Keeps `/v1/models` cheap — the alternative is a header read per
@@ -127,6 +148,10 @@ pub struct AppState {
     /// stdout/stderr/exit. A `Mutex` rather than an `ArcSwap` because it is read
     /// once per run, not per request.
     agent_spawner: std::sync::Mutex<Arc<dyn crate::agents::container::Spawner>>,
+    /// What realtime sessions score their pauses with instead of Smart Turn
+    /// (realtime design §6.3) — `None`, the model, except in a test that
+    /// installs a stand-in (`set_turn_score_for_tests`).
+    turn_score_hook: std::sync::Mutex<Option<crate::realtime::ScoreHook>>,
     pub started_at: Instant,
     /// Wall-clock twin of [`Self::started_at`]: the same moment, expressed as
     /// a timestamp instead of a monotonic reading.
@@ -138,7 +163,16 @@ pub struct AppState {
     /// capabilities design §2.1), and today's handler stamps `now()` on every
     /// call, so a client diffing two listings sees every model recreated.
     pub started_at_utc: chrono::DateTime<chrono::Utc>,
+    /// The background tasks were started (`server::spawn_background_tasks`):
+    /// once per state, so a server restarted on the same state ("Restart
+    /// gateway") does not start a second reaper, status tick and pruner
+    /// beside the first.
+    pub(crate) background: std::sync::atomic::AtomicBool,
     pub data_dir: PathBuf,
+    /// `init_for_tests`' own data dir, removed with the state: an audio row's
+    /// start, an agent run or a corpus write leaves files there, and /tmp is
+    /// RAM. `None` for a real data dir.
+    _test_dir: Option<TestDir>,
     /// Serializes every read-modify-write of the whole `Settings` blob
     /// (`store::save_settings`'s callers): clone the snapshot's settings,
     /// mutate the copy, save, `reload_snapshot()` — all under this lock.
@@ -211,6 +245,58 @@ pub fn default_data_dir() -> PathBuf {
     PathBuf::from(home).join(".local/share/lmgw")
 }
 
+/// `~/.local/share/lmgw` from `HOME`, whatever `XDG_DATA_HOME` says: the
+/// installed app's data dir as it is when the variable is not set.
+pub fn home_default_data_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".local/share/lmgw"))
+}
+
+/// `LMGW_DATA_DIR`, with an empty value read as unset: an empty path would
+/// open the databases in the working directory (chat-voice WP11 review n7).
+/// A relative value is made absolute against the working directory: the dir
+/// ends up in container bind mounts, and podman reads a `-v` source that does
+/// not start with `/` as the name of a volume, refusing the start.
+pub fn data_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("LMGW_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .map(|v| absolute_dir(PathBuf::from(v)))
+}
+
+/// `dir` made absolute against the working directory, without resolving
+/// symlinks; unchanged when it already is, or when the working directory
+/// cannot be read.
+fn absolute_dir(dir: PathBuf) -> PathBuf {
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+/// Whether `dir` is the installed app's data dir, as `installed` (what
+/// [`default_data_dir`] names, following `XDG_DATA_HOME`) or as
+/// `home_default` ([`home_default_data_dir`]) — compared as resolved paths, so
+/// another spelling or a symlink is the same dir. A dev run (the headless
+/// runner, a debug shell) refuses it: this build's migrations are one-way, and
+/// a dev run rewrites the dir's settings. Both names, because pointing
+/// `XDG_DATA_HOME` elsewhere does not move the installed app's dir; it only
+/// stops `default_data_dir` from naming it (WP5 review n4, WP11 review m4).
+pub fn is_installed_data_dir(dir: &Path, installed: &Path, home_default: Option<&Path>) -> bool {
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    same(dir, installed) || home_default.is_some_and(|home| same(dir, home))
+}
+
+/// A test state's data dir: removed when the state is dropped (the test's
+/// runtime shutting down drops every task holding it).
+struct TestDir(PathBuf);
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 impl AppState {
     /// The gateway on `data_dir`, a dev instance when `LMGW_DEV` says so
     /// ([`dev_from_env`]) — what the tray app starts.
@@ -223,7 +309,39 @@ impl AppState {
     /// production, and passes `true` whatever the environment says, so a
     /// dev gateway can never come up without its guards (no image deletion
     /// or pruning, its own tag namespace, its own builds dir).
+    ///
+    /// **It touches no container.** Every podman call that lists or removes
+    /// by `container_prefix` — agent-container reconciliation and its run-dir
+    /// sweep included — is spawned by [`crate::server::run`], after the entry
+    /// point's own dev-instance safety step (`examples/headless.rs` steers a
+    /// fresh dir off the production prefix, a debug shell refuses one). A
+    /// fresh data dir boots on the production default, so anything here that
+    /// asked podman would be asking about the installed app's containers
+    /// (chat-voice WP5 review B1).
     pub async fn init_with(data_dir: PathBuf, dev: bool) -> anyhow::Result<SharedState> {
+        Self::init_with_host(
+            data_dir,
+            dev,
+            Arc::new(runtime::registry::TokioRunner),
+            crate::vram::detect_probe(),
+        )
+        .await
+    }
+
+    /// [`Self::init_with`], reaching podman through `runner` and the GPU
+    /// through `probe` — the two host seams [`Self::init_for_tests`] fakes —
+    /// so a test can boot the real initialisation on a real data dir and
+    /// record every podman call it makes. `pub` (unconditional) to match the
+    /// `init_for_tests` convention.
+    #[doc(hidden)]
+    pub async fn init_with_host(
+        data_dir: PathBuf,
+        dev: bool,
+        runner: Arc<dyn runtime::registry::CommandRunner>,
+        probe: Arc<dyn crate::vram::GpuProbe>,
+    ) -> anyhow::Result<SharedState> {
+        // Every path under the data dir may become a container mount.
+        let data_dir = absolute_dir(data_dir);
         let db = store::open(&data_dir.join("lmgw.sqlite")).await?;
         let corpus = quickdoc_core::store::open(&data_dir.join(crate::quickdoc::CORPUS_DB_FILE))
             .await
@@ -285,10 +403,7 @@ impl AppState {
             .connect_timeout(std::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let registry = runtime::registry::Registry::new(
-            Arc::new(runtime::registry::TokioRunner),
-            http.clone(),
-        );
+        let registry = runtime::registry::Registry::new(runner, http.clone());
         let app = Arc::new(Self {
             db,
             corpus,
@@ -297,6 +412,9 @@ impl AppState {
             telemetry: TelemetryBus::new(),
             policy: std::sync::Arc::new(crate::policy::PolicyGate::default()),
             audio_catalog: std::sync::Mutex::new(None),
+            audio_profiles: Default::default(),
+            audio_rates: Default::default(),
+            audio_stale: Default::default(),
             jobs: JobManager::new(),
             agent_runs: Default::default(),
             agent_ledger: Default::default(),
@@ -307,14 +425,18 @@ impl AppState {
             http,
             proxy_http,
             catalog: CatalogCache::default(),
+            reasoning_learned: Default::default(),
             gguf_cache: GgufSummaryCache::default(),
-            vram: VramScheduler::new(),
+            vram: VramScheduler::with_probe(probe),
             kv_pools: Default::default(),
             runtime: ArcSwap::from_pointee(registry),
             agent_spawner: std::sync::Mutex::new(Arc::new(crate::agents::container::TokioSpawner)),
+            turn_score_hook: std::sync::Mutex::new(None),
             started_at: Instant::now(),
             started_at_utc: chrono::Utc::now(),
+            background: Default::default(),
             data_dir,
+            _test_dir: None,
             settings_write: tokio::sync::Mutex::new(()),
             dev: std::sync::atomic::AtomicBool::new(dev),
             builds: Default::default(),
@@ -376,37 +498,21 @@ impl AppState {
                  Agents & tools."
             );
         }
-        // Boot reconciliation for agent containers (container-runtime §6.4).
-        // `fail_orphaned_jobs` above has already failed every run a restart
-        // interrupted, so every container carrying `lmgw.kind=agent` is by
-        // definition a leftover — an agent container is never adopted, only
-        // collected.
+        // Boot reconciliation for agent containers (container-runtime §6.4)
+        // is not here: it lists and removes by `container_prefix`, and a fresh
+        // data dir still carries the production default at this point. It is
+        // spawned by `server::run` (`agents::container::boot_reconcile`), after
+        // every entry point's dev-instance safety step (chat-voice WP5 review
+        // B1).
         //
-        // Spawned rather than awaited, for the reason `lifecycle::boot` is
-        // (`server.rs`): `podman ps` is unbounded wall clock on a box where
-        // podman is slow or absent, and holding up `init` for it would make a
-        // crash-recovery detail a startup-availability problem.
-        let st = app.clone();
-        tokio::spawn(async move {
-            let report = crate::agents::container::reconcile(&st).await;
-            for e in &report.errors {
-                tracing::warn!("agent container reconciliation: {e}");
-            }
-            if !report.removed.is_empty() || !report.swept_dirs.is_empty() {
-                tracing::info!(
-                    "agent container reconciliation: removed {} container(s), swept {} run \
-                     director(ies)",
-                    report.removed.len(),
-                    report.swept_dirs.len()
-                );
-            }
-        });
         // The build runs `fail_orphaned_build_runs` closed above left their
         // worktrees and build contexts behind (container-builds §5 "At
-        // boot"). Spawned for the reason the reconciliation above is: git
-        // is unbounded wall clock, and a stale directory is not a startup
-        // problem. The sweep takes the machine-wide build lock first and
-        // skips itself while another instance holds it.
+        // boot"). Spawned rather than awaited: git is unbounded wall clock,
+        // and a stale directory is not a startup problem. The sweep takes the
+        // machine-wide build lock first and skips itself while another
+        // instance holds it. It stays here: what it removes is told by this
+        // data dir's build instance id (and a Check's dead pid), never by
+        // `container_prefix`.
         let st = app.clone();
         tokio::spawn(async move {
             crate::backends::run::boot_sweep(&st).await;
@@ -443,6 +549,9 @@ impl AppState {
             telemetry: TelemetryBus::new(),
             policy: std::sync::Arc::new(crate::policy::PolicyGate::default()),
             audio_catalog: std::sync::Mutex::new(None),
+            audio_profiles: Default::default(),
+            audio_rates: Default::default(),
+            audio_stale: Default::default(),
             jobs: JobManager::new(),
             agent_runs: Default::default(),
             agent_ledger: Default::default(),
@@ -456,6 +565,7 @@ impl AppState {
                 .build()
                 .expect("a client with no redirect policy always builds"),
             catalog: CatalogCache::default(),
+            reasoning_learned: Default::default(),
             gguf_cache: GgufSummaryCache::default(),
             // Deliberately never the real NVML: a test must not read the
             // machine's actual GPU (and must not behave differently on a box
@@ -490,8 +600,11 @@ impl AppState {
                  AppState::set_agent_spawner_for_tests)"
                     .into(),
             ))),
+            turn_score_hook: std::sync::Mutex::new(None),
             started_at: Instant::now(),
             started_at_utc: chrono::Utc::now(),
+            background: Default::default(),
+            _test_dir: Some(TestDir(dir.clone())),
             data_dir: dir,
             settings_write: tokio::sync::Mutex::new(()),
             // Never read from the environment: a developer running the suite
@@ -548,6 +661,18 @@ impl AppState {
         Ok(())
     }
 
+    /// Refuse a write into `target` (a models dir, or a path in one) on a dev
+    /// instance when it lies outside this instance's data dir
+    /// ([`crate::config::dev_models_dir_refusal`]): a dev copy keeps
+    /// production's models dirs, and what it writes there lands in the
+    /// installed app's tree.
+    pub fn refuse_shared_models_dir(&self, target: &Path) -> Result<(), String> {
+        match crate::config::dev_models_dir_refusal(self.dev(), &self.data_dir, target) {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+
     /// Test-only: mark this gateway a dev instance (or not). `pub`
     /// (unconditional) to match the other `set_*_for_tests` seams.
     #[doc(hidden)]
@@ -599,6 +724,21 @@ impl AppState {
     #[doc(hidden)]
     pub fn set_agent_spawner_for_tests(&self, spawner: Arc<dyn crate::agents::container::Spawner>) {
         *self.agent_spawner.lock().unwrap() = spawner;
+    }
+
+    /// The stand-in realtime sessions score their pauses with, if a test
+    /// installed one (realtime design §6.3).
+    pub fn turn_score_hook(&self) -> Option<crate::realtime::ScoreHook> {
+        self.turn_score_hook.lock().unwrap().clone()
+    }
+
+    /// Test-only: score every realtime pause with `hook` instead of Smart
+    /// Turn (`None`: the model again) — what lets a suite make the scorer
+    /// fail, or answer a chosen probability. `pub` (unconditional) to match
+    /// the other `set_*_for_tests` seams.
+    #[doc(hidden)]
+    pub fn set_turn_score_for_tests(&self, hook: Option<crate::realtime::ScoreHook>) {
+        *self.turn_score_hook.lock().unwrap() = hook;
     }
 
     /// Test-only: atomically swap in a hand-built snapshot (e.g. one carrying a
@@ -682,7 +822,48 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::dev_flag;
+    use super::{absolute_dir, dev_flag, is_installed_data_dir};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_relative_data_dir_is_made_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_dir(PathBuf::from("target/dev-copy")),
+            cwd.join("target/dev-copy")
+        );
+        assert_eq!(
+            absolute_dir(PathBuf::from("/srv/lmgw")),
+            PathBuf::from("/srv/lmgw")
+        );
+    }
+
+    /// A stand-in for the installed app's dir: the guard's own comparison,
+    /// never the real path.
+    #[test]
+    fn the_installed_data_dir_is_refused_under_either_name() {
+        let home = tempfile::tempdir().unwrap();
+        let installed = home.path().join(".local/share/lmgw");
+        std::fs::create_dir_all(&installed).unwrap();
+        let moved = Path::new("/srv/xdg-data/lmgw");
+        let dev = home.path().join("dev-copy");
+
+        assert!(is_installed_data_dir(&installed, &installed, None));
+        // XDG_DATA_HOME points elsewhere: the dir under HOME is still it.
+        assert!(is_installed_data_dir(&installed, moved, Some(&installed)));
+        // Another spelling of the same dir.
+        let spelled = installed.join("..").join("lmgw");
+        assert!(is_installed_data_dir(&spelled, moved, Some(&installed)));
+        // A symlink to it.
+        let link = home.path().join("link");
+        std::os::unix::fs::symlink(&installed, &link).unwrap();
+        assert!(is_installed_data_dir(&link, moved, Some(&installed)));
+        // XDG_DATA_HOME's own dir, when it is the one named.
+        assert!(is_installed_data_dir(moved, moved, Some(&installed)));
+        // A copy is not.
+        assert!(!is_installed_data_dir(&dev, moved, Some(&installed)));
+        assert!(!is_installed_data_dir(&dev, &installed, None));
+    }
 
     #[test]
     fn lmgw_dev_errs_on_the_side_of_dev() {

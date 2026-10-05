@@ -20,6 +20,8 @@ use lmgw_api_types::{
 };
 use serde_json::{json, Value};
 
+mod revision;
+
 use super::wizard::file_role;
 use crate::catalog::use_model_catalog;
 use crate::fmt::grouped;
@@ -124,6 +126,10 @@ struct FileItem {
     /// A finished chat weights file no model serves yet.
     planable: bool,
     companion: bool,
+    /// The revision it was asked at and the commit it came from: the short
+    /// text beside the name, the sentence for its title
+    /// ([`revision::revision_note`]).
+    revision: (String, String),
 }
 
 impl FileItem {
@@ -356,7 +362,9 @@ pub fn Downloads() -> impl IntoView {
                         && role == "weights"
                         && !served(&rel)
                         && on_disk != Some(false);
+                    let revision = revision::revision_note(&d);
                     FileItem {
+                        revision,
                         id: d.id,
                         size_bytes: listed
                             .map(|f| f.size_bytes)
@@ -437,7 +445,7 @@ pub fn Downloads() -> impl IntoView {
                 out.push(group(repo, false, files, total));
             }
         }
-        out.sort_by(|a, b| a.repo.to_lowercase().cmp(&b.repo.to_lowercase()));
+        out.sort_by_key(|g| g.repo.to_lowercase());
         if !singles.is_empty() {
             out.push(group(String::new(), true, singles, singles_total));
         }
@@ -967,11 +975,17 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
     } else {
         file_title
     };
+    let (rev_short, rev_long) = f.revision.clone();
+    let file_title = match rev_long.is_empty() {
+        true => file_title,
+        false => format!("{file_title}\n{rev_long}"),
+    };
     view! {
         <tr class:companion=f.companion>
             <td class="clip mono-sm" title=file_title>
                 {(!sub.is_empty()).then(|| view! { <span class="pfx">{sub.clone()}</span> })}
                 {name}
+                {(!rev_short.is_empty()).then(|| view! { <span class="dim">" " {rev_short}</span> })}
             </td>
             <td class="col-p2">
                 <span class="type-badge" title=role_title>{f.role.clone()}</span>

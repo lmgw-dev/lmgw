@@ -2,6 +2,7 @@
 //! recovery and send policy. Unrelated to the GPU-hold switch
 //! (`settings.hold`), which pauses local models crate-wide.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,8 +14,12 @@ use crate::runtime::registry::{AcquireGuard, ClaimStatus, Origin, RuntimeError, 
 use crate::runtime::Class;
 use crate::state::SharedState;
 
-use super::background::Restart;
+use super::background::{restart_candidate, Restart};
 use super::Target;
+
+mod let_go;
+pub use let_go::LetGo;
+
 /// Held for the life of a request against a local model: the registry's
 /// in-flight claim, plus where that model answers.
 ///
@@ -35,8 +40,14 @@ use super::Target;
 /// another admission from running. An ingest that holds its chat model while its
 /// embedding batches admit the aux model is the normal case. If the two really
 /// cannot coexist on the GPU, the second admission finds nothing evictable and
-/// ends at the named [`GatewayError::VramQueueTimeout`] — a visible refusal that
-/// says what is holding the memory, never a deadlock.
+/// waits for room: it ends at the named [`GatewayError::VramQueueTimeout`] — a
+/// visible refusal that says what is holding the memory — or, with
+/// `vram.queue_timeout_seconds` 0, waits for as long as the hold lives. So a
+/// holder must never wait on work that needs the room its hold pins: that is a
+/// circular wait, hung for good with no timeout. The plain chat drops its claim
+/// before its reply waits for a voice turn's user row, and a heard tool loop
+/// lets its claim go while its tools wait for that row ([`Self::let_go`]) and
+/// takes it again for its next model call (voice-audio-input design §3.4).
 pub struct LocalHold {
     /// Behind a lock because a hold can outlive the container it was taken
     /// on: the dead-endpoint recovery below swaps in a fresh claim on a
@@ -217,8 +228,10 @@ impl LocalHold {
     /// entry 46: the alias never starts an alternate).
     async fn readmit_base(&self) -> Result<(), GatewayError> {
         let fresh = match self.restart {
-            Restart::Admit => self.readmit_admission().await?,
-            Restart::Background | Restart::No => self.restart_candidate().await?,
+            Restart::Admit => admit_base(&self.state, &self.target, &self.alias).await?,
+            rule @ (Restart::Background | Restart::No) => {
+                restart_candidate(&self.state, &self.target, &self.alias, rule).await?
+            }
         };
         let fresh = fresh.into_guard();
         let mut slot = self.guard();
@@ -228,31 +241,6 @@ impl LocalHold {
         // entry's claim, which takes the registry map lock.
         drop(old);
         Ok(())
-    }
-
-    /// [`Self::readmit_base`] for a [`Restart::Admit`] hold: the same
-    /// admission as any start, arbitration included.
-    async fn readmit_admission(&self) -> Result<LocalHold, GatewayError> {
-        let (class, model_id) = (self.target.class, self.target.model_id.as_str());
-        let snap = self.state.snapshot();
-        let runtime =
-            model_runtime(&snap, class, model_id).ok_or_else(|| GatewayError::Upstream {
-                status: 502,
-                provider_type: None,
-                message: format!(
-                    "{class} model '{model_id}' is no longer configured, so its container could \
-                     not be started again"
-                ),
-            })?;
-        self.state
-            .vram
-            .admit_plain(&self.state, &snap, &self.target, &runtime, &self.alias)
-            .await?
-            .ok_or_else(|| GatewayError::Upstream {
-                status: 502,
-                provider_type: None,
-                message: format!("no container could be acquired for {class} model '{model_id}'"),
-            })
     }
 
     pub fn class(&self) -> Class {
@@ -278,6 +266,50 @@ impl LocalHold {
         // panicking `Drop`, and wedging a model until restart over it is the
         // worse failure.
         self.guard.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Where the container this hold is on computes, as it was started
+    /// (`Registry::placement_of`); `Gpu` once the container is gone.
+    pub fn placement(&self) -> crate::runtime::Placement {
+        self.state
+            .runtime()
+            .placement_of(self.target.class, &self.target.model_id)
+            .unwrap_or_default()
+    }
+
+    /// The container this hold is on just answered an inference request with
+    /// a 2xx (realtime design §9.4). For an audio model that means audio.cpp
+    /// has loaded it — lazily, on its first request — so the ledger stops
+    /// charging that load as pending, and one reading of what the container
+    /// holds is taken to learn the row's residency
+    /// ([`residency`](crate::vram::residency)). Nothing for any other class.
+    ///
+    /// Called by the audio inference sends, never by a metadata read (the
+    /// voice list loads nothing). An explicit call rather than a `Drop`:
+    /// a recovery moves the claim out of a hold ([`Self::into_guard`]), and
+    /// what is being reported is a response, not the end of a claim.
+    pub fn note_inference(&self) {
+        if self.target.class != Class::Audio {
+            return;
+        }
+        self.state
+            .vram
+            .audio_inference(&self.state, self.generation(), &self.target.model_id);
+    }
+
+    /// An inference request is about to be sent on this hold. For an audio
+    /// model whose residency has not settled yet, its container is sampled
+    /// while the request runs — audio.cpp frees part of what a request takes
+    /// once it has answered, and the reading after the answer alone misses
+    /// it ([`residency`](crate::vram::residency), the WP7 live gate). A
+    /// spawned task; nothing for any other class.
+    pub fn note_sending(&self) {
+        if self.target.class != Class::Audio {
+            return;
+        }
+        self.state
+            .vram
+            .audio_sending(&self.state, self.generation(), &self.target.model_id);
     }
 
     /// Record that the container did not serve the request this hold was taken
@@ -370,6 +402,35 @@ impl LocalHold {
     }
 }
 
+/// [`LocalHold::readmit_base`] for a [`Restart::Admit`] hold — and a let-go
+/// claim's regain ([`LetGo::regain`]): the same admission as any start,
+/// arbitration included.
+async fn admit_base(
+    state: &SharedState,
+    target: &Target,
+    alias: &str,
+) -> Result<LocalHold, GatewayError> {
+    let (class, model_id) = (target.class, target.model_id.as_str());
+    let snap = state.snapshot();
+    let runtime = model_runtime(&snap, class, model_id).ok_or_else(|| GatewayError::Upstream {
+        status: 502,
+        provider_type: None,
+        message: format!(
+            "{class} model '{model_id}' is no longer configured, so its container could not be \
+             started again"
+        ),
+    })?;
+    state
+        .vram
+        .admit_plain(state, &snap, target, &runtime, alias)
+        .await?
+        .ok_or_else(|| GatewayError::Upstream {
+            status: 502,
+            provider_type: None,
+            message: format!("no container could be acquired for {class} model '{model_id}'"),
+        })
+}
+
 /// Send one request that may be served by a local container, with the §3.2
 /// dead-container retry.
 ///
@@ -409,6 +470,26 @@ pub async fn send_local<F>(
 where
     F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
 {
+    send_local_marked(hold, route, timeout, build, None).await
+}
+
+/// [`send_local`] for a caller that bills a stop by whether a prompt went out
+/// (`prompt_sent`, which its `build` sets as each attempt leaves): a send
+/// that finds the container dead clears it before the recovery — a dead
+/// container works on nothing, so a stop while the model restarts bills no
+/// prompt, and the retry's build sets it again. A wait for response headers
+/// that timed out is not such a failure: that prompt went out to a container
+/// that is still there, and it is neither retried nor cleared.
+pub async fn send_local_marked<F>(
+    hold: Option<&LocalHold>,
+    route: &Route,
+    timeout: Option<Duration>,
+    build: F,
+    prompt_sent: Option<&AtomicBool>,
+) -> Result<reqwest::Response, GatewayError>
+where
+    F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
+{
     let Some(hold) = hold else {
         // No local container in this route's future: one send, no recovery,
         // exactly what the call site did before.
@@ -417,7 +498,11 @@ where
 
     let build = &build;
     retry_dead_container(hold, move || async move {
-        send_built(build(&on_hold(route, hold))?, timeout).await
+        let sent = send_built(build(&on_hold(route, hold))?, timeout).await;
+        if let (Some(flag), Err(GatewayError::Transport(_))) = (prompt_sent, &sent) {
+            flag.store(false, Ordering::Relaxed);
+        }
+        sent
     })
     .await
 }

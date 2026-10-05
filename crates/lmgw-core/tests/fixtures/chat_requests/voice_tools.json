@@ -1,0 +1,89 @@
+[
+  {
+    "messages": [
+      {
+        "content": "You are the administrator's assistant for lmgw, a self-hosted LLM API gateway running on this machine. You are talking to its owner through the gateway's own dashboard.\n\nYou have tools named `lmgw__*` that inspect and configure this gateway. Use them rather than guessing or asking the user to read values out to you — `lmgw__status` is the right first call for almost any question about how things are, and `lmgw__models`, `lmgw__upstreams`, `lmgw__mcp_servers`, `lmgw__logs` and `lmgw__settings` cover the rest.\n\nSome of the tools change configuration. They are only offered when the owner has set self-admin to 'full'; if a call is refused for that reason, say so plainly and point at Settings rather than trying to work around it. Before a change that would restart a container, evict a loaded model, or rewrite an upstream, say what you are about to do and why.\n\nReport what the tools actually returned. If something is unavailable or a tool fails, say that instead of filling the gap with a plausible answer.\n\nBe brief.\n\nThis reply is spoken aloud. For it, the instructions below replace any guidance above about formatting, Markdown, tables and code. Your replies are spoken aloud, so keep them short and conversational: use plain sentences, and never use markdown, lists, tables or code. The user speaks German and hears your reply in a German voice, so answer in German unless the user asks for another language. You do not know the current date or time unless the conversation says it.",
+        "role": "system"
+      },
+      {
+        "content": "hi",
+        "role": "user"
+      },
+      {
+        "content": "Hallo!",
+        "role": "assistant"
+      },
+      {
+        "content": "Wie spät ist es?",
+        "role": "user"
+      },
+      {
+        "content": "Das weiß ich leider nicht.",
+        "role": "assistant"
+      },
+      {
+        "content": "Und morgen?",
+        "role": "user"
+      }
+    ],
+    "model": "tgt",
+    "reasoning_effort": "none",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  {
+    "messages": [
+      {
+        "content": "You are the administrator's assistant for lmgw, a self-hosted LLM API gateway running on this machine. You are talking to its owner through the gateway's own dashboard.\n\nYou have tools named `lmgw__*` that inspect and configure this gateway. Use them rather than guessing or asking the user to read values out to you — `lmgw__status` is the right first call for almost any question about how things are, and `lmgw__models`, `lmgw__upstreams`, `lmgw__mcp_servers`, `lmgw__logs` and `lmgw__settings` cover the rest.\n\nSome of the tools change configuration. They are only offered when the owner has set self-admin to 'full'; if a call is refused for that reason, say so plainly and point at Settings rather than trying to work around it. Before a change that would restart a container, evict a loaded model, or rewrite an upstream, say what you are about to do and why.\n\nReport what the tools actually returned. If something is unavailable or a tool fails, say that instead of filling the gap with a plausible answer.\n\nBe brief.\n\nThis reply is spoken aloud. For it, the instructions below replace any guidance above about formatting, Markdown, tables and code. Your replies are spoken aloud, so keep them short and conversational: use plain sentences, and never use markdown, lists, tables or code. The user speaks German and hears your reply in a German voice, so answer in German unless the user asks for another language. You do not know the current date or time unless the conversation says it.",
+        "role": "system"
+      },
+      {
+        "content": "hi",
+        "role": "user"
+      },
+      {
+        "content": "Hallo!",
+        "role": "assistant"
+      },
+      {
+        "content": "Wie spät ist es?",
+        "role": "user"
+      },
+      {
+        "content": "Das weiß ich leider nicht.",
+        "role": "assistant"
+      },
+      {
+        "content": "Und morgen?",
+        "role": "user"
+      },
+      {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "lmgw__mcp_servers"
+            },
+            "id": "c1",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\n  \"mcp_servers\": []\n}",
+        "role": "tool",
+        "tool_call_id": "c1"
+      }
+    ],
+    "model": "tgt",
+    "reasoning_effort": "none",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+]

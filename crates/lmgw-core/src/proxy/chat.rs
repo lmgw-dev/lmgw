@@ -35,7 +35,12 @@ pub async fn handle_chat(
         .to_string();
 
     let parsed = match proto {
-        ClientProto::OpenaiChat => openai::parse_chat_request(&body),
+        // `Realtime`, `Chat` and `AdminChat` never reach this handler (their
+        // labels are for rows).
+        ClientProto::OpenaiChat
+        | ClientProto::Realtime
+        | ClientProto::Chat
+        | ClientProto::AdminChat => openai::parse_chat_request(&body),
         ClientProto::AnthropicMessages => anthropic::parse_messages_request(&body),
     };
     let mut ir = match parsed {
@@ -117,7 +122,7 @@ pub async fn handle_chat(
                     proto,
                     ctx: &ctx,
                     alias: ir.model_alias.clone(),
-                    route: f.route.as_ref(),
+                    route: f.route.as_deref(),
                     started,
                     streamed: ir.stream,
                     class: RequestClass::Chat,
@@ -175,6 +180,9 @@ async fn serve_opened(
         max_tokens_raised: anthropic_max_tokens_raised(&route, &params),
         max_tokens_clamped: None,
     };
+    // An off this cloud model cannot take as asked goes out in the form it
+    // can (§5.6); reported below with the other ignored controls.
+    let mut fitted = super::reasoning_fit::fit(state, &route, &mut params).await;
 
     // The gate's per-send half, on the final params: a guarded row's clamp,
     // count and pool reservation, a ladder's clamp. Its lease goes wherever
@@ -214,6 +222,7 @@ async fn serve_opened(
                     &mut headers,
                     egress,
                     &params,
+                    &mut fitted,
                     started,
                     admission,
                     lease,
@@ -231,6 +240,7 @@ async fn serve_opened(
                     lease,
                     egress,
                     &params,
+                    &mut fitted,
                     started,
                 )
                 .await;
@@ -256,6 +266,7 @@ async fn serve_opened(
         }
         Err(e) => Err(e),
     };
+    fitted.report(&mut annotations.ignored);
     let resp = match result {
         Ok(resp) => resp,
         Err(e) => {
@@ -301,32 +312,32 @@ async fn unary_chat(
     mut lease: crate::gate::TurnLease,
     egress: &'static dyn Egress,
     params: &crate::ir::Params,
+    fitted: &mut super::reasoning_fit::Fitted,
     started: Instant,
 ) -> Result<Turn<Response>, GatewayError> {
     let max_tokens_clamped = lease.max_tokens_clamped();
     let timeout = route.upstream.request_timeout();
-    let sent = crate::gate::send_gated(
+    let sent = super::reasoning_fit::send_chat(
         state,
         hold,
         route,
         &mut lease,
-        crate::gate::CountInput::Chat {
-            ir,
-            params,
-            stream: false,
+        ir,
+        params,
+        false,
+        None,
+        None,
+        None,
+        fitted,
+        super::reasoning_fit::RowAs::Public {
+            proto,
+            ctx,
+            alias: &ir.model_alias,
+            fallback: headers.fallback_reason(),
         },
-        None,
-        None,
-        |r| {
+        |r, p| {
             Ok(with_timeout(
-                egress.build_chat(
-                    &state.http,
-                    &r.upstream,
-                    &r.upstream_model,
-                    ir,
-                    params,
-                    false,
-                )?,
+                egress.build_chat(&state.http, &r.upstream, &r.upstream_model, ir, p, false)?,
                 timeout,
             ))
         },

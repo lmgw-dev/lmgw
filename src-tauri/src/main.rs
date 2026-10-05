@@ -4,42 +4,20 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio_out;
+mod dev_guard;
+mod gateway;
+#[cfg(target_os = "linux")]
+mod media;
 mod updater;
 
 use std::net::SocketAddr;
-use std::sync::Mutex;
 
+use gateway::Gateway;
 use lmgw_core::state::{default_data_dir, AppState, SharedState};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-
-/// Handle to the running Axum task so "Restart gateway" can bounce it.
-struct ServerHandle {
-    shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-}
-
-impl ServerHandle {
-    fn start(&self, state: SharedState, addr: SocketAddr) {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        *self.shutdown.lock().unwrap() = Some(tx);
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = lmgw_core::server::run(state, addr, async {
-                let _ = rx.await;
-            })
-            .await
-            {
-                tracing::error!("gateway server exited with error: {e}");
-            }
-        });
-    }
-
-    fn stop(&self) {
-        if let Some(tx) = self.shutdown.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-    }
-}
 
 fn bind_addr(state: &SharedState) -> SocketAddr {
     state
@@ -52,10 +30,11 @@ fn bind_addr(state: &SharedState) -> SocketAddr {
 
 /// Where a **newly created** window — or the tray's *Open in Browser* — opens:
 /// the login route, carrying a nonce this process just minted (principals
-/// design §3.4).
+/// design §3.4), on the address this process is bound to (`addr`, from
+/// [`Gateway::status`]).
 ///
-/// `127.0.0.1` stays forced, as it has always been — the shell's window is
-/// loopback whatever `bind_addr` says — and the nonce is single-use, so the
+/// Loopback for a wildcard bind, as it has always been, and the bound address
+/// otherwise ([`gateway::base_url`]); the nonce is single-use, so the
 /// webview's first history entry is a dead credential rather than the durable
 /// key. The gateway runs in this same process, so the nonce is minted through
 /// the managed [`SharedState`] and never travels anywhere to be issued. Every
@@ -64,8 +43,8 @@ fn bind_addr(state: &SharedState) -> SocketAddr {
 fn login_url(state: &SharedState, addr: &SocketAddr) -> String {
     let nonce = lmgw_core::web::session::mint_login_nonce(state);
     format!(
-        "http://127.0.0.1:{}/api/session/login?nonce={nonce}",
-        addr.port()
+        "{}/api/session/login?nonce={nonce}",
+        gateway::base_url(*addr)
     )
 }
 
@@ -75,7 +54,9 @@ fn login_url(state: &SharedState, addr: &SocketAddr) -> String {
 /// simply raised, and a window that has to be built gets a **fresh** nonce
 /// (§3.4) — one per creation, which is what makes it single-use. The state it
 /// mints from is the one `setup` managed, so every caller (the tray, the
-/// second launch, the first start) reaches it the same way.
+/// second launch, the first start) reaches it the same way. A window is built
+/// only on the address this process holds; while it holds none, the reason
+/// is shown instead.
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -83,11 +64,22 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = w.set_focus();
         return;
     }
+    let gw: tauri::State<Gateway> = app.state();
+    let addr = match gw.status() {
+        Ok(addr) => addr,
+        Err(why) => return gateway::not_serving(app, &why),
+    };
     let state: tauri::State<SharedState> = app.state();
-    let url = login_url(&state, &bind_addr(&state));
-    let origin = WindowOrigin::of(&url.parse::<tauri::Url>().expect("valid local url"));
+    let url = login_url(&state, &addr);
+    // Every judgement of the window's document reads what this process
+    // serves at that moment, not the origin the window was built for.
+    let serving = gw.serving();
+    #[cfg(target_os = "linux")]
+    let media_serving = serving.clone();
+    gw.set_window_origin(Some(gateway::origin_of(addr)));
     let shared: SharedState = (*state).clone();
-    let result = WebviewWindowBuilder::new(
+    let webview_dir = dev_guard::webview_data_dir(&state.data_dir, cfg!(debug_assertions));
+    let mut builder = WebviewWindowBuilder::new(
         app,
         "main",
         WebviewUrl::External(url.parse().expect("valid local url")),
@@ -102,10 +94,7 @@ fn show_main_window(app: &tauri::AppHandle) {
         // Only web and mail links may leave for the system browser; a
         // file:, data:, javascript: or custom-scheme URL is dropped.
         if new_window_may_open(&url) {
-            if let Err(e) = std::process::Command::new("xdg-open")
-                .arg(url.as_str())
-                .spawn()
-            {
+            if let Err(e) = xdg_open(url.as_str()) {
                 tracing::warn!("xdg-open {url}: {e}");
             }
         }
@@ -115,6 +104,9 @@ fn show_main_window(app: &tauri::AppHandle) {
     // the gateway's own origin is denied silently: nothing here ever opens a
     // browser, so a frame cannot be used to launch one.
     .on_navigation(move |url| {
+        let Some(origin) = serving.origin() else {
+            return false;
+        };
         let settings = shared.snapshot().settings.clone();
         navigation_allowed(url, &origin, &|h| {
             lmgw_core::agents::service::origin_label(&settings, h).is_some()
@@ -128,11 +120,30 @@ fn show_main_window(app: &tauri::AppHandle) {
     // controls, see assets/titlebar.js); resizing is provided by the JS
     // edge-resize handler since undecorated Linux windows have no native
     // resize borders.
-    .decorations(false)
-    .build();
-    if let Err(e) = result {
-        tracing::error!("failed to create window: {e}");
+    .decorations(false);
+    if let Some(dir) = webview_dir {
+        builder = builder.data_directory(dir);
     }
+    match builder.build() {
+        // The microphone for the voice features (chat-voice §13.1).
+        #[cfg(target_os = "linux")]
+        Ok(window) => media::install(&window, media_serving),
+        #[cfg(not(target_os = "linux"))]
+        Ok(_) => {}
+        Err(e) => {
+            gw.set_window_origin(None);
+            tracing::error!("failed to create window: {e}");
+        }
+    }
+}
+
+/// Hand a URL to the desktop. The browser it may start is not lmgw's audio,
+/// so it does not inherit lmgw's stream identity (chat-voice §12.3).
+fn xdg_open(url: &str) -> std::io::Result<std::process::Child> {
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url);
+    audio_out::scrub_identity_env(&mut cmd);
+    cmd.spawn()
 }
 
 /// The origin the window was opened with: scheme, host and port.
@@ -363,6 +374,7 @@ fn sync_hold(app: &tauri::AppHandle, hold_item: &CheckMenuItem<tauri::Wry>, acti
     let Some(tray) = app.tray_by_id("lmgw-tray") else {
         return;
     };
+    let state: tauri::State<SharedState> = app.state();
     let icon_bytes: &[u8] = if active {
         include_bytes!("../icons/tray-hold.png").as_slice()
     } else {
@@ -374,11 +386,7 @@ fn sync_hold(app: &tauri::AppHandle, hold_item: &CheckMenuItem<tauri::Wry>, acti
         }
         Err(e) => tracing::error!("tray icon decode: {e}"),
     }
-    let tooltip = if active {
-        "lmgw — GPU hold: local models paused, new loads refused or re-routed"
-    } else {
-        "lmgw"
-    };
+    let tooltip = dev_guard::tray_tooltip(&state.data_dir, cfg!(debug_assertions), active);
     let _ = tray.set_tooltip(Some(tooltip));
 }
 
@@ -426,6 +434,12 @@ fn render_workaround() -> Option<&'static str> {
     nvidia_driver_present().then_some("__NV_DISABLE_EXPLICIT_SYNC")
 }
 
+/// The shell's own commands (chat-voice §13.2), behind the origin check in
+/// `main`'s invoke handler.
+fn shell_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![audio_out::audio_outputs, audio_out::audio_output_set]
+}
+
 fn main() {
     // Must happen before GTK/WebKit initializes, so before anything else —
     // including the logger, which is why the decision is only reported below.
@@ -433,6 +447,9 @@ fn main() {
     if let Some(var) = workaround {
         std::env::set_var(var, "1");
     }
+    // Before WebKit spawns its processes too, which inherit it: the name
+    // WirePlumber remembers lmgw's audio routing under (chat-voice §12.3).
+    let identity = audio_out::apply_identity_env();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -449,30 +466,91 @@ fn main() {
              render path alone; set WEBKIT_DISABLE_DMABUF_RENDERER=1 if the window fails to open"
         );
     }
+    let set: Vec<&str> = identity.iter().map(|(k, _)| *k).collect();
+    tracing::debug!("audio stream identity: set {set:?} (an explicit value is left alone)");
+
+    let context = tauri::generate_context!();
+    let debug_build = cfg!(debug_assertions);
+    let mut single_instance =
+        tauri_plugin_single_instance::Builder::new().callback(|app, _args, _cwd| {
+            // Second launch: focus the existing instance.
+            show_main_window(app);
+        });
+    // Empty reads as unset (review n7): an empty path would open the
+    // databases in the working directory.
+    let env_data_dir = lmgw_core::state::data_dir_from_env();
+    if let Some(id) = dev_guard::single_instance_id(
+        &context.config().identifier,
+        debug_build,
+        env_data_dir.as_deref(),
+    ) {
+        single_instance = single_instance.dbus_id(id);
+    }
+    let commands = shell_commands();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Second launch: focus the existing instance.
-            show_main_window(app);
-        }))
-        .setup(|app| {
-            let data_dir = std::env::var("LMGW_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| default_data_dir());
-            let state = tauri::async_runtime::block_on(AppState::init(data_dir))?;
+        .plugin(single_instance.build())
+        .invoke_handler(move |invoke| {
+            // The capability admits the gateway's origin by the webview's
+            // active URI, which during a navigation is the provisional one;
+            // the commands also need the running document to be the gateway's
+            // (chat-voice §13.2, review M1). Tauri calls this on the GTK main
+            // thread as the message arrives, where `media` tracks the commits.
+            #[cfg(target_os = "linux")]
+            if let Err(why) = media::command_allowed() {
+                tracing::info!("command {} refused: {why}", invoke.message.command());
+                invoke.resolver.reject(format!("refused: {why}"));
+                return true;
+            }
+            commands(invoke)
+        })
+        .setup(move |app| {
+            let data_dir = dev_guard::data_dir(
+                env_data_dir,
+                &default_data_dir(),
+                lmgw_core::state::home_default_data_dir().as_deref(),
+                debug_build,
+            )?;
+            let dev = debug_build || lmgw_core::state::dev_from_env();
+            let state = tauri::async_runtime::block_on(AppState::init_with(data_dir, dev))?;
+            // Before the server starts: `server::serve` spawns every pass
+            // that lists or removes containers by prefix (`init_with` touches
+            // none), and `server::bind` refuses a dev instance on the default
+            // prefix itself.
+            dev_guard::check_prefix(
+                &state.snapshot().settings.container_prefix,
+                &lmgw_core::config::default_container_prefix(),
+                debug_build,
+            )?;
             let addr = bind_addr(&state);
 
-            let server = ServerHandle {
-                shutdown: Mutex::new(None),
+            // The window is built only once this process holds the port
+            // (review m3): a failed bind would otherwise show — and grant the
+            // microphone to — whoever holds it. A debug build refuses to
+            // start; a release build keeps its tray and says why.
+            let gateway = Gateway::default();
+            let bound = tauri::async_runtime::block_on(gateway.start(state.clone(), addr));
+            let tray_label = dev_guard::tray_label(debug_build);
+            let head = match &bound {
+                Ok(bound) => format!("{tray_label} · {bound}"),
+                Err(why) if debug_build => {
+                    return Err(format!(
+                        "the gateway could not serve on {addr}: {why}. A debug shell never \
+                         builds its window on a port this process does not hold."
+                    )
+                    .into())
+                }
+                Err(why) => {
+                    tracing::error!("the gateway could not serve on {addr}: {why}");
+                    format!("{tray_label} · not serving")
+                }
             };
-            server.start(state.clone(), addr);
             app.manage(state.clone());
-            app.manage(server);
+            app.manage(gateway);
 
             // --- tray menu (§12) ---
-            let status_item =
-                MenuItem::with_id(app, "status", format!("lmgw · {addr}"), false, None::<&str>)?;
+            let status_item = MenuItem::with_id(app, "status", head, false, None::<&str>)?;
             let runtime_item =
                 MenuItem::with_id(app, "runtime-status", "models: …", false, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
@@ -504,11 +582,16 @@ fn main() {
             let models_stop =
                 MenuItem::with_id(app, "models-stop", "Stop all models", true, None::<&str>)?;
             let restart = MenuItem::with_id(app, "restart", "Restart gateway", true, None::<&str>)?;
+            let updates = dev_guard::runs_updater(debug_build);
             let check_updates = MenuItem::with_id(
                 app,
                 "check-updates",
-                "Check for Updates…",
-                true,
+                if updates {
+                    "Check for Updates…"
+                } else {
+                    "Updates: off in a debug build"
+                },
+                updates,
                 None::<&str>,
             )?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -532,29 +615,45 @@ fn main() {
             )?;
 
             let hold_item_for_menu = hold_item.clone();
-            TrayIconBuilder::with_id("lmgw-tray")
+            let mut tray = TrayIconBuilder::with_id("lmgw-tray");
+            // A debug build's icon files beside its data, never in the dir
+            // the installed app's tray reads and deletes from (review m2).
+            if let Some(dir) = dev_guard::tray_icon_dir(&state.data_dir, debug_build) {
+                tray = tray.temp_dir_path(dir);
+            }
+            tray
                 // Monochrome symbolic variant so it blends into the system tray;
                 // the colored icon stays as the window/app icon.
                 .icon(tauri::image::Image::from_bytes(include_bytes!(
                     "../icons/tray.png"
                 ))?)
-                .tooltip("lmgw — LLM API gateway")
+                .tooltip(dev_guard::tray_tooltip(
+                    &state.data_dir,
+                    debug_build,
+                    hold_active,
+                ))
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(move |app, event| {
                     let state: tauri::State<SharedState> = app.state();
                     match event.id.as_ref() {
                         "open" => show_main_window(app),
-                        "browser" => {
+                        "browser" => match app.state::<Gateway>().status() {
                             // Minted here rather than at menu build time: a
                             // nonce lives 60 s and is single-use (§3.4), so a
                             // URL baked into the menu would be a dead
                             // credential by the first click and land the
-                            // browser on the login card. `127.0.0.1` stays
-                            // forced, as for the window.
-                            let url = login_url(&state, &bind_addr(&state));
-                            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                        }
+                            // browser on the login card. The address this
+                            // process holds, as for the window.
+                            Ok(addr) => {
+                                let url = login_url(&state, &addr);
+                                // Not the URL: it carries a login nonce.
+                                if let Err(e) = xdg_open(&url) {
+                                    tracing::warn!("Open in Browser: xdg-open: {e}");
+                                }
+                            }
+                            Err(why) => gateway::not_serving(app, &why),
+                        },
                         "models-start" | "models-stop" => {
                             let action = if event.id.as_ref() == "models-start" {
                                 "start"
@@ -604,15 +703,10 @@ fn main() {
                                 }
                             });
                         }
-                        "restart" => {
-                            let st = (*state).clone();
-                            let server: tauri::State<ServerHandle> = app.state();
-                            server.stop();
-                            let addr = bind_addr(&st);
-                            let server: &ServerHandle = &server;
-                            server.start(st, addr);
-                        }
-                        "check-updates" => updater::check_now(app.clone()),
+                        // Re-reads bind_addr (review m3: the window follows the
+                        // new bind, or closes when there is none).
+                        "restart" => gateway::restart(app, (*state).clone()),
+                        "check-updates" if updates => updater::check_now(app.clone()),
                         "quit" => app.exit(0),
                         _ => {}
                     }
@@ -633,10 +727,14 @@ fn main() {
                     let snap = state_for_status.snapshot();
                     let stats = state_for_status.telemetry.stats();
                     let runtime = state_for_status.runtime().list();
-                    let _ = status_item.set_text(format!(
-                        "lmgw · {addr} · {} req/min · {} active",
-                        stats.req_last_minute, stats.active_requests
-                    ));
+                    let gateway: tauri::State<Gateway> = app_for_status.state();
+                    let _ = status_item.set_text(match gateway.status() {
+                        Ok(addr) => format!(
+                            "{tray_label} · {addr} · {} req/min · {} active",
+                            stats.req_last_minute, stats.active_requests
+                        ),
+                        Err(_) => format!("{tray_label} · not serving"),
+                    });
                     // One line for N containers (§3.2): the count, and how many
                     // of them are serving something right now.
                     let busy = runtime.iter().filter(|v| v.in_flight > 0).count();
@@ -661,7 +759,14 @@ fn main() {
             });
 
             // Background update check (§12): polls the registry and prompts.
-            updater::spawn(app.handle().clone());
+            if updates {
+                updater::spawn(app.handle().clone());
+            } else {
+                tracing::info!(
+                    "debug build: the updater is off — it would download to the installed \
+                     app's path and install over the installed app"
+                );
+            }
 
             show_main_window(app.handle());
             Ok(())
@@ -673,7 +778,7 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while running lmgw")
         // `build` + `run(callback)` instead of `run(context)` for exactly one
         // reason: `RunEvent::Exit` is the only place the per-model container

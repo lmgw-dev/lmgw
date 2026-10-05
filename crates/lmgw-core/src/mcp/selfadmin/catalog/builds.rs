@@ -141,7 +141,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "cpus",
-                    str_p("Cores the build may use (--cpuset-cpus), e.g. 0-15. '' = all."),
+                    str_p(
+                        "Cores the build may use (--cpuset-cpus), e.g. 0-15. '' = all. Needs \
+                         podman's cpuset cgroup controller (rootless: delegated to \
+                         user@.service) — without it the save is refused, naming the fix; CPUs \
+                         the host does not have online are refused too. When podman cannot be \
+                         asked, the save goes through and its 'notes' say so.",
+                    ),
                 ),
                 (
                     "build_args",

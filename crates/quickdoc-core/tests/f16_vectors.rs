@@ -183,14 +183,14 @@ fn f16_versus_f32_at_corpus_scale() {
     let queries = unit_vectors(30, DIMS, 0x1234_5678_9ABC_DEF0);
 
     // Warm the caches so the first query does not pay for the whole matrix.
-    for q in queries.chunks_exact(DIMS).take(3) {
+    for q in queries.as_chunks::<DIMS>().0.iter().take(3) {
         let _ = topk_f32(q, &corpus, DIMS, k);
         let _ = topk_f16(q, &narrowed, DIMS, k);
     }
 
     let mut f32_ms = Vec::new();
     let mut f16_ms = Vec::new();
-    for q in queries.chunks_exact(DIMS) {
+    for q in queries.as_chunks::<DIMS>().0 {
         let t = Instant::now();
         let _ = topk_f32(q, &corpus, DIMS, k);
         f32_ms.push(t.elapsed().as_secs_f64() * 1000.0);

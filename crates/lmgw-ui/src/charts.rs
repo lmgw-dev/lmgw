@@ -212,7 +212,7 @@ impl Plot {
     }
     /// Column width: `frac` of the band, capped at 24px (the mark spec).
     pub fn bar_w(&self, n: usize, frac: f64) -> f64 {
-        (self.band_w(n) * frac).min(24.0).max(1.0)
+        (self.band_w(n) * frac).clamp(1.0, 24.0)
     }
     pub fn view_box(&self) -> String {
         format!("0 0 {:.0} {:.0}", self.w, self.h)

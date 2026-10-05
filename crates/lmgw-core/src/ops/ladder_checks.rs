@@ -324,9 +324,7 @@ pub(super) async fn validate_ladder(
         params,
         args,
     };
-    if let Err(reason) = crate::gate::count::image_token_bound(models_dir, row).await {
-        return Err(reason);
-    }
+    crate::gate::count::image_token_bound(models_dir, row).await?;
 
     Ok(())
 }

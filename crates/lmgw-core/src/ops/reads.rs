@@ -599,6 +599,8 @@ pub async fn settings(state: &SharedState) -> Result<Value, String> {
             "voice_dir": s.audio.voice_dir,
             "extra_run_args": s.audio.extra_run_args.join("\n"),
             "public_prefix": s.audio.public_prefix,
+            // Which local model writes voice-clip transcripts (empty: none).
+            "voice_transcribe_alias": s.audio.voice_transcribe_alias,
         },
         // The image class has no engine fields at all (image-generation design
         // §4): sd-server has no config file, and everything per-process is a
@@ -621,6 +623,16 @@ pub async fn settings(state: &SharedState) -> Result<Value, String> {
     out["chat_system_prompt_is_builtin"] = json!(s.chat_system_prompt.is_none());
     out["chat_pdf_mode"] = json!(s.chat_pdf_mode);
     out["chat_stt_alias"] = json!(s.chat_stt_alias);
+    // The Chat's Voice group (chat-voice design §2.1), in the shape
+    // `lmgw__settings_set` takes back.
+    out["chat_tts_alias"] = json!(s.chat_tts_alias);
+    out["chat_voice"] = json!(s.chat_voice);
+    out["chat_speech_style"] = json!(s.chat_speech_style);
+    out["chat_voice_language"] = json!(s.chat_voice_language);
+    out["chat_voice_reply_language"] = json!(s.chat_voice_reply_language);
+    out["chat_read_aloud"] = json!(s.chat_read_aloud);
+    out["chat_turn_detection"] = json!(s.chat_turn_detection);
+    out["chat_voice_audio_input"] = json!(s.chat_voice_audio_input);
     out["chat_kb_budget_tokens"] = json!(s.chat_kb_budget_tokens);
     let builds_dir = state.builds_dir();
     out["builds_dir"] = json!(s.builds_dir);
@@ -628,5 +640,11 @@ pub async fn settings(state: &SharedState) -> Result<Value, String> {
     out["builds_dir_warning"] = json!(crate::backends::paths::tmpfs_refusal(&builds_dir));
     out["forge_tokens"] = redact_map(&s.forge_tokens);
     out["build_update_check_hours"] = json!(s.build_update_check_hours);
+    // What an audio catalog download takes (the spec's pin, or main) — what
+    // `lmgw__settings_set audio_catalog_revision` sets. After the macro too.
+    out["audio"]["catalog_revision"] = json!(s.audio.catalog_revision.as_str());
+    // `GET /v1/realtime`'s section (realtime design §12), in the shape
+    // `lmgw__settings_set realtime` takes back.
+    out["realtime"] = json!(super::realtime_view(&s.realtime));
     Ok(out)
 }

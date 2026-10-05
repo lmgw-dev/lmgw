@@ -1,0 +1,595 @@
+[
+ {
+  "js": "'Chat voice WP9: the realtime panel with each visualisation variant in each state, in the chat panel and the focus view, against an in-page bound session (scripts/realtime-mock.js) and a fake microphone saying TTS clips on cue (scripts/drive/fake-voice.js): screenshots for the owner, plus the composer restored on leaving. No model runs: it works on any gateway. Run: scripts/drive/make-voice-fixtures.py <base> <token-file> target/chat-voice/fixtures/voice-de.js (once, on a gateway with a TTS), then scripts/ui-drive.py scripts/drive/chat-voice-panel.json --mute-audio --shots <dir> (nothing is audible: Chrome is muted, the fake microphone feeds only the page).'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "script": "scripts/realtime-mock.js"
+ },
+ {
+  "script": "target/chat-voice/fixtures/voice-de.js"
+ },
+ {
+  "script": "scripts/drive/fake-voice.js"
+ },
+ {
+  "js": "window.fakeVoice.install()"
+ },
+ {
+  "js": "window.lmgwRealtimeMock.patchThread({})"
+ },
+ {
+  "click": "button[title^='New temporary chat']"
+ },
+ {
+  "until": "location.search.startsWith('?t=-') && !!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
+  "timeout": 15,
+  "label": "a temporary chat whose voice button is enabled"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Entwurf bleibt"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.voice.viz'); 'default variants'"
+ },
+ {
+  "js": "localStorage.setItem('lmgw.voice.viz', JSON.stringify({panel: 'ribbon', focus: 'ribbon'})); window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 2600, audioMs: 7000, question: 'Erzähl mir bitte in fünf ganzen Sätzen, warum der Himmel blau ist.', reply: 'Der Himmel ist blau, weil die Luft das kurzwellige blaue Licht der Sonne viel stärker streut als das rote. Dieses gestreute Licht kommt aus allen Richtungen zu uns.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "ribbon-chat: live"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "ribbon-chat: the ribbon draws"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "ribbon-chat-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long'); window.lmgwRealtimeMock.speak(null, 3600); 'speaking'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 5
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "shot": "ribbon-chat-listening"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'thinking'",
+  "timeout": 8
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "ribbon-chat-thinking"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 8
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "shot": "ribbon-chat-speaking"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge'); window.lmgwRealtimeMock.bargeIn()"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "shot": "ribbon-chat-interrupted"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 3,
+  "label": "ribbon-chat: interrupted, then listening"
+ },
+ {
+  "js": "(() => { const s = window.lmgwRealtimeMock.current; s.emit({type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1, item_id: 'x'}); s.emit({type: 'error', error: {type: 'invalid_request_error', code: 'empty_turn', message: 'nothing new', param: null, event_id: null}}); return 'turn ended'; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 5
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "ribbon-chat: Esc leaves"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "localStorage.setItem('lmgw.voice.viz', JSON.stringify({panel: 'ribbon', focus: 'ribbon'})); window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 2600, audioMs: 7000, question: 'Erzähl mir bitte in fünf ganzen Sätzen, warum der Himmel blau ist.', reply: 'Der Himmel ist blau, weil die Luft das kurzwellige blaue Licht der Sonne viel stärker streut als das rote. Dieses gestreute Licht kommt aus allen Richtungen zu uns.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "ribbon-focus: live"
+ },
+ {
+  "click": "[data-rt-focus]"
+ },
+ {
+  "until": "document.querySelector('.rt-dock.focus')",
+  "timeout": 5
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "ribbon-focus: the ribbon draws"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "ribbon-focus-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long'); window.lmgwRealtimeMock.speak(null, 3600); 'speaking'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 5
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "shot": "ribbon-focus-listening"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'thinking'",
+  "timeout": 8
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "ribbon-focus-thinking"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 8
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "shot": "ribbon-focus-speaking"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge'); window.lmgwRealtimeMock.bargeIn()"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "shot": "ribbon-focus-interrupted"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 3,
+  "label": "ribbon-focus: interrupted, then listening"
+ },
+ {
+  "js": "(() => { const s = window.lmgwRealtimeMock.current; s.emit({type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1, item_id: 'x'}); s.emit({type: 'error', error: {type: 'invalid_request_error', code: 'empty_turn', message: 'nothing new', param: null, event_id: null}}); return 'turn ended'; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 5
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "ribbon-focus: Esc leaves"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "localStorage.setItem('lmgw.voice.viz', JSON.stringify({panel: 'orb', focus: 'orb'})); window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 2600, audioMs: 7000, question: 'Erzähl mir bitte in fünf ganzen Sätzen, warum der Himmel blau ist.', reply: 'Der Himmel ist blau, weil die Luft das kurzwellige blaue Licht der Sonne viel stärker streut als das rote. Dieses gestreute Licht kommt aus allen Richtungen zu uns.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "orb-chat: live"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "orb-chat: the orb draws"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "orb-chat-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long'); window.lmgwRealtimeMock.speak(null, 3600); 'speaking'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 5
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "shot": "orb-chat-listening"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'thinking'",
+  "timeout": 8
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "orb-chat-thinking"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 8
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "shot": "orb-chat-speaking"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge'); window.lmgwRealtimeMock.bargeIn()"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "shot": "orb-chat-interrupted"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 3,
+  "label": "orb-chat: interrupted, then listening"
+ },
+ {
+  "js": "(() => { const s = window.lmgwRealtimeMock.current; s.emit({type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1, item_id: 'x'}); s.emit({type: 'error', error: {type: 'invalid_request_error', code: 'empty_turn', message: 'nothing new', param: null, event_id: null}}); return 'turn ended'; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 5
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "orb-chat: Esc leaves"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "localStorage.setItem('lmgw.voice.viz', JSON.stringify({panel: 'orb', focus: 'orb'})); window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 2600, audioMs: 7000, question: 'Erzähl mir bitte in fünf ganzen Sätzen, warum der Himmel blau ist.', reply: 'Der Himmel ist blau, weil die Luft das kurzwellige blaue Licht der Sonne viel stärker streut als das rote. Dieses gestreute Licht kommt aus allen Richtungen zu uns.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "orb-focus: live"
+ },
+ {
+  "click": "[data-rt-focus]"
+ },
+ {
+  "until": "document.querySelector('.rt-dock.focus')",
+  "timeout": 5
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "orb-focus: the orb draws"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "orb-focus-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long'); window.lmgwRealtimeMock.speak(null, 3600); 'speaking'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 5
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "shot": "orb-focus-listening"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'thinking'",
+  "timeout": 8
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "orb-focus-thinking"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 8
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "shot": "orb-focus-speaking"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge'); window.lmgwRealtimeMock.bargeIn()"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "shot": "orb-focus-interrupted"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 3,
+  "label": "orb-focus: interrupted, then listening"
+ },
+ {
+  "js": "(() => { const s = window.lmgwRealtimeMock.current; s.emit({type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1, item_id: 'x'}); s.emit({type: 'error', error: {type: 'invalid_request_error', code: 'empty_turn', message: 'nothing new', param: null, event_id: null}}); return 'turn ended'; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 5
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "orb-focus: Esc leaves"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "localStorage.setItem('lmgw.voice.viz', JSON.stringify({panel: 'ring', focus: 'ring'})); window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 2600, audioMs: 7000, question: 'Erzähl mir bitte in fünf ganzen Sätzen, warum der Himmel blau ist.', reply: 'Der Himmel ist blau, weil die Luft das kurzwellige blaue Licht der Sonne viel stärker streut als das rote. Dieses gestreute Licht kommt aus allen Richtungen zu uns.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "ring-chat: live"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ring' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "ring-chat: the ring draws"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "ring-chat-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long'); window.lmgwRealtimeMock.speak(null, 3600); 'speaking'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 5
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "shot": "ring-chat-listening"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'thinking'",
+  "timeout": 8
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "ring-chat-thinking"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 8
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "shot": "ring-chat-speaking"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge'); window.lmgwRealtimeMock.bargeIn()"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "shot": "ring-chat-interrupted"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 3,
+  "label": "ring-chat: interrupted, then listening"
+ },
+ {
+  "js": "(() => { const s = window.lmgwRealtimeMock.current; s.emit({type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1, item_id: 'x'}); s.emit({type: 'error', error: {type: 'invalid_request_error', code: 'empty_turn', message: 'nothing new', param: null, event_id: null}}); return 'turn ended'; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 5
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "ring-chat: Esc leaves"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "localStorage.setItem('lmgw.voice.viz', JSON.stringify({panel: 'ring', focus: 'ring'})); window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), warmMs: 200, thinkMs: 2600, audioMs: 7000, question: 'Erzähl mir bitte in fünf ganzen Sätzen, warum der Himmel blau ist.', reply: 'Der Himmel ist blau, weil die Luft das kurzwellige blaue Licht der Sonne viel stärker streut als das rote. Dieses gestreute Licht kommt aus allen Richtungen zu uns.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "ring-focus: live"
+ },
+ {
+  "click": "[data-rt-focus]"
+ },
+ {
+  "until": "document.querySelector('.rt-dock.focus')",
+  "timeout": 5
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ring' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "ring-focus: the ring draws"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "ring-focus-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long'); window.lmgwRealtimeMock.speak(null, 3600); 'speaking'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 5
+ },
+ {
+  "wait": 1.6
+ },
+ {
+  "shot": "ring-focus-listening"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'thinking'",
+  "timeout": 8
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "ring-focus-thinking"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 8
+ },
+ {
+  "wait": 2.2
+ },
+ {
+  "shot": "ring-focus-speaking"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge'); window.lmgwRealtimeMock.bargeIn()"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "shot": "ring-focus-interrupted"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'listening'",
+  "timeout": 3,
+  "label": "ring-focus: interrupted, then listening"
+ },
+ {
+  "js": "(() => { const s = window.lmgwRealtimeMock.current; s.emit({type: 'input_audio_buffer.speech_stopped', audio_end_ms: 1, item_id: 'x'}); s.emit({type: 'error', error: {type: 'invalid_request_error', code: 'empty_turn', message: 'nothing new', param: null, event_id: null}}); return 'turn ended'; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 5
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "ring-focus: Esc leaves"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('textarea.composer-input').value === 'Entwurf bleibt'",
+  "label": "the composer's text is back as it was after every leave"
+ },
+ {
+  "expect": "window.fakeVoice.live() === 0 && window.fakeVoice.tracks.length === 6",
+  "label": "six sessions, six microphones, every track ended"
+ },
+ {
+  "expect": "window.fakeVoice.asked.every(c => c.audio && c.audio.echoCancellation === false && c.audio.noiseSuppression === false && c.audio.autoGainControl === false)",
+  "label": "the default echo mode (the input cancels echo) turns the browser's processing off"
+ }
+]

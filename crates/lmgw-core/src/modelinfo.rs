@@ -2434,8 +2434,9 @@ pub async fn local_model_test(
     // is exactly the thing that would otherwise start a container on a card
     // the owner has taken back. Named rather than left to `admit_local`'s net
     // so the answer says "hold", not "admission refused". A benchmark's
-    // lease refuses it the same way (benchmark design §3.2).
-    if let Some(block) = snap.gpu_block() {
+    // lease refuses it the same way (benchmark design §3.2). Per model, as
+    // every admission site decides (`gpu_block_for`).
+    if let Some(block) = snap.gpu_block_for(class, model_id) {
         return Err(format!(
             "{}, so '{model_id}' is not started to test it — a test loads the model for real. \
              {} and run it again.",

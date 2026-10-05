@@ -70,4 +70,5 @@ pub use open::{
     open, open_pinned, resolve, usable_fallback, AdmissionPolicy, FallbackReason, GateHeaders,
     OpenFailed, Opened, RouteCheck, Routed,
 };
-pub use send::{send_gated, CountInput, Sent};
+pub(crate) use send::rebuild;
+pub use send::{send_gated, send_gated_marked, CountInput, Sent};

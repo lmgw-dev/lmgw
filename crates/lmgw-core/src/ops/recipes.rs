@@ -147,7 +147,7 @@ pub async fn image_recipe_add(
         )
     })?;
     let snap = state.snapshot();
-    let models_dir = hf::models_dir_or_refuse(&snap.settings, "image")?;
+    let models_dir = hf::models_dir_to_write(state, "image")?;
     let chosen = recipe.choose_files(diffusion_file)?;
 
     // A gated component with no token queues a download that fails at the

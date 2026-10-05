@@ -34,6 +34,7 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
             "stopped": Vec::<String>::new(),
             "draining": draining_now(state, active),
             "failed": Vec::<String>::new(),
+            "kept_on_cpu": on_cpu_now(state, active),
             "message": format!(
                 "the GPU hold was already {} — nothing to do",
                 if active { "on" } else { "off" }
@@ -98,6 +99,12 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
             sweep.stopped.len(),
             sweep.draining.len()
         );
+        if !sweep.kept_on_cpu.is_empty() {
+            m.push_str(&format!(
+                "; audio models that run on the CPU keep serving ({})",
+                sweep.kept_on_cpu.join(", ")
+            ));
+        }
         if let Some(run) = bench_aborted {
             m.push_str(&format!(
                 "; benchmark run {run} was aborted and its container removed"
@@ -122,6 +129,7 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
         "stopped": sweep.stopped,
         "draining": sweep.draining,
         "failed": sweep.failed,
+        "kept_on_cpu": sweep.kept_on_cpu,
         "benchmark_aborted": bench_aborted,
         "message": message,
     }))
@@ -138,7 +146,24 @@ fn draining_now(state: &SharedState, active: bool) -> Vec<String> {
         .runtime()
         .list()
         .into_iter()
+        .filter(|v| v.placement.is_gpu())
         .filter(|v| v.state == crate::runtime::registry::RuntimeState::Starting || v.in_flight > 0)
+        .map(|v| format!("{}/{}", v.class.as_str(), v.model_id))
+        .collect()
+}
+
+/// The containers on the CPU the hold leaves running, for the no-op arm of
+/// [`hold_set`] (the sweep's own [`lifecycle::HoldSweep::kept_on_cpu`]
+/// otherwise).
+fn on_cpu_now(state: &SharedState, active: bool) -> Vec<String> {
+    if !active {
+        return Vec::new();
+    }
+    state
+        .runtime()
+        .list()
+        .into_iter()
+        .filter(|v| !v.placement.is_gpu())
         .map(|v| format!("{}/{}", v.class.as_str(), v.model_id))
         .collect()
 }

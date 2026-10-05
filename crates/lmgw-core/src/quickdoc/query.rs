@@ -7,7 +7,7 @@
 //! names itself, and start from the owner's stage defaults so a request that
 //! overrides nothing still gets the settings it was configured with.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use quickdoc_core::embed::TokenCounter;
 use quickdoc_core::retrieve::{Retriever, SearchParams};
@@ -26,9 +26,10 @@ use super::rerank::{rerank_alias, InProcessReranker};
 /// itself in the trace beats one that pretends to a precision it does not have.
 pub struct TiktokenCounter;
 
+/// tiktoken-rs's process-wide encoder, the one the gateway's own counter
+/// (`egress::openai`) uses too, so the 200k-entry table is built once.
 fn o200k() -> Option<&'static tiktoken_rs::CoreBPE> {
-    static BPE: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
-    BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
+    tiktoken_rs::bpe_for_tokenizer(tiktoken_rs::tokenizer::Tokenizer::O200kBase).ok()
 }
 
 impl TokenCounter for TiktokenCounter {

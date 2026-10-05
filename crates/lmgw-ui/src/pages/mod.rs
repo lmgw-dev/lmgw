@@ -44,6 +44,9 @@ mod chat_stream;
 mod chat_temp;
 /// One streamed turn, however it started.
 mod chat_turn;
+/// Chat voice: a thread's voice overrides, their resolution, the Voice
+/// section of its settings.
+mod chat_voice;
 mod conversations;
 pub mod docs;
 mod docs_eval;

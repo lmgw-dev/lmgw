@@ -39,6 +39,9 @@ pub mod extract;
 pub mod gate;
 pub mod gguf;
 pub mod hf;
+/// Facts about the machine lmgw runs on — its CPUs, the auto thread count of
+/// an audio row switched to the CPU.
+pub mod host;
 pub mod image_recipes;
 pub mod ingress;
 pub mod ir;
@@ -70,6 +73,10 @@ pub mod pricing;
 pub mod principal;
 pub mod proxy;
 pub mod quickdoc;
+/// `GET /v1/realtime`: spoken conversations over OpenAI's GA Realtime
+/// protocol, answered by a cascade of the gateway's own aliases (realtime
+/// design).
+pub mod realtime;
 pub mod responses;
 pub mod runtime;
 pub mod sdcpp_caps;

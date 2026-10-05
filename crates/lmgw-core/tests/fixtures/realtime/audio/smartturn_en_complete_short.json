@@ -1,0 +1,65 @@
+{
+ "source": "en_complete_short.wav",
+ "cut_ms": 1738,
+ "cut_description": "cut exactly at end of the question speech; expected complete",
+ "audio": {
+  "file": "smartturn_en_complete_short.audio16k_f32le.bin",
+  "dtype": "float32",
+  "endian": "little",
+  "samples": 27808,
+  "rate": 16000,
+  "note": "unpadded; soxr VHQ 24k->16k of the cut 24 kHz WAV. Reference left-pads zeros to 128000 samples (or keeps last 128000), then WhisperFeatureExtractor(chunk_length=8, do_normalize=True)"
+ },
+ "features": {
+  "file": "smartturn_en_complete_short.features_f32le.bin",
+  "dtype": "float32",
+  "endian": "little",
+  "shape": [
+   1,
+   80,
+   800
+  ],
+  "layout": "[batch=1, n_mels=80, frames=800] row-major (mel-major, time fastest)",
+  "first5": [
+   -0.02005946636199951,
+   -0.02005946636199951,
+   -0.02005946636199951,
+   -0.02005946636199951,
+   -0.02005946636199951
+  ],
+  "last5": [
+   -0.026079416275024414,
+   -0.028661727905273438,
+   -0.028661727905273438,
+   -0.028661727905273438,
+   -0.028661727905273438
+  ],
+  "mean": 0.12000151723623276,
+  "std": 0.3654181957244873,
+  "min": -0.028661727905273438,
+  "max": 1.9713382720947266
+ },
+ "smart_turn_v3_2_cpu_probability": 0.978554368019104,
+ "smart_turn_probability_with_200ms_zero_pad_appended": 0.9816229343414307,
+ "audio_stats": {
+  "first5": [
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "last5": [
+   -2.105559360643383e-06,
+   2.3472516659239773e-06,
+   -2.18979334931646e-06,
+   1.941641585290199e-06,
+   -1.6665054545228486e-06
+  ],
+  "mean": -0.00013147908612154424,
+  "std": 0.10597896575927734,
+  "min": -0.4929942786693573,
+  "max": 0.5551809072494507
+ },
+ "model": "smart-turn-v3.2-cpu.onnx, input input_features [1,80,800], output (named logits) is already a probability"
+}

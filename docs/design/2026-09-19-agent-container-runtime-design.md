@@ -1303,10 +1303,14 @@ failed by the mechanism that was already there.
 
 ### 6.4 Boot reconciliation
 
-On `AppState::init`, after `fail_orphaned_jobs`, spawned rather than awaited
+Spawned by `server::run` beside `lifecycle::boot`, rather than awaited
 (`podman ps` has no bound on a slow or absent podman, and `lifecycle::boot` is
 spawned for the same reason; `reconcile()` is a plain function tests call
-directly):
+directly). `fail_orphaned_jobs` in `AppState::init` has run by then. *Moved
+out of `AppState::init` (chat-voice WP5 review B1):* a fresh data dir boots on
+the production `container_prefix`, and only the entry point's dev-instance step,
+which runs between `init` and `server::run`, makes it a dev prefix; listing
+from `init` listed, and removed, the installed app's agent containers:
 `podman ps -a --filter label=lmgw.kind=agent --filter
 label=lmgw.instance=<container_prefix> --format json`. Every container whose
 `lmgw.run` label is not a live job row → `Registry::rm_force`. The run

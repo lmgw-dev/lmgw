@@ -7,8 +7,10 @@ use crate::runtime::registry::{RuntimeState, RuntimeView};
 use crate::runtime::Class;
 use crate::state::SharedState;
 
-use super::attribution::{self, Container, Fill, Member};
+use super::attribution::{self, Container, Fill, Member, Reading};
 use super::nvml::{GpuMemory, ProcessMemory};
+use super::on_cpu::on_gpu;
+use super::residency;
 use super::scheduler::{Reservation, CONTROL_TIMEOUT, MIB};
 use super::view::{peak_note, ResidentView};
 use super::{broadcast, VramScheduler};
@@ -46,12 +48,15 @@ impl VramScheduler {
         // Residency is the registry, not a question asked over HTTP: an entry
         // exists exactly while lmgw believes a container for that model is up,
         // and `starting` counts because the weights are already going onto the
-        // card.
+        // card. A container on the CPU is no part of it (`on_cpu`): this one
+        // filter keeps it out of the charge, the pending loads, eviction, the
+        // holders a refusal names and the hold's draining list.
         let entries: Vec<RuntimeView> = state
             .runtime()
             .list()
             .into_iter()
             .filter(|e| matches!(e.state, RuntimeState::Starting | RuntimeState::Ready))
+            .filter(on_gpu)
             .collect();
         let reservations = self.live.lock().unwrap().reservations.clone();
 
@@ -68,6 +73,31 @@ impl VramScheduler {
         // generation is one request away the whole time. Its sibling above is
         // memory that is *arriving*; this is memory that will be *taken back*.
         let mut reserved_peaks: u64 = 0;
+        // And the third (realtime design §9.4): what a ready audio container
+        // will load on its first request — audio.cpp loads lazily, and its
+        // readiness route answers before the weights are on the card. Like
+        // the peaks, charged only where the driver is the measurement: in the
+        // budget-only branch `estimated_resident` already counts the whole
+        // expected residency.
+        let mut pending_loads: u64 = 0;
+        // Pruned against every live container, the CPU's too: what a CPU
+        // container has answered is all its residency knows (`audio_model_
+        // loaded`), and forgetting it here made it read as never loaded — a
+        // reload sent at each warm, and a "cold" stage on every turn.
+        let live: Vec<u64> = state
+            .runtime()
+            .list()
+            .into_iter()
+            .filter(|e| matches!(e.state, RuntimeState::Starting | RuntimeState::Ready))
+            .map(|e| e.generation)
+            .collect();
+        let gens = self.residency.view(&live);
+        let now = std::time::Instant::now();
+        let cannot_learn = entries
+            .iter()
+            .any(|e| e.class == Class::Audio)
+            .then(|| self.probe().process_support().err())
+            .flatten();
         for e in &entries {
             // The rung the container runs, `starting` included: a climb's new
             // rung is charged from its claim on (ladder design §5).
@@ -93,10 +123,56 @@ impl VramScheduler {
             if let Some(p) = peak {
                 reserved_peaks = reserved_peaks.saturating_add(p);
             }
-            let note = match (e.class, e.state) {
-                (Class::Image, RuntimeState::Ready) => {
+            let audio = match (e.class, e.state, fp.as_ref()) {
+                (Class::Audio, RuntimeState::Ready, Some(fp)) => snap
+                    .audio_models
+                    .iter()
+                    .find(|m| m.model_id == e.model_id)
+                    .map(|row| (row, fp)),
+                _ => None,
+            };
+            let gen = gens.get(&e.generation).cloned().unwrap_or_default();
+            let pending = match audio {
+                Some((row, fp)) => {
+                    // Only an eager row nothing was read of needs its
+                    // weights file (memoized after the first ledger).
+                    let weights = if residency::is_eager(row, &s.audio) {
+                        self.plans.audio_weights(&s.audio.models_dir, row).await
+                    } else {
+                        0
+                    };
+                    Some(residency::pending(
+                        row,
+                        &s.audio,
+                        fp.total_bytes,
+                        weights,
+                        &gen,
+                        now,
+                    ))
+                }
+                None => None,
+            };
+            let pending_bytes = pending.as_ref().map(|p| p.bytes);
+            pending_loads = pending_loads.saturating_add(pending_bytes.unwrap_or(0));
+            let note = match (e.class, e.state, audio, &pending) {
+                (Class::Image, RuntimeState::Ready, _, _) => {
                     Some(peak_note(fp.as_ref().and_then(|f| f.note.as_deref()), peak))
                 }
+                (_, _, Some((row, fp)), Some(pending)) => Some(residency::resident_note(
+                    row,
+                    &s.audio,
+                    &residency::NoteFacts {
+                        on_disk: fp.weights_bytes,
+                        pending,
+                        cannot_learn: cannot_learn.as_deref(),
+                        sampling: self.sampling(row, &s.audio),
+                        gen: &gen,
+                        runs_previous: e.resident_key.as_deref().is_some_and(|k| {
+                            k != residency::resident_key(row, &s.audio)
+                                && row.residency.as_ref().is_some_and(|r| r.key == k)
+                        }),
+                    },
+                )),
                 _ => fp.as_ref().and_then(|f| f.note.clone()),
             };
             residents.push(ResidentView {
@@ -107,6 +183,7 @@ impl VramScheduler {
                 in_flight: e.in_flight as usize,
                 idle_seconds: Some(e.last_used_age_seconds),
                 peak_extra_bytes: peak,
+                pending_bytes: pending_bytes.filter(|p| *p > 0),
                 note,
             });
         }
@@ -132,6 +209,7 @@ impl VramScheduler {
                 // pipeline cannot be asked to draw until it is `ready`, and
                 // the reservation itself already charges the idle figure.
                 peak_extra_bytes: None,
+                pending_bytes: None,
                 note: None,
             });
         }
@@ -158,7 +236,8 @@ impl VramScheduler {
                         total,
                         free: free
                             .saturating_sub(unmeasured)
-                            .saturating_sub(reserved_peaks),
+                            .saturating_sub(reserved_peaks)
+                            .saturating_sub(pending_loads),
                         measured: true,
                     }),
                     None,
@@ -188,7 +267,8 @@ impl VramScheduler {
                         total: b,
                         free: raw_free
                             .saturating_sub(unmeasured)
-                            .saturating_sub(reserved_peaks),
+                            .saturating_sub(reserved_peaks)
+                            .saturating_sub(pending_loads),
                         measured: true,
                     }),
                     None,
@@ -251,8 +331,10 @@ impl VramScheduler {
             .process_support()
             .map_err(|e| format!("no per-process GPU memory: {e}"))?;
 
-        // 1. lmgw's containers, and their PIDs — a benchmark run's too.
-        let entries = state.runtime().list();
+        // 1. lmgw's containers, and their PIDs — a benchmark run's too. Those
+        // on the GPU only: a CPU container has no GPU process, and as a member
+        // it would make every pass refuse ("running without the GPU").
+        let entries = gpu_entries(state);
         let reservations = self.live.lock().unwrap().reservations.clone();
         if let Some(why) = unmeasured_start(&entries, &reservations) {
             return Err(why);
@@ -339,11 +421,8 @@ impl VramScheduler {
         }
 
         // 3. The registry (and the benchmark's container) again.
-        let after = Roster::of(
-            &state.runtime().list(),
-            &self.live.lock().unwrap().reservations,
-        )
-        .and_bench(bench_on_card(state));
+        let after = Roster::of(&gpu_entries(state), &self.live.lock().unwrap().reservations)
+            .and_bench(bench_on_card(state));
         let mut cache = self.pids.lock().unwrap();
         cache.remember(&members);
         if after != before {
@@ -385,26 +464,47 @@ impl VramScheduler {
     /// Only while the trigger is armed and the probe can list processes:
     /// otherwise no pass would read the PID, and nothing is spawned (§7 item
     /// 14). A `starting` entry is left alone — its PID is not meaningful yet,
-    /// and a start in flight makes every pass unavailable anyway.
+    /// and a start in flight makes every pass unavailable anyway. The one
+    /// part that is not gated is an audio container's reading at rest
+    /// ([`residency`], WP7 review M4), which reads its PID for itself.
     pub fn cache_pids(&self, state: &SharedState) {
+        // What a ready audio container holds at rest is read whatever the
+        // trigger's switches say ([`residency`]'s at-rest reading).
+        self.read_audio_at_rest(state);
         if trigger_off(&state.snapshot()).is_some() || self.probe().process_support().is_err() {
             return;
         }
+        // The status view's rule: ask only for a generation never asked
+        // about; one already being read, or whose read failed, is left to
+        // the next verdict.
+        self.pid_plan(state, Fill::View);
+    }
+
+    /// [`Self::cache_pids`] without its gate: plan the PIDs of every
+    /// registered container that is not `starting` (and the benchmark's),
+    /// spawn the batched `podman inspect` the plan asks for — reading the
+    /// processes under each init too — and hand back the reads `fill` waits
+    /// for (none for [`Fill::View`]).
+    ///
+    /// Every container goes into the plan, never only the one a caller is
+    /// after: the cache retires whatever a plan does not name into
+    /// tombstones. The audio residency reading is the caller that needs no
+    /// gate ([`residency`]): it learns a figure about a row, whatever the
+    /// outside-VRAM trigger's switches say.
+    pub(super) fn pid_plan(&self, state: &SharedState, fill: Fill) -> Vec<Reading> {
         let mut current: Vec<Container> = state
             .runtime()
             .list()
             .iter()
-            .filter(|e| e.state != RuntimeState::Starting)
+            .filter(|e| e.state != RuntimeState::Starting && on_gpu(e))
             .map(container_of)
             .collect();
         current.extend(bench_container(state).ok().flatten());
-        // The status view's rule: ask only for a generation never asked
-        // about; one already being read, or whose read failed, is left to
-        // the next verdict.
-        let plan = self.pids.lock().unwrap().plan(&current, Fill::View);
+        let plan = self.pids.lock().unwrap().plan(&current, fill);
         if let Some(done) = plan.done {
             self.read_pids(state, plan.inspect, done, false, true);
         }
+        plan.wait
     }
 
     /// Run one batched `podman inspect` for `asked` in a task of its own, and
@@ -445,7 +545,12 @@ impl VramScheduler {
                         CONTROL_TIMEOUT.as_secs()
                     )),
                 };
-            let mut live: HashSet<u64> = registry.list().iter().map(|e| e.generation).collect();
+            let mut live: HashSet<u64> = registry
+                .list()
+                .iter()
+                .filter(|e| on_gpu(e))
+                .map(|e| e.generation)
+                .collect();
             if let OnCard::Ready { generation } = bench_on_card(&st) {
                 live.insert(generation);
             }
@@ -514,6 +619,12 @@ fn bench_container(state: &SharedState) -> Result<Option<Container>, String> {
         })),
         _ => Ok(None),
     }
+}
+
+/// The registry's containers on the GPU (`on_cpu::on_gpu`) — what the
+/// per-process attribution measures.
+fn gpu_entries(state: &SharedState) -> Vec<RuntimeView> {
+    state.runtime().list().into_iter().filter(on_gpu).collect()
 }
 
 /// A registry entry as the PID cache keys it.

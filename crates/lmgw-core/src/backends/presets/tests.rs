@@ -85,14 +85,18 @@ fn the_tested_profiles_reproduce_the_spike_containerfiles() {
     .unwrap();
     assert_eq!(official, fixture!("official-cuda.spike.Containerfile"));
 
+    // audio: the spike's image had no eSpeak NG (`runtime-espeak` came with
+    // the Kokoro fix); without that edit the result is its file byte for
+    // byte.
     let mut audio_vars = spike_vars("lmgw-audio-cuda");
     audio_vars.npm_cache_id = "unused".into();
-    let (audio, _) = apply_edits(
-        fixture!("audio-cuda.Dockerfile"),
-        &profile("audio-cuda").edits_for(true),
-        &audio_vars,
-    )
-    .unwrap();
+    let audio_edits: Vec<BuildEdit> = profile("audio-cuda")
+        .edits_for(true)
+        .into_iter()
+        .filter(|e| e.name != "runtime-espeak")
+        .collect();
+    let (audio, _) =
+        apply_edits(fixture!("audio-cuda.Dockerfile"), &audio_edits, &audio_vars).unwrap();
     assert_eq!(audio, fixture!("audio-cuda.spike.Containerfile"));
 
     // sd.cpp: the spike did not inject build info (§14.2 "not verified");
@@ -160,6 +164,74 @@ fn ccache_off_drops_the_cache_edits_and_keeps_the_build_info() {
     .unwrap();
     assert!(audio.contains("RUN sed -i \"s/^set(AUDIOCPP_GIT_SHA"));
     assert!(!audio.contains("COMPILER_LAUNCHER"));
+}
+
+#[test]
+fn every_audio_runtime_stage_gains_espeak_ng() {
+    for id in ["audio-cuda", "audio-vulkan", "audio-cpu"] {
+        let p = profile(id);
+        let report = apply_edits_report(upstream(id), &p.edits_for(true), &spike_vars("x"));
+        let espeak = report
+            .outcomes
+            .iter()
+            .find(|o| o.name == "runtime-espeak")
+            .unwrap_or_else(|| panic!("{id}: no runtime-espeak edit"));
+        assert!(
+            !espeak.required,
+            "{id}: a reworded upstream must not fail the build"
+        );
+        // Exactly the runtime stage's install line, never the build stage's.
+        assert_eq!(espeak.matches, 1, "{id}");
+        let info = DockerfileInfo::parse(&report.text);
+        let base = info
+            .stages
+            .iter()
+            .position(|s| s.name.as_deref() == Some("base"))
+            .unwrap();
+        let at = report.text.find("libespeak-ng1 espeak-ng-data").unwrap();
+        let base_from = report
+            .text
+            .match_indices("\nFROM ")
+            .nth(base)
+            .map(|(i, _)| i)
+            .unwrap();
+        assert!(at > base_from, "{id}: installed in the runtime stage");
+        // The cache switch does not take it away: it is not a cache edit.
+        let plain = apply_edits_report(upstream(id), &p.edits_for(false), &spike_vars("x"));
+        assert!(plain.text.contains("libespeak-ng1 espeak-ng-data"), "{id}");
+    }
+}
+
+#[test]
+fn choose_dockerfile_carries_the_espeak_edit_for_audio() {
+    let spec = BuildSpec {
+        engine: Engine::Audio,
+        backend: GpuBackend::Cuda,
+        repo_url: "https://github.com/0xShug0/audio.cpp".into(),
+        ccache: true,
+        ..BuildSpec::default()
+    };
+    let choice = choose_dockerfile(
+        &spec,
+        ".devops/cuda.Dockerfile",
+        fixture!("audio-cuda.Dockerfile"),
+    )
+    .unwrap();
+    let names: Vec<&str> = choice.edits.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"runtime-espeak"), "{names:?}");
+    // An explicit edit list (a build saved before the preset grew it) is the
+    // owner's: nothing is appended behind their back.
+    let own = BuildSpec {
+        edits: Some(vec![profile("audio-cuda").edits[0].to_edit()]),
+        ..spec
+    };
+    let choice = choose_dockerfile(
+        &own,
+        ".devops/cuda.Dockerfile",
+        fixture!("audio-cuda.Dockerfile"),
+    )
+    .unwrap();
+    assert!(choice.edits.iter().all(|e| e.name != "runtime-espeak"));
 }
 
 #[test]

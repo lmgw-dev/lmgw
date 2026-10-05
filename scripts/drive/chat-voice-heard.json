@@ -1,0 +1,131 @@
+[
+ {
+  "js": "'Voice turns the model hears, WP3 (voice-audio-input design §5, §7), live: voice mode on a dev copy (scripts/dev-copy.sh) with its Gemma 4 12B row (gemma4-12b, audio projector) as the chat model and the speech models the copy\\'s Settings name (Parakeet on the CPU for speech-to-text). The thread sets audio input to local. The microphone is a fake one saying TTS clips on cue (scripts/drive/fake-voice.js; the clips from scripts/drive/make-voice-fixtures.py, the copy\\'s own TTS, into target/voice-audio-in/fixtures/voice-de.js). Checks: the drawer\\'s verdict and the INPUT chip say the model hears you; a spoken question is answered; its user bubble sits before its reply bubble (the row is written once the turn is transcribed, racing the release); the mic badge names the path; the reply\\'s timing line says heard as audio, held N ms; its regenerate tooltip says it answers from the transcript; the stored rows hold the transcript and input audio. It starts the copy\\'s model containers. Run: scripts/ui-drive.py scripts/drive/chat-voice-heard.json --token-file <dir>.token --base http://127.0.0.1:8896 --mute-audio --podman-guard \"\" (nothing is audible).'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(async()=>{const j={'content-type':'application/json'};const t=await (await fetch('/chat/api/threads',{method:'POST',headers:j,body:JSON.stringify({model_alias:'gemma4-12b',kind:'chat'})})).json();const s=await fetch('/chat/api/threads/'+t.id+'/settings',{method:'POST',headers:j,body:JSON.stringify({temperature:0,system_prompt:'Du bist ein hilfreicher Assistent. Antworte auf Deutsch in einem kurzen Satz.',voice:{language:'de',turn_detection:'server_vad',audio_input:'local'}})});localStorage.setItem('cvHeard',t.id);location.href='/chat?t='+t.id;return [t.id,s.status]})()"
+ },
+ {
+  "wait": 3
+ },
+ {
+  "until": "!!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
+  "timeout": 30,
+  "label": "the voice-mode button is enabled on the 12B thread"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')).then(r => r.json()).then(v => { const a = v.thread.voice_resolved.audio_input; return a.value === 'local' && a.source === 'thread' && a.path === 'audio' && a.model === 'gemma4-12b'; })",
+  "label": "the thread's verdict: gemma4-12b hears the turn"
+ },
+ {
+  "script": "target/voice-audio-in/fixtures/voice-de.js"
+ },
+ {
+  "script": "scripts/drive/fake-voice.js"
+ },
+ {
+  "js": "window.fakeVoice.install()"
+ },
+ {
+  "js": "(() => { const Real = window.WebSocket; window.__recv = []; window.WebSocket = function (url, p) { const ws = p === undefined ? new Real(url) : new Real(url, p); if (String(url).includes('/v1/realtime')) ws.addEventListener('message', (e) => { try { const v = JSON.parse(e.data); if (/delta$/.test(v.type)) return; if (v.type === 'lmgw.chat.frame' && v.event !== 'delta' && v.event !== 'done') return; window.__recv.push({t: performance.now(), type: v.type, event: v.event || '', rid: v.response_id || (v.response && v.response.id) || '', input: v.input || '', why: v.why || ''}); } catch (_) {} }); return ws; }; Object.assign(window.WebSocket, {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3}); window.WebSocket.prototype = Real.prototype; return 'recording the session'; })()"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 60,
+  "label": "entering: the panel goes live"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-status] .vs-note.busy') && !document.querySelector('[data-rt-connecting]')",
+  "timeout": 400,
+  "label": "the connect warm loaded the thread's models"
+ },
+ {
+  "expect": "(() => { const c = document.querySelector('[data-rt-chip=\"input\"]'); return !!c && c.dataset.audioPath === 'audio' && /hears you/.test(c.textContent); })()",
+  "label": "the INPUT chip says the model hears you"
+ },
+ {
+  "until": "+document.querySelector('[data-rt-panel]')?.dataset.voiceChunks > 20",
+  "timeout": 10,
+  "label": "the microphone streams appends"
+ },
+ {
+  "shot": "heard-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_short').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "until": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')).then(r => r.json()).then(v => v.messages.length === 2 && v.messages[1].role === 'assistant' && !!v.messages[1].voice && !!v.messages[1].voice.timing)",
+  "timeout": 300,
+  "label": "the journal stored the user turn and the reply with its timing"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'idle'",
+  "timeout": 120,
+  "label": "the reply played out"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "window.__recv.map(e => e.type + (e.event ? ':' + e.event : '') + (e.input ? ' ' + e.input : '')).join(' | ')"
+ },
+ {
+  "expect": "window.__recv.some(e => e.type === 'lmgw.chat.input' && e.input === 'audio')",
+  "label": "the session said the turn went as audio (lmgw.chat.input)"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')).then(r => r.json()).then(v => { const [u, a] = v.messages; return u.role === 'user' && /Tiere|Winterschlaf/i.test(u.content) && u.voice.via === 'realtime' && u.voice.input === 'audio' && !u.voice.transcript_error && a.voice.timing.input === 'audio' && typeof a.voice.timing.transcript_wait_ms === 'number' && u.id < a.id; })",
+  "label": "stored: the user row holds the transcript, input audio, before the reply; the reply's timing says audio and the hold"
+ },
+ {
+  "expect": "(() => { const u = [...document.querySelectorAll('.msg-item-user')].pop(); const a = [...document.querySelectorAll('.msg-assistant')].pop(); return !!u && !!a && !!(u.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING); })()",
+  "label": "the user bubble sits before its reply bubble"
+ },
+ {
+  "expect": "(() => { const b = document.querySelector('.msg-item-user [data-mic-badge=\"realtime\"]'); return !!b && /heard it as audio/.test(b.title); })()",
+  "label": "the mic badge's title names the path"
+ },
+ {
+  "expect": "/heard as audio, held \\d/.test([...document.querySelectorAll('.msg-assistant')].pop().querySelector('.voice-timing summary')?.textContent || '')",
+  "label": "the reply's timing line says heard as audio, held N ms"
+ },
+ {
+  "expect": "/heard as audio/.test(document.querySelector('[data-rt-timing]')?.textContent || '')",
+  "label": "the panel's timing readout says it too"
+ },
+ {
+  "expect": "/answers from the transcript: the audio is not kept/.test([...document.querySelectorAll('.msg-assistant')].pop().querySelector('[aria-label=\"Regenerate\"]')?.title || '')",
+  "label": "the reply's regenerate tooltip says it answers from the transcript"
+ },
+ {
+  "js": "[...document.querySelectorAll('.msg-assistant')].pop().querySelector('.voice-timing summary')?.textContent"
+ },
+ {
+  "shot": "heard-after"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 10,
+  "label": "Esc leaves voice mode"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')).then(r => r.json()).then(v => { const shown = [...document.querySelectorAll('.msg-item')].map(e => e.classList.contains('msg-item-user') ? 'user' : 'assistant'); return JSON.stringify(shown) === JSON.stringify(v.messages.map(m => m.role)); })",
+  "label": "after leaving, the transcript shows the stored rows in order"
+ },
+ {
+  "js": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')+'/delete', {method: 'POST'}).then(r => r.status)"
+ }
+]

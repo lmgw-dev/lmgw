@@ -22,6 +22,7 @@
   </script>
   <link data-trunk rel="icon" href="assets/favicon.svg">
   <link data-trunk rel="css" href="assets/app.css">
+  <link data-trunk rel="css" href="assets/voice.css">
   <link data-trunk rel="copy-dir" href="assets/fonts">
   <script data-trunk src="assets/titlebar.js" defer data-no-minify></script>
   <!-- Chat code blocks: highlight.js + the copy/preview toolbar. ES module, so
@@ -29,6 +30,10 @@
        matches Trunk's public_url (same as titlebar.js above). -->
   <link data-trunk rel="copy-dir" href="assets/vendor">
   <script data-trunk src="assets/codeblocks.js" type="module" data-no-minify></script>
+  <!-- Chat voice: the capture and player AudioWorklets (and later the
+       visualisation module), loaded by URL at runtime, so Trunk copies them
+       as they are and they are served under /voice/ (chat-voice §11.3). -->
+  <link data-trunk rel="copy-dir" href="assets/voice">
   <!-- data-no-demangle: a debug build keeps its function names as linked;
        demangled, the monomorphized view types made the name section 0.65 GB
        (Cargo.toml [profile.dev.package.lmgw-ui]). A release build strips

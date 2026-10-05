@@ -273,8 +273,9 @@ pub async fn hf_add(
 ) -> Result<Value, String> {
     hf::validate_repo(repo)?;
     let target = hf::normalize_target(target)?;
+    // Refused before the hub is asked, like an unset models dir.
+    hf::models_dir_to_write(state, target)?;
     let snap = state.snapshot();
-    hf::models_dir_or_refuse(&snap.settings, target)?;
     let available = hf::list_repo_files(&state.http, &snap.settings.hf_token, repo).await?;
     let ggufs: Vec<&hf::HfFile> = available
         .iter()
@@ -479,6 +480,10 @@ pub async fn hf_downloads(state: &SharedState) -> Result<Value, String> {
                 "received_bytes": live.map(|j| j.done),
                 "percent": live.and_then(|j| j.percent),
                 "job_id": live.map(|j| j.id),
+                // What the download asked for and what it got; null on a row
+                // from before lmgw recorded them (unknown, not guessed).
+                "requested_revision": r.requested_revision,
+                "resolved_commit": r.resolved_commit,
             })
         })
         .collect();

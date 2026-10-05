@@ -75,6 +75,8 @@ fn audio(model_id: &str, image: Option<&str>, warm: bool) -> AudioModel {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -89,6 +91,7 @@ fn audio(model_id: &str, image: Option<&str>, warm: bool) -> AudioModel {
         warm_start: warm,
         hold_fallback_mode: Default::default(),
         hold_fallback: None,
+        residency: None,
     }
 }
 
@@ -383,6 +386,8 @@ fn render_spec_for_a_chat_model_produces_the_expected_podman_argv() {
         "lmgw.model=gemma4-12b",
         "--label",
         "lmgw.engine=llama",
+        "--label",
+        &run_args_label(&spec.extra_run_args),
         "--device",
         "nvidia.com/gpu=all",
         "-p",
@@ -625,6 +630,8 @@ fn render_spec_for_an_audio_model_writes_its_config_and_produces_the_expected_po
         "lmgw.model=qwen3-tts".into(),
         "--label".into(),
         "lmgw.engine=audio".into(),
+        "--label".into(),
+        run_args_label(&spec.extra_run_args),
         "--audio-class-flag".into(),
         "-p".into(),
         "127.0.0.1:9201:8080".into(),
@@ -691,6 +698,8 @@ fn render_spec_for_an_image_model_creates_its_dirs_and_produces_the_expected_pod
         "lmgw.model=z-image".into(),
         "--label".into(),
         "lmgw.engine=sdcpp".into(),
+        "--label".into(),
+        run_args_label(&spec.extra_run_args),
         "--image-class-flag".into(),
         "-p".into(),
         "127.0.0.1:9301:8080".into(),
@@ -893,4 +902,101 @@ fn an_image_row_never_inherits_the_global_hold_fallback() {
     assert_eq!(snap.hold_fallback_for(Class::Image, "z-image"), None);
     // A row this snapshot does not know refuses rather than inherits.
     assert_eq!(snap.hold_fallback_for(Class::Image, "gone"), None);
+}
+
+// ---------------------------------------------------------------------------
+// The per-row CPU switch: engine settings in effect
+// ---------------------------------------------------------------------------
+
+/// The `server.json` the descriptor renders for `rt`, read back from the
+/// config dir its render wrote.
+fn rendered_config(rt: &lmgw_core::runtime::descriptor::ModelRuntime) -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    rt.render_spec("lmgw", 9201, "/srv/audio-models/", tmp.path())
+        .unwrap();
+    std::fs::read_to_string(audio_cfg::config_dir(tmp.path(), &rt.model_id).join("server.json"))
+        .unwrap()
+}
+
+/// A GPU row that sets neither `backend` nor `threads` renders the very
+/// bytes it rendered before rows could set them — pinned here as text, so a
+/// change on both sides at once still shows — which is what keeps boot
+/// adoption from re-creating every audio container after the upgrade.
+#[test]
+fn an_inheriting_gpu_row_renders_the_server_json_it_rendered_before() {
+    let m = audio("qwen3-tts", None, false);
+    let snap = snapshot(vec![], vec![], vec![m.clone()]);
+    let rt = model_runtime(&snap, Class::Audio, "qwen3-tts").unwrap();
+    let golden = format!(
+        "{{\n  \"backend\": \"cuda\",\n  \"busy_timeout_ms\": {busy},\n  \"device\": 0,\n  \
+         \"host\": \"0.0.0.0\",\n  \"idle_unload_ms\": 0,\n  \"lazy_load\": true,\n  \
+         \"min_free_memory_mb\": 0,\n  \"models\": [\n    {{\n      \"family\": \"qwen3_tts\",\n      \
+         \"id\": \"qwen3-tts\",\n      \"mode\": \"offline\",\n      \"path\": \
+         \"/models/voices/qwen\",\n      \"task\": \"tts\"\n    }}\n  ],\n  \"port\": 8080,\n  \
+         \"threads\": 1,\n  \"voice_dir\": \"{voices}\"\n}}\n",
+        busy = AudioSettings::default().busy_timeout_ms,
+        voices = AudioSettings::default().voice_dir,
+    );
+    assert_eq!(rendered_config(&rt), golden);
+    assert_eq!(rt.placement(), lmgw_core::runtime::Placement::Gpu);
+    assert_eq!(rt.extra_run_args, ["--audio-class-flag"]);
+}
+
+/// A row switched to the CPU renders `backend: cpu` and its thread count —
+/// this machine's physical cores when it names none — and runs the class's
+/// args without the GPU passthrough, with the env that keeps the legacy
+/// NVIDIA hook from adding it back.
+#[test]
+fn a_cpu_row_renders_the_cpu_backend_and_drops_the_gpu_passthrough() {
+    let mut m = audio("parakeet", None, false);
+    m.backend = Some("cpu".into());
+    let mut snap = snapshot(vec![], vec![], vec![m.clone()]);
+    snap.settings.audio.extra_run_args = [
+        "--device",
+        "nvidia.com/gpu=all",
+        "--security-opt",
+        "label=disable",
+    ]
+    .map(String::from)
+    .to_vec();
+    let rt = model_runtime(&snap, Class::Audio, "parakeet").unwrap();
+    let json: Value = serde_json::from_str(&rendered_config(&rt)).unwrap();
+    assert_eq!(json["backend"], "cpu");
+    assert_eq!(
+        json["threads"],
+        lmgw_core::host::cpu().physical_cores as u64
+    );
+    assert_eq!(rt.placement(), lmgw_core::runtime::Placement::Cpu);
+    assert_eq!(
+        rt.extra_run_args,
+        [
+            "--security-opt",
+            "label=disable",
+            "-e",
+            "NVIDIA_VISIBLE_DEVICES=void"
+        ]
+    );
+
+    snap.audio_models[0].threads = Some(8);
+    let rt = model_runtime(&snap, Class::Audio, "parakeet").unwrap();
+    let json: Value = serde_json::from_str(&rendered_config(&rt)).unwrap();
+    assert_eq!(json["threads"], 8);
+    // Its residency key is the CPU's: a figure learned on the GPU is kept
+    // for the round trip back, not charged to the CPU.
+    assert_ne!(
+        rt.resident_key(),
+        Some(lmgw_core::vram::residency::resident_key(
+            &audio("parakeet", None, false),
+            &snap.settings.audio
+        ))
+    );
+}
+
+/// The run-args label a start puts on the container (`lmgw.run_args=…`).
+fn run_args_label(args: &[String]) -> String {
+    format!(
+        "{}={}",
+        lmgw_core::runtime::argv::RUN_ARGS_LABEL,
+        lmgw_core::runtime::argv::run_args_digest(args)
+    )
 }

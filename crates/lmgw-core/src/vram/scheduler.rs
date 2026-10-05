@@ -11,7 +11,7 @@ use crate::state::SharedState;
 use super::amdgpu::AmdSysfsProbe;
 use super::attribution::{PidCache, ProcFs, ProcTree};
 use super::nvml::{GpuMemory, GpuProbe, NvmlProbe};
-use super::{background, broadcast, plan, Target, WaiterView};
+use super::{background, broadcast, plan, residency, Target, WaiterView};
 
 /// The telemetry source for this host, picked once at startup.
 ///
@@ -42,8 +42,9 @@ pub(super) const MIB: u64 = 1024 * 1024;
 
 /// How often the scheduler re-measures while it waits for room. A sampling
 /// rate, not a bound on anything: nothing is skipped or capped because of it,
-/// the loop simply looks again this often.
-pub(super) const POLL: Duration = Duration::from_millis(250);
+/// the loop simply looks again this often. A warm group's stage looks as
+/// often whether it can still get room beside its siblings (`beside`).
+pub(crate) const POLL: Duration = Duration::from_millis(250);
 
 /// Timeout for the busy probe against a victim's own `/slots`. A loopback JSON
 /// read against a container lmgw started, so a slow answer means it is wedged.
@@ -121,6 +122,9 @@ pub struct VramScheduler {
     /// Background starts, one at a time per model ([`background::GuestTurns`],
     /// candidate-aliases §12 entry 91).
     pub(super) guest_turns: background::GuestTurns,
+    /// Which audio containers have loaded their model (realtime design §9.4,
+    /// [`residency`]): the ledger charges the others' load as pending.
+    pub(super) residency: residency::Residency,
 }
 
 impl Default for VramScheduler {
@@ -146,6 +150,7 @@ impl VramScheduler {
             pids: Arc::new(Mutex::new(PidCache::default())),
             boot_settled: AtomicBool::new(false),
             guest_turns: background::GuestTurns::default(),
+            residency: residency::Residency::default(),
         }
     }
 

@@ -23,6 +23,9 @@ pub(super) struct World {
     pub(super) busy: HashSet<String>,
     /// Model ids started / stopped, in order.
     pub(super) runs: Vec<String>,
+    /// Model id -> the argv of its last `podman run`: what flags its
+    /// container was given (a CPU row's GPU passthrough left out).
+    pub(super) argv: HashMap<String, Vec<String>>,
     pub(super) stops: Vec<String>,
     /// How many times each port's mock answered `/apply-template` /
     /// `/tokenize` — so a test can assert "no /apply-template call" on a row
@@ -126,6 +129,65 @@ pub(super) struct World {
     /// word that starts with the tag ([`words`] makes such prompts) — so two
     /// requests on one port reach their verdicts in a set order.
     pub(super) template_delay_by_tag: Vec<(String, Duration)>,
+    /// Audio model id -> the bytes its container holds once audio.cpp has
+    /// loaded the model, which it does lazily, on the first inference request
+    /// (realtime design §9.4): an audio route's answer sets the model's
+    /// [`Self::size`] to this. Until then the container holds whatever
+    /// `size` the test gave it — its CUDA context.
+    pub(super) loaded_bytes: HashMap<String, u64>,
+    /// Audio inference requests the containers answered, as the model each
+    /// was for.
+    pub(super) audio_calls: Vec<String>,
+    /// Audio models whose speech route answers as a streaming-mode model
+    /// does: `text/event-stream`, this many bytes of events (WP7 review M1)
+    /// — or, for a request with `stream_format: audio`, this many bytes of
+    /// raw PCM as `application/octet-stream`.
+    pub(super) sse_bytes: HashMap<String, usize>,
+    /// Audio model id -> what its container holds while a request runs
+    /// ([`Transient`]): then it drops back to [`Self::loaded_bytes`] —
+    /// before it answers, the way audio.cpp frees compute buffers per
+    /// request (the WP7 live gate).
+    pub(super) transient: HashMap<String, Transient>,
+    /// How many times the fake driver listed processes: what a sampler
+    /// reads ([`Until::Sampled`]).
+    pub(super) process_reads: u64,
+}
+
+/// A request's transient on an audio container ([`World::transient`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Transient {
+    pub bytes: u64,
+    pub until: Until,
+}
+
+/// How long a [`Transient`] lasts.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Until {
+    /// Until the driver has been read while it lasted — the sampler's read
+    /// — however long that takes: a test of what the sampler catches does
+    /// not race the wall clock on a loaded box (it failed 3 of 64 runs
+    /// with 32 copies at once while it lasted 150 ms).
+    Sampled,
+    /// This long, on the wall clock: for a request nothing should sample.
+    For(Duration),
+}
+
+impl Transient {
+    /// Held until the sampler read it.
+    pub(super) fn sampled(bytes: u64) -> Self {
+        Self {
+            bytes,
+            until: Until::Sampled,
+        }
+    }
+
+    /// Held for `lasts`.
+    pub(super) fn lasting(bytes: u64, lasts: Duration) -> Self {
+        Self {
+            bytes,
+            until: Until::For(lasts),
+        }
+    }
 }
 
 /// The fake host PID of the process outside lmgw.
@@ -175,7 +237,8 @@ impl GpuProbe for FakeGpu {
     }
 
     fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
-        let w = self.world.lock().unwrap();
+        let mut w = self.world.lock().unwrap();
+        w.process_reads += 1;
         if !w.attribution {
             return Err("FakeGPU lists no processes".into());
         }

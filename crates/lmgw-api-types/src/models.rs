@@ -275,6 +275,32 @@ pub struct AuxModel {
 pub struct AudioModelView {
     pub public_name: String,
     pub model: AudioModel,
+    /// What the row is charged on the GPU and why, in one sentence (realtime
+    /// design §9.4): its learned residency, or the on-disk size it is charged
+    /// at instead — not learned yet, learned for a previous configuration, or
+    /// not learnable on this host (and why).
+    #[serde(default)]
+    pub residency_note: Option<String>,
+    /// The learned residency admission charges this row: `model.residency`'s
+    /// figure while it belongs to the row's current configuration, `None`
+    /// otherwise (not learned, or learned for a previous configuration — the
+    /// on-disk size is charged then).
+    #[serde(default)]
+    pub residency_charged_bytes: Option<u64>,
+    /// Where the row runs as configured now: `gpu` | `cpu` (its own
+    /// `backend`, else the class's). A running container keeps the placement
+    /// it was started with until it stops.
+    #[serde(default)]
+    pub runs_on: String,
+    /// The thread count its `server.json` renders.
+    #[serde(default)]
+    pub threads_in_effect: i64,
+    /// Where that count comes from: `row` | `class` | `cores` (this
+    /// machine's physical cores, for a row switched to the CPU that names
+    /// none) | `logical_cpus` (the same, where the core topology could not
+    /// be read and the figure is the logical CPU count).
+    #[serde(default)]
+    pub threads_source: String,
 }
 
 /// Mirror of `config::AudioModel` (JSON-map fields stay dynamic).
@@ -294,6 +320,15 @@ pub struct AudioModel {
     /// clamped to, in ms; `None` inherits the class.
     #[serde(default)]
     pub busy_timeout_ms: Option<i64>,
+    /// `cpu` runs this row on the CPU (no VRAM, served under the GPU hold);
+    /// `None` inherits the class's backend.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Per-row thread count; `None` inherits (this machine's physical cores
+    /// for a row switched to the CPU itself, else the class's — for a row
+    /// that inherits a class backend of `cpu` too).
+    #[serde(default)]
+    pub threads: Option<i64>,
     #[serde(default)]
     pub load_options: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
@@ -335,6 +370,24 @@ pub struct AudioModel {
     /// `hold_fallback_mode` is `alias`.
     #[serde(default)]
     pub hold_fallback: Option<String>,
+    /// What this model's container was measured to hold on the GPU once it
+    /// had served a request (realtime design §9.4). Learned by the gateway,
+    /// never by the editor; `audio_model_set`'s `clear: "residency"` resets
+    /// it. `None` = not learned, charged at the on-disk size.
+    #[serde(default)]
+    pub residency: Option<LearnedResidency>,
+}
+
+/// A learned audio residency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LearnedResidency {
+    pub bytes: u64,
+    /// When it was read (`YYYY-MM-DD HH:MM:SS`, UTC).
+    pub learned_at: String,
+    /// The configuration it was read under. A row whose configuration has
+    /// changed since keeps the figure but is not charged by it.
+    pub key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -18,7 +18,9 @@
 //!   answer — measured, not assumed: the container's own IP is not reachable
 //!   from the host under rootless pasta, so the port is **published on
 //!   loopback** (`-p 127.0.0.1:<host>:<port>`) on a host port lmgw picks per
-//!   start with [`ephemeral_port`](crate::runtime::registry::ephemeral_port).
+//!   start with [`ephemeral_port`](crate::runtime::registry::ephemeral_port),
+//!   and once more on a fresh one when podman finds it taken
+//!   ([`PortRetry`](crate::runtime::registry::PortRetry)).
 //!   The chosen port is in the run log and in `AgentDetail.service`.
 //! - `LMGW_PHASE=service`, `LMGW_APP_ORIGIN=http://<id>.<suffix>:<port>`, and no ledger
 //!   URL, run id or deadline: a service has no run to report to and is bounded
@@ -48,6 +50,7 @@ use crate::agents::container::{self, Mount, Published, RunDir, RunSpecArgs};
 use crate::agents::manifest::{Manifest, RunSpec, Service};
 use crate::agents::{mounts, token, Agent};
 use crate::config::{McpServer, McpTransport, Settings};
+use crate::runtime::registry::{ephemeral_port, PortRetry};
 use crate::runtime::slug;
 use crate::state::SharedState;
 use crate::store::{self, NewMcpServer};
@@ -1135,15 +1138,6 @@ async fn start_once(state: &SharedState, agent: &Agent, cancel: &Cancel) -> Outc
         Ok(t) => t,
         Err(e) => return Err(StartError::plain(e)),
     };
-    let host_port = match crate::runtime::registry::ephemeral_port() {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(StartError::plain(format!(
-                "lmgw could not get a free host port to publish '{id}' on: {e}"
-            )))
-        }
-    };
-
     let (root, secrets_on_disk) = container::runs_root(&state.data_dir, &prefix);
     let dir = match RunDir::create_named(&root, &format!("service-{}", slug(&id))) {
         Ok(d) => d,
@@ -1215,67 +1209,100 @@ async fn start_once(state: &SharedState, agent: &Agent, cancel: &Cancel) -> Outc
     if keep_id {
         tracing::info!(agent = %id, "{}", container::keep_id_note());
     }
-    let argv = container::run_argv(&RunSpecArgs {
-        name: &name,
-        prefix: &prefix,
-        agent_id: &id,
-        // A service has no run; the label says so in words rather than in a
-        // number that would collide with a job id (§6.5).
-        run: container::RUN_LABEL_SERVICE,
-        image,
-        pull: *pull,
-        entrypoint: entrypoint.as_deref(),
-        args,
-        limits: &limits,
-        env: &env,
-        mounts: &mounts,
-        keep_id,
-        network: &network,
-        service: Some(Published {
-            host: host_port,
-            container: service.port,
-        }),
-    });
-
     let spawner = state.agent_spawner();
-    tracing::info!(agent = %id, container = %name, port = host_port, "starting the service container");
-    // Cancellable from here on (§3.3): a Stop, a delete, a disable, a rotate or
-    // a manifest replace arriving mid-start interrupts it rather than being
-    // told "nothing was running" while the container comes up behind them.
-    // `podman run -d` is short, but a cold `--pull=missing` is not.
-    let started = tokio::select! {
-        r = spawner.run("podman", &argv) => Some(r),
-        _ = cancel.cancelled() => None,
+    // At most two attempts, and the second only for a host port taken between
+    // `ephemeral_port` releasing it and podman binding it — the race a model's
+    // start retries the same way (per-model containers §10.4).
+    let mut retry = PortRetry::default();
+    let host_port = loop {
+        let host_port = match ephemeral_port() {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(StartError::plain(format!(
+                    "lmgw could not get a free host port to publish '{id}' on: {e}"
+                )))
+            }
+        };
+        let argv = container::run_argv(&RunSpecArgs {
+            name: &name,
+            prefix: &prefix,
+            agent_id: &id,
+            // A service has no run; the label says so in words rather than in
+            // a number that would collide with a job id (§6.5).
+            run: container::RUN_LABEL_SERVICE,
+            image,
+            pull: *pull,
+            entrypoint: entrypoint.as_deref(),
+            args,
+            limits: &limits,
+            env: &env,
+            mounts: &mounts,
+            keep_id,
+            network: &network,
+            service: Some(Published {
+                host: host_port,
+                container: service.port,
+            }),
+        });
+
+        tracing::info!(agent = %id, container = %name, port = host_port, "starting the service container");
+        // Cancellable from here on (§3.3): a Stop, a delete, a disable, a
+        // rotate or a manifest replace arriving mid-start interrupts it rather
+        // than being told "nothing was running" while the container comes up
+        // behind them. `podman run -d` is short, but a cold `--pull=missing`
+        // is not.
+        let started = tokio::select! {
+            r = spawner.run("podman", &argv) => Some(r),
+            _ = cancel.cancelled() => None,
+        };
+        match started {
+            Some(Ok(out)) if out.ok() => break host_port,
+            Some(Ok(out)) if retry.again(&out.stderr) => {
+                // The failed run leaves its container behind in `created`
+                // (§10.4, measured): collected before the run on a fresh port,
+                // as a model's start collects it.
+                tracing::info!(
+                    agent = %id,
+                    container = %name,
+                    "host port {host_port} was taken before podman bound it; starting again on \
+                     a fresh port"
+                );
+                let rm = ["rm", "-f", name.as_str()].map(String::from);
+                let _ = spawner.run("podman", &rm).await;
+            }
+            Some(Ok(out)) => {
+                let log = log_tail(state, &id, &name, LOG_EXCERPT_LINES).await;
+                return Err(Arc::new(StartError {
+                    reason: format!(
+                        "podman run -d for '{id}' failed (exit {}): {}",
+                        out.status,
+                        out.stderr.trim()
+                    ),
+                    log,
+                    container: Some(name.clone()),
+                    cancelled: false,
+                }));
+            }
+            Some(Err(e)) => {
+                return Err(StartError::plain(format!(
+                    "podman is required for container agents and could not be run: {e}"
+                )))
+            }
+            // Dropping the `run` future kills the `podman` process
+            // (`kill_on_drop`), but `podman run -d` may already have created
+            // the container, so the collect below runs either way.
+            None => {
+                return Err(cancelled_start(
+                    &spawner,
+                    &id,
+                    &name,
+                    &limits,
+                    "the start was cancelled",
+                )
+                .await)
+            }
+        }
     };
-    match started {
-        Some(Ok(out)) if out.ok() => {}
-        Some(Ok(out)) => {
-            let log = log_tail(state, &id, &name, LOG_EXCERPT_LINES).await;
-            return Err(Arc::new(StartError {
-                reason: format!(
-                    "podman run -d for '{id}' failed (exit {}): {}",
-                    out.status,
-                    out.stderr.trim()
-                ),
-                log,
-                container: Some(name.clone()),
-                cancelled: false,
-            }));
-        }
-        Some(Err(e)) => {
-            return Err(StartError::plain(format!(
-                "podman is required for container agents and could not be run: {e}"
-            )))
-        }
-        // Dropping the `run` future kills the `podman` process
-        // (`kill_on_drop`), but `podman run -d` may already have created the
-        // container, so the collect below runs either way.
-        None => {
-            return Err(
-                cancelled_start(&spawner, &id, &name, &limits, "the start was cancelled").await,
-            )
-        }
-    }
 
     match probe(state, host_port, &service, cancel).await {
         Ok(()) => {}

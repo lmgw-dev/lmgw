@@ -116,6 +116,32 @@ impl Drop for ConcurrencyGuard {
     }
 }
 
+/// The gate's concurrency slot, offered to the handler of the request it was
+/// taken for (realtime design §10.3).
+///
+/// The gate normally keeps the slot until the response *body* ends
+/// (`server::hold_until_body_end`). A WebSocket's response is the 101, and
+/// hyper drops its (empty) body the moment the connection is upgraded — so a
+/// realtime session would give its slot back as it starts, and a
+/// `concurrency_limit` of 1 would admit any number of open sessions. A
+/// handler whose work outlives its response [`take`](Self::take)s the guard
+/// and holds it for as long as that work runs; one that does not leaves it
+/// to the gate. Taking it, rather than admitting a second time, keeps one
+/// session at one request for both the concurrency and the per-minute count.
+#[derive(Debug, Clone)]
+pub struct SlotHandover(std::sync::Arc<Mutex<Option<ConcurrencyGuard>>>);
+
+impl SlotHandover {
+    pub fn new(guard: ConcurrencyGuard) -> Self {
+        Self(std::sync::Arc::new(Mutex::new(Some(guard))))
+    }
+
+    /// The guard, if nobody has taken it yet.
+    pub fn take(&self) -> Option<ConcurrencyGuard> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
 impl PolicyGate {
     /// Expiry, requests-per-minute and concurrency, checked at the door.
     ///
@@ -127,22 +153,30 @@ impl PolicyGate {
         key: &ApiKey,
         now_utc: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<ConcurrencyGuard>, GatewayError> {
-        // An internal identity is budgetable but must never authenticate
-        // anything; it has no usable hash, and this is the backstop.
-        if key.kind == ApiKeyKind::Internal {
-            return Err(GatewayError::Unauthorized(
-                "missing or invalid gateway API key",
-            ));
-        }
-        if let Some(exp) = key.policy.expires_at.as_deref().filter(|e| !e.is_empty()) {
-            if expired(exp, now_utc) {
-                return Err(GatewayError::KeyExpired {
-                    key: key.name.clone(),
-                    expired_at: exp.to_string(),
-                });
-            }
-        }
+        self.admit_counting(key, now_utc, true)
+    }
 
+    /// [`Self::admit`] for a request that is not itself a model call and
+    /// makes its model calls later, each counted with [`Self::count_call`]:
+    /// a realtime session (realtime design §10.3 — rpm and tpm count model
+    /// calls, not the session). Expiry, the per-minute windows as they stand
+    /// and the concurrency slot are checked and the slot is taken, but the
+    /// request is not counted as one.
+    pub fn admit_session(
+        self: &std::sync::Arc<Self>,
+        key: &ApiKey,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<ConcurrencyGuard>, GatewayError> {
+        self.admit_counting(key, now_utc, false)
+    }
+
+    fn admit_counting(
+        self: &std::sync::Arc<Self>,
+        key: &ApiKey,
+        now_utc: chrono::DateTime<chrono::Utc>,
+        count: bool,
+    ) -> Result<Option<ConcurrencyGuard>, GatewayError> {
+        usable(key, now_utc)?;
         let p = &key.policy;
         if p.rpm_limit <= 0 && p.tpm_limit <= 0 && p.concurrency_limit <= 0 {
             return Ok(None);
@@ -153,22 +187,7 @@ impl PolicyGate {
         let st = m.entry(key.id).or_insert_with(|| KeyState::new(now));
         st.roll(now);
 
-        if p.rpm_limit > 0 && st.requests >= p.rpm_limit {
-            return Err(GatewayError::KeyRate {
-                key: key.name.clone(),
-                limit_kind: "requests/minute",
-                limit: p.rpm_limit,
-                retry_after: st.retry_after(now),
-            });
-        }
-        if p.tpm_limit > 0 && st.tokens >= p.tpm_limit {
-            return Err(GatewayError::KeyRate {
-                key: key.name.clone(),
-                limit_kind: "tokens/minute",
-                limit: p.tpm_limit,
-                retry_after: st.retry_after(now),
-            });
-        }
+        per_minute(st, key, now)?;
         if p.concurrency_limit > 0 && st.in_flight >= p.concurrency_limit {
             return Err(GatewayError::KeyRate {
                 key: key.name.clone(),
@@ -180,12 +199,51 @@ impl PolicyGate {
             });
         }
 
-        st.requests += 1;
+        if count {
+            st.requests += 1;
+        }
         st.in_flight += 1;
         Ok(Some(ConcurrencyGuard {
             gate: self.clone(),
             key_id: key.id,
         }))
+    }
+
+    /// Expiry, requests-per-minute and tokens-per-minute for one model call
+    /// made **inside** a request that already holds its key's concurrency
+    /// slot — a realtime session's chat, ASR and TTS calls (realtime design
+    /// §10.3), whose rate limits count model calls, not the session.
+    ///
+    /// [`Self::admit`] takes a second slot along with the count, which a
+    /// session under `concurrency_limit: 1` could never get; this counts the
+    /// call and takes none — the session's own slot is what holds its place.
+    pub fn count_call(
+        &self,
+        key: &ApiKey,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), GatewayError> {
+        usable(key, now_utc)?;
+        let p = &key.policy;
+        if p.rpm_limit <= 0 && p.tpm_limit <= 0 {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let mut m = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let st = m.entry(key.id).or_insert_with(|| KeyState::new(now));
+        st.roll(now);
+        per_minute(st, key, now)?;
+        st.requests += 1;
+        Ok(())
+    }
+
+    /// Whether the gate keeps any window for `key_id` — what a test reads
+    /// to see that a deleted key got none (`proxy::recording`).
+    #[cfg(test)]
+    pub(crate) fn tracks(&self, key_id: i64) -> bool {
+        self.keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&key_id)
     }
 
     /// Fold a finished request's tokens into the per-minute token window.
@@ -269,6 +327,49 @@ impl PolicyGate {
         *g = (period_key.to_string(), spent, Some(Instant::now()));
         Ok(spent)
     }
+}
+
+/// A key that may be used at all: never an internal identity, never past
+/// its expiry.
+fn usable(key: &ApiKey, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), GatewayError> {
+    // An internal identity is budgetable but must never authenticate
+    // anything; it has no usable hash, and this is the backstop.
+    if key.kind == ApiKeyKind::Internal {
+        return Err(GatewayError::Unauthorized(
+            "missing or invalid gateway API key",
+        ));
+    }
+    if let Some(exp) = key.policy.expires_at.as_deref().filter(|e| !e.is_empty()) {
+        if expired(exp, now_utc) {
+            return Err(GatewayError::KeyExpired {
+                key: key.name.clone(),
+                expired_at: exp.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The per-minute windows, checked before a request is counted into them.
+fn per_minute(st: &KeyState, key: &ApiKey, now: Instant) -> Result<(), GatewayError> {
+    let p = &key.policy;
+    if p.rpm_limit > 0 && st.requests >= p.rpm_limit {
+        return Err(GatewayError::KeyRate {
+            key: key.name.clone(),
+            limit_kind: "requests/minute",
+            limit: p.rpm_limit,
+            retry_after: st.retry_after(now),
+        });
+    }
+    if p.tpm_limit > 0 && st.tokens >= p.tpm_limit {
+        return Err(GatewayError::KeyRate {
+            key: key.name.clone(),
+            limit_kind: "tokens/minute",
+            limit: p.tpm_limit,
+            retry_after: st.retry_after(now),
+        });
+    }
+    Ok(())
 }
 
 /// Scope, then budget — the two checks that need the resolved alias.
@@ -520,6 +621,26 @@ mod tests {
         assert_eq!(gate.admit(&k, now).unwrap_err().kind(), "key_rate");
         drop(g);
         assert!(gate.admit(&k, now).is_ok(), "the slot came back");
+    }
+
+    #[test]
+    fn a_call_inside_a_held_slot_counts_rpm_and_takes_no_second_slot() {
+        let gate = Arc::new(PolicyGate::default());
+        let k = key(KeyPolicy {
+            rpm_limit: 3,
+            concurrency_limit: 1,
+            ..Default::default()
+        });
+        let now = chrono::Utc::now();
+        // The session: one request, holding the only slot.
+        let _session = gate.admit(&k, now).unwrap();
+        // Its model calls are not refused for concurrency…
+        gate.count_call(&k, now).unwrap();
+        gate.count_call(&k, now).unwrap();
+        // …but each one counted towards the minute.
+        let e = gate.count_call(&k, now).unwrap_err();
+        assert_eq!(e.kind(), "key_rate");
+        assert!(e.to_string().contains("requests/minute"), "{e}");
     }
 
     #[test]

@@ -298,6 +298,8 @@ fn audio(model_id: &str, task: &str) -> AudioModel {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -312,6 +314,7 @@ fn audio(model_id: &str, task: &str) -> AudioModel {
         warm_start: false,
         hold_fallback_mode: Default::default(),
         hold_fallback: None,
+        residency: None,
     }
 }
 
@@ -320,8 +323,8 @@ fn tts_and_asr_notes_carry_the_real_request_shapes() {
     assert_notes(
         &capabilities::for_audio(&audio("qwen3-tts", "tts")).notes,
         &[
-            "Speech: POST /v1/audio/speech with a JSON body of {model, input, voice}, where input is the text to speak and voice names one of this model's presets. GET /v1/audio/voices?model=<this id> lists the voice ids and presets it accepts.",
-            "No voice presets are configured on this row: a model that ships its own voice ids still answers, but a cloning model draws a new random speaker for every request until presets are configured.",
+            "Speech: POST /v1/audio/speech with a JSON body of {model, input, voice}, where input is the text to speak and voice names one of this model's voices: a preset of this row, a voice its package ships (in any case — lmgw sends the model's own spelling, in the field the model reads), or a voice-library clip. GET /v1/audio/voices?model=<this id> lists them all, from lmgw's own catalog without starting the model.",
+            "No voice presets are configured on this row: a model that ships its own voices still answers to them by name, but a cloning model draws a new random speaker for every request until presets are configured.",
         ],
     );
 
@@ -363,8 +366,26 @@ fn openai_protocol_catalog_notes() {
     );
 }
 
-/// Gemini publishes no modalities and lmgw expresses reasoning there as a
-/// budget, so both facts are stated rather than implied.
+/// The same catalog without `none` among the variants: the levels it lists
+/// are all the model takes, so an off goes out as the least of them
+/// (model-capabilities design §5.6) — and the note says so.
+#[test]
+fn openai_protocol_catalog_notes_without_an_off_level() {
+    let mut entry = catalog_entry("kilo_anthropic_variants.json");
+    entry["opencode"]["variants"]
+        .as_object_mut()
+        .unwrap()
+        .remove("none");
+    let info = lmgw_core::catalog::parse_openai_entry(&entry).expect("parses");
+    assert_notes(
+        &capabilities::for_catalog(&info, Protocol::Openai, "kilo").notes,
+        &["Reasoning: set body reasoning_effort or header x-lmgw-reasoning-effort (levels: low|medium|high|xhigh|max); x-lmgw-reasoning: off is sent upstream as reasoning_effort: \"low\", since its capabilities list the effort levels it takes, and none of them is off. The catalog does not state the default state."],
+    );
+}
+
+/// Gemini publishes no modalities, and says only *that* a model thinks — so
+/// what an off becomes there (its lowest level, model-capabilities design
+/// §5.6) is stated rather than implied.
 #[test]
 fn gemini_catalog_notes() {
     let info = lmgw_core::catalog::parse_gemini_entry(&catalog_entry("gemini_thinking.json"))
@@ -373,7 +394,7 @@ fn gemini_catalog_notes() {
         &capabilities::for_catalog(&info, Protocol::Gemini, "gemini").notes,
         &[
             "The catalog of upstream gemini does not state this model's input modalities, so none are published here; unknown is not the same as text-only.",
-            "Reasoning: x-lmgw-reasoning-budget sets generationConfig.thinkingConfig.thinkingBudget on this route and a budget of 0 turns thinking off; x-lmgw-reasoning-effort sets thinkingConfig.thinkingLevel (Gemini 3 vocabulary, passed verbatim); the catalog states neither a default nor whether this model accepts 0.",
+            "Reasoning: x-lmgw-reasoning-budget sets generationConfig.thinkingConfig.thinkingBudget on this route, and x-lmgw-reasoning-effort sets thinkingConfig.thinkingLevel (Gemini 3 vocabulary, passed verbatim); the catalog states no default. A budget of 0 counts as off. x-lmgw-reasoning: off is sent upstream as thinkingLevel: \"minimal\": Gemini's catalog does not say whether this model can stop thinking, and current Gemini models cannot — minimal is the least they take; should the provider refuse it, lmgw retries with what the refusal says the model takes and, failing that, with no reasoning control (the model then reasons as it does by default), and keeps what answered for the model.",
         ],
     );
 }
@@ -394,7 +415,7 @@ fn anthropic_catalog_notes() {
     assert_notes(
         &capabilities::for_catalog(&info, Protocol::Anthropic, "anthropic").notes,
         &[
-            "Reasoning: header x-lmgw-reasoning-effort (levels: low|medium|high|xhigh|max) becomes output_config.effort with thinking type adaptive, and x-lmgw-reasoning: on|off becomes thinking type adaptive|disabled.",
+            "Reasoning: header x-lmgw-reasoning-effort (levels: low|medium|high|xhigh|max) becomes output_config.effort with thinking type adaptive, and x-lmgw-reasoning: on becomes thinking type adaptive. x-lmgw-reasoning: off is sent upstream as thinking: {type: \"disabled\"}; should the provider refuse it, lmgw retries with what the refusal says the model takes and, failing that, with no reasoning control (the model then reasons as it does by default), and keeps what answered for the model.",
             "x-lmgw-reasoning-budget is forwarded as thinking.budget_tokens, which current Claude models reject — use an effort level instead.",
             "Non-streaming requests without max_tokens are sent with max_tokens 4096 (the provider refuses larger non-streamed caps); streaming requests get the published maximum; either way the response carries x-lmgw-max-tokens-defaulted. Set max_tokens yourself to control it.",
         ],

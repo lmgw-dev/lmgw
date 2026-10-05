@@ -188,6 +188,15 @@ pub async fn count_chat_prompt(
     })
 }
 
+/// The refusal of an audio part on a guarded row ([`media_bound`]): what a
+/// heard voice turn (voice-audio-input design §3.5) tells apart from every
+/// other `unsupported`, to go again as its transcript.
+pub(crate) const AUDIO_UNBOUNDED: &str =
+    "this request carries audio input, and lmgw has no per-audio-part token bound to count it \
+     against (v1) — this model enforces a context guard (a ladder rung or a guarded shared KV \
+     pool), which cannot promise the request fits without one; use a model without a context \
+     guard for audio requests";
+
 /// The per-image token bound [`count_chat_prompt`] adds for each image part,
 /// or its refusal of media it cannot bound — the checks that need no server,
 /// so a ladder row (whose count runs beside the send, ladder design §12
@@ -197,13 +206,7 @@ pub(crate) fn media_bound(
     image_bound: Option<&ImageBound>,
 ) -> Result<u64, GatewayError> {
     if media.audio > 0 {
-        return Err(GatewayError::Unsupported(
-            "this request carries audio input, and lmgw has no per-audio-part token bound to \
-             count it against (v1) — this model enforces a context guard (a ladder rung or a \
-             guarded shared KV pool), which cannot promise the request fits without one; use a \
-             model without a context guard for audio requests"
-                .into(),
-        ));
+        return Err(GatewayError::Unsupported(AUDIO_UNBOUNDED.into()));
     }
     match (media.images, image_bound) {
         (0, _) => Ok(0),

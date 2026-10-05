@@ -16,8 +16,9 @@ use super::*;
 /// A message's editable columns, written together by
 /// [`update_chat_message`]. The caller states every one of them: editing an
 /// assistant reply clears its reasoning, token counts and tool record (they
-/// no longer describe the text), a continued reply gets the longer text and
-/// the last call's counts, and a user message keeps its (empty) others.
+/// no longer describe the text) and keeps its voice less what the edit made
+/// stale, a continued reply gets the longer text and the last call's counts,
+/// and a user message keeps its (empty) others.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatMessageUpdate {
     pub content: String,
@@ -25,6 +26,10 @@ pub struct ChatMessageUpdate {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
     pub ir_messages: Option<String>,
+    /// How the turn was spoken (chat-voice design §3): an edited reply keeps
+    /// its voice without the unheard rest and the timing
+    /// ([`MessageVoice::edited`]).
+    pub voice: Option<MessageVoice>,
 }
 
 /// A turn's reply as it is saved ([`append_chat_reply`],
@@ -40,6 +45,10 @@ pub struct ChatReply {
     pub model: Option<String>,
     /// The alias that answered instead ([`ChatMessageRow::answered_by`]).
     pub answered_by: Option<String>,
+    /// A spoken reply's voice ([`ChatMessageRow::voice`]). A continue never
+    /// writes it: the continued row keeps its own, less the unheard rest
+    /// ([`continue_chat_reply`]).
+    pub voice: Option<MessageVoice>,
 }
 
 /// What [`continue_chat_reply`] did.
@@ -60,8 +69,8 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
     let id = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages,
-            model, answered_by)
-         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            model, answered_by, voice)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )
     .bind(thread_id)
     .bind(&r.content)
@@ -71,6 +80,7 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
     .bind(&r.ir_messages)
     .bind(&r.model)
     .bind(&r.answered_by)
+    .bind(super::chat_voice::message_voice_json(r.voice.as_ref()))
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
@@ -83,7 +93,9 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
 /// the prefix the model was shown plus what it wrote), but only while the
 /// row's text, trailing whitespace aside, is still `prefix`. Read and written
 /// in one transaction, so an edit cannot land between the check and the
-/// write (review R1 finding 1).
+/// write (review R1 finding 1). A spoken reply keeps its voice, less the
+/// unheard rest: the continuation follows the heard text (chat-voice design
+/// §3).
 pub async fn continue_chat_reply(
     pool: &SqlitePool,
     thread_id: i64,
@@ -92,22 +104,24 @@ pub async fn continue_chat_reply(
     r: &ChatReply,
 ) -> DbResult<ContinueSave> {
     let mut tx = pool.begin().await?;
-    let now: Option<String> = sqlx::query_scalar(
-        "SELECT content FROM chat_messages WHERE id = ?1 AND thread_id = ?2 AND role = 'assistant'",
+    let now: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT content, voice FROM chat_messages
+         WHERE id = ?1 AND thread_id = ?2 AND role = 'assistant'",
     )
     .bind(id)
     .bind(thread_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(now) = now else {
+    let Some((now, voice)) = now else {
         return Ok(ContinueSave::Gone);
     };
     if now.trim_end() != prefix {
         return Ok(ContinueSave::Changed);
     }
+    let voice = MessageVoice::from_stored(voice).map(MessageVoice::continued);
     sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
-           completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9
+           completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, voice=?10
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -119,6 +133,7 @@ pub async fn continue_chat_reply(
     .bind(&r.ir_messages)
     .bind(&r.model)
     .bind(&r.answered_by)
+    .bind(super::chat_voice::message_voice_json(voice.as_ref()))
     .execute(&mut *tx)
     .await?;
     touch_thread(&mut tx, thread_id).await?;
@@ -129,8 +144,10 @@ pub async fn continue_chat_reply(
 /// Rewrite user message `id` for a resend, in one transaction (review R1
 /// finding 9): its text becomes `content`, its knowledge picks `kb_refs`, its
 /// stored retrieval goes (it described the old text), and every later message
-/// is deleted with its attachments. Its own attachments stay bound. `false`
-/// — and nothing written — when no such user message is in this thread.
+/// is deleted with its attachments. Its own attachments stay bound. A
+/// dictated message whose text changed loses its `voice`: the text is no
+/// longer what was spoken (chat-voice design §3). `false` — and nothing
+/// written — when no such user message is in this thread.
 pub async fn rewrite_chat_user_message(
     pool: &SqlitePool,
     thread_id: i64,
@@ -140,7 +157,8 @@ pub async fn rewrite_chat_user_message(
 ) -> DbResult<bool> {
     let mut tx = pool.begin().await?;
     let n = sqlx::query(
-        "UPDATE chat_messages SET content = ?3, kb_refs = ?4, context = NULL
+        "UPDATE chat_messages SET content = ?3, kb_refs = ?4, context = NULL,
+           voice = CASE WHEN content = ?3 THEN voice ELSE NULL END
          WHERE id = ?1 AND thread_id = ?2 AND role = 'user'",
     )
     .bind(id)
@@ -203,7 +221,7 @@ pub async fn update_chat_message(
     let mut tx = pool.begin().await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
-           completion_tokens=?6, ir_messages=?7
+           completion_tokens=?6, ir_messages=?7, voice=?8
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -213,6 +231,7 @@ pub async fn update_chat_message(
     .bind(m.prompt_tokens)
     .bind(m.completion_tokens)
     .bind(&m.ir_messages)
+    .bind(super::chat_voice::message_voice_json(m.voice.as_ref()))
     .execute(&mut *tx)
     .await?
     .rows_affected();

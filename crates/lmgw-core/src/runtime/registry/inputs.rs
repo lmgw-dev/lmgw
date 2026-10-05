@@ -29,6 +29,12 @@ pub struct AcquireSpec<'a> {
     /// is fixed (`audio::config_dir`), there is nothing left for a caller to
     /// resolve, only a root directory to hand over.
     pub data_dir: &'a Path,
+    /// Whether the start may create what its argv points at inside
+    /// `models_dir` (the image class's LoRA and upscaler dirs). `false` on a
+    /// dev instance whose models dir lies outside its data dir
+    /// ([`crate::config::dev_models_dir_refusal`]): the start goes ahead and
+    /// creates nothing there.
+    pub may_write_models_dir: bool,
     /// `vram.load_timeout_seconds`. Bounds the readiness poll, nothing else.
     pub load_timeout: Duration,
     /// `vram.unload_timeout_seconds`. Recorded on the entry and used by a
@@ -45,6 +51,7 @@ pub struct StartSpec {
     pub container_prefix: String,
     pub models_dir: String,
     pub data_dir: PathBuf,
+    pub may_write_models_dir: bool,
     pub load_timeout: Duration,
     pub stop_timeout: Duration,
 }
@@ -56,6 +63,7 @@ impl StartSpec {
             container_prefix: spec.container_prefix.to_string(),
             models_dir: spec.models_dir.to_string(),
             data_dir: spec.data_dir.to_path_buf(),
+            may_write_models_dir: spec.may_write_models_dir,
             load_timeout: spec.load_timeout,
             stop_timeout: spec.stop_timeout,
         }
@@ -67,6 +75,7 @@ impl StartSpec {
             container_prefix: &self.container_prefix,
             models_dir: &self.models_dir,
             data_dir: &self.data_dir,
+            may_write_models_dir: self.may_write_models_dir,
             load_timeout: self.load_timeout,
             stop_timeout: self.stop_timeout,
         }

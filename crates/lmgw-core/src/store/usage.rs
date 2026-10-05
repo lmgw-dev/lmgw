@@ -272,7 +272,7 @@ pub async fn usage_top(
 /// Weekday (0 = Sunday) × hour request counts, in local time.
 pub async fn usage_heat(pool: &SqlitePool, f: &UsageFilter) -> DbResult<Vec<(i64, i64, i64)>> {
     let shift = format!("'{:+} minutes'", f.tz_offset_min);
-    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(&format!(
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
         "SELECT CAST(strftime('%w', bucket_utc || ':00:00', {shift}) AS INTEGER) AS dow,
                 CAST(strftime('%H', bucket_utc || ':00:00', {shift}) AS INTEGER) AS hour,
                 SUM(requests) AS requests
@@ -611,7 +611,7 @@ pub async fn usage_error_kinds(
         Bucket::Week => "'%Y-W%W'",
         Bucket::Month => "'%Y-%m'",
     };
-    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(&format!(
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
         "SELECT strftime({fmt}, ts, {shift}) AS bucket,
                 COALESCE(error_kind, 'error') AS kind,
                 COUNT(*) AS n

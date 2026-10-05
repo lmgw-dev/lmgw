@@ -10,11 +10,19 @@ lmgw-core = { path = "../crates/lmgw-core" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The window's permission handler (media.rs, chat-voice §13.1). The same crate
+# and version wry builds the webview with (locked 2.0.2): `PlatformWebview::inner`
+# hands out its `WebView`, and the display-capture check is the re-exported
+# `webkit2gtk::ffi` (webkit2gtk-sys), which the safe binding lacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_38"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

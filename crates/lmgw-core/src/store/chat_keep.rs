@@ -1,6 +1,7 @@
 //! **Keep** for a temporary chat (chat-complete design §7): a thread that
-//! lived only in memory written to the DB whole — settings, messages,
-//! attachments — as one ordinary thread.
+//! lived only in memory written to the DB whole — settings (its voice
+//! included), messages (each with its voice), attachments — as one ordinary
+//! thread.
 
 use std::collections::HashMap;
 
@@ -46,9 +47,9 @@ pub async fn insert_kept_chat_thread(
             reasoning_enabled, reasoning_effort, reasoning_budget, agent_id,
             created_at, updated_at,
             top_p, top_k, min_p, repeat_penalty, presence_penalty, frequency_penalty, seed, stop,
-            kb_ids, kb_mode, kb_budget_tokens)
+            kb_ids, kb_mode, kb_budget_tokens, voice)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
     )
     .bind(&thread.title)
     .bind(&thread.model_alias)
@@ -74,6 +75,7 @@ pub async fn insert_kept_chat_thread(
     .bind(super::chat_knowledge::id_list_json(&thread.kb_ids))
     .bind(thread.kb_mode.as_str())
     .bind(thread.kb_budget_tokens)
+    .bind(thread.voice.to_stored())
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
@@ -83,8 +85,8 @@ pub async fn insert_kept_chat_thread(
         let new_id = sqlx::query(
             "INSERT INTO chat_messages
                (thread_id, role, content, reasoning, prompt_tokens, completion_tokens,
-                ir_messages, created_at, kb_refs, context, model, answered_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                ir_messages, created_at, kb_refs, context, model, answered_by, voice)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(thread_id)
         .bind(&m.role)
@@ -98,6 +100,7 @@ pub async fn insert_kept_chat_thread(
         .bind(super::chat_knowledge::context_json(m.context.as_ref()))
         .bind(&m.model)
         .bind(&m.answered_by)
+        .bind(super::chat_voice::message_voice_json(m.voice.as_ref()))
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();

@@ -589,6 +589,25 @@ const AUDIO_CCACHE_STATS: PresetEdit = PresetEdit {
     replace: "        --target model_perf && ccache -s\n",
 };
 
+/// eSpeak NG in the runtime image. Kokoro (and the other phonemizing
+/// families) link `libespeak-ng.so.1` at run time and fail to load without
+/// it; upstream's runtime stages install `libgomp1 curl ffmpeg python3
+/// ca-certificates` and nothing else, and ghcr's `full-cuda12` lacks it too.
+/// Ubuntu 24.04 ships the library (1.51, found by soname) and its data on
+/// the default path, about 10 MB of apt. The anchor is the tail every
+/// runtime stage (cuda, vulkan, cpu) shares; the build stage's
+/// `cmake ca-certificates` does not contain it. Not required: a build whose
+/// upstream rewords the line still runs, it only lacks Kokoro. Rejected:
+/// `-DAUDIOCPP_STATIC_ESPEAK=ON` (bypasses ccache, a second copy of the data,
+/// writes under `$HOME/.cache` at run time).
+const AUDIO_ESPEAK: PresetEdit = PresetEdit {
+    name: "runtime-espeak",
+    role: EditRole::Other,
+    required: false,
+    find: "curl ffmpeg python3 ca-certificates",
+    replace: "curl ffmpeg python3 ca-certificates libespeak-ng1 espeak-ng-data",
+};
+
 const AUDIO_CUDA: &[PresetEdit] = &[
     PresetEdit {
         name: "ccache-pkg",
@@ -635,6 +654,7 @@ const AUDIO_CUDA: &[PresetEdit] = &[
                   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \\\n",
     },
     AUDIO_CCACHE_STATS,
+    AUDIO_ESPEAK,
 ];
 
 /// audio.cpp's Vulkan and CPU Dockerfiles differ from the CUDA one only
@@ -679,6 +699,7 @@ const AUDIO_PLAIN: &[PresetEdit] = &[
                   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \\\n",
     },
     AUDIO_CCACHE_STATS,
+    AUDIO_ESPEAK,
 ];
 
 const SD_QUALIFY_UBUNTU: PresetEdit = PresetEdit {

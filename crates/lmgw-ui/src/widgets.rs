@@ -42,6 +42,8 @@ pub mod sub_nav;
 pub mod table;
 /// The tool picker shared by the Chat's thread settings and the key editor.
 pub mod tool_picker;
+/// A voice of a text-to-speech model, offered the model's voice list.
+pub mod voice_picker;
 
 pub use clamp::ClampText;
 pub use confirm::ConfirmButton;

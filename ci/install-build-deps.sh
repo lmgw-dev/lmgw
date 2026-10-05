@@ -6,6 +6,10 @@
 # Usage: bash ci/install-build-deps.sh   (run as root inside the fedora image)
 set -euo pipefail
 
+# The list follows Tauri's Fedora prerequisites, which is the only reason
+# openssl-devel is on it: nothing in lmgw's build links OpenSSL (its TLS is
+# rustls, ort's build-time download included), and neither does tauri-cli with
+# its default features.
 dnf -y install \
   rust cargo \
   rust-std-static-wasm32-unknown-unknown \

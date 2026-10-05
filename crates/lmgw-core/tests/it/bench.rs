@@ -777,6 +777,57 @@ async fn a_request_queued_for_room_is_refused_once_the_lease_is_taken() {
     );
 }
 
+/// The port `free_port` handed out can be taken before podman binds it
+/// (per-model containers §10.4): the husk is collected and the container
+/// runs once more on a fresh port, whose command line the run stores.
+#[tokio::test]
+async fn a_port_taken_before_podman_bound_it_is_retried_once_on_a_fresh_one() {
+    let w = World::new(quick()).await;
+    let decoy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let decoy_port = decoy.local_addr().unwrap().port();
+    drop(decoy);
+    *w.launcher.decoy.lock().unwrap() = Some(decoy_port);
+    w.launcher.taken.store(1, Ordering::SeqCst);
+    let (run_id, job) = w.start(json!({"model_id": "qwen", "repetitions": 1})).await;
+    w.finished(job).await;
+    let run = w.run(run_id).await["run"].clone();
+    assert_eq!(run["status"], "done", "{}", run["error"]);
+
+    let name = format!("{}-bench-{run_id}", w.prefix());
+    let seen: Vec<Vec<String>> = w
+        .launcher
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c[0].as_str(), "run" | "rm"))
+        .collect();
+    let verbs: Vec<&str> = seen.iter().map(|c| c[0].as_str()).collect();
+    assert_eq!(verbs[..3], ["run", "rm", "run"], "{seen:?}");
+    assert_eq!(seen[1].last(), Some(&name), "the husk, by name");
+    let published = |c: &[String]| c[c.iter().position(|a| a == "-p").unwrap() + 1].clone();
+    let real = format!("127.0.0.1:{}:8080", w.launcher.port);
+    assert_eq!(published(&seen[0]), format!("127.0.0.1:{decoy_port}:8080"));
+    assert_eq!(published(&seen[2]), real);
+    let cl = run["command_line"].as_str().unwrap();
+    assert!(cl.contains(&real), "the line that ran is stored: {cl}");
+}
+
+/// Once: a second taken port fails the run with podman's words.
+#[tokio::test]
+async fn a_port_taken_twice_fails_the_run_with_podman_s_words() {
+    let w = World::new(quick()).await;
+    w.launcher.taken.store(2, Ordering::SeqCst);
+    let (run_id, job) = w.start(json!({"model_id": "qwen"})).await;
+    w.finished(job).await;
+    let run = w.run(run_id).await["run"].clone();
+    assert_eq!(run["status"], "failed");
+    let err = run["error"].as_str().unwrap();
+    assert!(err.contains("address already in use"), "{err}");
+    assert_eq!(w.launcher.verb("run").len(), 2, "one retry, not a loop");
+    assert!(w
+        .launcher
+        .removed(&format!("{}-bench-{run_id}", w.prefix())));
+}
+
 #[tokio::test]
 async fn a_load_that_dies_fails_the_run_with_the_classifiers_hint() {
     let w = World::new(quick()).await;

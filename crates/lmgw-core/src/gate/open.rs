@@ -402,10 +402,6 @@ impl Routed {
     /// enable is refused here with a `400` naming it — before anything is
     /// started, and under the hold as much as without it. Every other name
     /// is never refused by it.
-    ///
-    /// `#[allow(result_large_err)]`: [`OpenFailed`] is every gate refusal's
-    /// one shape, the same `resolve` and `admit` return.
-    #[allow(clippy::result_large_err)]
     pub fn using(mut self, uses: FacetSet) -> Result<Self, OpenFailed> {
         self.images = uses.contains(Facet::Vision);
         if let Some(req) = &self.candidate {
@@ -468,7 +464,7 @@ pub struct OpenFailed {
     /// admission or from an aux section guard (a check about the model the
     /// route names) — the request log's `upstream_*` columns follow this, as
     /// they always have.
-    pub route: Option<Route>,
+    pub route: Option<Box<Route>>,
     /// Empty unless a fallback was already answering when admission refused.
     /// A route-check refusal carries none, as before the gate: the check runs
     /// before anything was sent anywhere.
@@ -492,7 +488,18 @@ pub async fn resolve(
     let picked = match pick_candidate(state, &snap, alias).await {
         Some(picked) => picked.map_err(refused)?,
         None => {
-            let r = snap.resolve_for_request(alias).map_err(refused)?;
+            let mut r = snap.resolve_for_request(alias).map_err(refused)?;
+            // A row switched to the CPU is not held, but a container of its
+            // still running on the GPU is: its fallback answers, as it did
+            // before the switch.
+            if r.fallback.is_none() {
+                if let Some((fallback, route)) =
+                    crate::vram::held_container_fallback(state, &snap, &r.route)
+                {
+                    r.route = route;
+                    r.fallback = Some(fallback);
+                }
+            }
             let mut headers = GateHeaders::default();
             if let Some(fallback) = r.fallback {
                 // The same snapshot answered the swap, so it names the reason:
@@ -512,7 +519,7 @@ pub async fn resolve(
     if let Err(r) = check.run(state, &snap, &picked.route, alias).await {
         return Err(if r.names_route {
             OpenFailed {
-                route: Some(picked.route),
+                route: Some(Box::new(picked.route)),
                 headers: picked.headers,
                 error: r.error,
             }
@@ -729,7 +736,7 @@ pub(super) async fn admit_route(
             })
         }
         Err(error) => Err(OpenFailed {
-            route: Some(route),
+            route: Some(Box::new(route)),
             headers,
             error,
         }),

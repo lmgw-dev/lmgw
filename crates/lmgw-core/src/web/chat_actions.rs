@@ -14,19 +14,22 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::chat::{err_json, thread_json};
-use super::chat_extract::{ChatJson, ChatPath};
+use super::chat_extract::{ChatJson, ChatOptJson, ChatPath};
 use super::chat_knowledge;
 use super::chat_repo::{ChatRepo, KeepOutcome};
 use super::chat_turn::{self, TurnMode};
+use super::chat_voice::ReadAloud;
 use crate::state::SharedState;
-use crate::store::{ChatMessageRow, ChatMessageUpdate, ChatThread};
+use crate::store::{ChatMessageRow, ChatMessageUpdate, ChatThread, MessageVoice};
 
 /// `POST /chat/api/threads/{id}/persist` — **Keep** a temporary chat: it is
 /// written to the DB as an ordinary thread (messages, attachments, settings)
 /// and leaves memory. Answers `{id, thread}` with the new, positive id. A
 /// stored thread is refused (`409 not_temporary`), and so is a Keep while
 /// another Keep of the same thread runs (`409 keep_in_progress` — it is
-/// stored once); an unknown temporary one is a 404.
+/// stored once), and so is a Keep while a realtime session is bound to it
+/// (`409 voice_session_active`, chat-voice design §8.1); an unknown
+/// temporary one is a 404.
 pub async fn persist_thread(
     State(state): State<SharedState>,
     ChatPath(id): ChatPath<i64>,
@@ -47,6 +50,13 @@ pub async fn persist_thread(
                 "this chat is being kept right now",
             )
         }
+        Ok(KeepOutcome::VoiceActive) => {
+            return err_json(
+                StatusCode::CONFLICT,
+                "voice_session_active",
+                "this chat is in voice mode; leave voice mode to keep it",
+            )
+        }
         Ok(KeepOutcome::NotFound) => {
             return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found")
         }
@@ -54,8 +64,7 @@ pub async fn persist_thread(
     };
     match ChatRepo::Db.thread(&state, new_id).await {
         Ok(Some(t)) => {
-            let purge_days = state.snapshot().settings.chat_purge_days;
-            Json(json!({ "id": new_id, "thread": thread_json(&t, purge_days) })).into_response()
+            Json(json!({ "id": new_id, "thread": thread_json(&state, &t).await })).into_response()
         }
         _ => err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -145,19 +154,36 @@ pub struct EditReq {
     /// it had; absent keeps them. Ignored for a reply.
     #[serde(default)]
     kb_refs: Option<Vec<i64>>,
+    /// Read the new answer aloud as it streams (chat-voice design §6.4).
+    /// Ignored for a reply, which is not answered again.
+    #[serde(default)]
+    speak: bool,
+}
+
+/// The optional body of a regenerate or a continue (chat-voice design
+/// §6.4): an empty request is still accepted.
+#[derive(Debug, Default, Deserialize)]
+pub struct TurnReq {
+    /// Read the answer aloud as it streams.
+    #[serde(default)]
+    speak: bool,
 }
 
 /// `POST /chat/api/threads/{id}/messages/{mid}/edit` `{content}`.
 ///
 /// - **A reply** is rewritten in place and nothing is sent: its reasoning,
 ///   token counts and tool record are cleared, since they no longer describe
-///   the text. Answers `{ok, message}` (the row as the thread lists it).
+///   the text, and so are a spoken reply's unheard rest and timing.
+///   Answers `{ok, message}` (the row as the thread lists it).
 /// - **A user message** is rewritten in place (its attachments stay bound),
 ///   every later message is deleted, and it is answered again: the answer is
 ///   the send's SSE stream, opening with `turn {user_message_id}`. Empty text
 ///   is refused unless the message carries files, as a send refuses it. Its
 ///   stored knowledge retrieval goes with the old text: auto mode searches
 ///   again for the new one (`kb_refs`, when sent, replaces its `#` picks).
+///   A dictated message whose text changed becomes a typed turn: its
+///   `voice` goes, since the text is no longer what was spoken
+///   (chat-voice §3).
 ///   Everything that can refuse or take time — the checks, the model's
 ///   capabilities, which may probe a catalog — happens before anything is
 ///   written, and the rewrite (text, picks, the cut) is one write, so a
@@ -174,8 +200,11 @@ pub async fn edit_message(
     };
     match msg.role.as_str() {
         "assistant" => {
+            // A spoken reply stays spoken, but what was not heard and the
+            // turn's timing no longer describe the text (chat-voice §3).
             let update = ChatMessageUpdate {
                 content: req.content,
+                voice: msg.voice.clone().map(MessageVoice::edited),
                 ..Default::default()
             };
             match repo.update_message(&state, id, mid, &update).await {
@@ -225,7 +254,7 @@ pub async fn edit_message(
                 Ok(false) => return message_not_found(),
                 Err(e) => return internal(e),
             }
-            answer(&state, repo, &thread, Some(mid), caps).await
+            answer(&state, repo, &thread, Some(mid), caps, req.speak).await
         }
         other => err_json(
             StatusCode::BAD_REQUEST,
@@ -244,9 +273,12 @@ pub async fn edit_message(
 ///   message (`409 nothing_to_answer` otherwise — nothing is deleted then).
 /// - **On a user message**: everything after it is deleted and it is answered
 ///   again; the stream opens with `turn {user_message_id}`.
+///
+/// The body is optional (`{speak}`, [`TurnReq`]); an empty one is accepted.
 pub async fn regenerate_message(
     State(state): State<SharedState>,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
+    ChatOptJson(req): ChatOptJson<TurnReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let (thread, msg) = match thread_and_message(&state, repo, id, mid).await {
@@ -275,14 +307,14 @@ pub async fn regenerate_message(
             if let Err(e) = repo.truncate(&state, id, mid, true).await {
                 return internal(e);
             }
-            answer(&state, repo, &thread, None, caps).await
+            answer(&state, repo, &thread, None, caps, req.speak).await
         }
         "user" => {
             let caps = super::chat_attach_gate::thread_caps(&state, repo, &thread).await;
             if let Err(e) = repo.truncate(&state, id, mid, false).await {
                 return internal(e);
             }
-            answer(&state, repo, &thread, Some(mid), caps).await
+            answer(&state, repo, &thread, Some(mid), caps, req.speak).await
         }
         other => err_json(
             StatusCode::BAD_REQUEST,
@@ -293,16 +325,18 @@ pub async fn regenerate_message(
 }
 
 /// A fresh turn over the thread as it now stands, with the `caps` read
-/// before it was rewritten.
+/// before it was rewritten; `speak` reads it aloud as it streams.
 async fn answer(
     state: &SharedState,
     repo: ChatRepo,
     thread: &ChatThread,
     user_message_id: Option<i64>,
     caps: super::chat_attach_gate::Caps,
+    speak: bool,
 ) -> Response {
     let mode = TurnMode::Fresh { user_message_id };
-    chat_turn::start_turn(state, repo, thread, mode, caps).await
+    let speak = speak.then(ReadAloud::default);
+    chat_turn::start_turn(state, repo, thread, mode, caps, speak).await
 }
 
 /// `POST /chat/api/threads/{id}/continue` — the model continues the
@@ -311,10 +345,13 @@ async fn answer(
 /// text and reasoning grow by what came (its token counts become this
 /// call's). Refused with `409 continue_unavailable` and the reason the
 /// thread JSON's `continue` gives when that says no; a route the send is
-/// re-routed to that cannot take a prefill is refused in the stream.
+/// re-routed to that cannot take a prefill is refused in the stream. The
+/// body is optional (`{speak}`, [`TurnReq`]): with `speak`, the
+/// continuation is read aloud as it streams.
 pub async fn continue_reply(
     State(state): State<SharedState>,
     ChatPath(id): ChatPath<i64>,
+    ChatOptJson(req): ChatOptJson<TurnReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let thread = match repo.thread(&state, id).await {
@@ -338,5 +375,7 @@ pub async fn continue_reply(
     let mode = TurnMode::Continue {
         message_id: last.id,
     };
-    chat_turn::start_turn(&state, repo, &thread, mode, caps).await
+    // Read from the clause the stored reply broke off in (§6.4).
+    let speak = req.speak.then(|| ReadAloud::continuing(&last.content));
+    chat_turn::start_turn(&state, repo, &thread, mode, caps, speak).await
 }

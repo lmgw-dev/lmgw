@@ -33,6 +33,7 @@ pub(super) async fn stream_chat(
     headers: &mut GateHeaders,
     egress: &'static dyn Egress,
     params: &crate::ir::Params,
+    fitted: &mut super::reasoning_fit::Fitted,
     started: Instant,
     admission: Option<crate::vram::LocalHold>,
     mut lease: crate::gate::TurnLease,
@@ -41,29 +42,27 @@ pub(super) async fn stream_chat(
     let timeout = route.upstream.request_timeout();
     // The connect is retried through the shared dead-container path (§3.2);
     // once the relay below has started, the response is the client's — and
-    // on a ladder row it starts only after the count's verdict.
-    let sent = crate::gate::send_gated(
+    // on a ladder row it starts only after the count's verdict. A refused
+    // off is retried before that, too (§5.6).
+    let sent = super::reasoning_fit::send_chat(
         state,
         admission.as_ref(),
         route,
         &mut lease,
-        crate::gate::CountInput::Chat {
-            ir,
-            params,
-            stream: true,
-        },
+        ir,
+        params,
+        true,
         None,
         timeout,
-        |r| {
-            egress.build_chat(
-                &state.http,
-                &r.upstream,
-                &r.upstream_model,
-                ir,
-                params,
-                true,
-            )
+        None,
+        fitted,
+        super::reasoning_fit::RowAs::Public {
+            proto,
+            ctx,
+            alias: &ir.model_alias,
+            fallback: headers.fallback_reason(),
         },
+        |r, p| egress.build_chat(&state.http, &r.upstream, &r.upstream_model, ir, p, true),
     )
     .await;
     headers.set_rung(lease.rung());
@@ -290,16 +289,40 @@ impl StreamProgress {
 /// ends when the upstream ends it or the consumer goes away.
 pub(crate) async fn drive_upstream<S, Fut>(
     resp: reqwest::Response,
-    mut decoder: Box<dyn EgressStreamDecoder>,
+    decoder: Box<dyn EgressStreamDecoder>,
     timeout: Option<Duration>,
     started: Instant,
     telemetry: &crate::telemetry::TelemetryBus,
-    mut sink: S,
+    sink: S,
 ) -> StreamOutcome
 where
     S: FnMut(StreamDelta) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
+    let never = std::future::pending();
+    drive_upstream_until(resp, decoder, timeout, started, telemetry, sink, never).await
+}
+
+/// [`drive_upstream`], which also ends the moment `stop` resolves — recorded
+/// as `aborted`, like a sink that said stop — even with no chunk in sight: a
+/// long prefill, a slow provider. The consumer's cooperative stop (realtime
+/// design §4.3) has to reach a stream that is not producing, and a sink only
+/// hears from one that is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive_upstream_until<S, Fut>(
+    resp: reqwest::Response,
+    mut decoder: Box<dyn EgressStreamDecoder>,
+    timeout: Option<Duration>,
+    started: Instant,
+    telemetry: &crate::telemetry::TelemetryBus,
+    mut sink: S,
+    stop: impl std::future::Future<Output = ()>,
+) -> StreamOutcome
+where
+    S: FnMut(StreamDelta) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::pin!(stop);
     let mut sse = crate::sse::SseDecoder::new();
     let mut out = StreamOutcome::default();
     let mut progress = StreamProgress::default();
@@ -311,7 +334,15 @@ where
                 None => Ok(upstream.next().await),
             }
         };
-        let chunk = match next.await {
+        let next = tokio::select! {
+            biased;
+            () = &mut stop => {
+                out.aborted = true;
+                break;
+            }
+            n = next => n,
+        };
+        let chunk = match next {
             Err(_) => {
                 let msg = "upstream stalled mid-stream".to_string();
                 out.error = Some(("timeout".into(), msg.clone()));

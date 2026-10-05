@@ -60,7 +60,7 @@ pub struct RequestSummary {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Request(RequestSummary),
+    Request(Box<RequestSummary>),
     /// Live MCP southbound connection status (§9) — drives the MCP tab's
     /// status badges. Carries the full set of connection views so a single
     /// frame refreshes the whole list.
@@ -246,7 +246,7 @@ impl RequestClass {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_label(s: &str) -> Self {
         match s {
             "aux" => Self::Aux,
             "audio" => Self::Audio,
@@ -471,7 +471,7 @@ impl TelemetryBus {
                 Self::trim(&mut s.window);
             }
         }
-        let _ = self.tx.send(Event::Request(summary));
+        let _ = self.tx.send(Event::Request(Box::new(summary)));
     }
 
     /// Broadcast the current MCP connection statuses to the live feed (§9).

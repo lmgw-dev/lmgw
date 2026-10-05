@@ -20,7 +20,7 @@ use sqlx::{Row, SqlitePool};
 
 /// An in-memory database migrated up to `version` and no further — the state an
 /// install that has not taken the aux-router upgrade yet is sitting in.
-async fn db_at_version(version: i64) -> SqlitePool {
+pub(crate) async fn db_at_version(version: i64) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")
         .unwrap()
         .foreign_keys(true);
@@ -1393,5 +1393,216 @@ async fn migration_0044_adds_candidate_aliases_with_the_right_defaults() {
             .await
             .is_err(),
         "alias must stay unique"
+    );
+}
+
+/// Migration 0053 (realtime design §9.4): the learned audio residency is three
+/// new columns, NULL on every row an existing install already has — nothing
+/// has been measured on that box yet, so nothing is claimed — and an
+/// upgraded install ends with the same columns as a fresh one.
+#[tokio::test]
+async fn migration_0053_adds_the_audio_residency_columns_as_null() {
+    let pool = db_at_version(52).await;
+    sqlx::query(
+        "INSERT INTO audio_models (model_id, family, path, task, mode, enabled) \
+         VALUES ('pocket', 'pocket_tts', 'pocket', 'tts', 'offline', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    lmgw_core::store::run_migrations(&pool).await.unwrap();
+
+    let rows = lmgw_core::store::list_audio_models(&pool).await.unwrap();
+    let row = rows.iter().find(|m| m.model_id == "pocket").unwrap();
+    assert_eq!(
+        row.family, "pocket_tts",
+        "the pre-existing row is untouched"
+    );
+    assert_eq!(row.residency, None, "nothing learned on this box yet");
+
+    let columns = |pool: SqlitePool| async move {
+        let mut names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('audio_models')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        names.sort();
+        names
+    };
+    let upgraded = columns(pool.clone()).await;
+    let fresh = columns(lmgw_core::store::open_in_memory().await.unwrap()).await;
+    assert_eq!(upgraded, fresh);
+    for c in ["resident_bytes", "resident_learned_at", "resident_key"] {
+        assert!(upgraded.iter().any(|u| u == c), "{c} in {upgraded:?}");
+    }
+
+    // Stored by its own statement, read back with the row, untouched by the
+    // owner's save, and cleared by the owner's reset.
+    lmgw_core::store::set_audio_model_residency(&pool, row.id, Some((3 << 30, "0123456789ab")))
+        .await
+        .unwrap();
+    let get = |pool: SqlitePool, id: i64| async move {
+        lmgw_core::store::get_audio_model(&pool, id)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let learned = get(pool.clone(), row.id).await.residency.unwrap();
+    assert_eq!(learned.bytes, 3 << 30);
+    assert_eq!(learned.key, "0123456789ab");
+    assert!(!learned.learned_at.is_empty());
+    let r = get(pool.clone(), row.id).await;
+    let save = lmgw_core::store::NewAudioModel {
+        model_id: r.model_id.clone(),
+        family: r.family.clone(),
+        path: r.path.clone(),
+        task: r.task.clone(),
+        mode: r.mode.clone(),
+        lazy: r.lazy,
+        busy_timeout_ms: r.busy_timeout_ms,
+        backend: None,
+        threads: None,
+        load_options: r.load_options.clone(),
+        session_options: r.session_options.clone(),
+        default_request_options: r.default_request_options.clone(),
+        model_spec_override: r.model_spec_override.clone(),
+        config_id: r.config_id.clone(),
+        weight_id: r.weight_id.clone(),
+        voice_presets: r.voice_presets.clone(),
+        default_voice_preset: r.default_voice_preset.clone(),
+        enabled: r.enabled,
+        image: r.image.clone(),
+        extra_run_args: r.extra_run_args.clone(),
+        warm_start: true,
+        hold_fallback_mode: r.hold_fallback_mode,
+        hold_fallback: r.hold_fallback.clone(),
+    };
+    lmgw_core::store::update_audio_model(&pool, row.id, &save)
+        .await
+        .unwrap();
+    assert_eq!(get(pool.clone(), row.id).await.residency, Some(learned));
+    lmgw_core::store::set_audio_model_residency(&pool, row.id, None)
+        .await
+        .unwrap();
+    assert_eq!(get(pool.clone(), row.id).await.residency, None);
+}
+
+/// Migration 0055: a per-model `extra_run_args` of `[]` — saved with the
+/// field left blank, and meaning "run with no extra args", which dropped the
+/// class's GPU and SELinux flags — becomes NULL, the class's run args, in all
+/// four model tables. A row with args of its own and a NULL row are left as
+/// they are, and so is `mcp_servers` (not a per-model override).
+#[tokio::test]
+async fn migration_0055_turns_an_empty_run_args_override_into_inherit() {
+    let pool = db_at_version(54).await;
+    let rows = [
+        "INSERT INTO local_models (model_id, gguf_path, extra_run_args) \
+         VALUES ('chat-empty', 'a.gguf', '[]'), ('chat-own', 'a.gguf', '[\"--cpus\",\"2\"]'), \
+         ('chat-null', 'a.gguf', NULL)",
+        "INSERT INTO aux_models (model_id, gguf_path, extra_run_args) \
+         VALUES ('aux-empty', 'e.gguf', '[]'), ('aux-own', 'e.gguf', '[\"--cpus\",\"2\"]')",
+        "INSERT INTO audio_models (model_id, family, path, task, mode, enabled, extra_run_args) \
+         VALUES ('audio-empty', 'f', 'p', 'asr', 'offline', 1, '[]'), \
+         ('audio-own', 'f', 'p', 'asr', 'offline', 1, '[\"--cpus\",\"2\"]')",
+        "INSERT INTO image_models (model_id, extra_run_args) \
+         VALUES ('img-empty', '[]'), ('img-own', '[\"--cpus\",\"2\"]')",
+        "INSERT INTO mcp_servers (name, transport, extra_run_args) VALUES ('m', 'stdio', '[]')",
+    ];
+    for sql in rows {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    // The upgrade names every row it moves, once: the SQL cannot.
+    let (log, capturing) = crate::common::captured_log::capture_log();
+    lmgw_core::store::run_migrations(&pool).await.unwrap();
+    lmgw_core::store::run_migrations(&pool).await.unwrap();
+    drop(capturing);
+    let log = log.text();
+    for (class, id) in [
+        ("chat", "chat-empty"),
+        ("aux", "aux-empty"),
+        ("audio", "audio-empty"),
+        ("image", "img-empty"),
+    ] {
+        let line = format!("migration 0055: {class} model '{id}' had an empty run-args override");
+        assert_eq!(log.matches(&line).count(), 1, "{log}");
+    }
+    assert!(
+        !log.contains("-own'") && !log.contains("chat-null"),
+        "{log}"
+    );
+    assert!(log.contains("names at least one flag of its own"), "{log}");
+
+    let own = Some("[\"--cpus\",\"2\"]".to_string());
+    for (table, prefix) in [
+        ("local_models", "chat"),
+        ("aux_models", "aux"),
+        ("audio_models", "audio"),
+        ("image_models", "img"),
+    ] {
+        let empty = run_args_of(&pool, table, &format!("{prefix}-empty")).await;
+        assert_eq!(empty, None, "{table}");
+        let kept = run_args_of(&pool, table, &format!("{prefix}-own")).await;
+        assert_eq!(kept, own, "{table}");
+    }
+    assert_eq!(run_args_of(&pool, "local_models", "chat-null").await, None);
+    assert_eq!(
+        run_args_of(&pool, "mcp_servers", "m").await.as_deref(),
+        Some("[]"),
+        "not a per-model override"
+    );
+    // Read back through the store: inherit, the class's run args.
+    let audio = lmgw_core::store::list_audio_models(&pool).await.unwrap();
+    let row = audio.iter().find(|m| m.model_id == "audio-empty").unwrap();
+    assert_eq!(row.extra_run_args, None);
+}
+
+/// The stored `extra_run_args` of the row named `id` in `table`.
+async fn run_args_of(pool: &SqlitePool, table: &str, id: &str) -> Option<String> {
+    let sql = match table {
+        "local_models" => "SELECT extra_run_args FROM local_models WHERE model_id = ?1",
+        "aux_models" => "SELECT extra_run_args FROM aux_models WHERE model_id = ?1",
+        "audio_models" => "SELECT extra_run_args FROM audio_models WHERE model_id = ?1",
+        "image_models" => "SELECT extra_run_args FROM image_models WHERE model_id = ?1",
+        "mcp_servers" => "SELECT extra_run_args FROM mcp_servers WHERE name = ?1",
+        other => panic!("no run args column in {other}"),
+    };
+    sqlx::query_scalar::<_, Option<String>>(sql)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Migration 0056: every audio row an install already has reads `backend`
+/// and `threads` as `None` — inherit the class, so it renders the
+/// `server.json` it rendered before — and a row written with both reads them
+/// back.
+#[tokio::test]
+async fn migration_0056_leaves_every_audio_row_on_the_class_backend() {
+    let pool = db_at_version(55).await;
+    sqlx::query(
+        "INSERT INTO audio_models (model_id, family, path, task, mode, enabled) \
+         VALUES ('asr', 'parakeet', 'p', 'asr', 'offline', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    lmgw_core::store::run_migrations(&pool).await.unwrap();
+
+    let audio = lmgw_core::store::list_audio_models(&pool).await.unwrap();
+    let row = audio.iter().find(|m| m.model_id == "asr").unwrap();
+    assert_eq!((row.backend.as_deref(), row.threads), (None, None));
+    sqlx::query("UPDATE audio_models SET backend = 'cpu', threads = 8 WHERE model_id = 'asr'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let audio = lmgw_core::store::list_audio_models(&pool).await.unwrap();
+    let row = audio.iter().find(|m| m.model_id == "asr").unwrap();
+    assert_eq!(
+        (row.backend.as_deref(), row.threads),
+        (Some("cpu"), Some(8))
     );
 }

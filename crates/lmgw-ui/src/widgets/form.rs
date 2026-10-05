@@ -534,7 +534,9 @@ impl FormState {
 
 /// A labelled control: `.field` with its label (and unit), the control,
 /// then an inline error and a hint. `dirty` draws the amber rule the dirty
-/// state is known by; `error` marks the control red and says why.
+/// state is known by; `error` marks the control red and says why; `warn`
+/// marks it amber and says what is off without blocking anything (Settings:
+/// a stored value no save is judging).
 #[component]
 pub fn Field(
     #[prop(into)] label: TextProp,
@@ -547,6 +549,7 @@ pub fn Field(
     wide: bool,
     #[prop(optional, into)] dirty: Option<Signal<bool>>,
     #[prop(optional, into)] error: Option<Signal<Option<String>>>,
+    #[prop(optional, into)] warn: Option<Signal<Option<String>>>,
     /// An anchor to link to ("Settings → GPU → Hold").
     #[prop(optional, into)]
     id: Option<String>,
@@ -562,6 +565,7 @@ pub fn Field(
 ) -> impl IntoView {
     let is_dirty = move || dirty.is_some_and(|d| d.get());
     let msg = move || error.and_then(|e| e.get());
+    let note = move || warn.and_then(|w| w.get());
     let gone = move || hidden.is_some_and(|h| h.get());
     view! {
         <div
@@ -569,6 +573,7 @@ pub fn Field(
             class:wide=wide
             class:dirty=is_dirty
             class:invalid=move || msg().is_some()
+            class:warned=move || msg().is_none() && note().is_some()
             id=id
             hidden=gone
         >
@@ -587,6 +592,7 @@ pub fn Field(
             </label>
             {children()}
             {move || msg().map(|m| view! { <div class="field-err" role="alert">{m}</div> })}
+            {move || note().map(|m| view! { <div class="field-warn" role="note">{m}</div> })}
             {match hint_extra {
                 Some(extra) => {
                     view! {

@@ -1,0 +1,187 @@
+# Which lmgw-core `tests/it` modules `bash ci/check.sh --changed` runs for a
+# diff. ci/changed.py reads this file and prints every pick with its reason.
+#
+# Most of the tree needs no entry, because of the naming convention:
+#
+#   * a file under crates/lmgw-core/src/ picks the modules named after its
+#     first path component that is not listed in `skip`: src/realtime/** picks
+#     realtime_*, src/vram/** picks vram_admission, src/web/chat_voice/**
+#     picks chat_voice_*. A component with no module of its own is shortened
+#     at its last underscore until one matches (src/web/chat_attach_gate.rs
+#     picks chat_attach_*);
+#   * a module's own file (tests/it/<module>.rs or tests/it/<module>/**)
+#     picks that module;
+#   * a file under tests/it/support/ or tests/it/common/ picks every module
+#     that names it (`support::<file>`), and common/mod.rs picks all of them;
+#   * a fixture under tests/fixtures/ picks the modules that name the file
+#     (or, failing that, its directory).
+#
+# This file adds what the convention misses. `paths` are fnmatch patterns on
+# the repo-relative path, where `*` also matches `/`. `modules` entries are a
+# module name, a prefix ending in `_` (every module starting with it), a
+# `module::test` path, or "*" (the whole binary). Entries add to the
+# convention, they never remove from it. A path nothing matches is named in
+# the output, covered only by the smoke set; the full `bash ci/check.sh`
+# stays the gate before a merge.
+
+# Directory names that group files rather than name a feature.
+skip = ["web"]
+
+# Always run, whatever the diff: cheap tests that cross the whole router.
+smoke = [
+    "route_walk",        # every CAPABILITY_TABLE row against the principal gate
+    "openapi_coverage",  # every route documented
+    "router",
+    "migrations",
+    "web_pages::the_spa_is_served_at_the_root_and_the_api_backs_its_pages",
+]
+
+[[map]]
+paths = ["crates/lmgw-core/src/state.rs", "crates/lmgw-core/Cargo.toml"]
+modules = ["*"]
+why = "every suite builds its gateway from these"
+
+[[map]]
+paths = ["crates/lmgw-core/src/config.rs", "crates/lmgw-core/src/config/*"]
+modules = ["config_hoisting", "web_pages", "migrations", "models_endpoint", "router",
+           "mcp_selfadmin", "realtime_settings", "chat_voice_settings", "chat_stt_settings",
+           "dev_boot_prefix"]
+why = "settings and the snapshot; nearly every feature adds a field here, so the feature's own files pick its suites"
+
+[[map]]
+paths = ["crates/lmgw-core/src/server.rs", "crates/lmgw-core/src/principal.rs",
+         "crates/lmgw-core/src/web/mod.rs", "crates/lmgw-core/src/web/wiring.rs",
+         "crates/lmgw-core/src/web/admin.rs", "crates/lmgw-core/src/web/session.rs"]
+modules = ["route_walk", "principal_gate", "owner_keys", "session_login", "key_policy",
+           "openapi_", "web_pages", "body_limit", "dev_boot_prefix"]
+why = "the routing table and the gate in front of it (dev_boot_prefix: server::bind/serve)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api.rs", "crates/lmgw-core/src/web/api_settings.rs",
+         "crates/lmgw-core/src/web/ui.rs"]
+modules = ["web_pages", "openapi_dashboard", "ui_cache", "config_hoisting", "dev_boot_prefix"]
+why = "the dashboard API (dev_boot_prefix: the settings write's dev-prefix refusal)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/config/settings/dev_models_dir.rs", "crates/lmgw-core/src/hf.rs",
+         "crates/lmgw-core/src/web/hf.rs", "crates/lmgw-core/src/jobs/hf_download.rs",
+         "crates/lmgw-core/src/web/audio_lab.rs", "crates/lmgw-core/src/web/audio_lab/*",
+         "crates/lmgw-core/src/ops/recipes.rs", "crates/lmgw-core/src/ops/huggingface.rs",
+         "crates/lmgw-core/src/ops/voice_library.rs", "crates/lmgw-core/src/runtime/*",
+         "crates/lmgw-core/src/web/api.rs", "crates/lmgw-core/src/web/api_settings.rs"]
+modules = ["dev_models_dir", "hf_download",
+           "vram_admission::dev_image_start::a_dev_image_start_creates_nothing_in_a_shared_models_dir_and_still_starts",
+           "vram_admission::dev_image_start::a_production_image_start_still_creates_its_dirs"]
+why = "the models-dir write sites a dev instance refuses outside its data dir (owner ruling 2026-10-04)"
+
+[[map]]
+paths = ["crates/lmgw-ui/assets/voice/*", "crates/lmgw-ui/index.html"]
+modules = ["ui_cache"]
+why = "the voice worklets and visualisation modules are served from the bundle (chat-voice §10, §11.3)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/op_names.rs", "crates/lmgw-core/src/web/op_body.rs",
+         "crates/lmgw-core/src/ops.rs", "crates/lmgw-core/src/ops/*"]
+modules = ["ops_container", "openapi_ops", "mcp_selfadmin", "mcp_admin_plane", "tool_inventory"]
+why = "the /api/op plane and the MCP tools on it"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api_docs.rs"]
+modules = ["openapi_"]
+why = "serves the OpenAPI document"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api_knowledge.rs", "crates/lmgw-core/src/knowledge/*",
+         "crates/lmgw-core/migrations_knowledge/*"]
+modules = ["knowledge", "knowledge_", "chat_knowledge", "realtime_chat_thread"]
+why = "the knowledge bases and their users"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api_agents.rs", "crates/lmgw-core/src/web/agent_proxy.rs",
+         "crates/lmgw-core/src/web/agentchat.rs", "crates/lmgw-core/src/agent.rs",
+         "crates/lmgw-core/src/agent/*", "crates/lmgw-core/builtin-agents/*",
+         "crates/lmgw-core/assets/agent-shim.mjs"]
+modules = ["agents_", "agent_stopped_rows", "chat_agent_live"]
+why = "the agent runtime"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api_usage.rs", "crates/lmgw-core/src/policy.rs",
+         "crates/lmgw-core/src/pricing.rs"]
+modules = ["key_policy", "key_set", "owner_keys", "models_endpoint"]
+why = "keys, budgets and usage"
+
+[[map]]
+paths = ["crates/lmgw-core/src/candidates/*"]
+modules = ["candidate_"]
+why = "the module names are singular"
+
+[[map]]
+paths = ["crates/lmgw-core/src/gate/*", "crates/lmgw-core/src/ladder.rs"]
+modules = ["vram_admission", "candidate_routing", "ladder_models", "kv_unified_disable",
+           "background_admission", "gpu_contention"]
+why = "the request gate in front of every local send"
+
+[[map]]
+paths = ["crates/lmgw-core/src/vram/*", "crates/lmgw-core/src/runtime/*"]
+modules = ["vram_admission", "background_admission", "gpu_contention", "runtime_",
+           "realtime_tts_hold", "realtime_tts_residency", "audio_streaming"]
+why = "admission and the container lifecycle"
+
+[[map]]
+paths = ["crates/lmgw-core/src/proxy.rs", "crates/lmgw-core/src/proxy/*",
+         "crates/lmgw-core/src/sse.rs"]
+modules = ["e2e_proxy", "count_compat", "key_policy", "body_limit", "responses_api",
+           "embeddings_params", "anthropic_beta", "chat_live", "reasoning_off_fit",
+           "realtime_chat_thread::reasoning::a_voice_turn_answers_on_a_model_without_reasoning"]
+why = "the inference proxy"
+
+[[map]]
+paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
+         "crates/lmgw-core/src/ir.rs", "crates/lmgw-core/src/responses.rs"]
+modules = ["egress_adapters", "ingress_roundtrip", "e2e_proxy", "count_compat",
+           "responses_api", "responses_key_ref", "anthropic_beta", "chat_replay_shapes"]
+why = "the protocol adapters"
+
+[[map]]
+paths = ["crates/lmgw-core/src/extract/*"]
+modules = ["chat_attach_", "chat_attachments", "knowledge", "knowledge_"]
+why = "attachments and knowledge bases read files through it"
+
+[[map]]
+paths = ["crates/lmgw-core/src/gguf.rs", "crates/lmgw-core/src/gguf/*",
+         "crates/lmgw-core/src/modelinfo.rs", "crates/lmgw-core/src/llama_caps.rs",
+         "crates/lmgw-core/src/sdcpp_caps.rs"]
+modules = ["modelinfo_real_files", "capabilities_local", "model_runtime_overrides",
+           "runtime_argv", "image_backend"]
+why = "model metadata"
+
+[[map]]
+paths = ["crates/lmgw-core/src/store.rs", "crates/lmgw-core/src/store/*",
+         "crates/lmgw-core/migrations/*"]
+modules = ["migrations", "web_pages", "models_endpoint"]
+why = "the schema and its readers"
+
+[[map]]
+paths = ["crates/lmgw-core/src/realtime/*", "crates/lmgw-core/assets/realtime/*"]
+modules = ["realtime_", "chat_voice_"]
+why = "the chat page's voice mode is a realtime session"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat_voice.rs", "crates/lmgw-core/src/web/chat_voice/*"]
+modules = ["realtime_chat_thread"]
+why = "a realtime session bound to a chat thread"
+
+[[map]]
+paths = ["crates/lmgw-core/assets/bench/*"]
+modules = ["bench", "bench_"]
+why = "the benchmark's assets"
+
+[[map]]
+paths = ["crates/lmgw-api-types/*"]
+modules = ["web_pages", "openapi_", "models_endpoint"]
+why = "the DTOs the dashboard reads"
+
+[[map]]
+paths = ["crates/quickdoc-core/*"]
+modules = ["quickdoc_", "knowledge"]
+why = "lmgw-core's corpus store"

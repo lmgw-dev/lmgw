@@ -5,7 +5,7 @@
 //! (`an_unlisted_op_is_refused_before_dispatch`). `every_listed_op_is_
 //! documented_and_vice_versa`, `tool_and_op_arguments_agree_except_listed_
 //! divergences` and `writes_agree_with_the_tool` are WP5's, now that
-//! `ops/table.rs`'s `table()` has its 81 entries.
+//! `ops/table.rs`'s `table()` has its 83 entries.
 
 use crate::common;
 
@@ -355,7 +355,7 @@ fn every_listed_op_is_documented_and_vice_versa() {
         documented, listed,
         "the doc's x-lmgw-op set and web::op_names::all() have drifted"
     );
-    assert_eq!(listed.len(), 81, "web::op_names::all() should name 81 ops");
+    assert_eq!(listed.len(), 83, "web::op_names::all() should name 83 ops");
 }
 
 /// The property *names* a JSON Schema object declares (`properties`'s keys) —

@@ -7,6 +7,23 @@
 //! [`crate::runtime::registry`] since per-model containers (§3.6): there is
 //! no shared audiocpp_server process left for this module to own.
 
+mod carry;
+pub mod cues;
+pub mod engine_errors;
+pub mod families;
+pub mod files;
+pub mod language;
+pub mod pins;
+pub mod preflight;
+pub mod profile;
+pub mod published;
+pub mod rates;
+pub mod shape;
+pub mod tags;
+pub mod transcript;
+pub mod variant;
+pub mod voices;
+
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -152,6 +169,12 @@ pub struct SpecPackage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
     pub family: String,
+    /// The spec file this came from (`model_specs/<stem>.json`), so a
+    /// refresh in which that file fails can keep the family as it was.
+    /// Empty in a snapshot saved before it was recorded, and for a spec
+    /// parsed from anywhere else.
+    #[serde(default)]
+    pub source: String,
     pub display_name: String,
     pub description: String,
     pub category: String,
@@ -391,6 +414,7 @@ pub fn parse_spec(v: &Value) -> ModelSpec {
         })
         .unwrap_or_default();
     ModelSpec {
+        source: String::new(),
         family: v
             .get("family")
             .and_then(Value::as_str)
@@ -451,11 +475,27 @@ pub struct CatalogSnapshot {
     /// RFC3339 fetch time (shown on the page).
     pub fetched_at: String,
     pub specs: Vec<ModelSpec>,
+    /// Which spec-referenced files each package repo publishes, listed at
+    /// refresh ([`published`]). Empty in a snapshot from before listings
+    /// existed: availability not checked yet.
+    #[serde(default)]
+    pub listings: std::collections::BTreeMap<String, published::RepoListing>,
+    /// What the refresh could not do — a spec file that did not load, a repo
+    /// that could not be listed. Shown until the next refresh replaces them.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Fetch the live catalog: list `model_specs/*.json` via the git-trees API,
-/// then pull each spec from the raw host (not API-rate-limited).
-pub async fn fetch_catalog(http: &reqwest::Client) -> Result<CatalogSnapshot, String> {
+/// then pull each spec from the raw host (not API-rate-limited). A spec file
+/// that fails while others load is a warning on the snapshot, not dropped
+/// unsaid — and its family is kept as `previous` (the snapshot this one
+/// replaces) had it, because a flaky link must not hide installed or served
+/// families until a later refresh happens to load them.
+pub async fn fetch_catalog(
+    http: &reqwest::Client,
+    previous: Option<&CatalogSnapshot>,
+) -> Result<CatalogSnapshot, String> {
     let (api_base, raw_base) = spec_bases();
     let trees_url = format!("{api_base}/repos/{SPEC_REPO}/git/trees/{SPEC_REF}?recursive=1");
     let resp = http
@@ -487,23 +527,27 @@ pub async fn fetch_catalog(http: &reqwest::Client) -> Result<CatalogSnapshot, St
         .unwrap_or_default();
     paths.sort();
 
-    let specs: Vec<Result<ModelSpec, String>> =
+    // `(path, why)` for a file that did not load.
+    let specs: Vec<Result<ModelSpec, (String, String)>> =
         futures::stream::iter(paths.into_iter().map(|path| {
             let http = http.clone();
             let raw_base = raw_base.clone();
             async move {
                 let url = format!("{raw_base}/{SPEC_REPO}/{SPEC_REF}/{path}");
+                let failed = |why: String| (path.clone(), why);
                 let resp = http
                     .get(&url)
                     .timeout(std::time::Duration::from_secs(30))
                     .send()
                     .await
-                    .map_err(|e| format!("{path}: {e}"))?;
+                    .map_err(|e| failed(e.to_string()))?;
                 if !resp.status().is_success() {
-                    return Err(format!("{path}: HTTP {}", resp.status()));
+                    return Err(failed(format!("HTTP {}", resp.status())));
                 }
-                let v: Value = resp.json().await.map_err(|e| format!("{path}: {e}"))?;
-                Ok(parse_spec(&v))
+                let v: Value = resp.json().await.map_err(|e| failed(e.to_string()))?;
+                let mut spec = parse_spec(&v);
+                spec.source = path.clone();
+                Ok(spec)
             }
         }))
         .buffer_unordered(8)
@@ -511,16 +555,17 @@ pub async fn fetch_catalog(http: &reqwest::Client) -> Result<CatalogSnapshot, St
         .await;
 
     let mut out = Vec::with_capacity(specs.len());
-    let mut errors = Vec::new();
+    let mut failed = Vec::new();
     for s in specs {
         match s {
             Ok(spec) if !spec.family.is_empty() => out.push(spec),
             Ok(_) => {}
-            Err(e) => errors.push(e),
+            Err(f) => failed.push(f),
         }
     }
-    out.sort_by(|a, b| a.family.cmp(&b.family));
+    failed.sort();
     if out.is_empty() {
+        let errors: Vec<String> = failed.iter().map(|(p, e)| format!("{p}: {e}")).collect();
         return Err(format!(
             "no audio.cpp specs fetched{}",
             if errors.is_empty() {
@@ -530,8 +575,12 @@ pub async fn fetch_catalog(http: &reqwest::Client) -> Result<CatalogSnapshot, St
             }
         ));
     }
+    let warnings = carry::carry_failed(&mut out, &failed, previous);
+    out.sort_by(|a, b| a.family.cmp(&b.family));
     Ok(CatalogSnapshot {
         fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         specs: out,
+        listings: Default::default(),
+        warnings,
     })
 }

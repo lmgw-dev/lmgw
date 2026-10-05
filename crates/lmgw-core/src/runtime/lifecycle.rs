@@ -23,7 +23,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::Snapshot;
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 use crate::vram::Fit;
 
 use super::descriptor::{higher_rungs, model_runtimes, ModelRuntime};
@@ -56,22 +56,32 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 /// image-generation §4), and a start that resolved that differently from a
 /// reconciliation would compare a container against argv it was never started
 /// with.
+///
+/// The data dir and the dev flag come from `state` itself, so a start can
+/// never be handed one instance's data dir with another's rule: a dev
+/// instance whose models dir lies outside its data dir starts with
+/// `may_write_models_dir: false` (owner ruling 2026-10-04).
 pub fn acquire_spec<'a>(
-    data_dir: &'a Path,
+    state: &'a AppState,
     snap: &'a Snapshot,
     runtime: &'a ModelRuntime,
 ) -> AcquireSpec<'a> {
     let s = &snap.settings;
+    let models_dir: &str = match runtime.class {
+        Class::Chat => &s.router.models_dir,
+        Class::Aux => &s.aux_router.models_dir,
+        Class::Audio => &s.audio.models_dir,
+        Class::Image => &s.image.models_dir,
+    };
     AcquireSpec {
         runtime,
         container_prefix: &s.container_prefix,
-        models_dir: match runtime.class {
-            Class::Chat => &s.router.models_dir,
-            Class::Aux => &s.aux_router.models_dir,
-            Class::Audio => &s.audio.models_dir,
-            Class::Image => &s.image.models_dir,
-        },
-        data_dir,
+        models_dir,
+        data_dir: &state.data_dir,
+        may_write_models_dir: models_dir.trim().is_empty()
+            || state
+                .refuse_shared_models_dir(Path::new(models_dir))
+                .is_ok(),
         load_timeout: Duration::from_secs(s.vram.load_timeout_seconds),
         stop_timeout: Duration::from_secs(s.vram.unload_timeout_seconds),
     }
@@ -106,13 +116,13 @@ pub async fn boot(state: &SharedState) {
     let specs: Vec<AcquireSpec<'_>> = runtimes
         .iter()
         .filter(|r| r.enabled)
-        .map(|r| acquire_spec(&state.data_dir, &snap, r))
+        .map(|r| acquire_spec(state, &snap, r))
         .collect();
     let candidates: Vec<AcquireSpec<'_>> = runtimes
         .iter()
         .chain(&rungs)
         .filter(|r| r.enabled)
-        .map(|r| acquire_spec(&state.data_dir, &snap, r))
+        .map(|r| acquire_spec(state, &snap, r))
         .collect();
 
     let registry = state.runtime();
@@ -155,20 +165,24 @@ pub async fn boot(state: &SharedState) {
 
     // A hold that survived the restart (gpu-hold design §2/§5): reconciliation
     // has just adopted whatever podman was still running, so this is where
-    // those containers are handed back. `boot` then **returns** — relying on
-    // `Fit::Held` to skip the warm starts one by one would be correct but
-    // slow: `boot` is spawned rather than awaited, and the `join_all` below
-    // would hold up the free for as long as the slowest skip takes.
-    if snap.settings.hold.active {
+    // those containers are handed back. Only the models on the CPU are then
+    // warm-started — they use no VRAM, so the hold has no claim on them;
+    // leaving the GPU ones out here rather than relying on `Fit::Held` to
+    // skip them one by one is faster: `boot` is spawned rather than
+    // awaited, and the `join_all` below would hold up the free for as long
+    // as the slowest skip takes.
+    let held = snap.settings.hold.active;
+    if held {
         let swept = hold_sweep(state).await;
         tracing::info!(
             "GPU hold is active: stopped {} adopted container(s), {} still draining, {} \
-             failed to stop; warm starts are skipped until it is released",
+             failed to stop, {} kept on the CPU; warm starts of models on the GPU are skipped \
+             until it is released",
             swept.stopped.len(),
             swept.draining.len(),
-            swept.failed.len()
+            swept.failed.len(),
+            swept.kept_on_cpu.len()
         );
-        return;
     }
 
     // Warm starts (§3.4: "nothing auto-starts except `warm_start` models").
@@ -177,6 +191,7 @@ pub async fn boot(state: &SharedState) {
     let warm: Vec<&AcquireSpec<'_>> = specs
         .iter()
         .filter(|s| s.runtime.warm_start)
+        .filter(|s| !held || !s.runtime.placement().is_gpu())
         .filter(|s| !registry.contains(s.runtime.class, &s.runtime.model_id))
         .collect();
     if warm.is_empty() {
@@ -263,6 +278,9 @@ pub struct HoldSweep {
     /// their GPU back; a stop failure is the one thing here that cannot be
     /// silent, so it is named in the op response and logged at warn.
     pub failed: Vec<String>,
+    /// Containers on the CPU, left running: they use no VRAM, so the hold
+    /// has no claim on them (`runtime::Placement`).
+    pub kept_on_cpu: Vec<String>,
 }
 
 /// Take lmgw off the GPU (gpu-hold design §5): stop every container that is
@@ -295,6 +313,12 @@ pub async fn hold_sweep(state: &SharedState) -> HoldSweep {
     let mut out = HoldSweep::default();
     for view in registry.list() {
         let name = format!("{}/{}", view.class.as_str(), view.model_id);
+        // By the container's own placement: one started on the GPU before
+        // its row was switched to the CPU is swept like any other.
+        if !view.placement.is_gpu() {
+            out.kept_on_cpu.push(name);
+            continue;
+        }
         if view.state != RuntimeState::Ready || view.in_flight > 0 {
             out.draining.push(name);
             continue;
@@ -436,6 +460,8 @@ async fn legacy_sweep(state: &SharedState, snap: &Snapshot, adopted: &[String]) 
 
 /// One pass of the idle reaper (§3.7): stop every `ready` model that has been
 /// unused for longer than its own `idle_seconds`, and is not serving anything.
+/// It also stops, once idle, an audio container a download or a delete left
+/// on an old `server.json` ([`crate::runtime::audio::recheck_left`]).
 ///
 /// **`idle_seconds` is read from the current snapshot, not from the entry.**
 /// The registry entry captures `stop_timeout` at claim time because
@@ -509,6 +535,9 @@ pub async fn reap_idle(state: &SharedState) {
             Err(e) => tracing::warn!("idle reaper: {e}"),
         }
     }
+    // Audio containers a download or a delete left on an old `server.json`
+    // because they were starting or serving then: stopped once idle.
+    crate::runtime::audio::recheck_left(state).await;
 }
 
 /// Graceful shutdown (§3.4): stop every managed container before the process

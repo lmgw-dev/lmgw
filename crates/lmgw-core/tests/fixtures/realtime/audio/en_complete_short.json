@@ -1,0 +1,24 @@
+{
+ "file": "en_complete_short.wav",
+ "text": "Where is the nearest station?",
+ "voice": "en_US-ljspeech-medium",
+ "licence": {
+  "model_licence": "MIT (rhasspy/piper-voices repo metadata); trained from scratch",
+  "dataset_licence": "public domain (LJ Speech, https://keithito.com/LJ-Speech-Dataset/)"
+ },
+ "tts": "piper-tts 1.3, soxr VHQ 22.05k->24k, amplitude-trimmed (>2% of peak, 5 ms pad/fades), peak-normalised to 0.7",
+ "sample_rate": 24000,
+ "channels": 1,
+ "format": "PCM16 WAV",
+ "duration_ms": 2538,
+ "samples": 60904,
+ "speech_segments_ms": [
+  {
+   "start_ms": 300,
+   "end_ms": 1738,
+   "text": "Where is the nearest station?"
+  }
+ ],
+ "segments_note": "derived from generation (positions of inserted silence), not from a VAD",
+ "turn_end_ms": 1738
+}

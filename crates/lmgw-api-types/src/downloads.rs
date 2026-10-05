@@ -91,6 +91,13 @@ pub struct DownloadRow {
     /// Id of the `hf_download` job currently transferring this file, if any —
     /// what "Cancel" acts on. `None` means nothing is running for this row.
     pub job_id: Option<i64>,
+    /// The revision the download asks for: `main`, or the commit an audio
+    /// catalog spec pins. `None` on a row from before it was recorded (a
+    /// `main` download).
+    pub requested_revision: Option<String>,
+    /// The commit the file on disk came from (the hub's `X-Repo-Commit`).
+    /// `None` when unknown — every row downloaded before it was recorded.
+    pub resolved_commit: Option<String>,
 }
 
 impl DownloadRow {

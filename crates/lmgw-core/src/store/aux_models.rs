@@ -62,7 +62,7 @@ pub async fn get_aux_model(pool: &SqlitePool, id: i64) -> DbResult<Option<AuxMod
 
 pub async fn insert_aux_model(pool: &SqlitePool, m: &NewAuxModel) -> DbResult<i64> {
     let args = serde_json::to_string(&m.args).map_err(|e| GatewayError::Internal(e.to_string()))?;
-    let extra_run_args = to_json_opt(&m.extra_run_args)?;
+    let extra_run_args = run_args_json(&m.extra_run_args)?;
     let res = sqlx::query(
         "INSERT INTO aux_models (model_id, gguf_path, kind, pooling, ctx_size, args, idle_seconds,
                                   enabled, image, extra_run_args, warm_start, hold_fallback_mode,
@@ -89,7 +89,7 @@ pub async fn insert_aux_model(pool: &SqlitePool, m: &NewAuxModel) -> DbResult<i6
 
 pub async fn update_aux_model(pool: &SqlitePool, id: i64, m: &NewAuxModel) -> DbResult<()> {
     let args = serde_json::to_string(&m.args).map_err(|e| GatewayError::Internal(e.to_string()))?;
-    let extra_run_args = to_json_opt(&m.extra_run_args)?;
+    let extra_run_args = run_args_json(&m.extra_run_args)?;
     sqlx::query(
         "UPDATE aux_models SET model_id=?2, gguf_path=?3, kind=?4, pooling=?5, ctx_size=?6, args=?7,
          idle_seconds=?8, enabled=?9, image=?10, extra_run_args=?11, warm_start=?12,

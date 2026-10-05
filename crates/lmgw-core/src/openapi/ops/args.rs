@@ -114,7 +114,7 @@ pub(crate) fn audio_catalog() -> Value {
         json!({
             "action": enum_p(
                 "'refresh' live-fetches the audio.cpp model_specs catalog; 'download' queues \
-                 one package's files.",
+                 the files one package lacks.",
                 &["refresh", "download"],
             ),
             "family": str_p("download only: the catalog family (e.g. 'kokoro')."),

@@ -111,6 +111,8 @@ fn entry(model: &str, state: RuntimeState) -> RuntimeView {
         climbing: None,
         sends: 0,
         charge: None,
+        resident_key: None,
+        placement: Default::default(),
         owner: Default::default(),
         draining_for_owner: false,
     }

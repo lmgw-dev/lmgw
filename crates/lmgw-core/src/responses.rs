@@ -35,6 +35,7 @@
 //! every chained turn. Eviction is [chain-aware](crate::store::gc_responses)
 //! and lives in Settings + the Responses tab.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -601,7 +602,9 @@ struct GatewayRunner {
     route: Route,
     /// Why `route` is a fallback, when it is — every turn's row says so.
     fallback: Option<FallbackReason>,
-    client_key: Option<String>,
+    /// The caller's key, with its id: every turn's row is recorded against
+    /// the key it is, even after a rename mid-loop (A2 review 4).
+    key: proxy::KeyRef,
     stream: bool,
     /// GPU admission for the *run*, not for a turn (§9b). A tool loop is many
     /// turns against one model with tool calls in between; the model has to
@@ -630,7 +633,7 @@ impl TurnRunner for GatewayRunner {
                 self.fallback,
                 ir,
                 RESPONSES_PROTO,
-                self.client_key.clone(),
+                self.key.clone(),
                 deadline,
                 sink,
             )
@@ -643,7 +646,7 @@ impl TurnRunner for GatewayRunner {
                 self.fallback,
                 ir,
                 RESPONSES_PROTO,
-                self.client_key.clone(),
+                self.key.clone(),
                 deadline,
                 Some(&self.fell_back),
             )
@@ -750,7 +753,7 @@ async fn run_loop(
         state: state.clone(),
         route,
         fallback,
-        client_key: ctx.client_key.clone(),
+        key: ctx.key_ref(),
         stream,
         _admission: admission,
         fell_back: proxy::FallbackNote::default(),
@@ -778,6 +781,13 @@ async fn run_loop(
         state.clone(),
         ctx.clone(),
     );
+    // The tools the gateway runs: a stored response closes the ones a stop
+    // left unmade (`persist`).
+    let server_tools: HashSet<String> = tools
+        .iter()
+        .filter(|t| t.server_label.is_some())
+        .map(|t| t.def.name.clone())
+        .collect();
     let cfg = RunConfig {
         tools,
         budget,
@@ -794,6 +804,7 @@ async fn run_loop(
         chain_id: prior.as_ref().map(|p| p.chain_id.clone()),
         previous_response_id: req.previous_response_id.clone(),
         input_items: req.input_items.clone(),
+        server_tools,
     };
 
     if !stream {
@@ -822,6 +833,7 @@ async fn run_loop(
             Err(e) => {
                 // The turns themselves already logged; this records the
                 // request-level outcome the client actually saw.
+                let e = e.error;
                 let status = e.http_status();
                 enc.fail(&e);
                 proxy::record_request_failure(
@@ -875,7 +887,7 @@ async fn run_loop(
             // and paid for, and a chained retry should be able to pick it up.
             Ok(r) => persist(&state, &save, &enc, &r).await,
             Err(e) => {
-                let f = enc.fail(&e);
+                let f = enc.fail(&e.error);
                 let _ = send(f).await;
             }
         }
@@ -902,6 +914,8 @@ struct SaveCtx {
     chain_id: Option<String>,
     previous_response_id: Option<String>,
     input_items: Value,
+    /// The run's server-side tools, by name.
+    server_tools: HashSet<String>,
 }
 
 /// Write the finished response to the store, so a client can `GET` it and chain
@@ -914,6 +928,20 @@ async fn persist(state: &SharedState, save: &SaveCtx, enc: &ResponsesEncoder, ru
     }
     let id = enc.id().to_string();
     let usage = enc.usage();
+    // A stop that left server-side calls unmade (the tool-call budget ran
+    // out, the client went away while they were announced) closes them, so a
+    // chained request replays every call with its result and a strict
+    // upstream answers it (chat-voice design §7.3). A client's calls stay
+    // open for the client, and calls handed back for a client tool or an
+    // approval are settled by the next request.
+    let mut messages = run.messages.clone();
+    if !matches!(run.reason, StopReason::ClientTool | StopReason::Approval) {
+        agent::close_trailing_calls(&mut messages, |name| {
+            save.server_tools
+                .contains(name)
+                .then(|| agent::UNMADE_CALL.to_string())
+        });
+    }
     let row = StoredResponse {
         chain_id: save.chain_id.clone().unwrap_or_else(|| id.clone()),
         id,
@@ -922,7 +950,7 @@ async fn persist(state: &SharedState, save: &SaveCtx, enc: &ResponsesEncoder, ru
         status: enc.status().to_string(),
         body: enc.snapshot().to_string(),
         input_items: save.input_items.to_string(),
-        messages: serde_json::to_string(&run.messages).unwrap_or_else(|_| "[]".into()),
+        messages: serde_json::to_string(&messages).unwrap_or_else(|_| "[]".into()),
         pending: match run.reason {
             StopReason::Approval => serde_json::to_string(&run.pending).ok(),
             _ => None,

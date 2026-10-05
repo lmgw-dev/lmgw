@@ -1,0 +1,833 @@
+[
+  {
+    "id": 0,
+    "type": "PipeWire:Interface:Core",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "cookie": 1,
+      "user-name": "user",
+      "host-name": "host",
+      "version": "1.6.9",
+      "name": "pipewire-0",
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "config.name": "pipewire.conf",
+        "core.name": "pipewire-0",
+        "object.id": 0,
+        "object.serial": 0
+      }
+    }
+  },
+  {
+    "id": 31,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.version": "1.6.9",
+        "pipewire.access": "unrestricted",
+        "pipewire.protocol": "protocol-native",
+        "pipewire.sec.uid": 1000,
+        "pipewire.sec.gid": 1000,
+        "pipewire.sec.socket": "pipewire-0",
+        "application.name": "WirePlumber",
+        "application.process.id": 1800,
+        "pipewire.sec.pid": 1800,
+        "object.serial": 31,
+        "object.id": 31
+      }
+    }
+  },
+  {
+    "id": 40,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.version": "1.6.9",
+        "pipewire.access": "unrestricted",
+        "pipewire.protocol": "protocol-native",
+        "pipewire.sec.uid": 1000,
+        "pipewire.sec.gid": 1000,
+        "pipewire.sec.socket": "pipewire-0",
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "client.api": "pipewire-pulse",
+        "config.name": "pipewire-pulse.conf",
+        "pipewire.sec.pid": 1900,
+        "pulse.server.type": "unix",
+        "application.name": "lmgw",
+        "application.process.binary": "WebKitWebProcess",
+        "application.process.id": 4242,
+        "object.serial": 4040,
+        "object.id": 40
+      }
+    }
+  },
+  {
+    "id": 41,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.version": "1.6.9",
+        "pipewire.access": "unrestricted",
+        "pipewire.protocol": "protocol-native",
+        "pipewire.sec.uid": 1000,
+        "pipewire.sec.gid": 1000,
+        "pipewire.sec.socket": "pipewire-0",
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "client.api": "pipewire-pulse",
+        "config.name": "pipewire-pulse.conf",
+        "pipewire.sec.pid": 1900,
+        "pulse.server.type": "unix",
+        "application.name": "Firefox",
+        "application.process.binary": "firefox",
+        "application.process.id": 5555,
+        "object.serial": 4041,
+        "object.id": 41
+      }
+    }
+  },
+  {
+    "id": 42,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.version": "1.6.9",
+        "pipewire.access": "unrestricted",
+        "pipewire.protocol": "protocol-native",
+        "pipewire.sec.uid": 1000,
+        "pipewire.sec.gid": 1000,
+        "pipewire.sec.socket": "pipewire-0",
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "application.name": "musicplayer",
+        "application.process.binary": "musicplayer",
+        "application.process.id": 6666,
+        "pipewire.sec.pid": 6666,
+        "object.serial": 4042,
+        "object.id": 42
+      }
+    }
+  },
+  {
+    "id": 43,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.version": "1.6.9",
+        "pipewire.access": "unrestricted",
+        "pipewire.protocol": "protocol-native",
+        "pipewire.sec.uid": 1000,
+        "pipewire.sec.gid": 1000,
+        "pipewire.sec.socket": "pipewire-0",
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "application.name": "lmgw",
+        "application.process.binary": "WebKitGPUProcess",
+        "application.process.id": 2,
+        "pipewire.sec.pid": 4243,
+        "object.serial": 4043,
+        "object.id": 43
+      }
+    }
+  },
+  {
+    "id": 44,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.version": "1.6.9",
+        "pipewire.access": "unrestricted",
+        "pipewire.protocol": "protocol-native",
+        "pipewire.sec.uid": 1000,
+        "pipewire.sec.gid": 1000,
+        "pipewire.sec.socket": "pipewire-0",
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "application.name": "impostor",
+        "application.process.id": 4242,
+        "pipewire.sec.pid": 7777,
+        "object.serial": 4044,
+        "object.id": 44
+      }
+    }
+  },
+  {
+    "id": 50,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 129,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 2,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "alsa_output.pci-0000_00_1f.3.analog-stereo",
+        "node.description": "Built-in Audio Analog Stereo",
+        "node.nick": "ALC Analog",
+        "object.serial": 50,
+        "client.id": 31,
+        "device.api": "alsa",
+        "factory.name": "api.alsa.pcm.sink",
+        "priority.session": 1009,
+        "object.id": 50
+      }
+    }
+  },
+  {
+    "id": 51,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 129,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 2,
+      "n-output-ports": 2,
+      "state": "suspended",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "alsa_output.usb-Generic_USB_Headset-00.analog-stereo",
+        "node.description": "USB Headset Analog Stereo",
+        "object.serial": 1234,
+        "client.id": 31,
+        "device.api": "alsa",
+        "factory.name": "api.alsa.pcm.sink",
+        "object.id": 51
+      }
+    }
+  },
+  {
+    "id": 52,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 129,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 2,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "echo_cancel_sink",
+        "node.description": "Echo-Cancel Sink",
+        "node.virtual": true,
+        "object.serial": 52,
+        "client.id": 31,
+        "object.id": 52
+      }
+    }
+  },
+  {
+    "id": 53,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 129,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 2,
+      "n-output-ports": 2,
+      "state": "suspended",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "alsa_output.pci-0000_01_00.1.hdmi-stereo",
+        "node.description": "",
+        "node.nick": "Monitor HDMI",
+        "object.serial": 2048,
+        "client.id": 31,
+        "object.id": 53
+      }
+    }
+  },
+  {
+    "id": 54,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 129,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 2,
+      "n-output-ports": 2,
+      "state": "suspended",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "bare_sink",
+        "object.serial": 54,
+        "client.id": 31,
+        "object.id": 54
+      }
+    }
+  },
+  {
+    "id": 55,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Source",
+        "node.name": "alsa_input.pci-0000_00_1f.3.analog-stereo",
+        "node.description": "Built-in Audio Analog Stereo",
+        "object.serial": 55,
+        "client.id": 31,
+        "object.id": 55
+      }
+    }
+  },
+  {
+    "id": 60,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "client.api": "pipewire-pulse",
+        "config.name": "pipewire-pulse.conf",
+        "pulse.server.type": "unix",
+        "media.class": "Stream/Output/Audio",
+        "node.name": "lmgw",
+        "media.name": "playback",
+        "application.name": "lmgw",
+        "application.process.binary": "WebKitWebProcess",
+        "application.process.id": 4242,
+        "client.id": 40,
+        "object.serial": 6060,
+        "object.id": 60
+      }
+    }
+  },
+  {
+    "id": 61,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "client.api": "pipewire-pulse",
+        "config.name": "pipewire-pulse.conf",
+        "pulse.server.type": "unix",
+        "media.class": "Stream/Output/Audio",
+        "node.name": "lmgw",
+        "media.name": "playback",
+        "application.name": "lmgw",
+        "application.process.binary": "WebKitWebProcess",
+        "application.process.id": 4242,
+        "client.id": 40,
+        "object.serial": 6061,
+        "object.id": 61
+      }
+    }
+  },
+  {
+    "id": 62,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 129,
+      "max-output-ports": 0,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 1,
+      "n-output-ports": 0,
+      "state": "running",
+      "error": null,
+      "props": {
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "client.api": "pipewire-pulse",
+        "config.name": "pipewire-pulse.conf",
+        "pulse.server.type": "unix",
+        "media.class": "Stream/Input/Audio",
+        "node.name": "lmgw",
+        "media.name": "record",
+        "application.name": "lmgw",
+        "application.process.id": 4242,
+        "client.id": 40,
+        "object.serial": 6062,
+        "object.id": 62
+      }
+    }
+  },
+  {
+    "id": 63,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "application.language": "C.UTF-8",
+        "application.process.host": "host",
+        "application.process.user": "user",
+        "client.api": "pipewire-pulse",
+        "config.name": "pipewire-pulse.conf",
+        "pulse.server.type": "unix",
+        "media.class": "Stream/Output/Audio",
+        "node.name": "Firefox",
+        "media.name": "a video",
+        "application.name": "Firefox",
+        "application.process.id": 5555,
+        "client.id": 41,
+        "object.serial": 6063,
+        "object.id": 63
+      }
+    }
+  },
+  {
+    "id": 64,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Stream/Output/Audio",
+        "node.name": "musicplayer",
+        "media.name": "musicplayer",
+        "media.role": "Music",
+        "client.id": 42,
+        "object.serial": 6064,
+        "object.id": 64
+      }
+    }
+  },
+  {
+    "id": 65,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Stream/Output/Audio",
+        "node.name": "lmgw",
+        "media.name": "playback",
+        "client.id": 43,
+        "object.serial": 6065,
+        "object.id": 65
+      }
+    }
+  },
+  {
+    "id": 66,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Stream/Output/Audio",
+        "node.name": "impostor",
+        "client.id": 44,
+        "object.serial": 6066,
+        "object.id": 66
+      }
+    }
+  },
+  {
+    "id": 67,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 0,
+      "max-output-ports": 129,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 0,
+      "n-output-ports": 2,
+      "state": "running",
+      "error": null,
+      "props": {
+        "media.class": "Stream/Output/Audio",
+        "node.name": "echo_cancel_playback",
+        "node.virtual": true,
+        "client.id": 31,
+        "object.serial": 6067,
+        "object.id": 67
+      }
+    }
+  },
+  {
+    "id": 70,
+    "type": "PipeWire:Interface:Metadata",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "props": {
+      "metadata.name": "settings",
+      "object.serial": 70
+    },
+    "metadata": [
+      {
+        "subject": 0,
+        "key": "clock.rate",
+        "type": "",
+        "value": 48000
+      }
+    ]
+  },
+  {
+    "id": 71,
+    "type": "PipeWire:Interface:Metadata",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "props": {
+      "client.id": 31,
+      "metadata.name": "default",
+      "object.serial": 71
+    },
+    "metadata": [
+      {
+        "subject": 0,
+        "key": "default.configured.audio.sink",
+        "type": "Spa:String:JSON",
+        "value": {
+          "name": "alsa_output.usb-Generic_USB_Headset-00.analog-stereo"
+        }
+      },
+      {
+        "subject": 0,
+        "key": "default.audio.sink",
+        "type": "Spa:String:JSON",
+        "value": {
+          "name": "alsa_output.pci-0000_00_1f.3.analog-stereo"
+        }
+      },
+      {
+        "subject": 0,
+        "key": "default.audio.source",
+        "type": "Spa:String:JSON",
+        "value": {
+          "name": "alsa_input.pci-0000_00_1f.3.analog-stereo"
+        }
+      },
+      {
+        "subject": 63,
+        "key": "target.object",
+        "type": "Spa:Id",
+        "value": "1234"
+      }
+    ]
+  },
+  {
+    "id": 72,
+    "type": "PipeWire:Interface:Metadata",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "props": {
+      "client.id": 31,
+      "metadata.name": "route-settings",
+      "object.serial": 72
+    },
+    "metadata": []
+  }
+]

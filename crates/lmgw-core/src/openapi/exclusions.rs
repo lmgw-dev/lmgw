@@ -61,6 +61,21 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
     ("POST", "/chat/api/threads/{id}/settings", DASHBOARD_BACKEND),
     ("POST", "/chat/api/threads/{id}/delete", DASHBOARD_BACKEND),
     ("POST", "/chat/api/threads/{id}/send", DASHBOARD_BACKEND),
+    (
+        "POST",
+        "/chat/api/threads/{id}/voice/warm",
+        DASHBOARD_BACKEND,
+    ),
+    (
+        "POST",
+        "/chat/api/threads/{id}/transcribe",
+        DASHBOARD_BACKEND,
+    ),
+    (
+        "POST",
+        "/chat/api/threads/{id}/speech/stop",
+        DASHBOARD_BACKEND,
+    ),
     ("POST", "/chat/api/threads/{id}/pin", DASHBOARD_BACKEND),
     ("POST", "/chat/api/threads/{id}/move", DASHBOARD_BACKEND),
     ("GET", "/chat/api/search", DASHBOARD_BACKEND),
@@ -82,6 +97,11 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/edit",
+        DASHBOARD_BACKEND,
+    ),
+    (
+        "POST",
+        "/chat/api/threads/{id}/messages/{mid}/speak",
         DASHBOARD_BACKEND,
     ),
     (
@@ -118,6 +138,11 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
         DASHBOARD_BACKEND,
     ),
     ("POST", "/audio-lab/api/refs/{name}/text", DASHBOARD_BACKEND),
+    (
+        "POST",
+        "/audio-lab/api/refs/{name}/transcribe",
+        DASHBOARD_BACKEND,
+    ),
     ("POST", "/audio-lab/api/speech", DASHBOARD_BACKEND),
     ("POST", "/audio-lab/api/transcriptions", DASHBOARD_BACKEND),
     ("POST", "/audio-lab/api/alignments", DASHBOARD_BACKEND),

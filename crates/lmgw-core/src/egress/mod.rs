@@ -117,7 +117,7 @@ pub enum CountPlan {
     Guessed(u64),
     /// Send this request; [`Egress::parse_count`] reads the count from the
     /// success body.
-    Request(reqwest::RequestBuilder),
+    Request(Box<reqwest::RequestBuilder>),
 }
 
 pub trait EgressStreamDecoder: Send {

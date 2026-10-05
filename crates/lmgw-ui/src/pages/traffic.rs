@@ -617,6 +617,8 @@ pub fn Traffic() -> impl IntoView {
 
 /// One entry of the log table: a day's separator, or a request.
 #[derive(Clone, PartialEq)]
+// Short-lived render rows; boxing `Row` would ripple through every match arm for no gain.
+#[allow(clippy::large_enum_variant)]
 enum Item {
     Day(String, String),
     Row(RequestRow),
@@ -897,13 +899,22 @@ fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
                                 // what admission keeps free on top, and
                                 // the note in the tooltip says whether the
                                 // row has one at all.
+                                // What an audio model that has not loaded
+                                // yet is about to take is part of its
+                                // estimate, not on top of it: the driver
+                                // does not show it yet, so admission keeps
+                                // it free.
                                 let label = format!(
-                                    "{} · {} · {}{}",
+                                    "{} · {} · {}{}{}",
                                     r.container,
                                     r.state,
                                     human_bytes(r.estimated_bytes),
                                     match r.peak_extra_bytes {
                                         Some(p) => format!(" + {} peak", human_bytes(p)),
+                                        None => String::new(),
+                                    },
+                                    match r.pending_bytes {
+                                        Some(p) => format!(", {} of it to load", human_bytes(p)),
                                         None => String::new(),
                                     },
                                 );

@@ -9,7 +9,9 @@
 # notes file when given, else git opens your editor. When the tree already carries the
 # version (the first release), it only tags. Then publish:
 #   git push origin main vX.Y.Z    GitLab: a private build X.Y.Z+<pipeline> of main
-#   git push github main vX.Y.Z    GitHub: the public release (.github/workflows/release.yml)
+#   scripts/publish-github.sh --ref vX.Y.Z -F <message> --tag vX.Y.Z
+#                                  GitHub: one squashed commit with the tag's tree, and the tag
+#                                  on it (.github/workflows/release.yml builds the release)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -42,4 +44,5 @@ fi
 
 echo "tagged v$version at $(git rev-parse --short HEAD). Publish with:"
 echo "  git push origin main v$version"
-echo "  git push github main v$version"
+echo "  scripts/publish-github.sh --dry-run --ref v$version -F <message> --tag v$version"
+echo "  (audit, --approve, then the same without --dry-run; see the script's header)"

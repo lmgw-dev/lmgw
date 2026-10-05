@@ -1,0 +1,21 @@
+# `clippy::result_large_err` fires at 128 bytes by default.
+#
+# axum's handler error is `Response` (128 bytes), the idiomatic shape of every
+# `Result<_, Response>` in web/*, server.rs and proxy/*; boxing it at each of
+# those sites would only add noise. The gate's own refusal shapes
+# (`OpenFailed`, `(GateHeaders, GatewayError)`, ...) are headers plus a
+# `GatewayError`, ~200 bytes, returned once per request and never in a hot loop
+# (their one outlier, the 368-byte `Route`, is boxed in `OpenFailed`). The
+# threshold sits just above those so a genuinely new large error type still
+# trips the lint.
+large-error-threshold = 224
+
+# web_sys's `MediaStream::clone` and `MediaStreamTrack::clone` are inherent
+# methods that shadow `Clone::clone`: they are the JS `clone()`, a new stream of
+# new live tracks. Holding one and stopping its tracks leaves the microphone
+# open (chat-voice WP6's media probe caught exactly that). A handle is copied
+# with `Clone::clone(&stream)`; a real JS clone needs an `#[allow]` and a reason.
+disallowed-methods = [
+  { path = "web_sys::MediaStream::clone", reason = "the JS clone: new live tracks that must be stopped too; copy the handle with Clone::clone(&stream)" },
+  { path = "web_sys::MediaStreamTrack::clone", reason = "the JS clone: a new live track that must be stopped too; copy the handle with Clone::clone(&track)" },
+]

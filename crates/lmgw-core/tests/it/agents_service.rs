@@ -449,6 +449,9 @@ struct Fake {
     /// Shuts the fake container's listener down, for the "it died after its
     /// probe passed" case.
     kill: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// How many `run -d`s answer as if the published port had been taken
+    /// before podman bound it, without binding anything.
+    taken: AtomicU32,
 }
 
 impl Fake {
@@ -494,7 +497,22 @@ impl Spawner for Fake {
             }
             let i = args.iter().position(|a| a == "-p").expect("published");
             let port: u16 = args[i + 1].split(':').nth(1).unwrap().parse().unwrap();
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+            if self
+                .taken
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Ok(port_taken(port));
+            }
+            // lmgw probed this port free and released it before publishing it,
+            // so under a loaded full suite another test's ephemeral socket can
+            // hold it for a moment: answered as podman answers it, which lmgw
+            // retries once on a fresh port (§10.4).
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(port_taken(port)),
+                Err(e) => return Err(e),
+            };
             if self.tcp_only {
                 // Accept and say nothing: a process that is listening but will
                 // never finish a health probe.
@@ -543,6 +561,19 @@ impl Spawner for Fake {
             stdout: "deadbeef\n".into(),
             stderr: String::new(),
         })
+    }
+}
+
+/// `podman run -d`'s answer when the port it publishes was taken (pasta's
+/// wording): exit 126, and the container left behind in `created`.
+fn port_taken(port: u16) -> CmdOutput {
+    CmdOutput {
+        status: 126,
+        stdout: String::new(),
+        stderr: format!(
+            "Error: pasta failed with exit code 1:\nFailed to bind port {port} (Address already in \
+             use) for option '-t 127.0.0.1/{port}-{port}:8080-8080', exiting\n"
+        ),
     }
 }
 
@@ -616,6 +647,60 @@ async fn the_agents_own_page_loads_through_the_proxy_and_the_start_is_on_demand(
     assert_eq!(card["app"], json!(true), "{card}");
 
     service::stop(&state, "board", "test over").await;
+}
+
+/// The host port lmgw probed free can be taken before podman binds it
+/// (per-model containers §10.4): the husk is collected and the start runs
+/// once more on a fresh port, as a model's start does.
+#[tokio::test]
+async fn a_port_taken_before_podman_bound_it_is_retried_once_on_a_fresh_one() {
+    let fake = Fake {
+        taken: AtomicU32::new(1),
+        ..Default::default()
+    };
+    let (state, base, calls, _kill) = with(fake).await;
+    install(&base, &doc("localhost/board:1", 0, 10, "")).await;
+
+    let (status, body) = app_get(&base, "board.localhost", "/").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("served by the container"), "{body}");
+    let seen: Vec<Vec<String>> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|a| matches!(a[0].as_str(), "run" | "rm"))
+        .cloned()
+        .collect();
+    let verbs: Vec<&str> = seen.iter().map(|a| a[0].as_str()).collect();
+    assert_eq!(verbs, ["run", "rm", "run"], "{seen:?}");
+    let name = &seen[0][seen[0].iter().position(|a| a == "--name").unwrap() + 1];
+    assert_eq!(seen[1], ["rm", "-f", name.as_str()], "the husk, by name");
+    let d = detail(&base, "board").await;
+    assert_eq!(d["service"]["running"], json!(true), "{d}");
+
+    service::stop(&state, "board", "test over").await;
+}
+
+/// Once: a second taken port is the start's failure, with podman's words.
+#[tokio::test]
+async fn a_port_taken_twice_fails_the_start_with_podman_s_words() {
+    let fake = Fake {
+        taken: AtomicU32::new(2),
+        ..Default::default()
+    };
+    let (_state, base, calls, _kill) = with(fake).await;
+    install(&base, &doc("localhost/board:1", 0, 10, "")).await;
+
+    let (status, v) = op(&base, "agent_service_start", json!({ "id": "board" })).await;
+    assert_eq!(status, 400, "{v}");
+    let message = v["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("failed (exit 126)") && message.contains("Address already in use"),
+        "{v}"
+    );
+    assert_eq!(run_count(&calls), 2, "one retry, not a loop");
+    let d = detail(&base, "board").await;
+    assert_eq!(d["service"]["running"], json!(false), "{d}");
 }
 
 #[tokio::test]

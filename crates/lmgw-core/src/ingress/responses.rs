@@ -1280,8 +1280,15 @@ impl ResponsesEncoder {
             }
             Open::Message => {
                 let part = json!({"type": "output_text", "text": text, "annotations": []});
+                // A run that failed mid-answer leaves its text unfinished;
+                // the item says so rather than claiming it completed.
+                let status = if self.status == "failed" {
+                    "incomplete"
+                } else {
+                    "completed"
+                };
                 let item = json!({
-                    "id": id, "type": "message", "status": "completed",
+                    "id": id, "type": "message", "status": status,
                     "role": "assistant", "content": [part],
                 });
                 let mut out = self.ev(

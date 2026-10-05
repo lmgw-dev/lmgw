@@ -29,6 +29,8 @@ use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
 use crate::store;
 
+pub(crate) mod transcribe;
+
 /// Subdirectory of the audio models dir holding uploaded reference clips.
 /// Inside the container this is `/models/voices` (the models dir is mounted at
 /// `/models`), which is what goes into a request's `voice_ref`.
@@ -127,9 +129,9 @@ pub struct VoicesQuery {
 /// a container that is up and answering ([`proxy::audio_voices_if_running`]:
 /// no admission, no claim, no dead-container restart). A local model that is
 /// not running answers `{"voices": [], "running": false}` instead, and the
-/// panel offers an explicit "load voices" that sends `start=1`. The public
-/// `GET /v1/audio/voices` keeps admitting: a client asking for voices there is
-/// asking the model.
+/// panel offers an explicit "load voices" that sends `start=1` — the public
+/// route's `probe=engine`. (The public `GET /v1/audio/voices` answers a local
+/// row from lmgw's own catalog by default, starting nothing.)
 pub async fn list_voices(
     State(state): State<SharedState>,
     Query(q): Query<VoicesQuery>,
@@ -140,7 +142,9 @@ pub async fn list_voices(
         .as_deref()
         .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
     if start {
-        return proxy::handle_audio_voices(state, alias).await;
+        // "Load voices": the model's own list, which starts it — the public
+        // route's `probe=engine`.
+        return proxy::handle_audio_voices(state, alias, proxy::VoicesProbe::Engine).await;
     }
     proxy::audio_voices_if_running(state, alias)
         .await
@@ -163,6 +167,73 @@ fn voices_dir(state: &SharedState) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(dir).join(VOICES_SUBDIR))
+}
+
+/// The answer to a write into the voice library a dev instance may not make:
+/// its audio models dir lies outside its data dir, so the library may be the
+/// installed app's ([`crate::config::dev_models_dir_refusal`]). `None` when
+/// the write may go ahead.
+fn refuse_library_write(state: &SharedState, dir: &std::path::Path) -> Option<Response> {
+    let why = state.refuse_shared_models_dir(dir).err()?;
+    Some((StatusCode::BAD_REQUEST, Json(error_body(why))).into_response())
+}
+
+/// `{"error": message}`, the shape this plane answers failures in, plus the
+/// `code` of a refusal that has one (`dev_shared_models_dir`).
+fn error_body(message: String) -> Value {
+    match crate::config::dev_models_dir_code(&message) {
+        Some(code) => json!({ "error": message, "code": code }),
+        None => json!({ "error": message }),
+    }
+}
+
+/// The voice names the library answers to — its clips' names without the
+/// extension — when the audio class's `voice_dir` is this library: what a
+/// realtime session's `{id}` voice names (realtime design §5.3). `None`: the
+/// class points `voice_dir` elsewhere (or no models dir is set), so no clip
+/// here is a voice name any model answers to.
+pub(crate) fn library_voices(state: &SharedState) -> Option<Vec<String>> {
+    if state.snapshot().settings.audio.voice_dir.trim() != CONTAINER_VOICES_DIR {
+        return None;
+    }
+    let dir = voices_dir(state)?;
+    Some(
+        clip_entries(&dir)
+            .iter()
+            .filter_map(|e| e["voice"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// Whether the audio class's `voice_dir` is lmgw's voice library — the one
+/// directory of clips lmgw can list itself. An empty one names no clips at
+/// all; any other is mounted by the owner (`extra_run_args`) and only the
+/// engine sees it.
+pub(crate) fn voice_dir_is_library(settings: &crate::config::AudioSettings) -> bool {
+    let dir = settings.voice_dir.trim();
+    dir.is_empty() || dir == CONTAINER_VOICES_DIR
+}
+
+/// [`library_voices`] with each clip's transcript state — what the voice
+/// list of a local row shows (`crate::audio::voices`).
+pub(crate) fn library_clips(state: &SharedState) -> Option<Vec<crate::audio::voices::LibraryClip>> {
+    if state.snapshot().settings.audio.voice_dir.trim() != CONTAINER_VOICES_DIR {
+        return None;
+    }
+    let dir = voices_dir(state)?;
+    Some(
+        clip_entries(&dir)
+            .iter()
+            .filter_map(|e| {
+                Some(crate::audio::voices::LibraryClip {
+                    voice: e["voice"].as_str()?.to_string(),
+                    transcript: e["transcript"]
+                        .as_str()
+                        .is_some_and(|t| !t.trim().is_empty()),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Accept only a plain file name built from safe characters. This is a path
@@ -301,6 +372,9 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
         )
             .into_response();
     };
+    if let Some(refusal) = refuse_library_write(&state, &dir) {
+        return refusal;
+    }
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -375,7 +449,9 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
     // One transcript belongs to one clip: with several files in the same
     // upload there is no way to say which, so it is only applied when the
     // upload is unambiguous.
-    if let (Some(text), [only]) = (transcript.filter(|t| !t.is_empty()), saved.as_slice()) {
+    let typed = transcript.filter(|t| !t.is_empty());
+    let applied = typed.is_some() && saved.len() == 1;
+    if let (Some(text), [only]) = (typed, saved.as_slice()) {
         let mut texts = read_prompt_text(&dir);
         texts.insert(voice_name(only).to_string(), text);
         if let Err(e) = write_prompt_text(&dir, &texts) {
@@ -386,7 +462,29 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
                 .into_response();
         }
     }
-    Json(json!({ "saved": saved, "clips": clip_entries(&dir) })).into_response()
+    // Without a typed transcript, a local speech-to-text model writes one —
+    // only when the owner chose one (`audio.voice_transcribe_alias`, empty
+    // by default). The upload stands either way; a failure is reported.
+    let mut transcribed: Vec<Value> = Vec::new();
+    let setting = state
+        .snapshot()
+        .settings
+        .audio
+        .voice_transcribe_alias
+        .clone();
+    let alias = setting.trim();
+    if !applied && !alias.is_empty() {
+        for clip in &saved {
+            transcribed.push(
+                match transcribe::transcribe_clip(&state, clip, alias).await {
+                    Ok(w) => json!({"clip": clip, "transcript_source": w.source}),
+                    Err(e) => json!({"clip": clip, "transcribe_error": e.to_string()}),
+                },
+            );
+        }
+    }
+    Json(json!({ "saved": saved, "transcribed": transcribed, "clips": clip_entries(&dir) }))
+        .into_response()
 }
 
 /// `POST /audio-lab/api/refs/{name}/delete`.
@@ -398,6 +496,9 @@ pub async fn delete_ref(State(state): State<SharedState>, Path(name): Path<Strin
         )
             .into_response();
     };
+    if let Some(refusal) = refuse_library_write(&state, &dir) {
+        return refusal;
+    }
     match std::fs::remove_file(dir.join(&name)) {
         Ok(()) => {
             // A transcript for a clip that is gone would silently re-attach
@@ -436,6 +537,9 @@ pub async fn set_ref_text(
         )
             .into_response();
     };
+    if let Some(refusal) = refuse_library_write(&state, &dir) {
+        return refusal;
+    }
     if !dir.join(&name).is_file() {
         return (
             StatusCode::NOT_FOUND,
@@ -468,6 +572,42 @@ pub async fn set_ref_text(
             Json(json!({ "error": format!("writing {PROMPT_TEXT_FILE}: {e}") })),
         )
             .into_response(),
+    }
+}
+
+/// `POST /audio-lab/api/refs/{name}/transcribe` — `{alias?}`: transcribe the
+/// clip with a local speech-to-text model (the alias, else the setting
+/// `audio.voice_transcribe_alias`) and record it as its transcript,
+/// replacing one it had ([`transcribe`]).
+pub async fn transcribe_ref(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    body: Option<Json<Value>>,
+) -> Response {
+    let asked = body
+        .as_ref()
+        .and_then(|b| b.get("alias"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let alias = match transcribe::alias_for(&state, asked.as_deref()) {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    };
+    match transcribe::transcribe_clip(&state, &name, &alias).await {
+        Ok(w) => {
+            let clips = voices_dir(&state)
+                .map(|d| clip_entries(&d))
+                .unwrap_or_default();
+            Json(json!({
+                "ok": true,
+                "clip": name,
+                "transcript": w.transcript,
+                "transcript_source": w.source,
+                "clips": clips,
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(error_body(e.to_string()))).into_response(),
     }
 }
 

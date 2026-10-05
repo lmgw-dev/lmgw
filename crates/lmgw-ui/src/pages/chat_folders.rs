@@ -128,7 +128,7 @@ pub(super) fn thread_from_defaults(defaults: &Value) -> ChatThread {
 /// The `defaults` a folder-settings save sends: the settings form's patch,
 /// with what the folder should leave to the global behaviour left `null` — a
 /// blank prompt (rather than an empty one that would blank every new chat's
-/// prompt) and no tool servers.
+/// prompt), no tool servers and a voice that sets nothing.
 pub(super) fn defaults_body(patch: Value, model: &str) -> Value {
     let mut d = patch;
     if let Some(o) = d.as_object_mut() {
@@ -140,6 +140,13 @@ pub(super) fn defaults_body(patch: Value, model: &str) -> Value {
             .is_some_and(Vec::is_empty)
         {
             o.insert("mcp_tools".into(), Value::Null);
+        }
+        // A voice that sets nothing is no default (chat-voice §2.2).
+        if o.get("voice")
+            .and_then(Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            o.insert("voice".into(), Value::Null);
         }
         o.insert(
             "model_alias".into(),

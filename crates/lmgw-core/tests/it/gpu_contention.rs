@@ -73,7 +73,7 @@ async fn until(what: &str, cond: impl Fn() -> bool) {
 
 fn started(s: BackgroundStart) -> LocalHold {
     match s {
-        BackgroundStart::Started(hold) => hold,
+        BackgroundStart::Started(hold) => *hold,
         BackgroundStart::Blocked(why) => panic!("expected a start, blocked by: {why}"),
     }
 }

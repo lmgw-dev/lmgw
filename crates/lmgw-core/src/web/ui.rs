@@ -89,6 +89,15 @@ async fn asset(Path(path): Path<String>, headers: HeaderMap) -> Response {
 const DASHBOARD_CSP: &str =
     "img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'";
 
+/// The dashboard's Permissions Policy, set on every HTML response beside the
+/// CSP (chat-voice §13.1). The microphone is the dashboard's own: no frame of
+/// another origin — an agent app's, the opaque HTML preview — can be handed
+/// it, even by an `<iframe allow="microphone">` the UI should never write;
+/// the camera and screen capture are nobody's. Same-origin frames still
+/// inherit the microphone (`self`), which is why no same-origin frame may
+/// show untrusted content.
+const DASHBOARD_PERMISSIONS: &str = "microphone=(self), camera=(), display-capture=()";
+
 /// Whether a bundle file's name carries Trunk's content hash
 /// (`app-4dd5e9466ebb44f4.css`, `lmgw-ui-b5b9f9525c7eb1fc_bg.wasm`): a new
 /// build gives changed bytes a new name, so such a file may be cached forever.
@@ -151,6 +160,10 @@ fn serve(path: &str, req: &HeaderMap) -> Response {
                 h.insert(
                     header::CONTENT_SECURITY_POLICY,
                     header::HeaderValue::from_static(csp),
+                );
+                h.insert(
+                    header::HeaderName::from_static("permissions-policy"),
+                    header::HeaderValue::from_static(DASHBOARD_PERMISSIONS),
                 );
             }
             resp

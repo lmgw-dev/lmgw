@@ -1,0 +1,522 @@
+[
+ {
+  "js": "'Chat voice WP9, live: voice mode on a dev copy with local models (scripts/dev-copy.sh): Parakeet on the CPU for speech-to-text (audio/parakeet-tdt-q8-0), Supertonic for the voice (audio/supertonic-3-q8-0), gemma4-e4b for the chat. The microphone is a fake one saying TTS clips on cue (scripts/drive/fake-voice.js; the clips from scripts/drive/make-voice-fixtures.py into target/chat-voice/fixtures/voice-de.js). The state walks idle → listening → thinking → speaking → idle with captions, both bubbles are written and equal the stored rows, a second utterance over the reply barges in and the stored cut follows the truncate at what was heard, ending at a word (WP9 review B), with no response.cancel of the page's own; stop talking sends the truncate first and a response.cancel only when the truncate did not stop the response (NIT 13), its stored cut ends at a word too; push-to-talk by Space, Esc ends every track; leaving mid-reply shows the cut reply once, read back in place after the gateway's close (WP11 UI m1, m2); under the dev copy's own GPU hold (its /api/op/hold_set, turned off again) a refused turn is one amber chip in the panel and in text chat (m6); and an Admin Chat thread offers no voice mode. It starts the models containers: run with --podman-guard \"\" and check `podman ps -a --filter name=lmgw-dev` afterwards. Run: scripts/ui-drive.py scripts/drive/chat-voice-realtime.json --token-file <dir>.token --mute-audio --podman-guard \"\" (nothing is audible).'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(async()=>{const j={'content-type':'application/json'};const t=await (await fetch('/chat/api/threads',{method:'POST',headers:j,body:JSON.stringify({model_alias:'gemma4-e4b',kind:'chat'})})).json();const s=await fetch('/chat/api/threads/'+t.id+'/settings',{method:'POST',headers:j,body:JSON.stringify({system_prompt:'Du bist ein hilfreicher Assistent. Antworte auf Deutsch, in zwei bis drei kurzen Sätzen, außer man bittet dich um mehr.',voice:{asr_alias:'audio/parakeet-tdt-q8-0',tts_alias:'audio/supertonic-3-q8-0',voice:'F2',language:'de',turn_detection:'server_vad'}})});localStorage.setItem('cvRT',t.id);location.href='/chat?t='+t.id;return [t.id,s.status]})()"
+ },
+ {
+  "wait": 3
+ },
+ {
+  "until": "!!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
+  "timeout": 20,
+  "label": "the voice-mode button is enabled on a plain thread with both speech models"
+ },
+ {
+  "script": "target/chat-voice/fixtures/voice-de.js"
+ },
+ {
+  "script": "scripts/drive/fake-voice.js"
+ },
+ {
+  "js": "window.fakeVoice.install()"
+ },
+ {
+  "js": "(() => { const Real = window.WebSocket; window.__sent = []; window.__recv = []; window.__full = {}; window.WebSocket = function (url, p) { const ws = p === undefined ? new Real(url) : new Real(url, p); if (String(url).includes('/v1/realtime')) ws.addEventListener('message', (e) => { try { const v = JSON.parse(e.data); if (v.type === 'lmgw.chat.frame' && v.event === 'delta') { window.__full[v.response_id] = (window.__full[v.response_id] || '') + (v.data && v.data.text || ''); return; } if (/delta$/.test(v.type)) return; window.__recv.push({t: performance.now(), type: v.type, rid: v.response_id || (v.response && v.response.id) || '', reason: v.response && v.response.status_details && v.response.status_details.reason || '', content: v.content, unheard: v.unheard}); } catch (_) {} }); return ws; }; Object.assign(window.WebSocket, {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3}); window.WebSocket.prototype = Real.prototype; const send = Real.prototype.send; Real.prototype.send = function (d) { try { const v = JSON.parse(d); if (v.type !== 'input_audio_buffer.append') window.__sent.push({t: performance.now(), type: v.type}); } catch (_) {} return send.call(this, d); }; return 'recording the session'; })()"
+ },
+ {
+  "expect": "performance.getEntriesByType('resource').every(e => !e.name.includes('/voice/warm') && !e.name.includes('/v1/realtime'))",
+  "label": "opening the chat loads nothing"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 60,
+  "label": "entering: the panel goes live (socket, microphone, player)"
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.composer-area')).display === 'none' && window.fakeVoice.live() === 1",
+  "label": "the panel replaces the composer; one microphone is open"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-status] .vs-note.busy') && !document.querySelector('[data-rt-connecting]')",
+  "timeout": 400,
+  "label": "the connect warm loaded the thread's models (no loading note left)"
+ },
+ {
+  "js": "document.querySelector('[data-rt-status]').textContent"
+ },
+ {
+  "until": "+document.querySelector('[data-rt-panel]')?.dataset.voiceChunks > 20",
+  "timeout": 10,
+  "label": "the microphone streams appends"
+ },
+ {
+  "js": "(() => { window.__walk = [document.querySelector('[data-rt-panel]').dataset.voiceState]; window.__caps = []; const p = document.querySelector('[data-rt-panel]'); window.__wo = new MutationObserver(() => { const s = p.dataset.voiceState; if (window.__walk[window.__walk.length - 1] !== s) window.__walk.push(s); }); window.__wo.observe(p, {attributes: true, attributeFilter: ['data-voice-state']}); const c = document.querySelector('[data-rt-caption]'); window.__co = new MutationObserver(() => { const t = c.textContent; if (window.__caps[window.__caps.length - 1] !== t) window.__caps.push(t); }); window.__co.observe(c, {subtree: true, childList: true, characterData: true}); return window.__walk; })()"
+ },
+ {
+  "shot": "live-idle"
+ },
+ {
+  "js": "window.fakeVoice.say('q_short').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "until": "window.__walk.includes('speaking')",
+  "timeout": 300,
+  "label": "the reply is spoken"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "shot": "live-speaking"
+ },
+ {
+  "until": "window.__walk[window.__walk.length - 1] === 'idle' && window.__walk.includes('speaking')",
+  "timeout": 300,
+  "label": "... to its end, back to idle"
+ },
+ {
+  "js": "[window.__walk, document.querySelector('[data-rt-panel]').dataset.voicePlayed]"
+ },
+ {
+  "js": "JSON.stringify(window.__caps.slice(-6))"
+ },
+ {
+  "expect": "window.__walk.join('>') === 'idle>listening>thinking>speaking>idle'",
+  "label": "the state walks idle → listening → thinking → speaking → idle"
+ },
+ {
+  "expect": "window.__caps.some(t => /^You/i.test(t) && /Tiere|Winterschlaf/i.test(t)) && window.__caps.some(t => /^Assistant/i.test(t) && t.length > 20)",
+  "label": "captions: the user's words, then the reply's spoken words"
+ },
+ {
+  "until": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => v.messages.length === 2 && v.messages[1].role === 'assistant' && !!v.messages[1].voice && !!v.messages[1].voice.timing)",
+  "timeout": 30,
+  "label": "the journal stored the user turn and the reply with its timing"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const n = t => (t || '').replace(/[\\[\\]*_#`]/g, '').replace(/\\s+/g, ' ').trim(); const [u, a] = v.messages; const du = [...document.querySelectorAll('.msg-item-user .msg-user-text')].pop(); const da = [...document.querySelectorAll('.msg-assistant .md')].pop(); const ok = u.voice.via === 'realtime' && u.voice.asr === 'audio/parakeet-tdt-q8-0' && n(du.textContent) === n(u.content) && n(da.textContent) === n(a.content) && !a.voice.unheard; if (!ok) console.log(JSON.stringify({stored: [u.content, a.content], shown: [du.textContent, da.textContent]})); return ok; })",
+  "label": "both bubbles are written and show exactly the stored rows (the user turn spoken, by Parakeet)"
+ },
+ {
+  "expect": "(() => { const a = [...document.querySelectorAll('.msg-assistant')].pop(); return !!a.querySelector('[data-speaker-badge]') && /ASR \\d+ ms/.test(a.querySelector('.voice-timing summary')?.textContent || '') && !!document.querySelector('.msg-item-user [data-mic-badge=\"realtime\"]'); })()",
+  "label": "the reply has its speaker badge and timing line, the user turn its mic badge"
+ },
+ {
+  "expect": "/last turn: ASR \\d+ ms/.test(document.querySelector('[data-rt-timing]')?.textContent || '') && /audio\\/parakeet-tdt-q8-0 → gemma4-e4b → audio\\/supertonic-3-q8-0/.test(document.querySelector('[data-rt-timing]').textContent)",
+  "label": "the panel's timing readout names ASR, first token, first audio and the three models"
+ },
+ {
+  "js": "document.querySelector('[data-rt-timing]').textContent"
+ },
+ {
+  "js": "(() => { window.__walk = [document.querySelector('[data-rt-panel]').dataset.voiceState]; return 'walk reset'; })()"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'speaking'",
+  "timeout": 300,
+  "label": "the long reply is spoken"
+ },
+ {
+  "until": "/[.!?]\\s+\\S/.test(document.querySelector('[data-rt-panel]').dataset.voiceSpoken || '')",
+  "timeout": 60,
+  "label": "the reply's first clause is said whole (its second one starts)"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "live-before-barge"
+ },
+ {
+  "js": "window.fakeVoice.say('q_barge').then(ms => 'barged ' + ms + ' ms')"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceTruncates === '1'",
+  "timeout": 20,
+  "label": "the second utterance barges in: a truncate goes"
+ },
+ {
+  "js": "Object.fromEntries(['voiceTruncated','voiceCutPlayed','voiceTruncatedAck','voiceState'].map(k => [k, document.querySelector('[data-rt-panel]').dataset[k]]))"
+ },
+ {
+  "expect": "window.__walk.includes('interrupted') && +document.querySelector('[data-rt-panel]')?.dataset.voiceTruncated > 0 && +document.querySelector('[data-rt-panel]')?.dataset.voiceTruncated <= +document.querySelector('[data-rt-panel]')?.dataset.voiceCutPlayed",
+  "label": "interrupted; the truncate is what was heard: more than nothing, no more than was played"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceTruncatedAck === document.querySelector('[data-rt-panel]')?.dataset.voiceTruncated",
+  "timeout": 10,
+  "label": "the gateway cut the item at exactly that"
+ },
+ {
+  "until": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const k = v.messages.findIndex(m => m.role === 'user' && /Himmel/.test(m.content)); const a = v.messages[k + 1]; return !!a && a.role === 'assistant' && !!a.voice && typeof a.voice.unheard === 'string' && a.voice.unheard.length > 0 && a.content.length > 0; })",
+  "timeout": 60,
+  "label": "the journal stored the cut reply: the heard part, the unheard rest"
+ },
+ {
+  "js": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const k = v.messages.findIndex(m => m.role === 'user' && /Himmel/.test(m.content)); const a = v.messages[k + 1]; const el = a && [...document.querySelectorAll('.msg-assistant')].find(x => x.dataset.mid === String(a.id)); return {stored: a && [a.content, a.voice && a.voice.unheard], shown: el && [el.querySelector('.md').textContent, el.querySelector('[data-unheard] .unheard-text')?.textContent]}; })"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const n = t => (t || '').replace(/[\\[\\]*_#`]/g, '').replace(/\\s+/g, ' ').trim(); const k = v.messages.findIndex(m => m.role === 'user' && /Himmel/.test(m.content)); const a = v.messages[k + 1]; const el = [...document.querySelectorAll('.msg-assistant')].find(x => x.dataset.mid === String(a.id)); if (!el) return false; const shown = n(el.querySelector('.md').textContent); const unheard = n(el.querySelector('[data-unheard] .unheard-text')?.textContent); return shown === n(a.content) && unheard === n(a.voice.unheard); })",
+  "label": "the cut reply's bubble shows exactly the stored heard part and its greyed rest"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const k = v.messages.findIndex(m => m.role === 'user' && /Himmel/.test(m.content)); const a = v.messages[k + 1]; if (!a || !a.voice || !a.voice.unheard) return false; const rid = a.voice.timing && a.voice.timing.response_id; const full = (window.__full[rid] || '').trim(); const c = a.content.trim(); window.__cutCheck = {content: c.slice(-40), unheard: a.voice.unheard.slice(0, 40), next: full.charAt(c.length)}; return full.startsWith(c) && /\\s/.test(full.charAt(c.length)); })",
+  "label": "the stored heard part of the barge-in ends at a word: the reply as streamed has a space right after it (review B)"
+ },
+ {
+  "js": "window.__cutCheck"
+ },
+ {
+  "expect": "(() => { const tr = window.__sent.filter(s => s.type === 'conversation.item.truncate'); return tr.length === 1 && !window.__sent.some(s => s.type === 'response.cancel'); })()",
+  "label": "the barge-in sent its truncate and no response.cancel (the gateway cancels a barge-in)"
+ },
+ {
+  "shot": "live-cut"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'idle' && fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => v.messages.length >= 6)",
+  "timeout": 300,
+  "label": "the barge-in's words were answered too"
+ },
+ {
+  "js": "(() => { window.__mark = performance.now(); window.__walk = [document.querySelector('[data-rt-panel]').dataset.voiceState]; return 'stop: mark'; })()"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'speaking'",
+  "timeout": 300,
+  "label": "stop talking: the long reply is spoken again"
+ },
+ {
+  "until": "/[.!?]\\s+\\S/.test(document.querySelector('[data-rt-panel]').dataset.voiceSpoken || '')",
+  "timeout": 60,
+  "label": "... past its first clause"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "(() => { window.__stopAt = performance.now(); window.__audioDoneBeforeStop = window.__recv.some(e => e.t > window.__mark && e.type === 'response.output_audio.done'); document.querySelector('[data-rt-stop]').click(); return {audioDoneBeforeStop: window.__audioDoneBeforeStop}; })()"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceTruncates === '2'",
+  "timeout": 20,
+  "label": "Stop talking sends a truncate"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "({sent: window.__sent.filter(s => s.t >= window.__stopAt).map(s => s.type), recv: window.__recv.filter(e => e.t >= window.__stopAt).map(e => e.type + (e.reason ? ' ' + e.reason : '')).slice(0, 12)})"
+ },
+ {
+  "expect": "(() => { const s = window.__sent.filter(x => x.t >= window.__stopAt).map(x => x.type).filter(t => t === 'conversation.item.truncate' || t === 'response.cancel'); const done = window.__recv.find(e => e.t >= window.__stopAt && e.type === 'response.done'); const firstTruncate = s[0] === 'conversation.item.truncate'; const cancels = s.filter(t => t === 'response.cancel').length; return firstTruncate && (window.__audioDoneBeforeStop ? cancels <= 1 : (cancels === 0 && !!done && done.reason === 'client_cancelled')); })()",
+  "label": "stop talking: the truncate first; while the item was produced it alone cancelled the response (client_cancelled), a cancel follows only an item already complete (review NIT 13)"
+ },
+ {
+  "expect": "!window.__recv.some(e => e.t >= window.__stopAt && e.type === 'error')",
+  "label": "... and the gateway refused nothing"
+ },
+ {
+  "until": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const a = v.messages[v.messages.length - 1]; return a.role === 'assistant' && !!a.voice && typeof a.voice.unheard === 'string'; })",
+  "timeout": 60,
+  "label": "the stopped reply is stored cut"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const k = v.messages.map(m => m.role === 'user' && /Himmel/.test(m.content)).lastIndexOf(true); const a = v.messages[k + 1]; if (!a || !a.voice || !a.voice.unheard) return false; const rid = a.voice.timing && a.voice.timing.response_id; const full = (window.__full[rid] || '').trim(); const c = a.content.trim(); window.__cutCheck = {content: c.slice(-40), unheard: a.voice.unheard.slice(0, 40), next: full.charAt(c.length)}; return full.startsWith(c) && /\\s/.test(full.charAt(c.length)); })",
+  "label": "the stopped reply's stored heard part ends at a word"
+ },
+ {
+  "js": "window.__cutCheck"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'idle'",
+  "timeout": 30,
+  "label": "idle after the stop"
+ },
+ {
+  "click": "[data-rt-mode='ptt']"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePtt === 'true'",
+  "timeout": 5,
+  "label": "push-to-talk on"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "(() => { window.__walk = [document.querySelector('[data-rt-panel]').dataset.voiceState]; window.__c0 = +document.querySelector('[data-rt-panel]').dataset.voiceChunks; return 'walk reset'; })()"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "+document.querySelector('[data-rt-panel]')?.dataset.voiceChunks === window.__c0",
+  "label": "push-to-talk gates the microphone: nothing streams while Space is up"
+ },
+ {
+  "keydown": "Space"
+ },
+ {
+  "js": "window.fakeVoice.say('q_short').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "keyup": "Space"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceCommits === '1'",
+  "timeout": 10,
+  "label": "Space up commits the turn and asks for a reply"
+ },
+ {
+  "until": "window.__walk[window.__walk.length - 1] === 'idle' && window.__walk.includes('speaking')",
+  "timeout": 300,
+  "label": "the push-to-talk turn is answered"
+ },
+ {
+  "expect": "window.__walk.join('>') === 'idle>listening>thinking>speaking>idle'",
+  "label": "push-to-talk walks the same states"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "Esc leaves voice mode"
+ },
+ {
+  "expect": "window.fakeVoice.live() === 0 && window.fakeVoice.tracks.every(t => t.readyState === 'ended')",
+  "label": "every microphone track ended"
+ },
+ {
+  "expect": "getComputedStyle(document.querySelector('.composer-area')).display === 'contents' && document.activeElement === document.querySelector('textarea.composer-input')",
+  "label": "the composer is back, with the focus"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "js": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => v.messages.map(m => [m.id, m.role, m.content.slice(0, 60), m.voice && m.voice.unheard ? 'unheard: ' + m.voice.unheard.slice(0, 40) : '']))"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const n = t => (t || '').replace(/[\\[\\]*_#`]/g, '').replace(/\\s+/g, ' ').trim(); const shown = [...document.querySelectorAll('.msg-item')].map(e => e.classList.contains('msg-item-user') ? n(e.querySelector('.msg-user-text')?.textContent) : n(e.querySelector('.md')?.textContent)); const stored = v.messages.map(m => n(m.content)); return JSON.stringify(shown) === JSON.stringify(stored); })",
+  "label": "after leaving, the transcript is exactly the stored rows"
+ },
+ {
+  "shot": "live-after"
+ },
+ {
+  "js": "'WP11 UI fixes: leaving mid-reply — the gateway answers the page close only once its journal drained, and the page reads the thread back once, then (WP11 UI review m1, m2).'"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 60,
+  "label": "leave mid-reply: voice mode again"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-status] .vs-note.busy') && !document.querySelector('[data-rt-connecting]')",
+  "timeout": 120,
+  "label": "leave mid-reply: the models are up"
+ },
+ {
+  "js": "(() => { window.__mark = document.querySelector('.msg-item'); window.__msgs0 = document.querySelectorAll('.msg-item').length; return window.__msgs0; })()"
+ },
+ {
+  "js": "window.fakeVoice.say('q_long').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'speaking'",
+  "timeout": 300,
+  "label": "leave mid-reply: the long reply is spoken"
+ },
+ {
+  "until": "/[.!?]\\s+\\S/.test(document.querySelector('[data-rt-panel]').dataset.voiceSpoken || '')",
+  "timeout": 60,
+  "label": "leave mid-reply: past its first clause"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "click": "[data-rt-leave]"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "leave mid-reply: Leave closes the panel at once"
+ },
+ {
+  "until": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const a = v.messages[v.messages.length - 1]; return a.role === 'assistant' && !!a.voice && typeof a.voice.unheard === 'string' && a.voice.unheard.length > 0; })",
+  "timeout": 60,
+  "label": "leave mid-reply: the journal stored the reply cut to what was heard"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const n = t => (t || '').replace(/[\\[\\]*_#`]/g, '').replace(/\\s+/g, ' ').trim(); const a = v.messages[v.messages.length - 1]; const els = [...document.querySelectorAll('.msg-assistant')].filter(x => x.dataset.mid === String(a.id)); const head = n(a.content).slice(0, 40); const same = [...document.querySelectorAll('.msg-assistant .md')].filter(x => n(x.textContent).startsWith(head)).length; return els.length === 1 && same === 1 && n(els[0].querySelector('.md').textContent) === n(a.content) && n(els[0].querySelector('[data-unheard] .unheard-text')?.textContent) === n(a.voice.unheard); })",
+  "label": "leave mid-reply: the thread shows the cut reply once, exactly as stored, its rest greyed"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvRT')).then(r => r.json()).then(v => { const n = t => (t || '').replace(/[\\[\\]*_#`]/g, '').replace(/\\s+/g, ' ').trim(); const shown = [...document.querySelectorAll('.msg-item')].map(e => e.classList.contains('msg-item-user') ? n(e.querySelector('.msg-user-text')?.textContent) : n(e.querySelector('.md')?.textContent)); return JSON.stringify(shown) === JSON.stringify(v.messages.map(m => n(m.content))) && window.__mark.isConnected; })",
+  "label": "leave mid-reply: the transcript is the stored rows, patched in place (the first bubble is the same node)"
+ },
+ {
+  "shot": "live-leave-mid-reply"
+ },
+ {
+  "js": "'WP11 UI fixes: the dev copy own GPU hold (the copy only: its token, its port) — one amber chip for one hold, in the panel and in text chat (review m6).'"
+ },
+ {
+  "js": "fetch('/api/op/hold_set', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({active: true})}).then(r => r.status)"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 60,
+  "label": "hold: voice mode under the hold (the CPU speech-to-text serves)"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "js": "[...document.querySelectorAll('[data-rt-status] .vs-note, [data-hold-line]')].map(e => e.className + ': ' + e.textContent)"
+ },
+ {
+  "js": "window.fakeVoice.say('q_short').then(ms => 'said ' + ms + ' ms')"
+ },
+ {
+  "until": "/GPU hold: voice mode paused/.test(document.querySelector('[data-rt-status]')?.textContent || '') && document.querySelector('[data-rt-panel]')?.dataset.voiceState === 'idle'",
+  "timeout": 120,
+  "label": "hold: the turn is heard and its reply refused as a hold"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "[...document.querySelectorAll('[data-rt-status] .vs-note, [data-hold-line]')].map(e => e.className + ': ' + e.textContent)"
+ },
+ {
+  "expect": "document.querySelectorAll('[data-rt-status] .vs-note.hold').length === 1 && /gemma4-e4b/.test(document.querySelector('[data-rt-status] .vs-note.hold').textContent) && !document.querySelector('[data-rt-status] .vs-note.err')",
+  "label": "hold: one amber chip in the panel, naming the chat model, and no error"
+ },
+ {
+  "shot": "live-hold-panel"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "hold: Esc leaves"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Hallo, nur ein Test."
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "/GPU hold: chat paused/.test(document.querySelector('.composer-area [data-voice-status]')?.textContent || '')",
+  "timeout": 60,
+  "label": "hold: a text send is refused as a hold"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "[...document.querySelectorAll('.composer-area [data-voice-status] .vs-note')].map(e => e.className + ': ' + e.textContent)"
+ },
+ {
+  "expect": "document.querySelectorAll('.composer-area [data-voice-status] .vs-note.hold').length === 1 && !document.querySelector('.composer-area [data-voice-status] .vs-note.err')",
+  "label": "hold: one amber chip above the composer too (the held state and the gpu_hold error are one note)"
+ },
+ {
+  "shot": "live-hold-text"
+ },
+ {
+  "js": "fetch('/api/op/hold_set', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({active: false})}).then(r => r.status)"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Und jetzt?"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "(() => { const a = [...document.querySelectorAll('.msg-assistant')].pop(); return !!a && !!a.dataset.mid && !/⚠/.test(a.textContent); })()",
+  "timeout": 300,
+  "label": "hold off: the next send is answered"
+ },
+ {
+  "expect": "!document.querySelector('.composer-area [data-voice-status] .vs-note.hold')",
+  "label": "hold off: the next turn takes the chip away"
+ },
+ {
+  "js": "(async()=>{const j={'content-type':'application/json'};const t=await (await fetch('/chat/api/threads',{method:'POST',headers:j,body:JSON.stringify({model_alias:'gemma4-e4b',kind:'admin'})})).json();localStorage.setItem('cvAdmin',t.id);location.href='/chat?t='+t.id;return t.id})()"
+ },
+ {
+  "wait": 3
+ },
+ {
+  "until": "!!document.querySelector('[data-voice-mode-btn]')?.dataset.disabledReason",
+  "timeout": 20,
+  "label": "an Admin Chat thread: the voice button carries a reason"
+ },
+ {
+  "expect": "(() => { const b = document.querySelector('[data-voice-mode-btn]'); return (b.getAttribute('aria-disabled') === 'true' && /not available in Admin Chat/i.test(b.title)); })()",
+  "label": "... disabled, with its one-line reason"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "!document.querySelector('[data-rt-panel]') && /not available in Admin Chat/i.test(document.querySelector('[data-voice-status]')?.textContent || '')",
+  "label": "a press opens nothing and says why"
+ },
+ {
+  "shot": "live-admin"
+ },
+ {
+  "js": "(async()=>{for (const k of ['cvAdmin']) { await fetch('/chat/api/threads/'+localStorage.getItem(k)+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}); } return 'admin thread deleted'; })()"
+ }
+]

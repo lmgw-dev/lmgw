@@ -273,6 +273,50 @@ async fn a_refused_definition_names_the_field() {
     assert!(err.starts_with("invalid arguments"), "{err}");
 }
 
+/// `cpus` is `--cpuset-cpus`, which a rootless podman without the `cpuset`
+/// controller cannot honour: refused on save under its field, and — when
+/// the controller went away after the save — failing a run before anything
+/// is fetched, with the same sentence. Never dropped or swapped for another
+/// limit.
+#[tokio::test]
+async fn cpus_without_the_cpuset_controller_is_refused_on_save_and_at_run_start() {
+    let h = Harness::new().await;
+    let gw = common::serve(h.state.clone()).await;
+    let rootless: Vec<String> = ["cpu", "io", "memory", "pids"].map(String::from).to_vec();
+    let delegated = h.podman.world().cgroup_controllers.clone();
+    let mut spec = h.spec();
+    spec.cpus = Some("0-3".into());
+
+    h.podman.world().cgroup_controllers = rootless.clone();
+    let err = op_err(&gw, "build_set", create_args(spec.clone())).await;
+    assert!(
+        err.starts_with("cpus '0-3' needs the cpuset cgroup controller"),
+        "{err}"
+    );
+    assert!(err.contains("only: cpu, io, memory, pids"), "{err}");
+    // Without cpus there is nothing to ask podman about.
+    let mut all_cores = h.spec();
+    all_cores.slug = "all-cores".into();
+    create(&gw, all_cores).await;
+
+    h.podman.world().cgroup_controllers = delegated;
+    let id = create(&gw, spec).await;
+    h.podman.world().cgroup_controllers = rootless;
+    let started = op_ok(&gw, "build_run", json!({"id": id})).await;
+    let run_id = started["run_id"].as_i64().unwrap();
+    let log = follow_log(&gw, run_id).await;
+    assert!(
+        log.contains("failed: cpus '0-3' needs the cpuset cgroup controller"),
+        "{log}"
+    );
+    assert!(
+        !phases_in(&log).iter().any(|p| p == "fetch" || p == "build"),
+        "nothing fetched or built: {log}"
+    );
+    let got = op_ok(&gw, "build_get", json!({"id": id})).await;
+    assert_eq!(got["runs"][0]["status"], "failed");
+}
+
 #[tokio::test]
 async fn a_run_starts_as_a_job_its_log_reads_by_offset_and_its_history_pages() {
     let h = Harness::new().await;

@@ -231,6 +231,7 @@ mod tests {
                 json_schema: Some(j),
                 json_object: None,
             }),
+            speech: None,
             source: "gguf+config".to_string(),
         }
     }

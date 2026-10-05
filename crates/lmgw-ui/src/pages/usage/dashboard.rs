@@ -418,12 +418,14 @@ fn bump_current(r: &mut UsageSeriesResponse, row: &RequestRow, group_by: &str) {
             None => return,
         }
     };
-    let mut delta = UsageCell::default();
-    delta.requests = 1;
-    delta.tokens_in = row.prompt_tokens.unwrap_or(0);
-    delta.tokens_out = row.completion_tokens.unwrap_or(0);
-    delta.tokens_cached = row.cached_in_tokens.unwrap_or(0);
-    delta.tokens_cache_write = row.cache_write_tokens.unwrap_or(0);
+    let mut delta = UsageCell {
+        requests: 1,
+        tokens_in: row.prompt_tokens.unwrap_or(0),
+        tokens_out: row.completion_tokens.unwrap_or(0),
+        tokens_cached: row.cached_in_tokens.unwrap_or(0),
+        tokens_cache_write: row.cache_write_tokens.unwrap_or(0),
+        ..Default::default()
+    };
     // The frame carries the money now, so the current bucket grows with the
     // real number rather than catching up on the next refetch. `None` is
     // **unpriced, not free** — it lands in the remainder the spend figures are

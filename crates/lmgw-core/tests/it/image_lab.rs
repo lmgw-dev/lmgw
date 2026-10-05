@@ -101,6 +101,14 @@ fn serve(state: &SharedState) -> Gw {
     Gw { base, key }
 }
 
+/// An image models dir inside the state's own test dir, which goes with
+/// the state: a kept `tempdir()` stayed behind in /tmp, which is RAM.
+fn models_dir(state: &SharedState) -> String {
+    let dir = state.data_dir.join("image-models");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.display().to_string()
+}
+
 async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState, Gw) {
     let state = AppState::init_for_tests().await.unwrap();
     let port = mock.address().port();
@@ -111,7 +119,7 @@ async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState,
     )));
     let mut s = Settings::default();
     s.vram.load_timeout_seconds = 5;
-    s.image.models_dir = tempfile::tempdir().unwrap().keep().display().to_string();
+    s.image.models_dir = models_dir(&state);
     s.container_prefix = "lmgwtest".into();
     store::save_settings(&state.db, &s).await.unwrap();
     for row in rows {

@@ -152,7 +152,7 @@ fn runtime(model_id: &str) -> ModelRuntime {
         enabled: true,
         llama: Some(LlamaArgs::Chat {
             gguf_path: format!("{model_id}.gguf"),
-            params: LlamaParams::default(),
+            params: Box::default(),
             args: vec![],
         }),
         audio: None,
@@ -169,6 +169,7 @@ fn spec(rt: &ModelRuntime) -> AcquireSpec<'_> {
         container_prefix: "lmgw",
         models_dir: "/srv/models",
         data_dir: Path::new("/nonexistent/lmgw-test-data-dir"),
+        may_write_models_dir: true,
         load_timeout: Duration::from_secs(5),
         stop_timeout: Duration::from_secs(5),
     }
@@ -328,12 +329,12 @@ async fn a_climb_keeps_the_entrys_owner() {
         let mut rt = runtime("lad");
         rt.llama = Some(LlamaArgs::Chat {
             gguf_path: format!("lad-{index}.gguf"),
-            params: LlamaParams {
+            params: Box::new(LlamaParams {
                 ctx_size: Some(64 << index),
                 parallel: Some(1),
                 n_predict: Some(16),
                 ..Default::default()
-            },
+            }),
             args: vec![],
         });
         rt.rung = Some(RungPos { index, of: 2 });
@@ -587,12 +588,12 @@ async fn a_guest_climb_start_is_refused_in_the_claiming_lock_hold() {
         let mut rt = runtime(model);
         rt.llama = Some(LlamaArgs::Chat {
             gguf_path: format!("{model}-{index}.gguf"),
-            params: LlamaParams {
+            params: Box::new(LlamaParams {
                 ctx_size: Some(64 << index),
                 parallel: Some(1),
                 n_predict: Some(16),
                 ..Default::default()
-            },
+            }),
             args: vec![],
         });
         rt.rung = Some(RungPos { index, of: 2 });

@@ -85,6 +85,7 @@ pub async fn open_in_memory() -> anyhow::Result<SqlitePool> {
 pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     repair_before_migrations(pool).await?;
     refuse_if_aliases_pin_the_managed_upstreams(pool).await?;
+    empty_run_args_notice(pool).await?;
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
@@ -143,6 +144,19 @@ pub use request_logs::*;
 mod agent_catalog;
 pub use agent_catalog::*;
 
+/// The SQL that says a thread's stored `voice` holds a seed: a `u32`,
+/// anything else is none — one predicate for the settings write that keeps
+/// it and the draw that fills it (WP11 server review n7). `IFNULL`: with no
+/// seed `json_type` is NULL, and NOT NULL would match no row. The JSON
+/// functions run only on valid JSON — `AND` does not keep a malformed
+/// `voice` from them, a `CASE` does (WP4 review m8: they raise on it).
+macro_rules! seed_held {
+    () => {
+        "IFNULL(CASE WHEN json_valid(voice) THEN json_type(voice, '$.seed') = 'integer' \
+         AND json_extract(voice, '$.seed') BETWEEN 0 AND 4294967295 END, 0)"
+    };
+}
+
 mod chat;
 pub use chat::*;
 
@@ -166,6 +180,9 @@ pub use chat_search::*;
 
 mod chat_messages;
 pub use chat_messages::*;
+
+mod chat_voice;
+pub use chat_voice::*;
 
 mod responses;
 pub use responses::*;

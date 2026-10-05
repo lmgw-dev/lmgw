@@ -162,6 +162,9 @@ pub struct AudioCatalogInstall {
     pub family: String,
     pub package: String,
     pub repo: String,
+    /// The revision the files are fetched at: the commit the spec pins
+    /// (under `audio.catalog_revision = pinned`), else `main`.
+    pub revision: String,
     pub files_queued: u32,
     pub downloads: Vec<QueuedDownload>,
     pub message: String,

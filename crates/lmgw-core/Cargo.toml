@@ -16,7 +16,10 @@ quickdoc-core = { path = "../quickdoc-core", features = ["http"] }
 anyhow = "1.0.102"
 arc-swap = "1.9.1"
 async-trait = "0.1.89"
-axum = { version = "0.8.9", features = ["macros", "multipart"] }
+# `ws`: `GET /v1/realtime` (realtime design §13) speaks OpenAI's Realtime
+# protocol over a WebSocket and has to parse every frame, which is exactly what
+# axum's extractor (over tokio-tungstenite) is for.
+axum = { version = "0.8.9", features = ["macros", "multipart", "ws"] }
 # `lmgw__local_model_test target=image` reports how large the image a pipeline
 # just drew actually is, and the OpenAI images response carries it as base64
 # only (image-generation design §2.3) — so the byte count has to come from a
@@ -31,12 +34,13 @@ hex = "0.4.3"
 # version axum itself uses, so axum recognises its `LengthLimitError` and turns
 # a tripped limit into a 413 rejection rather than an opaque body error.
 http-body-util = "0.1.3"
-# The WebSocket tunnel service mode proxies (container-runtime §3.3). Neither
-# the enabled `axum` features (no `ws`) nor `reqwest`'s can do a raw upgrade on
-# the *inbound* half, and a frame-parsing library (tokio-tungstenite) would
+# The WebSocket tunnel service mode proxies (container-runtime §3.3). axum's
+# `ws` feature is on now, but only for `/v1/realtime`, which parses frames
+# (realtime design §13): its extractor (tokio-tungstenite underneath) would
 # decode and re-encode every frame for a proxy that must not look at them at
-# all. `hyper::upgrade::on` on the axum request + `reqwest::Response::upgrade`
-# on the outbound one + `copy_bidirectional` is the byte pipe this actually is.
+# all, and `reqwest` cannot do a raw upgrade on the *inbound* half either.
+# `hyper::upgrade::on` on the axum request + `reqwest::Response::upgrade` on
+# the outbound one + `copy_bidirectional` is the byte pipe this actually is.
 # Both versions are already in the lock, pulled in by axum and reqwest.
 hyper = "1.10.1"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
@@ -46,6 +50,29 @@ if-addrs = "0.15.0"
 # lock through tokio, and used the same way by examples/agents/folder-chat.
 libc = "0.2.186"
 mime_guess = "2.0.5"
+# Silero VAD for realtime turn detection (realtime design §6.1, §13): ONNX
+# Runtime, pinned exactly (2.0.0-rc.13 = ONNX Runtime 1.28), CPU provider only,
+# linked from ort's build-time download of a prebuilt static library (owner's
+# decision, §20; CI caches ~/.cache/ort.pyke.io). +25 MB stripped per binary
+# that links it, measured in WP0. The RPM and AppImage ship ONNX Runtime's
+# licence and ThirdPartyNotices (assets/realtime/README.md; update them with
+# this pin).
+#
+# Features trimmed to what is used (WP2 review R11): `std`; `tracing`, so ONNX
+# Runtime's own messages land in lmgw's log; `download-binaries`; and
+# `tls-rustls` for that download — the rustls the gateway already uses
+# rather than native-tls/OpenSSL. The download's rustls needs a crypto
+# provider of its own (`ring`; ort cannot use the gateway's aws-lc-rs), but
+# only in the build script: nothing of it is linked into lmgw. No `ndarray`
+# (tensors are built from `(shape, Vec)`), no `copy-dylibs` (static), and no
+# `api-*` level: Silero's session needs nothing past ONNX Runtime's C API 17,
+# ort's floor.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "tracing",
+    "download-binaries",
+    "tls-rustls",
+] }
 # Text out of office files for Chat attachments and knowledge bases
 # (`crate::extract::office`, chat-complete design §8): `zip` opens docx / pptx /
 # odt / odp / xlsx / ods containers (deflate only — what office writers use) and
@@ -58,10 +85,19 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # `Nvml::init()` error the ledger reports as degraded, never a link failure.
 nvml-wrapper = "0.12.1"
 rand = "0.10.1"
+# Whisper's log-mel front end for Smart Turn (`realtime/turn/mel.rs`, realtime
+# design §6.3, §13): a 400-point f64 real FFT per 10 ms hop. Pure Rust (pulls
+# in rustfft 6).
+realfft = "3"
 # The container-builds verify step reads its verdict out of probe output with
 # per-engine patterns (container-builds design §14.3). Already in the lock at
 # this version through tiktoken-rs and wiremock.
 regex = "1.12.4"
+# Sample-rate conversion for realtime audio (realtime design §4.1, §8.2, §13):
+# the 24 kHz input to Silero's 16 kHz, and whole clips (the ASR upload, TTS at
+# a model's native rate). The FFT resampler, rubato's default feature, is not
+# used (`realtime/audio/resample.rs` says why).
+rubato = { version = "5", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "multipart"] }
 # Southbound MCP client (§5). `transport-streamable-http-client-reqwest`
 # transitively enables `transport-streamable-http-client` + `client-side-sse`
@@ -96,8 +132,18 @@ tiktoken-rs = "0.12.0"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 tower-http = { version = "0.6.11", features = ["trace", "cors", "timeout", "compression-gzip"] }
+# Only for its error type: a realtime socket that trips the explicit message or
+# frame limit (realtime design §10.4) is closed with a reason naming the
+# setting, and telling that `Capacity` error from any other read failure needs
+# the type axum's `ws::Error` wraps. The version axum's `ws` feature already
+# pulls in through tokio-tungstenite, so nothing new is built.
+tungstenite = { version = "0.29.0", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# UAX #29 word boundaries: a realtime cut gives the listener only the words
+# heard whole (realtime design §7.3). Already in the tree through other
+# crates, so nothing new is built.
+unicode-segmentation = "1.13.3"
 
 [dev-dependencies]
 async-trait = "0.1.89"
@@ -112,4 +158,12 @@ insta = "1.47.2"
 # against a fetched meta-schema, only the document's own inline schemas.
 jsonschema = { version = "0.58", default-features = false }
 tempfile = "3.27.0"
+# The realtime suites' WebSocket client (realtime design §16). The version
+# axum's `ws` feature pulls in, so the test client and the server speak through
+# the same tungstenite.
+tokio-tungstenite = "0.29.0"
+# The paused clock (`#[tokio::test(start_paused = true)]`): the realtime
+# writer's pacing is tested to the millisecond on it (realtime design §8.2).
+# A feature of the tokio already built, nothing new.
+tokio = { version = "1.52.3", features = ["test-util"] }
 wiremock = "0.6.5"

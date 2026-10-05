@@ -12,6 +12,9 @@ use wasm_bindgen::JsCast;
 
 use crate::fmt::{count_of, grouped};
 
+/// A filter set elsewhere (a clicked row, a URL) and the callback that removes it.
+type FilterChip = (String, Callback<()>);
+
 /// One facet chip: "Offered 62".
 #[derive(Clone, PartialEq, Debug)]
 pub struct Facet {
@@ -55,7 +58,7 @@ pub fn FilterBar(
     #[prop(optional)] facets: Option<FacetSet>,
     /// Filters set elsewhere (a clicked row, a URL), each with its remover.
     #[prop(optional, into)]
-    chips: Option<Signal<Vec<(String, Callback<()>)>>>,
+    chips: Option<Signal<Vec<FilterChip>>>,
     /// Controls of the caller's own (a Select, a toggle) before the count.
     #[prop(optional, into)]
     extra: Option<ViewFn>,

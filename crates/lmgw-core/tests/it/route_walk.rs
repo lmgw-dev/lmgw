@@ -292,6 +292,12 @@ struct Walk {
     gw: Gw,
     client: String,
     agent: String,
+    /// One HTTP client for the whole walk. Building one loads the system's
+    /// trust store, and a client per request made that the bulk of this
+    /// test's run time; no credential lives in it (every request sets its
+    /// own headers, and it keeps no cookie jar), so sharing it changes no
+    /// answer.
+    http: reqwest::Client,
 }
 
 async fn walk_gateway(auth_enabled: bool) -> Walk {
@@ -308,10 +314,18 @@ async fn walk_gateway(auth_enabled: bool) -> Walk {
     insert_key(&state, "agent:walker", &agent, "agent", Some("walker")).await;
     state.reload_snapshot().await.unwrap();
 
+    // No redirect following: `/ui/*` answers with one, and what is being
+    // asked here is what *this* route said.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
     Walk {
         gw: common::serve(state).await,
         client,
         agent,
+        http,
     }
 }
 
@@ -352,15 +366,8 @@ impl Walk {
 
     async fn status(&self, method: &str, path: &str, who: Who) -> u16 {
         let url = format!("{}{}", self.gw.base, fill(path));
-        // No redirect following: `/ui/*` answers with one, and what is being
-        // asked here is what *this* route said.
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
         let verb = if method == "*" { "GET" } else { method };
-        let mut req = client.request(verb.parse().unwrap(), &url);
+        let mut req = self.http.request(verb.parse().unwrap(), &url);
         if verb == "POST" {
             // `POST /api/session` carries its credential in the *body* (§3.4),
             // and a body with no key in it would answer every principal alike

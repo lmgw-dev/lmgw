@@ -1103,6 +1103,11 @@ fn BuildForm(seed: EditorSeed, open: RwSignal<bool>) -> impl IntoView {
                     for k in r.kept {
                         toasts.warn(format!("kept {}: {}", k.tag, k.reason));
                     }
+                    // Saved without a check it could not make (podman not
+                    // answering about `cpus`): said now, not first in a run.
+                    for n in r.notes {
+                        toasts.warn(n);
+                    }
                     open.set(false);
                     bk.load_builds();
                     if and_run {
@@ -1593,7 +1598,7 @@ fn BuildForm(seed: EditorSeed, open: RwSignal<bool>) -> impl IntoView {
                                 }
                             />
                         </Field>
-                        <Field label="CPUs" hint="--cpuset-cpus, e.g. 0-15; empty = all cores" error=err_for("cpus")>
+                        <Field label="CPUs" hint="--cpuset-cpus, e.g. 0-15; empty = all cores; needs podman's cpuset cgroup controller" error=err_for("cpus")>
                             <input
                                 class="input mono"
                                 placeholder="all"

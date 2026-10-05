@@ -566,6 +566,43 @@ fn responses_object(
             );
             return Value::Object(responses);
         }
+        Resp::WebSocket {
+            subprotocol,
+            frames,
+        } => {
+            let switching = json!({
+                "description": format!(
+                    "Switching Protocols: the connection is now a WebSocket. {frames}"
+                ),
+                "headers": {
+                    "Sec-WebSocket-Protocol": {
+                        "description": "The subprotocol selected, present when the client \
+                            offered it.",
+                        "schema": { "type": "string", "enum": [subprotocol] },
+                    },
+                },
+            });
+            responses.insert(
+                "101".to_string(),
+                with_headers(switching, method, path, is_inference),
+            );
+            responses.insert(
+                "426".to_string(),
+                json!({
+                    "description": "Upgrade Required: the request carried no WebSocket \
+                        upgrade headers.",
+                    "content": { "application/json": { "schema": schemas::error_ref(g, dialect) } },
+                }),
+            );
+            responses.insert(
+                "default".to_string(),
+                json!({
+                    "description": "Error, before the upgrade.",
+                    "content": { "application/json": { "schema": schemas::error_ref(g, dialect) } },
+                }),
+            );
+            return Value::Object(responses);
+        }
         Resp::Redirect => {
             responses.insert(
                 "302".to_string(),
@@ -634,7 +671,9 @@ fn with_headers(mut response: Value, method: &str, path: &str, is_inference: boo
     if headers.is_empty() {
         return response;
     }
-    let mut obj = Map::new();
+    // Added to whatever headers the response already declares (a WebSocket
+    // 101's `Sec-WebSocket-Protocol`), never in place of them.
+    let mut obj = response["headers"].as_object().cloned().unwrap_or_default();
     for h in headers {
         let name = h["name"].as_str().unwrap_or_default().to_string();
         obj.insert(

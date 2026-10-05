@@ -55,7 +55,9 @@ pub fn decode_f16(blob: &[u8]) -> Result<Vec<f16>> {
         )));
     }
     Ok(blob
-        .chunks_exact(BYTES_PER_ELEMENT)
+        .as_chunks::<BYTES_PER_ELEMENT>()
+        .0
+        .iter()
         .map(|c| f16::from_le_bytes([c[0], c[1]]))
         .collect())
 }
@@ -156,15 +158,15 @@ pub fn dot_f16(query: &[f32], row: &[f16], scratch: &mut [f32]) -> f32 {
 pub fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = [0f32; 8];
-    let mut ia = a.chunks_exact(8);
-    let mut ib = b.chunks_exact(8);
-    for (ca, cb) in ia.by_ref().zip(ib.by_ref()) {
+    let (ia, ra) = a.as_chunks::<8>();
+    let (ib, rb) = b.as_chunks::<8>();
+    for (ca, cb) in ia.iter().zip(ib) {
         for k in 0..8 {
             acc[k] += ca[k] * cb[k];
         }
     }
     let mut s: f32 = acc.iter().sum();
-    for (x, y) in ia.remainder().iter().zip(ib.remainder()) {
+    for (x, y) in ra.iter().zip(rb) {
         s += x * y;
     }
     s

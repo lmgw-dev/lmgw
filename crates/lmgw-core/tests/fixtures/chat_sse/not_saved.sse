@@ -1,0 +1,18 @@
+event: delta
+data: {"text":" and "}
+
+event: delta
+data: {"text":"more."}
+
+event: stop
+data: {"reason":"stop"}
+
+event: usage
+data: {"completion_tokens":2,"prompt_tokens":10}
+
+event: error
+data: {"code":"not_saved","message":"this reply was not saved: the conversation changed while it was being written"}
+
+event: done
+data: {"aborted":false,"answered_by":null,"completion_tokens":2,"message_id":0,"model":"m","prompt_tokens":10,"reasoning_ignored":[],"reasoning_note":null,"saved":false,"timings":null,"total_ms":0,"ttfb_ms":0}
+

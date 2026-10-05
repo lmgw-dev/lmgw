@@ -59,16 +59,44 @@ pub(super) const OPS: &[OpDoc] = &[
             "Audio model CRUD — the same shape as aux_model_set (sparse patch, unknown fields \
              rejected, the snapshot reloaded after every write, apply stays a separate step), \
              adapted to the wider audio.cpp field set (task, mode, load/session/request \
-             options, voice presets).",
+             options, voice presets, and where the row runs: backend 'cpu' with its threads, \
+             which takes no VRAM and keeps serving under the GPU hold). The same function \
+             lmgw__audio_model_set calls.",
         ),
-        tool: None,
-        args: OpArgs::Struct(|g| g.root_schema_for::<crate::web::api::AudioPatch>()),
+        tool: Some("lmgw__audio_model_set"),
+        args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::AudioPatch>()),
         response: Resp::OpOutcome,
         writes: true,
         reveals_secret: false,
         confirm_note: None,
         deprecated: false,
         example: None,
+    },
+    OpDoc {
+        name: "voice_transcribe",
+        tag: TAG,
+        summary: "Transcribe voice-library clips with a local speech-to-text model",
+        description: Some(
+            "Writes a voice-library clip's transcript (the library's prompt_text, which \
+             audio.cpp hands a cloning model as reference_text when a request's voice names \
+             the clip): one clip (replaced if it had one), or every clip without one. The \
+             model is the alias given, else the setting audio.voice_transcribe_alias; it must \
+             be a local speech-to-text (asr) row — a cloud alias is refused, and so is the \
+             GPU hold's fallback: the hold refuses the call instead, so the owner's voice never \
+             leaves the machine. The answer names the clips and their transcript lengths, not \
+             the text. The same function lmgw__voice_transcribe calls.",
+        ),
+        tool: Some("lmgw__voice_transcribe"),
+        args: OpArgs::Tool,
+        response: Resp::Untyped(
+            "{ok, transcribed: [{clip, chars, transcript_source}], failed: [{clip, error}], \
+             already, message}",
+        ),
+        writes: true,
+        reveals_secret: false,
+        confirm_note: None,
+        deprecated: false,
+        example: Some(r#"{"alias":"audio/qwen3-asr"}"#),
     },
     OpDoc {
         name: "image_model_set",

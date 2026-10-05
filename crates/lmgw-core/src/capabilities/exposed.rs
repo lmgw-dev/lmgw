@@ -23,7 +23,9 @@ use futures::future::join_all;
 
 use crate::candidates::Facet;
 use crate::catalog::{self, ModelInfo, Pricing};
-use crate::config::{AuxModel, ImageModel, LocalModel, Snapshot, Upstream, UpstreamKind};
+use crate::config::{
+    AudioModel, AuxModel, ImageModel, LocalModel, Protocol, Snapshot, Upstream, UpstreamKind,
+};
 use crate::ir::Params;
 use crate::runtime::image::ImageCapabilities;
 use crate::state::SharedState;
@@ -266,11 +268,13 @@ async fn entry_for(
         "audio" => {
             // audio.cpp exposes no per-model metadata (see `vram::plan`), so
             // there is no context window to publish.
-            let derived = snap
+            let row = snap
                 .enabled_audio_models()
-                .find(|m| snap.audio_public_name(&m.model_id) == e.name)
-                .map(super::for_audio)
-                .unwrap_or_default();
+                .find(|m| snap.audio_public_name(&m.model_id) == e.name);
+            let derived = match row {
+                Some(m) => audio_derived(state, m).await,
+                None => Derived::default(),
+            };
             assemble(
                 e.name,
                 crate::config::AUDIO_UPSTREAM_NAME.to_string(),
@@ -474,6 +478,7 @@ async fn candidate_alias_entry(
         reasoning,
         tool_calls: Some(tool_calls),
         structured_output: Some(structured_output),
+        speech: None,
         source: "candidate_alias".to_string(),
     };
 
@@ -632,7 +637,7 @@ async fn alias_entry(
     // The alias' own override sits above the backing row's (which
     // `local_derived` already applied), the same way `param_overrides` sit
     // above the row's params.
-    let derived = with_owner_override(derived, owner_override.as_ref(), "alias");
+    let derived = with_owner_override(derived, owner_override.as_ref(), "alias", upstream.protocol);
 
     assemble(
         name,
@@ -665,11 +670,10 @@ async fn backing_derived(
             let aux = snap.aux_models.iter().find(|m| m.model_id == model_id)?;
             Some(aux_derived(state, snap, aux).await)
         }
-        UpstreamKind::AudioCpp => snap
-            .audio_models
-            .iter()
-            .find(|m| m.model_id == model_id)
-            .map(super::for_audio),
+        UpstreamKind::AudioCpp => {
+            let row = snap.audio_models.iter().find(|m| m.model_id == model_id)?;
+            Some(audio_derived(state, row).await)
+        }
         UpstreamKind::SdCpp => snap
             .image_models
             .iter()
@@ -736,10 +740,81 @@ async fn aux_derived(state: &SharedState, snap: &Snapshot, model: &AuxModel) -> 
 /// An image row: everything published comes from the row's own columns
 /// (design §5), plus — for the notes only — whatever this model's *running*
 /// container reported about the pipeline it loaded.
+/// An audio row's capabilities, with what its package says
+/// ([`super::AudioFacts`]): a speaking row's `speech` object from its
+/// profile (cached, computed on the blocking pool when a row changed), and
+/// any row's notes about its package — a task its variant does not run,
+/// voices whose file is missing.
+async fn audio_derived(state: &SharedState, model: &AudioModel) -> Derived {
+    let speech = crate::audio::voices::row_speech(state, model).await;
+    let mut notes = Vec::new();
+    // A task its package does not run (audio-class gap 2): every speech
+    // request is refused until the owner fixes it.
+    if let Some(why) = speech
+        .profile
+        .variant
+        .as_deref()
+        .and_then(|v| crate::audio::variant::mismatch(&model.model_id, &model.task, v))
+    {
+        notes.push(format!(
+            "Speech is refused (400 task_mismatch) until this row is fixed: {why}."
+        ));
+    }
+    // A voice the spec names whose file the package lacks (audio-class gap
+    // 4): the catalog's download completes the install.
+    if !speech.voices.missing.is_empty() {
+        notes.push(format!(
+            "Voices the package's spec names but whose file is missing here: {} — Download on \
+             the package in the Audio catalog (or lmgw__audio_catalog action=download) fetches \
+             only the files it lacks.",
+            speech.voices.missing.join(", ")
+        ));
+    }
+    // A cloning model that wants the clip's transcript, and library clips
+    // without one (audio-class gap 5) — refused outright by an engine that
+    // cannot clone without it (`crate::audio::transcript`).
+    let untranscribed: Vec<&str> = speech
+        .voices
+        .entries
+        .iter()
+        .filter(|e| e.kind == crate::audio::voices::VoiceKind::Library)
+        .filter(|e| e.transcript == Some(false))
+        .map(|e| e.id.as_str())
+        .collect();
+    if speech.profile.needs_reference_text && !untranscribed.is_empty() {
+        let how = if crate::audio::transcript::refuses_untranscribed(model, &speech.profile) {
+            "This model cannot clone a voice-library clip without the clip's transcript \
+             (reference_text): speech with these clips is refused (400 voice_needs_transcript) \
+             until they have one"
+        } else {
+            "This model clones a voice-library clip well only with the clip's transcript \
+             (reference_text), and these clips have none"
+        };
+        notes.push(format!(
+            "{how}: {} — transcribe them in the Audio lab or with lmgw__voice_transcribe (a \
+             local speech-to-text model; the clips never leave this machine).",
+            untranscribed.join(", ")
+        ));
+    }
+    let facts = super::AudioFacts {
+        speech: super::speech::speaks(&model.task).then(|| {
+            let rate = state.audio_rates.get(&model.model_id);
+            super::speech::from_profile(&speech.profile, model, rate)
+        }),
+        notes,
+    };
+    super::for_audio_with(model, Some(&facts))
+}
+
 fn image_derived(state: &SharedState, model: &ImageModel) -> Derived {
     let probed = probed_image_capabilities(state, &model.model_id);
     let derived = super::for_image(model, probed.as_ref());
-    with_owner_override(derived, model.capabilities_override.as_ref(), "image row")
+    with_owner_override(
+        derived,
+        model.capabilities_override.as_ref(),
+        "image row",
+        Protocol::Openai,
+    )
 }
 
 /// The `GET /sdcpp/v1/capabilities` body this model's container answered with,
@@ -850,22 +925,29 @@ async fn local_derived(
     // (§7). On the alias path the alias' override lands on top of this one,
     // in `alias_entry` — row first, alias second, exactly as `param_overrides`
     // stack.
-    with_owner_override(derived, model.capabilities_override.as_ref(), "model")
+    with_owner_override(
+        derived,
+        model.capabilities_override.as_ref(),
+        "model",
+        Protocol::Openai,
+    )
 }
 
 /// Deep-merge an owner's `capabilities_override` over a derived object (design
-/// §7). A malformed override is **loud**: the derived facts stay, and the
+/// §7), for a model served over `protocol` (a changed task's routes depend on
+/// it). A malformed override is **loud**: the derived facts stay, and the
 /// error becomes a note on the model it was written for, so the owner sees it
 /// where they will look rather than only in a log.
 fn with_owner_override(
     derived: Derived,
     override_: Option<&serde_json::Value>,
     what: &str,
+    protocol: Protocol,
 ) -> Derived {
     let Some(value) = override_ else {
         return derived;
     };
-    match super::apply_owner_override(derived.clone(), value) {
+    match super::apply_owner_override(derived.clone(), value, protocol) {
         Ok(applied) => applied,
         Err(e) => {
             let mut derived = derived;

@@ -1,0 +1,58 @@
+# cargo-nextest settings for this workspace (ci/check.sh runs the suite with it).
+#
+# Why nextest: it runs every test in a process of its own. lmgw-core's
+# `tests/it` binary under plain `cargo test` is one process with 32 test
+# threads, and on 2026-10-03 it spent 6597 s of system time against 2263 s of
+# user time in a 359 s run: forked git/pdftotext children (a `pre_exec` rules
+# out posix_spawn) and thread-heavy tests contending on one huge address
+# space. The same tests one process each summed 1439 s of wall time and
+# finished in 81 s; with the fixes that came with this file, 36 s.
+#
+# A process per test also makes every process-global guard in the suites (the
+# `common::process_env_lock` mutex, the `NEXT_PREFIX` counters, which carry the
+# pid) uncontended without touching them, so `cargo test` keeps working
+# as before.
+
+[store]
+dir = "target/nextest"
+
+[profile.default]
+# Every failure, not just the first: the summary should be the whole story.
+fail-fast = false
+# A test still running after 30 s is reported as SLOW (and listed at the
+# end); one still running after 10 periods (5 min, ten times the slowest test
+# today) is killed and fails as TIMEOUT, instead of hanging the check forever.
+slow-timeout = { period = "30s", terminate-after = 10 }
+# Live per-test lines only for what needs attention ...
+status-level = "slow"
+# ... and the end of the run lists every failed, flaky and slow test by name:
+# a test that passed only on a retry is never silently green.
+final-status-level = "slow"
+failure-output = "immediate-final"
+
+[profile.default.junit]
+# target/nextest/default/junit.xml: per-test times, for finding the slow tail.
+path = "junit.xml"
+
+# --- Known flakes: retried, and named FLAKY in the summary when a retry saved them.
+# Add a test here only with the evidence next to it, and take it out when fixed.
+
+[[profile.default.overrides]]
+# Fail under parallel load and pass alone (ci/check.sh's history, and the
+# project notes since 2026-09); they drive real sockets on tight deadlines.
+filter = 'package(lmgw-core) & binary(it) & test(/^agents_service::/)'
+retries = 2
+
+# --- Order: the long tests start first, so they do not run alone at the end.
+# Measured 2026-10-03 (target/nextest/default/junit.xml has the current
+# times): the live-container tests take 8-18 s, the realtime suites pace their
+# audio in real time (3-8 s each), and a handful of admission tests wait out
+# real queue timeouts.
+
+[[profile.default.overrides]]
+filter = 'package(lmgw-core) & binary(it) & (test(/::the_real_thing/) | test(/^image_live::/))'
+priority = 100
+
+[[profile.default.overrides]]
+filter = 'package(lmgw-core) & binary(it) & (test(/^realtime_/) | test(/^vram_admission::(gate_follows_running_container|outside_vram_fallback|request_gate|ladder_|in_flight_claim|admission)::/) | test(/^modelinfo_real_files::/) | test(/^openapi_live::/))'
+priority = 50

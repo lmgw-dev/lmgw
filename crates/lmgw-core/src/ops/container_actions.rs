@@ -115,7 +115,7 @@ async fn start_model(state: &SharedState, class: Class, model_id: &str) -> Resul
         Fit::Go(permit) => Some(permit),
         Fit::Unchecked => None,
     };
-    let spec = lifecycle::acquire_spec(&state.data_dir, &snap, &runtime);
+    let spec = lifecycle::acquire_spec(state, &snap, &runtime);
     let started = state.runtime().acquire(&spec).await;
     drop(permit);
     let port = started.map_err(|e| e.to_string())?.port();
@@ -221,7 +221,10 @@ async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Resul
             ),
         }));
     }
-    let held = state.snapshot().settings.hold.active;
+    // Per model: a row on the CPU is not held, and starts again (§2 of the
+    // gpu-hold design, by `gpu_block_for`). The dispatch refuses `apply`
+    // under a benchmark's lease before this runs, so this is the hold.
+    let held = state.snapshot().gpu_block_for(class, model_id).is_some();
     // A stop that *failed* while held is the one outcome that must not be
     // rounded up to the sentence below. Without a hold the `start_model` after
     // it is the recovery — the next start replaces the container by name — but
@@ -358,7 +361,8 @@ async fn chat_model_problems(dir: &str, m: &LocalModel) -> ModelChecks {
 /// Audio models point at a model *directory*, not a single GGUF (§3.6).
 fn audio_model_problems(dir: &str, m: &AudioModel) -> Vec<String> {
     let mut out = Vec::new();
-    if !dir.trim().is_empty() && !std::path::Path::new(dir).join(&m.path).is_dir() {
+    // A directory, or the GGUF file itself: audio.cpp loads either.
+    if !dir.trim().is_empty() && !std::path::Path::new(dir).join(&m.path).exists() {
         out.push(format!("path '{}' is missing from the models dir", m.path));
     }
     out
@@ -485,24 +489,28 @@ async fn recreate_one(state: &SharedState, class: Class, model_id: &str, held: b
 /// Recreate every currently running member of `class_filter` (`None` = every
 /// class), concurrently. Returns `(recreated, busy, errors, held)`, each a
 /// `Value` list ready to embed in a response — `held` is populated only while
-/// the GPU hold is on, where "recreate" means "stop, and start at release".
+/// the GPU hold is on, with the members it holds (a row on the CPU is not
+/// held, and is recreated): for `apply` "recreate" means "stop, and start at
+/// release"; a `restart` (`keep_held`) leaves them running untouched, since
+/// stopping one it cannot start again is the destructive half of a restart.
 async fn recreate_running(
     state: &SharedState,
     class_filter: Option<Class>,
+    keep_held: bool,
 ) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
-    let held = state.snapshot().settings.hold.active;
-    let running: Vec<(Class, String)> = state
+    let snap = state.snapshot();
+    type Members = Vec<(Class, String)>;
+    let (running, kept): (Members, Members) = state
         .runtime()
         .list()
         .into_iter()
         .filter(|v| class_filter.is_none_or(|c| v.class == c))
         .map(|v| (v.class, v.model_id))
-        .collect();
-    let outcomes = futures::future::join_all(
-        running
-            .iter()
-            .map(|(c, m)| recreate_one(state, *c, m, held)),
-    )
+        .partition(|(c, m)| !keep_held || snap.gpu_block_for(*c, m).is_none());
+    let outcomes = futures::future::join_all(running.iter().map(|(c, m)| {
+        let held = snap.gpu_block_for(*c, m).is_some();
+        recreate_one(state, *c, m, held)
+    }))
     .await;
 
     let mut recreated = Vec::new();
@@ -522,6 +530,9 @@ async fn recreate_running(
                 stopped_held.push(json!({ "class": class.as_str(), "model_id": model_id }))
             }
         }
+    }
+    for (class, model_id) in kept {
+        stopped_held.push(json!({ "class": class.as_str(), "model_id": model_id }));
     }
     (recreated, busy, errors, stopped_held)
 }
@@ -561,9 +572,16 @@ async fn group_start(state: &SharedState, class_filter: Option<Class>) -> Result
         .filter(|r| registry.contains(r.class, &r.model_id))
         .map(|r| json!({ "class": r.class.as_str(), "model_id": r.model_id }))
         .collect();
-    let to_start: Vec<_> = candidates
+    // Under the GPU hold only the models on the CPU start; the rest are
+    // named, not attempted (the dispatch refuses a group start under a
+    // benchmark's lease before this runs).
+    let (to_start, held): (Vec<_>, Vec<_>) = candidates
         .into_iter()
         .filter(|r| !registry.contains(r.class, &r.model_id))
+        .partition(|r| snap.gpu_block_for(r.class, &r.model_id).is_none());
+    let held: Vec<Value> = held
+        .iter()
+        .map(|r| json!({ "class": r.class.as_str(), "model_id": r.model_id }))
         .collect();
 
     let outcomes = futures::future::join_all(
@@ -588,6 +606,7 @@ async fn group_start(state: &SharedState, class_filter: Option<Class>) -> Result
         "target": target_label(class_filter),
         "started": started,
         "already_running": already_running,
+        "held": held,
         "errors": errors,
         "note": "Group start only starts models flagged warm_start — starting every configured \
                  model in a class could ask for more VRAM than the box has. Start any other \
@@ -652,16 +671,26 @@ async fn group_stop(
 /// they are identical at the per-model one, because apply additionally
 /// reports the static checks).
 async fn group_restart(state: &SharedState, class_filter: Option<Class>) -> Result<Value, String> {
-    // `held` is always empty here: `container` refuses `restart` outright
-    // while the hold is on, before this is ever called.
-    let (recreated, busy, errors, _held) = recreate_running(state, class_filter).await;
+    // Under the hold only the members on the CPU are restarted; the rest
+    // are left running untouched and named in `held`.
+    let (recreated, busy, errors, held) = recreate_running(state, class_filter, true).await;
+    let held_note = if held.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; {} on the GPU left as they are — lmgw is holding the GPU, so they would not \
+             start again",
+            held.len()
+        )
+    };
     Ok(json!({
         "ok": errors.is_empty(),
         "target": target_label(class_filter),
         "restarted": recreated,
         "busy": busy,
+        "held": held,
         "errors": errors,
-        "message": format!("restarted {} running container(s)", recreated.len()),
+        "message": format!("restarted {} running container(s){held_note}", recreated.len()),
     }))
 }
 
@@ -733,7 +762,7 @@ async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result
         }
     }
 
-    let (recreated, busy, errors, held) = recreate_running(state, class_filter).await;
+    let (recreated, busy, errors, held) = recreate_running(state, class_filter, false).await;
     let held_note = if held.is_empty() {
         String::new()
     } else {
@@ -806,8 +835,18 @@ pub async fn container(
     // The GPU hold's operator gate (gpu-hold design §2), before either
     // dispatch and therefore before any verb's stop step. `stop`, `status` and
     // `logs` are untouched — a hold wants models stopped, and reading is never
-    // a GPU decision.
-    if snap.settings.hold.active && matches!(action, "start" | "restart") {
+    // a GPU decision. Per model: a row on the CPU is not held. A group verb
+    // decides per member (`group_start`, `group_restart`) when its group has
+    // a model on the CPU, and is refused whole as before when it has none.
+    let held = match model_class.zip(model) {
+        Some((c, m)) => snap.gpu_block_for(c, m).is_some(),
+        None => !model_runtimes(&snap).iter().any(|r| {
+            r.enabled
+                && group_target.flatten().is_none_or(|c| r.class == c)
+                && !r.placement().is_gpu()
+        }),
+    };
+    if snap.settings.hold.active && held && matches!(action, "start" | "restart") {
         return Err(hold_refusal(action));
     }
     // A benchmark run holds the card (benchmark design §3.2): the same gate,

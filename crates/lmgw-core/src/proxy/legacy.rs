@@ -95,7 +95,7 @@ pub async fn handle_legacy_completions(
                     proto,
                     ctx: &ctx,
                     alias,
-                    route: f.route.as_ref(),
+                    route: f.route.as_deref(),
                     started,
                     streamed,
                     class: RequestClass::Chat,

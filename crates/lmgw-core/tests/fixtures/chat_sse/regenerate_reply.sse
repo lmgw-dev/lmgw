@@ -1,0 +1,21 @@
+event: reasoning
+data: {"text":"Let me think."}
+
+event: delta
+data: {"text":"Hel"}
+
+event: delta
+data: {"text":"lo"}
+
+event: stop
+data: {"reason":"stop"}
+
+event: stats
+data: {"cache_n":0,"predicted_ms":8.0,"predicted_n":2,"predicted_per_second":250.0,"prompt_ms":14.0,"prompt_n":7,"prompt_per_second":500.0}
+
+event: usage
+data: {"completion_tokens":2,"prompt_tokens":7}
+
+event: done
+data: {"aborted":false,"answered_by":null,"completion_tokens":2,"message_id":3,"model":"m","prompt_tokens":7,"reasoning_ignored":[],"reasoning_note":null,"saved":true,"timings":{"cache_n":0,"predicted_ms":8.0,"predicted_n":2,"predicted_per_second":250.0,"prompt_ms":14.0,"prompt_n":7,"prompt_per_second":500.0},"total_ms":0,"ttfb_ms":0}
+

@@ -564,20 +564,32 @@ fn every_typed_extractor_is_referenced_by_the_doc() {
     // The three internal mini-APIs (owner decision, 2026-09-28,
     // `openapi/exclusions.rs`) are deliberately undocumented — their own
     // extractor types can never appear under `src/openapi/**` and are not a
-    // drift this guard should flag. The Chat's handlers live in `chat.rs` and
-    // its `chat_*.rs` siblings (chat-complete design, ground rules: new logic
-    // in new sibling modules), so every one of those counts.
+    // drift this guard should flag. The Chat's handlers live in `chat.rs`, its
+    // `chat_*.rs` siblings (chat-complete design, ground rules: new logic in
+    // new sibling modules) and the child modules named in `CHAT_DIRS`
+    // (chat-voice's `chat_voice/`), so every one of those counts. The
+    // directories are named, not matched: a future non-Chat module under a
+    // `chat_*` directory is scanned like any other.
     // The Knowledge page's backend (`api_knowledge.rs`, chat-complete §9.5)
     // is excluded the same way.
     let internal: BTreeSet<PathBuf> = ["audio_lab.rs", "image_lab.rs", "api_knowledge.rs"]
         .iter()
         .map(|f| src.join("web").join(f))
         .collect();
+    const CHAT_DIRS: &[&str] = &["chat_voice"];
+    let web = src.join("web");
     let is_chat = |f: &PathBuf| {
-        f.parent() == Some(src.join("web").as_path())
-            && f.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n == "chat.rs" || n.starts_with("chat_"))
+        let Ok(rel) = f.strip_prefix(&web) else {
+            return false;
+        };
+        let mut parts = rel.components().filter_map(|c| c.as_os_str().to_str());
+        match (parts.next(), parts.next()) {
+            (Some(file), None) => {
+                file == "chat.rs" || (file.starts_with("chat_") && file.ends_with(".rs"))
+            }
+            (Some(dir), Some(_)) => CHAT_DIRS.contains(&dir),
+            _ => false,
+        }
     };
 
     let mut scan_files = Vec::new();

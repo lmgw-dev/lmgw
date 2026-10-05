@@ -1,0 +1,15 @@
+{
+ "file": "noise_only.wav",
+ "text": "",
+ "voice": null,
+ "licence": "synthetic (numpy, seeded); no licence constraint",
+ "tts": "numpy",
+ "sample_rate": 24000,
+ "channels": 1,
+ "format": "PCM16 WAV",
+ "duration_ms": 2000,
+ "samples": 48000,
+ "speech_segments_ms": [],
+ "segments_note": "derived from generation (positions of inserted silence), not from a VAD",
+ "noise": "seed 1234 numpy default_rng; 0.5*white + 0.5*pink(1/f FFT shaping), RMS -50 dBFS"
+}

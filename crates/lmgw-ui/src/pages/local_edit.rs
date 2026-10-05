@@ -1688,7 +1688,7 @@ fn Editor(id_param: String) -> impl IntoView {
                                 <Field
                                     label="Extra podman run args override"
                                     unit="one per line"
-                                    hint="Blank fields inherit the chat class settings:"
+                                    hint="An override replaces the class args whole: to run without some of them, list the ones to keep (an empty override inherits). Blank fields inherit the chat class settings:"
                                     hint_extra=|| {
                                         view! {
                                             <a href=super::settings::href("router.extra_run_args")>

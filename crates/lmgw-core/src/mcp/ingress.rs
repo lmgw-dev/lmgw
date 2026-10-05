@@ -801,6 +801,14 @@ async fn dispatch(
                      sd-server segfaults on a reference-image request to a pipeline that \
                      cannot take one, so lmgw refuses /v1/images/edits for every row without \
                      it.\n\n\
+                     AUDIO models (audio.cpp: speech recognition, text-to-speech, cloning, \
+                     music, …) come as catalog packages: `lmgw__audio_catalog action=list` \
+                     (`action=refresh` first when nothing is cached) names each package's \
+                     suggested model id, path, task and mode, `action=download` queues its \
+                     files, `lmgw__hf_downloads` until done, then `lmgw__audio_model_set \
+                     action=create` with those suggestions; prove it with a request to \
+                     /v1/audio/speech or /v1/audio/transcriptions on `audio/<id>` and read it \
+                     back with `lmgw__local_model_get target=audio`.\n\n\
                      Models already on disk that lmgw did not download are supported — pass \
                      `gguf_path` to `lmgw__local_model_set` (or `lmgw__aux_model_set`) and \
                      use `lmgw__gguf_files` to find them — but that route cannot fetch \
@@ -812,7 +820,8 @@ async fn dispatch(
                      renders.\n\n\
                      If `lmgw__status` reports `vram.hold_active: true`, the GPU is held: \
                      requests to a local model with no configured fallback come back as a 503 \
-                     `gpu_hold`. `lmgw__hold_set active=false` releases the hold; \
+                     `gpu_hold`; audio models that run on the CPU keep serving. \
+                     `lmgw__hold_set active=false` releases the hold; \
                      `active=true` engages it and stops idle local containers. The global \
                      fallback (chat-class local models only) is `hold_fallback_alias` on \
                      `lmgw__settings_set`; a per-model one is set on `lmgw__local_model_set` \

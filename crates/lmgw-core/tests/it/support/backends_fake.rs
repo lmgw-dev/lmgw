@@ -198,6 +198,9 @@ pub struct World {
     /// What `podman pull <name>` brings: the image ID and `RepoDigests` the
     /// registry would hand over. A name not here fails the pull.
     pub remote: HashMap<String, (String, Vec<String>)>,
+    /// `podman info`'s `Host.CgroupControllers`: every one, as rootful
+    /// podman (or a rootless one with `cpuset` delegated) has them.
+    pub cgroup_controllers: Vec<String>,
 }
 
 impl World {
@@ -284,6 +287,9 @@ impl FakePodman {
                     .into(),
                 next: 0,
                 remote: HashMap::new(),
+                cgroup_controllers: ["cpuset", "cpu", "io", "memory", "pids"]
+                    .map(String::from)
+                    .to_vec(),
             }),
             behavior: Mutex::new(Behavior::Succeed),
             release: Notify::new(),
@@ -484,6 +490,9 @@ impl CommandRunner for FakePodman {
                     .collect::<Vec<_>>(),
             )
             .unwrap()),
+            ["info", "--format", "{{json .Host.CgroupControllers}}"] => {
+                ok(serde_json::to_string(&w.cgroup_controllers).unwrap())
+            }
             ["system", "df", "--format", "json"] => ok(
                 r#"[{"Type":"Images","Total":3,"RawSize":3000000,"RawReclaimable":1000000},
                     {"Type":"Containers","Total":0,"RawSize":0,"RawReclaimable":0}]"#,

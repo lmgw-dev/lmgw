@@ -443,7 +443,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "extra_run_args",
                     str_p(
                         "'podman run' args override, one per line. Empty or absent leaves it \
-                         unset; name it in 'clear' to revert to the class default.",
+                         unchanged; name it in 'clear' to revert to the class default. An \
+                         override with no args is never stored: it is the class default.",
                     ),
                 ),
                 (
@@ -590,7 +591,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "extra_run_args",
                     str_p(
                         "'podman run' args override, one per line. Empty or absent leaves \
-                         it unset; name it in 'clear' to revert to the class default. The \
+                         it unchanged; name it in 'clear' to revert to the class default (an \
+                         override with no args is never stored: it is the class default). The \
                          GPU device flags live here — sd-server links libcuda directly and \
                          will not even print its help without the card.",
                     ),

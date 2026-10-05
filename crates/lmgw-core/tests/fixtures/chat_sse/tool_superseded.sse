@@ -1,0 +1,21 @@
+event: turn
+data: {"user_message_id":1}
+
+event: tool
+data: {"event":"start","index":0,"name":"stub__slow"}
+
+event: tool
+data: {"event":"args","fragment":"{\"text\":\"zzz\"}","index":0}
+
+event: tool
+data: {"arguments":{"text":"zzz"},"event":"ready","index":0,"name":"stub__slow"}
+
+event: tool
+data: {"event":"result","index":0,"is_error":true,"ms":0,"name":"stub__slow","output":"abandoned when the run was cancelled; it had already been sent, so it may still have run"}
+
+event: error
+data: {"code":"superseded","message":"a newer turn of this thread started (or the thread went away), so this reply was stopped and is not saved"}
+
+event: done
+data: {"aborted":true}
+

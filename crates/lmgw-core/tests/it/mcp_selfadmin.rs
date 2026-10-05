@@ -735,6 +735,67 @@ async fn settings_set_fallback_on_external_round_trips() {
     assert_eq!(after["vram"]["fallback_on_external"], false, "{after}");
 }
 
+/// `realtime` is one JSON-encoded string on the flat tool schema (realtime
+/// design §12), hoisted into the same patch the dashboard saves — with the
+/// same refusals, and `""` leaving the section alone.
+#[tokio::test]
+async fn settings_set_realtime_takes_a_json_string() {
+    let base = serve_with(state_with_mode(SelfAdmin::Full).await).await;
+    let sid = initialize(&base).await;
+
+    let set = call(
+        &base,
+        &sid,
+        "lmgw__settings_set",
+        json!({"realtime": r#"{"warm_on_connect": false, "semantic_vad": {"high": {"max_wait_ms": 2500}}}"#}),
+    )
+    .await;
+    let out = payload(&set);
+    assert_eq!(
+        out["changed"],
+        json!(["realtime.semantic_vad", "realtime.warm_on_connect"]),
+        "{out}"
+    );
+    let after = payload(&call(&base, &sid, "lmgw__settings", json!({})).await);
+    assert_eq!(after["realtime"]["warm_on_connect"], false, "{after}");
+    assert_eq!(
+        after["realtime"]["semantic_vad"]["high"]["max_wait_ms"],
+        2500
+    );
+    assert_eq!(after["realtime"]["semantic_vad"]["high"]["floor"], 0.1);
+
+    let refused = call(
+        &base,
+        &sid,
+        "lmgw__settings_set",
+        json!({"realtime": r#"{"max_message_mb": 0, "max_frame_mb": 0}"#}),
+    )
+    .await;
+    assert!(is_error(&refused));
+    assert!(
+        text_of(&refused).contains("realtime.max_frame_mb"),
+        "{}",
+        text_of(&refused)
+    );
+    let bad_json = call(
+        &base,
+        &sid,
+        "lmgw__settings_set",
+        json!({"realtime": "{nope"}),
+    )
+    .await;
+    assert!(is_error(&bad_json));
+    assert!(text_of(&bad_json).contains("realtime: invalid JSON"));
+    let empty = call(
+        &base,
+        &sid,
+        "lmgw__settings_set",
+        json!({"realtime": "", "retention_days": 7}),
+    )
+    .await;
+    assert_eq!(payload(&empty)["changed"], json!(["retention_days"]));
+}
+
 /// An unknown name inside the reserved namespace is a genuine protocol error,
 /// not a tool error — the distinction the dispatcher draws in §14.
 #[tokio::test]

@@ -13,6 +13,11 @@ pub struct AudioCatalog {
     pub fetched_at: String,
     /// Families with an installed package or a served model come first.
     pub families: Vec<AudioFamily>,
+    /// What the last refresh could not do — a spec file that did not load, a
+    /// package repo Hugging Face could not list (offline, rate-limited,
+    /// gated) — or that it has not checked the package files yet. Stays until
+    /// the next refresh.
+    pub warnings: Vec<String>,
 }
 
 /// One model family (`model_specs/<family>.json`).
@@ -47,8 +52,15 @@ pub struct AudioFamily {
     pub options: AudioFamilyOptions,
     /// At least one package fully downloaded.
     pub any_installed: bool,
-    /// An audio model of this family is already configured.
+    /// An enabled audio model of this family loads one of its packages
+    /// (some package's `served`). A row that points at the family's files
+    /// without saying which package is the packages' `serving_unclear`; one
+    /// that loads nothing of the family is `serving_note`.
     pub served: bool,
+    /// One sentence per enabled row of this family that matches none of its
+    /// packages — an empty or missing root, a `weight_id` that picks no file,
+    /// GGUFs no package ships — joined by "; ". Empty when there is none.
+    pub serving_note: String,
     pub packages: Vec<AudioPackage>,
 }
 
@@ -104,6 +116,16 @@ pub struct AudioPackage {
     pub installed: bool,
     /// Some (not all) files tracked/downloaded.
     pub partial: bool,
+    /// Spec files the package lacks on this machine, once any of it was
+    /// downloaded: no finished download, or the file is gone from disk. A
+    /// spec that grew after the package was installed (a new built-in
+    /// voice) shows up here.
+    pub missing_files: Vec<String>,
+    /// Downloaded once and short of `missing_files` now, with nothing on
+    /// its way: a download ("complete install") fetches those — and, while
+    /// a pin is followed, the package's installed files from another commit
+    /// than the pin, so the package is one commit again.
+    pub incomplete: bool,
     /// What this package is, when the spec says so (a size, a trade).
     pub description: String,
     /// Hugging Face repo the files come from; empty = no download source in
@@ -116,10 +138,41 @@ pub struct AudioPackage {
     /// a licence that forbids redistribution, a GGUF build not published yet.
     /// Empty when it can.
     pub unavailable_reason: String,
-    /// Branch/tag the spec pins, when it pins one.
+    /// The revision the spec names for the package's repo (`main`, or a
+    /// commit), as written; empty when it names none.
     pub revision: String,
-    /// An audio model already serves this package's path.
+    /// The commit the spec pins the package to — its `revision` when that is
+    /// a full commit hash; empty when it pins none.
+    pub pinned_commit: String,
+    /// Whether a download takes `pinned_commit`: true under
+    /// `audio.catalog_revision = pinned`, false under `latest`, which takes
+    /// `main` even though the spec pins one. False when nothing is pinned.
+    pub pin_followed: bool,
+    /// Which commit the downloaded files came from, as a sentence — the
+    /// commit and the revision the download asked for, or "unknown" for files
+    /// downloaded before lmgw recorded it. Empty when nothing is downloaded.
+    pub downloaded_from: String,
+    /// Spec files the repo does not publish, as of the refresh that listed
+    /// it at the revision a download takes (the pin, when followed): the spec
+    /// is ahead of the weights, and a download would be refused.
+    pub unpublished_files: Vec<String>,
+    /// What is known about whether the repo publishes this package's files,
+    /// when it is not simply "all of them": the missing ones with the date of
+    /// the listing, or why the repo could not be listed. Empty otherwise.
+    pub availability_note: String,
+    /// An enabled audio model loads this package's weights: the weights file
+    /// lmgw takes the row to load (the GGUFs under its root, narrowed by its
+    /// `weight_id`) belongs to this package and no other — or, for a package
+    /// without GGUFs, the package is downloaded and the only one under the
+    /// row's root. Implies the weights are on disk.
     pub served: bool,
+    /// The `model_id`s of the rows that serve it.
+    pub served_by: Vec<String>,
+    /// Non-empty when a row points at this package's files without telling
+    /// it apart from another package (its root holds several and no
+    /// `weight_id` picks one): what it is and how to settle it, one sentence
+    /// per such row.
+    pub serving_unclear: String,
     /// Tracked download rows for this package's files — the UI joins them
     /// against `GET /api/hf/downloads` for live progress.
     pub download_ids: Vec<i64>,

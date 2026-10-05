@@ -17,6 +17,8 @@ mod settings;
 pub use settings::*;
 mod settings_classes;
 pub use settings_classes::*;
+mod semantic_vad;
+pub use semantic_vad::*;
 mod chat_prompt;
 pub use chat_prompt::*;
 mod prices;

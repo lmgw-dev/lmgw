@@ -43,6 +43,7 @@
 //! [`Sent::Rerouted`]: the site serves the request again on what the walk
 //! picked. Every other hold is unchanged.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -125,24 +126,60 @@ pub async fn send_gated<F>(
 where
     F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
 {
+    send_gated_marked(
+        state, hold, route, lease, count, deadline, timeout, build, None,
+    )
+    .await
+}
+
+/// [`send_gated`] for a caller that bills a stop by whether a prompt went
+/// out: `build` sets `prompt_sent` as each attempt leaves, and this clears
+/// it whenever the gate takes an attempt back (A2 review 2, B2 review 1):
+/// - the request goes elsewhere ([`Sent::Rerouted`]) — an attempt held back
+///   as a context refusal ran nothing, and a candidate that was lost or
+///   re-picked is not working on it. The rerouted call keeps its own record;
+/// - a ladder's count says the attempt does not fit, or llama-server refused
+///   it as above its context (the backstop): the attempt is dropped and the
+///   model climbs, and the retry's build sets the flag again;
+/// - the container is found dead (a transport failure, on a ladder or not)
+///   and is recovered: a dead container works on nothing.
+///
+/// A stop during any of these waits — the re-pick, the climb's restart, the
+/// recovery — or a refusal in their place, then bills no prompt. A wait for
+/// response headers that timed out clears nothing: that prompt went out.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_gated_marked<F>(
+    state: &SharedState,
+    hold: Option<&LocalHold>,
+    route: &Route,
+    lease: &mut TurnLease,
+    count: CountInput<'_>,
+    deadline: Option<Instant>,
+    timeout: Option<Duration>,
+    build: F,
+    prompt_sent: Option<&AtomicBool>,
+) -> Result<Sent, GatewayError>
+where
+    F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
+{
     // The fit already found this candidate cannot take the send (a guest
     // over its pool's per-request limit, or the candidate lost at the count).
     if let Some(cause) = lease.skip.take() {
         let Some(hold) = hold else {
             return Err(cause);
         };
-        return Ok(reroute(state, hold, lease, cause, deadline).await);
+        return Ok(reroute(state, hold, lease, cause, deadline, prompt_sent).await);
     }
     let Some(plan) = lease.ladder.clone() else {
-        let sent = crate::vram::send_local(hold, route, timeout, build).await;
+        let sent = crate::vram::send_local_marked(hold, route, timeout, build, prompt_sent).await;
         return match (hold, sent) {
             (Some(h), Err(e)) if candidate::repicks(hold, &e) => {
-                Ok(reroute(state, h, lease, e, deadline).await)
+                Ok(reroute(state, h, lease, e, deadline, prompt_sent).await)
             }
             (Some(h), Ok(resp)) if candidate::holds_back_refusals(hold) => {
                 match context_refusal(h, resp).await? {
                     Ok(resp) => Ok(Sent::Upstream(resp)),
-                    Err(cause) => Ok(reroute(state, h, lease, cause, deadline).await),
+                    Err(cause) => Ok(reroute(state, h, lease, cause, deadline, prompt_sent).await),
                 }
             }
             (_, sent) => sent.map(Sent::Upstream),
@@ -161,10 +198,11 @@ where
         count: &count,
         timeout,
         build: &build,
+        prompt_sent,
     };
     match within(deadline, ladder.send(lease)).await {
         Err(e) if candidate::repicks(Some(hold), &e) => {
-            Ok(reroute(state, hold, lease, e, deadline).await)
+            Ok(reroute(state, hold, lease, e, deadline, prompt_sent).await)
         }
         sent => sent,
     }
@@ -174,15 +212,20 @@ where
 /// ([`candidate::repick`]) — within an in-process caller's deadline, like
 /// the rest of the send. The lease no longer names a rung, holds a send or
 /// holds its pool reservation ([`TurnLease::reroute`]): a context refusal
-/// ran nothing on the container, so its tokens come back at once.
-#[allow(clippy::result_large_err)]
+/// ran nothing on the container, so its tokens come back at once — and no
+/// prompt of this send is being worked on any more (`prompt_sent`,
+/// [`send_gated_marked`]).
 async fn reroute(
     state: &SharedState,
     hold: &LocalHold,
     lease: &mut TurnLease,
     cause: GatewayError,
     deadline: Option<Instant>,
+    prompt_sent: Option<&AtomicBool>,
 ) -> Sent {
+    if let Some(sent) = prompt_sent {
+        sent.store(false, Ordering::Relaxed);
+    }
     lease.reroute(matches!(cause, GatewayError::ContextExceeded { .. }));
     let picked = match deadline {
         Some(d) => tokio::time::timeout_at(
@@ -229,7 +272,7 @@ async fn context_refusal(
 }
 
 /// A response rebuilt from its parts and a body already read whole.
-fn rebuild(
+pub(crate) fn rebuild(
     status: reqwest::StatusCode,
     version: reqwest::Version,
     headers: reqwest::header::HeaderMap,
@@ -251,6 +294,8 @@ struct Ladder<'s, F> {
     count: &'s CountInput<'s>,
     timeout: Option<Duration>,
     build: &'s F,
+    /// The caller's record of a prompt that went out ([`send_gated_marked`]).
+    prompt_sent: Option<&'s AtomicBool>,
 }
 
 /// How one count-and-send pair ended.
@@ -322,11 +367,12 @@ where
                 // The model came back without a ladder (the row was edited,
                 // and a recovery restarted it): judged like any such row.
                 lease.served = None;
-                return crate::vram::send_local(
+                return crate::vram::send_local_marked(
                     Some(self.hold),
                     self.route,
                     self.timeout,
                     self.build,
+                    self.prompt_sent,
                 )
                 .await
                 .map(Sent::Upstream);
@@ -359,6 +405,9 @@ where
                 }
                 Verdict::Dead(why) => {
                     drop(guard);
+                    // A dead container works on nothing: a stop during the
+                    // recovery bills no prompt.
+                    self.took_back();
                     if recovered {
                         // Twice in a row, on two containers: whatever is
                         // wrong is not this container (`retry_dead_container`).
@@ -376,6 +425,9 @@ where
                     // send counted on the running rung, this one included
                     // (§12 entry 30).
                     drop(guard);
+                    // The attempt was dropped (or refused before any work):
+                    // a stop during the climb bills no prompt.
+                    self.took_back();
                     backstop_left &= !backstop;
                     let prompt = known.map_or(prompt, |k| k.max(prompt));
                     known = Some(prompt);
@@ -384,6 +436,14 @@ where
                     }
                 }
             }
+        }
+    }
+
+    /// The attempt just made is not being worked on any more: the caller's
+    /// record of a sent prompt is cleared ([`send_gated_marked`]).
+    fn took_back(&self) {
+        if let Some(sent) = self.prompt_sent {
+            sent.store(false, Ordering::Relaxed);
         }
     }
 

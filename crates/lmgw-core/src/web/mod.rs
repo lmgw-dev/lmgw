@@ -38,8 +38,11 @@ pub(crate) mod api_settings;
 /// `/api/usage/*` (usage-analytics design §5): the query surface every chart
 /// on the Usage page reads, so a chart cannot invent its own arithmetic.
 pub mod api_usage;
-mod audio;
-mod audio_lab;
+/// `pub(crate)`: the audio model CRUD (`ops::audio_model_set`) and the
+/// self-admin audio tools validate and browse through it.
+pub(crate) mod audio;
+pub(crate) mod audio_lab;
+pub(crate) use audio_lab::{library_clips, library_voices, voice_dir_is_library};
 mod aux;
 mod chat;
 /// Thread-scoped actions that rewrite a conversation: Keep, and the message
@@ -84,6 +87,12 @@ pub(crate) mod chat_temp;
 /// One assistant turn: `start_turn` (send, edit, regenerate, continue share
 /// it), the request it builds, and its persist step.
 mod chat_turn;
+#[doc(hidden)]
+pub use chat_turn::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnForTests};
+/// Chat voice (chat-voice design): what a thread's voice resolves to, and
+/// the checks its overrides go through. `pub(crate)` for its `bound` seam,
+/// which a realtime session bound to a thread works through (§8).
+pub(crate) mod chat_voice;
 /// Visible to [`crate::ops`] so the tool plane drives the same download,
 /// re-download and update-check paths as the dashboard rather than a parallel
 /// implementation of them.
@@ -153,6 +162,13 @@ fn labs_routes() -> Router<SharedState> {
             "/chat/api/threads/{id}/attachments",
             post(chat::upload_attachment),
         )
+        // Dictation (chat-voice design §5): the same rule, so a recording is
+        // bounded by `max_body_mb` (read in the handler), not cut at about
+        // 65 s by axum's 2 MiB default.
+        .route(
+            "/chat/api/threads/{id}/transcribe",
+            post(chat_voice::transcribe),
+        )
         .layer(axum::extract::DefaultBodyLimit::disable());
 
     Router::new()
@@ -187,6 +203,11 @@ fn labs_routes() -> Router<SharedState> {
         .route("/chat/api/threads/{id}/settings", post(chat::update_thread))
         .route("/chat/api/threads/{id}/delete", post(chat::delete_thread))
         .route("/chat/api/threads/{id}/send", post(chat::send))
+        .route("/chat/api/threads/{id}/voice/warm", post(chat_voice::warm))
+        .route(
+            "/chat/api/threads/{id}/speech/stop",
+            post(chat_voice::stop_speech),
+        )
         .route("/chat/api/threads/{id}/pin", post(chat::pin_thread))
         .route("/chat/api/threads/{id}/archive", post(chat::archive_thread))
         .route(
@@ -208,6 +229,10 @@ fn labs_routes() -> Router<SharedState> {
         .route(
             "/chat/api/threads/{id}/messages/{mid}/regenerate",
             post(chat_actions::regenerate_message),
+        )
+        .route(
+            "/chat/api/threads/{id}/messages/{mid}/speak",
+            post(chat_voice::speak),
         )
         .merge(attachments)
         .route(
@@ -247,6 +272,10 @@ fn labs_routes() -> Router<SharedState> {
         .route(
             "/audio-lab/api/refs/{name}/text",
             post(audio_lab::set_ref_text),
+        )
+        .route(
+            "/audio-lab/api/refs/{name}/transcribe",
+            post(audio_lab::transcribe_ref),
         )
         .route(
             "/audio-lab/api/speech",

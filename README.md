@@ -88,6 +88,7 @@ works remotely from a browser too.
 - **Local OpenAI and Anthropic APIs on one port.** `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/rerank`, `/v1/messages` and more. A client in either dialect can reach any chat model.
 - **Local or cloud behind one alias.** An alias points at a local model or at an OpenAI-compatible, Anthropic or Gemini upstream. Streaming, tool calls and reasoning get translated in both directions, so switching changes nothing for the client.
 - **Model capabilities in `/v1/models`.** Context length, output limit, modalities and reasoning controls, per model.
+- **Voice conversations.** `/v1/realtime` speaks OpenAI's Realtime protocol over a WebSocket and answers with a cascade of your own models: turn detection inside lmgw, speech to text, a chat model, text to speech. See [Voice conversations](#voice-conversations).
 - **MCP gateway.** Stdio servers (Podman-isolated by default) and HTTP servers sit behind one `/mcp` endpoint, each under its own tool prefix. For upstreams without `/v1/responses`, lmgw runs that API itself, MCP tool calls included.
 
 **Docs and knowledge**
@@ -97,12 +98,12 @@ works remotely from a browser too.
 **Operations**
 - **Usage and cost.** Every request is logged with its tokens, latency and price. Charts break it down by alias and key.
 - **API keys with policy.** A key can carry alias and tool scopes, a budget, rate limits and a concurrency cap.
-- **GPU hold.** A tray switch pauses local models while you need the card for something else. Requests can fall back to a cloud alias, and the `x-lmgw-fallback` header names the one that answered.
+- **GPU hold.** A tray switch pauses local models while you need the card for something else. Requests can fall back to a cloud alias, and the `x-lmgw-fallback` header names the one that answered. An audio model switched to the CPU (its row's "Runs on") takes no VRAM and keeps serving through the hold.
 
 **Dashboard and extensions**
 - **Desktop app, remote-ready.** The tray menu covers the GPU hold, starting and stopping models, and updates, and the dashboard opens in a native window. Bind lmgw to your LAN and the same dashboard works remotely in any browser.
 - **Rust from gateway to dashboard.** The dashboard is about 88,000 lines of Rust (Leptos), compiled to WebAssembly and built with cargo and Trunk. There's no npm anywhere in the tree. JavaScript is limited to vendored libraries for chat rendering (highlight.js, KaTeX, Mermaid, DOMPurify) and about 700 lines of glue for the window title bar and code blocks.
-- **Chat, plus labs for audio and images.** Chat with any alias, with attachments, knowledge bases and MCP tools. The Audio lab and Image lab are playgrounds for the speech and image routes.
+- **Chat, plus labs for audio and images.** Chat with any alias, with attachments, knowledge bases and MCP tools. Dictate into it, have replies read aloud, or talk with a conversation in voice mode, all on your own speech models (see [Voice in the Chat](#voice-in-the-chat)). The Audio lab and Image lab are playgrounds for the speech and image routes.
 - **Self-administration over MCP.** The `lmgw__*` tools on `/mcp/admin` let an agent such as Claude Code inspect and configure the gateway. They stay off until you enable their key, and start out read-only.
 - **Agents.** JSON manifests define chat presets, batch pipelines whose results you review before anything gets written, and container agents that bring their own UI.
 
@@ -156,7 +157,9 @@ glibc at least that recent. On anything older, build from source.
 
 ## Building from source
 
-On Fedora, install the toolchain and the Tauri build dependencies:
+On Fedora, install the toolchain and the Tauri build dependencies. The list
+follows Tauri's prerequisites, which is the only reason `openssl-devel` is on
+it: lmgw itself doesn't link OpenSSL.
 
 ```sh
 sudo dnf install rust cargo rust-std-static-wasm32-unknown-unknown \
@@ -222,6 +225,130 @@ access takes three changes. Set the bind address to `0.0.0.0:<port>` under
 network. Then open `http://<host>:<port>/` in any browser on your LAN and sign
 in with the `owner:dashboard` key, copied from **Usage → Keys & budgets**.
 
+### Voice conversations
+
+`ws://127.0.0.1:8787/v1/realtime` speaks OpenAI's GA Realtime protocol, so
+the OpenAI SDKs' realtime clients connect with the same base URL as above. No
+single model does the talking. lmgw runs a cascade: it detects the turns
+itself (Silero VAD, and Smart Turn for `semantic_vad`), transcribes each turn
+with a speech-to-text alias, answers with a chat alias and speaks the answer
+with a text-to-speech alias. Local models come first, and any stage can be a
+cloud alias instead.
+
+Set it up under **Settings → Realtime**. Pick the chat, speech-to-text and
+text-to-speech models and a voice. The **GPU memory** card adds up what the
+three keep resident together against what lmgw may use on the card, so you
+can see whether a larger chat model still leaves room for the voice. The same
+page holds the turn-detection and barge-in defaults, the voice prompt and the
+connection limits. Once both audio models are set, chat models list
+`/v1/realtime` in `/v1/models`. A **speech style** ("calm, warm, unhurried")
+goes to a text-to-speech model that reads one, or describes the voice of a
+voice-design model, and a session can set its own in
+`session.lmgw.speech_instructions`; for a model that makes sounds such as
+`[laughter]`, the chat model is told which ones it may write. A model that
+reads a style or plain instructions but makes no sounds (Qwen3 CustomVoice,
+Auk, MOSS-TTS) gets **delivery cues** instead: a `[laughing]` the chat model
+writes at the start of a sentence is sent with the style as how to say the
+rest of that sentence, never read out. Cues are a nudge, not a command: the
+words themselves weigh more, so a funny line laughs easily and a neutral one
+rarely. A cloud TTS gets the style but no cues (gpt-4o-mini-tts ignored
+them), unless its alias's `capabilities.speech` override declares
+`instructions: "style"`.
+
+Implemented are conversation sessions with audio or text output, PCM16 at
+24 kHz, `server_vad`, `semantic_vad` and manual turns, barge-in, and
+client-side function tools. WebRTC, SIP, ephemeral keys, transcription-only
+sessions and G.711 are not, and the API reference lists the details.
+
+### Voice in the Chat
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/chat-voice-panel.png"><img src="docs/screenshots/thumbs/chat-voice-panel.png" width="400" alt="Voice mode in the chat panel"></a><br>
+      <sub><b>Voice mode</b> · the panel in the composer's place</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/chat-voice-focus.png"><img src="docs/screenshots/thumbs/chat-voice-focus.png" width="400" alt="Voice mode in the focus view"></a><br>
+      <sub><b>Focus view</b> · the orb while the voice speaks</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="docs/screenshots/chat-voice-menu.png"><img src="docs/screenshots/thumbs/chat-voice-menu.png" width="400" alt="The composer's voice menu"></a><br>
+      <sub><b>Voice menu</b> · read-aloud and the window's audio devices</sub>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/settings-chat-voice.png"><img src="docs/screenshots/thumbs/settings-chat-voice.png" width="400" alt="The Voice group in Settings, Chat"></a><br>
+      <sub><b>Settings → Chat → Voice</b> · the defaults every thread inherits</sub>
+    </td>
+  </tr>
+</table>
+
+The Chat listens and speaks with your own speech models, through the same
+pipeline as `/v1/realtime`. **Settings → Chat → Voice** sets the defaults: the
+speech-to-text and text-to-speech models, the voice and its speech style, the
+language you speak (what speech recognition hears where the model takes a
+language) and the language replies are in (what the model answers in and the
+voice pronounces; empty follows the language you speak, so you can speak German
+and hear English), with a note where a model cannot take its language, whether replies are read aloud, and how voice
+mode hears the end of a turn (Smart Turn, silence, or push-to-talk). An empty model, voice or
+style falls back to **Settings → Realtime**, so a configured realtime cascade
+serves the Chat as well. A thread overrides any of these in its settings
+drawer, and a folder's defaults hand their overrides to the threads created in
+it. Nothing loads when a chat opens. The speech-to-text model loads when you
+press the microphone, the voice when something is first read, and all three
+models when voice mode starts. Each load goes through the same VRAM admission
+as a request, so a press may push an idle model out. Under the GPU hold the
+controls turn amber and say beforehand which fallback would hear or speak, and
+a fallback that answered is named on the message.
+
+- **Dictation.** Click the microphone to start and stop, or hold it, or hold
+  **Right Ctrl** anywhere on the page. The transcript lands at the caret for
+  editing and nothing is sent before Enter. Esc discards the recording.
+- **Read-aloud.** The speaker under a reply reads it. **Read replies aloud**
+  in the composer's voice menu reads each new reply as it streams, from its
+  first sentence. Code blocks and tables are not read out; the voice says
+  "Code block, rust." or "Table." instead.
+- **Voice mode.** The waveform button next to the microphone swaps the
+  composer for the voice panel. In automatic mode lmgw hears when you start
+  and stop, you can talk over the voice to interrupt it, and **Space** stops
+  the voice. In push-to-talk mode you hold **Space** (or the Talk button)
+  while you speak. **M** mutes and **Esc** leaves. An interrupted reply keeps
+  what you heard in the thread's history, and the unheard rest stays greyed
+  in the bubble. Captions follow the voice, chips show the chat, speech and
+  voice models (a change applies from the next turn), and each spoken reply
+  gets a timing line: speech recognition, first token, first audio, and the
+  models that served. The visualisation is a ribbon, an orb or a ring, picked
+  per window, and the focus view gives the panel the whole column. Turns are
+  written into the thread as you speak, so the conversation carries on in
+  text whenever you like. Voice mode is not available in Admin Chat threads,
+  though dictation and read-aloud are.
+- **Models that hear (experimental).** Set **Audio input in voice mode** to
+  *local* in Settings → Chat → Voice or in a thread's drawer, and a local
+  model lmgw runs that takes audio input (Gemma 4 with its audio projector,
+  say) gets each spoken turn as audio while the speech-to-text model
+  transcribes it beside. The reply starts at once but plays only when the
+  transcript is in: the transcript is what the thread keeps, and a turn that
+  turns out to be noise ends quietly. The voice panel's INPUT chip says
+  whether the model hears you or reads the transcript, and why. Cloud models
+  and servers lmgw does not run never get the audio, and no audio is stored.
+- **Audio devices.** The voice menu holds the microphone, the output and the
+  echo mode, kept per window. The default expects an input that cancels echo
+  itself, such as a USB mic array with echo cancellation or a PipeWire
+  echo-cancel source, with lmgw playing on the system default output, so
+  you get full duplex with barge-in. Browser echo cancellation, headphones
+  and half duplex are the other modes. In the app window the microphone needs
+  no prompt, and lmgw moves only its own playback to the chosen output
+  through PipeWire (that needs `pipewire-utils`; other programs stay where
+  they are). A browser asks for the microphone itself and offers it only in
+  a secure context (`localhost` or https, not a LAN address over plain http).
+  There the outputs are the browser's own: Chromium plays on the one you
+  choose, Firefox only on the system default.
+
+No audio is stored. A spoken turn is kept as text, together with how it was
+spoken.
+
 ### Network and access defaults
 
 - The gateway listens on **`127.0.0.1:8787`**, loopback only. **Settings → Network & access** changes that after a restart.
@@ -248,14 +375,64 @@ installed version.
 (cd crates/lmgw-ui && trunk build)   # dashboard bundle, read from disk by debug builds
 scripts/dev-instance.sh               # headless gateway on a scratch data dir, 127.0.0.1:8899
 (cd crates/lmgw-ui && trunk watch)    # rebuild the dashboard on change, no restart needed
-bash ci/check.sh                      # rustfmt, clippy (advisory) and the test suite
+bash ci/check.sh                      # rustfmt, clippy, the dashboard build and the test suite
+bash ci/check.sh --changed            # the fast tier: only what the diff against main touches
 ```
+
+`ci/check.sh` runs the suite under [cargo-nextest](https://nexte.st) when it is
+installed (`cargo install cargo-nextest --locked`): every test in a process of
+its own, known flakes retried and named in the summary (`.config/nextest.toml`
+says which and why). Without it the script falls back to `cargo test
+--workspace` and says so. `--changed [base]` prints what it selected and why:
+the touched crates' tests, the `tests/it` modules that `ci/it-map.toml` maps the
+diff to, and a smoke set; the dashboard build and the worklet check run only
+when their inputs changed. The narrowing needs nextest (without it, `--changed`
+runs the whole suite), and the full run stays the check before a merge.
+
+Linking with [mold](https://github.com/rui314/mold) is optional. Rust already
+links this target with its bundled rust-lld; mold took 1.2 s instead of 2.0 s
+for the `tests/it` binary, a small part of a rebuild. To use it, install
+`clang` and `mold` and create an untracked `.cargo/config.toml`:
+
+```toml
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+```
+
+Keep it out of git with `echo .cargo/config.toml >> .git/info/exclude`. It
+covers only the host target, so Trunk's wasm32 build keeps rust-lld, and the
+first build after adding or removing it rebuilds everything. Dev builds keep
+line tables only (see `Cargo.toml`), so backtraces name every file and line;
+for a debugger session, build with `CARGO_PROFILE_DEV_DEBUG=full`.
 
 `scripts/dev-instance.sh` runs a dev instance with its own container names and
 a scratch data directory, so your real data stays out of reach. `cargo tauri dev`
-starts the full desktop app instead. That one uses your real data directory
-and counts as the same app as an installed lmgw, so quit the installed one
-first.
+starts the full desktop app instead, and a debug build is always a dev run: it
+needs `LMGW_DATA_DIR` (a copy from `scripts/dev-copy.sh copy`, or a dir
+`scripts/dev-instance.sh` has booted once), refuses the installed app's data
+directory and a dir still on the production container prefix, runs beside the
+installed app rather than handing over to it, keeps its own webview store in
+`<data dir>/webview`, plays its audio as `lmgw-dev`, keeps its tray icon's files
+in `<data dir>/tray-icon`, builds its window only on a port it holds, and runs no
+updater. There is no switch to point a debug build at your real data.
+`scripts/dev-guards-check.sh` checks these refusals under a fake home directory.
+A dev copy does not resume the installed app's Hugging Face downloads, and a dev
+instance refuses to write into a models directory outside its own data dir:
+downloads, retries, deletes and voice-library edits answer `dev_shared_models_dir`,
+and an image start skips creating its LoRA and upscaler dirs there. To test those,
+point the copy's models dir at a folder inside its data dir. A row's own extra run
+args and an agent you re-enable in a copy still reach production's paths.
+
+Your real data dir belongs to the installed app (the RPM; on Arch, the release
+build `docs/amd-arch.md` describes). Do not run a work-in-progress build on it:
+`cargo run --release` opens `~/.local/share/lmgw` and applies that tree's
+database migrations, which are one-way, so an older installed app refuses to
+start afterwards.
+
+`scripts/shell-check.py` checks the window's microphone permission and the voice
+output routing in the real shell, on a hidden display, with mock microphones and
+a private audio graph.
 
 The workspace has six members:
 
@@ -271,6 +448,8 @@ The workspace has six members:
 Releases are tagged. `scripts/release.sh 0.4.0` sets the version, commits it
 and creates the tag `v0.4.0`, and the tag's message becomes the release notes.
 Pushing the tag builds the RPM and publishes the release.
+This repository receives one squashed commit per publish: `scripts/publish-github.sh`
+copies an audited, scanned tree onto the public tip, and `--tag` puts the release tag on it.
 
 ## License
 
@@ -282,4 +461,9 @@ a rebranded copy or a paid hosted gateway, needs a separate license from its
 author until the release it builds on turns two years old, and from then on
 that release is plain MIT. The dashboard bundles KaTeX, Mermaid, DOMPurify and
 highlight.js, each under its own license, in
-[crates/lmgw-ui/assets/vendor](crates/lmgw-ui/assets/vendor/).
+[crates/lmgw-ui/assets/vendor](crates/lmgw-ui/assets/vendor/). The gateway
+embeds the Silero VAD model (MIT) from
+[crates/lmgw-core/assets/realtime](crates/lmgw-core/assets/realtime/) and links
+ONNX Runtime (MIT) to run it. Their licences and ONNX Runtime's third-party
+notices are in that folder, and the RPM and AppImage install them under
+`/usr/share/licenses/lmgw/`.

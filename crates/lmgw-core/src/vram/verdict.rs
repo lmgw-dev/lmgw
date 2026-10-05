@@ -139,7 +139,7 @@ impl VramScheduler {
     }
 
     /// Is a container for this model up (or coming up) right now?
-    pub(super) fn is_up(&self, state: &SharedState, target: &Target) -> bool {
+    pub(crate) fn is_up(&self, state: &SharedState, target: &Target) -> bool {
         state.runtime().list().iter().any(|e| {
             e.class == target.class
                 && e.model_id == target.model_id
@@ -168,7 +168,30 @@ impl VramScheduler {
     /// What a registry entry is charged: the footprint of the rung its
     /// container was started at ([`RuntimeView::charge`], ladder design §5),
     /// or — on every row without a ladder — the row's own, exactly as before.
+    /// An audio container is charged the residency learned for the
+    /// configuration it was started with, which a class-level change may
+    /// have moved the row away from while it kept running
+    /// ([`super::residency::expected_for`]).
     pub(super) async fn footprint_of(&self, snap: &Snapshot, e: &RuntimeView) -> Option<Footprint> {
+        if e.class == Class::Audio {
+            let s = &snap.settings.audio;
+            let row = snap
+                .audio_models
+                .iter()
+                .find(|m| m.model_id == e.model_id)?;
+            let files = self.plans.audio(&s.models_dir, row).await;
+            // By the container's own placement: the row may have been
+            // switched since it started.
+            if e.placement == crate::runtime::Placement::Cpu {
+                return Some(super::on_cpu::cpu_footprint(files));
+            }
+            return Some(super::residency::expected_for(
+                files,
+                row,
+                s,
+                e.resident_key.as_deref(),
+            ));
+        }
         self.footprint_at(snap, e.class, &e.model_id, e.charge.as_ref())
             .await
     }
@@ -204,8 +227,10 @@ impl VramScheduler {
     }
 
     /// The footprint of a model this gateway configured, or `None` when no row
-    /// describes it. Nothing unknown is ever charged for on a guess.
-    pub(super) async fn footprint(
+    /// describes it. Nothing unknown is ever charged for on a guess. Also
+    /// what the realtime settings' VRAM budget sums (`ops::realtime_budget`),
+    /// so the figure shown there is the one admission charges.
+    pub(crate) async fn footprint(
         &self,
         snap: &Snapshot,
         class: Class,
@@ -223,7 +248,14 @@ impl VramScheduler {
             }
             Class::Audio => {
                 let row = snap.audio_models.iter().find(|m| m.model_id == model_id)?;
-                Some(self.plans.audio(&s.audio.models_dir, row).await)
+                // The plan is the files; what the row is charged is its
+                // learned residency once it has one (realtime design §9.4).
+                let files = self.plans.audio(&s.audio.models_dir, row).await;
+                if crate::runtime::audio::placement(row, &s.audio).is_gpu() {
+                    Some(super::residency::expected(files, row, &s.audio))
+                } else {
+                    Some(super::on_cpu::cpu_footprint(files))
+                }
             }
             Class::Image => {
                 let row = snap.image_models.iter().find(|m| m.model_id == model_id)?;

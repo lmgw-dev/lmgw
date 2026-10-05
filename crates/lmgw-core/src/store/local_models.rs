@@ -42,7 +42,7 @@ pub async fn insert_local_model(pool: &SqlitePool, m: &NewLocalModel) -> DbResul
     let params =
         serde_json::to_string(&m.params).map_err(|e| GatewayError::Internal(e.to_string()))?;
     let args = serde_json::to_string(&m.args).map_err(|e| GatewayError::Internal(e.to_string()))?;
-    let extra_run_args = to_json_opt(&m.extra_run_args)?;
+    let extra_run_args = run_args_json(&m.extra_run_args)?;
     let capabilities_override = to_json_opt(&m.capabilities_override)?;
     let ladder = to_json(&m.ladder)?;
     let res = sqlx::query(
@@ -74,7 +74,7 @@ pub async fn update_local_model(pool: &SqlitePool, id: i64, m: &NewLocalModel) -
     let params =
         serde_json::to_string(&m.params).map_err(|e| GatewayError::Internal(e.to_string()))?;
     let args = serde_json::to_string(&m.args).map_err(|e| GatewayError::Internal(e.to_string()))?;
-    let extra_run_args = to_json_opt(&m.extra_run_args)?;
+    let extra_run_args = run_args_json(&m.extra_run_args)?;
     let capabilities_override = to_json_opt(&m.capabilities_override)?;
     let ladder = to_json(&m.ladder)?;
     sqlx::query(

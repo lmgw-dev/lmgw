@@ -73,7 +73,7 @@ mod stop;
 use acquire::Started;
 pub use command::{
     ephemeral_port, llama_server_candidates, throwaway_args, without_gpus, CmdOutput,
-    CommandRunner, ImageFacts, NoRuntime, PortAllocator, TokioRunner, HIDE_GPUS,
+    CommandRunner, ImageFacts, NoRuntime, PortAllocator, PortRetry, TokioRunner, HIDE_GPUS,
 };
 pub use errors::RuntimeError;
 pub use inputs::{AcquireSpec, StartSpec};

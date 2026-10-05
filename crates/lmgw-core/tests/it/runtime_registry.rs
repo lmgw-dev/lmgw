@@ -314,7 +314,7 @@ fn runtime(class: Class, model_id: &str) -> ModelRuntime {
         enabled: true,
         llama: Some(LlamaArgs::Chat {
             gguf_path: format!("{model_id}.gguf"),
-            params: LlamaParams::default(),
+            params: Box::default(),
             args: vec![],
         }),
         audio: None,
@@ -335,6 +335,7 @@ fn spec<'a>(rt: &'a ModelRuntime, load_ms: u64) -> AcquireSpec<'a> {
         container_prefix: "lmgw",
         models_dir: "/srv/models",
         data_dir: Path::new("/nonexistent/lmgw-test-data-dir"),
+        may_write_models_dir: true,
         load_timeout: Duration::from_millis(load_ms),
         stop_timeout: Duration::from_millis(500),
     }
@@ -974,12 +975,12 @@ fn ladder_runtime(model_id: &str, index: usize) -> ModelRuntime {
     let mut rt = runtime(Class::Chat, model_id);
     rt.llama = Some(LlamaArgs::Chat {
         gguf_path: format!("{model_id}-{file}.gguf"),
-        params: LlamaParams {
+        params: Box::new(LlamaParams {
             ctx_size: Some(ctx),
             parallel: Some(1),
             n_predict: Some(16),
             ..Default::default()
-        },
+        }),
         args: vec![],
     });
     rt.rung = Some(RungPos { index, of: 2 });
@@ -2116,6 +2117,7 @@ fn image_spec<'a>(rt: &'a ModelRuntime, models_dir: &'a str, load_ms: u64) -> Ac
         container_prefix: "lmgw",
         models_dir,
         data_dir: Path::new("/nonexistent/lmgw-test-data-dir"),
+        may_write_models_dir: true,
         load_timeout: Duration::from_millis(load_ms),
         stop_timeout: Duration::from_millis(500),
     }

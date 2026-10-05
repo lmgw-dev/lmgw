@@ -69,6 +69,11 @@ pub struct AudioSettingsDto {
     pub public_prefix: String,
     /// See [`RouterSettingsDto::request_timeout_seconds`].
     pub request_timeout_seconds: u64,
+    /// Local speech-to-text model for voice-library clip transcripts (empty =
+    /// none, nothing transcribed automatically).
+    pub voice_transcribe_alias: String,
+    /// `pinned` | `latest`: what an audio catalog download takes.
+    pub catalog_revision: &'static str,
 }
 
 impl From<&AudioSettings> for AudioSettingsDto {
@@ -88,6 +93,8 @@ impl From<&AudioSettings> for AudioSettingsDto {
             extra_run_args: a.extra_run_args.clone(),
             public_prefix: a.public_prefix.clone(),
             request_timeout_seconds: a.request_timeout_seconds,
+            voice_transcribe_alias: a.voice_transcribe_alias.clone(),
+            catalog_revision: a.catalog_revision.as_str(),
         }
     }
 }
@@ -184,6 +191,19 @@ pub async fn settings_full(State(st): State<SharedState>) -> Response {
     // built-in one beside it: the page's Reset puts that back in the box.
     body["chat_pdf_mode"] = json!(s.chat_pdf_mode);
     body["chat_stt_alias"] = json!(s.chat_stt_alias);
+    // The Chat's Voice group (chat-voice design §2.1).
+    body["chat_tts_alias"] = json!(s.chat_tts_alias);
+    body["chat_voice"] = json!(s.chat_voice);
+    body["chat_speech_style"] = json!(s.chat_speech_style);
+    body["chat_voice_language"] = json!(s.chat_voice_language);
+    body["chat_voice_reply_language"] = json!(s.chat_voice_reply_language);
+    // Where the saved languages do not reach a speech model as set — the
+    // spoken one the ASR, the reply's the TTS — said beside the fields
+    // (chat-voice design §2.1).
+    body["chat_voice_language_notes"] = json!(super::chat_voice::language_notes(&st).await);
+    body["chat_read_aloud"] = json!(s.chat_read_aloud);
+    body["chat_turn_detection"] = json!(s.chat_turn_detection);
+    body["chat_voice_audio_input"] = json!(s.chat_voice_audio_input);
     body["chat_kb_budget_tokens"] = json!(s.chat_kb_budget_tokens);
     body["chat_system_prompt"] = json!(s.default_chat_prompt());
     body["chat_system_prompt_builtin"] = json!(crate::config::BUILTIN_CHAT_SYSTEM_PROMPT);
@@ -198,6 +218,15 @@ pub async fn settings_full(State(st): State<SharedState>) -> Response {
     body["builds_dir_warning"] = json!(crate::backends::paths::tmpfs_refusal(&builds_dir));
     body["forge_tokens"] = crate::ops::redact_map(&s.forge_tokens);
     body["build_update_check_hours"] = json!(s.build_update_check_hours);
+    body["realtime"] = json!(crate::ops::realtime_view(&s.realtime));
+    // A derived fact, like the built-in prompt above: what an audio row on
+    // the CPU runs with when it names no thread count.
+    let cpu = crate::host::cpu();
+    body["host_cpu"] = json!({
+        "physical_cores": cpu.physical_cores,
+        "logical_cpus": cpu.logical_cpus,
+        "source": cpu.source,
+    });
     Json(body).into_response()
 }
 
@@ -250,6 +279,11 @@ pub struct AudioSettingsPatch {
     extra_run_args: Option<Vec<String>>,
     public_prefix: Option<String>,
     request_timeout_seconds: Option<u64>,
+    /// Checked by the save (a local `asr` row, or empty), not by `apply`.
+    voice_transcribe_alias: Option<String>,
+    /// `pinned` | `latest`. Set by the save, not by `apply`: it is not part
+    /// of the class's container definition.
+    catalog_revision: Option<String>,
 }
 
 impl AudioSettingsPatch {
@@ -260,8 +294,11 @@ impl AudioSettingsPatch {
         if let Some(v) = self.models_dir {
             a.models_dir = v;
         }
+        // Trimmed: audio.cpp matches the word as written, so a stray space
+        // would stop every inheriting container from starting, and lmgw's
+        // CPU predicate would not read it as `cpu` either.
         if let Some(v) = self.backend {
-            a.backend = v;
+            a.backend = v.trim().to_string();
         }
         if let Some(v) = self.device {
             a.device = v;
@@ -372,8 +409,36 @@ pub struct SettingsFullPatch {
     chat_system_prompt: Option<String>,
     /// How a text PDF attached in Chat starts out: `text` | `images` | `ask`.
     chat_pdf_mode: Option<String>,
-    /// Speech-to-text alias for Chat audio attachments; `""` = none.
+    /// The Chat's speech-to-text alias; `""` = `realtime.asr_alias`.
     chat_stt_alias: Option<String>,
+    // The Chat's Voice group (chat-voice design §2.1), checked by
+    // `ops::apply_chat_voice` as the self-admin path checks it.
+    /// The Chat's text-to-speech alias (task `tts` or `vdes`); `""` =
+    /// `realtime.tts_alias`.
+    chat_tts_alias: Option<String>,
+    /// The Chat's voice, a voice of the Chat's text-to-speech model; `""` =
+    /// none named, so realtime's chain decides (`realtime.default_voice`,
+    /// then the model's default).
+    chat_voice: Option<String>,
+    /// What the Chat's voice is told (a speaking style, or a voice-design
+    /// description); `""` = `realtime.speech_instructions`.
+    chat_speech_style: Option<String>,
+    /// The language the user speaks, an ISO 639-1 code the speech-to-text
+    /// model is told; `""` = none.
+    chat_voice_language: Option<String>,
+    /// The language replies are in, an ISO 639-1 code: the model answers in
+    /// it and the text-to-speech model speaks it; `""` = the spoken one.
+    chat_voice_reply_language: Option<String>,
+    /// Read every Chat reply aloud as it streams; a thread can override it.
+    chat_read_aloud: Option<bool>,
+    /// How voice mode detects the end of a turn: `semantic_vad` |
+    /// `server_vad` | `push_to_talk`.
+    chat_turn_detection: Option<String>,
+    /// `off` | `local`: whether a voice turn goes to the chat model as audio
+    /// when it is a local model lmgw runs that takes audio input
+    /// (experimental; a cloud chat model never gets audio); a thread can
+    /// override it.
+    chat_voice_audio_input: Option<String>,
     /// Tokens of knowledge-base excerpts one Chat turn may carry; above 0.
     chat_kb_budget_tokens: Option<i64>,
     self_admin: Option<String>,
@@ -427,6 +492,9 @@ pub struct SettingsFullPatch {
     aux_router: Option<RouterSettingsPatch>,
     audio: Option<AudioSettingsPatch>,
     image: Option<ImageSettingsPatch>,
+    /// `GET /v1/realtime`'s settings (realtime design §12) — the same patch
+    /// `settings_set` takes, with the same checks.
+    realtime: Option<crate::ops::RealtimeSettingsPatch>,
 }
 
 /// VRAM admission control (§9b). Every field is optional so one knob moves
@@ -624,9 +692,11 @@ fn secret(current: &mut String, supplied: Option<String>, clear: Option<bool>) {
 /// definitions included.
 ///
 /// Answers `Result<Value, Refusal>` rather than the plane's usual
-/// `Result<Value, String>` for the reason the credential ops do (§3.12): one of
-/// its refusals carries a code of its own (`origin_suffix_shadows_gateway`,
-/// origins §4.1). Everything else here is still the flat `400 op_failed` every
+/// `Result<Value, String>` for the reason the credential ops do (§3.12): two of
+/// its refusals carry a code of their own (`origin_suffix_shadows_gateway`,
+/// origins §4.1; `dev_production_prefix`, a dev instance asked to take the
+/// production container prefix, chat-voice WP11 review m1). Everything else
+/// here is still the flat `400 op_failed` every
 /// op-level input error is — which is exactly what [`Refusal`]'s `From<String>`
 /// renders — so nothing else about this surface moved.
 pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result<Value, Refusal> {
@@ -717,6 +787,21 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.chat_kb_budget_tokens {
         s.chat_kb_budget_tokens = crate::ops::validate_chat_kb_budget(v)?;
     }
+    crate::ops::apply_chat_voice(
+        st,
+        &mut s,
+        crate::ops::ChatVoicePatch {
+            chat_tts_alias: p.chat_tts_alias,
+            chat_voice: p.chat_voice,
+            chat_speech_style: p.chat_speech_style,
+            chat_voice_language: p.chat_voice_language,
+            chat_voice_reply_language: p.chat_voice_reply_language,
+            chat_read_aloud: p.chat_read_aloud,
+            chat_turn_detection: p.chat_turn_detection,
+            chat_voice_audio_input: p.chat_voice_audio_input,
+        },
+    )
+    .await?;
     if let Some(v) = p.self_admin {
         s.self_admin =
             SelfAdmin::parse(&v).ok_or_else(|| format!("unknown self-admin mode '{v}'"))?;
@@ -779,6 +864,9 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.vram {
         v.apply(&mut s.vram)?;
     }
+    if let Some(r) = p.realtime {
+        crate::ops::apply_realtime(st, &mut s.realtime, r).await?;
+    }
     if let Some(h) = p.hold {
         if let Some(v) = h.fallback_alias {
             let v = v.trim().to_string();
@@ -791,6 +879,17 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     }
     if let Some(v) = p.container_prefix {
         let v = validate_container_prefix(&v)?;
+        // The boot refusal's rule, on the write as well (chat-voice WP11
+        // review m1): a dev instance holds production's model ids, so its
+        // next start under the production prefix would `--replace` the
+        // installed app's live container of the same name.
+        if let Some(why) = crate::config::dev_prefix_refusal(st.dev(), &v) {
+            return Err(Refusal {
+                status: StatusCode::BAD_REQUEST,
+                code: "dev_production_prefix",
+                message: why,
+            });
+        }
         if v != s.container_prefix {
             // Every managed container's *name* and its `lmgw.instance` label
             // are rendered from this prefix (§3.3), and both are fixed at
@@ -929,13 +1028,32 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
                 .into(),
         );
     }
-    if let Some(a) = p.audio {
+    if let Some(mut a) = p.audio {
+        // Not part of the class's container definition: checked here (a
+        // local speech-to-text row — the clips are the owner's voice), and no
+        // restart note when it is all that changed.
+        if let Some(v) = a.voice_transcribe_alias.take() {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                crate::proxy::local_asr_row(&st.snapshot(), &v)
+                    .map_err(|e| format!("audio.voice_transcribe_alias: {e}"))?;
+            }
+            s.audio.voice_transcribe_alias = v;
+        }
+        // What a catalog download takes: no container reads it, so no
+        // restart note either.
+        if let Some(v) = a.catalog_revision.take() {
+            s.audio.catalog_revision = crate::config::CatalogRevision::parse(&v)?;
+        }
+        let before = serde_json::to_value(&s.audio).ok();
         a.apply(&mut s.audio);
-        notes.push(
-            "audio class definition changed — running audio models keep the previous one until \
-             they restart"
-                .into(),
-        );
+        if serde_json::to_value(&s.audio).ok() != before {
+            notes.push(
+                "audio class definition changed — running audio models keep the previous one \
+                 until they restart"
+                    .into(),
+            );
+        }
     }
     if let Some(i) = p.image {
         i.apply(&mut s.image);
@@ -952,16 +1070,23 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
         // start creates them too (`render_spec`), which is what covers a
         // directory deleted between two starts; this covers the operator who
         // looks at the tree before ever starting anything.
-        if !s.image.models_dir.trim().is_empty() {
-            let root = s.image.models_dir.clone();
-            for (_, sub) in crate::runtime::image::DEFAULT_DIRS {
-                if let Err(e) = std::fs::create_dir_all(std::path::Path::new(&root).join(sub)) {
-                    // Reported, never fatal: an unwritable path is worth
-                    // saving the setting for (the owner may be about to mount
-                    // it) and worth naming, because the first start will fail
-                    // on it otherwise with sd-server's own filesystem
-                    // exception instead of this sentence.
-                    notes.push(format!("could not create {root}/{sub}: {e}"));
+        let root = s.image.models_dir.clone();
+        if !root.trim().is_empty() {
+            // A dev instance on a models dir outside its data dir saves the
+            // setting, creates nothing there, and says so.
+            if let Err(why) = st.refuse_shared_models_dir(std::path::Path::new(&root)) {
+                notes.push(format!("the loras/upscalers dirs were not created: {why}"));
+            } else {
+                for (_, sub) in crate::runtime::image::DEFAULT_DIRS {
+                    let dir = std::path::Path::new(&root).join(sub);
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        // Reported, never fatal: an unwritable path is worth
+                        // saving the setting for (the owner may be about to
+                        // mount it) and worth naming, because the first start
+                        // will fail on it otherwise with sd-server's own
+                        // filesystem exception instead of this sentence.
+                        notes.push(format!("could not create {root}/{sub}: {e}"));
+                    }
                 }
             }
         }

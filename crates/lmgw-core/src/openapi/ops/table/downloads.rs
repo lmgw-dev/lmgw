@@ -71,11 +71,16 @@ pub(super) const OPS: &[OpDoc] = &[
         summary: "Refresh the audio.cpp model catalog, or queue one package's download",
         description: Some(
             "The two catalog actions of the Audio lab, as one op: 'refresh' live-fetches \
-             audio.cpp's model_specs catalog and persists the snapshot (the only network call \
-             in this domain); 'download' queues one package's files (family + package) through \
-             the shared Hugging Face download queue, target audio.",
+             audio.cpp's model_specs catalog, lists each package repo on Hugging Face once \
+             (which spec files are published — a package's unpublished_files), and persists \
+             the snapshot (the only network calls in this domain; a spec file or repo listing \
+             that fails is one of its warnings, not a failed refresh); 'download' queues the files one package lacks (family + \
+             package) through the shared Hugging Face download queue, target audio — every \
+             file for a package never downloaded, only the missing ones for one the spec grew \
+             since (the catalog's missing_files; 'complete install' in the Audio catalog). \
+             The same function lmgw__audio_catalog calls.",
         ),
-        tool: None,
+        tool: Some("lmgw__audio_catalog"),
         args: OpArgs::Hand(args::audio_catalog),
         response: Resp::Untyped(
             "the two actions answer different shapes — a refresh summary, or a queued-download \

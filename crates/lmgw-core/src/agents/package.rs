@@ -329,7 +329,7 @@ async fn rm_f(spawner: &Arc<dyn Spawner>, name: &str) {
 pub const RUN_LABEL_PACKAGE: &str = "package";
 
 /// What a package read's run directory is called, so
-/// [`container::reconcile`]'s sweep can recognise one.
+/// [`container::reconcile()`]'s sweep can recognise one.
 pub const RUN_DIR_PREFIX: &str = "pkg-";
 
 /// `lmgw-pkg-<rand>` — the throwaway container's name (§3.4).

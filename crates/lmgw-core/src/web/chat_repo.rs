@@ -21,14 +21,14 @@
 //! [`ChatRepo::save_reply`] / [`ChatRepo::save_continue`], under the lock the
 //! turn's ticket holds.
 
-use super::chat_live::SaveGuard;
+use super::chat_live::{HistoryWrite, SaveGuard};
 use super::chat_temp::TakeForKeep;
 use crate::error::GatewayError;
 use crate::state::AppState;
 use crate::store::{
     self, ChatAttachmentFull, ChatAttachmentMeta, ChatContext, ChatMessageRow, ChatMessageUpdate,
-    ChatReply, ChatThread, ContinueSave, DbResult, DeleteAttachmentOutcome, NewAttachment,
-    SendMessageOutcome, SetModeOutcome,
+    ChatReply, ChatThread, ContinueSave, DbResult, DeleteAttachmentOutcome, MessageVoice,
+    NewAttachment, SeedWrite, SendMessageOutcome, SetModeOutcome, ThreadVoice,
 };
 
 /// What [`ChatRepo::keep`] did.
@@ -38,6 +38,9 @@ pub(super) enum KeepOutcome {
     Kept(i64),
     /// Another Keep of the same thread is running.
     Busy,
+    /// A realtime session is bound to it (chat-voice design §8.1): it
+    /// writes by the temporary id, so Keep waits until voice mode ends.
+    VoiceActive,
     NotFound,
 }
 
@@ -154,6 +157,9 @@ impl ChatRepo {
     /// refused rather than storing it twice (review R1 finding 8). A reply
     /// still being written into it is cancelled.
     pub(super) async fn keep(s: &AppState, id: i64) -> DbResult<KeepOutcome> {
+        if s.chat_live.voice_bound(id) {
+            return Ok(KeepOutcome::VoiceActive);
+        }
         let _write = s.chat_live.discard(id).await;
         let t = match s.chat_temp.take_for_keep(id) {
             TakeForKeep::Taken(t) => t,
@@ -183,15 +189,32 @@ impl ChatRepo {
         Ok(KeepOutcome::Kept(new_id))
     }
 
-    /// Write the editable settings `t` holds to the thread `t.id`.
-    pub(super) async fn update_settings(self, s: &AppState, t: &ChatThread) -> DbResult<()> {
+    /// Draw the thread's TTS seed on first use (chat-voice §2.2, §6.1):
+    /// `drawn` is stored only where none is, so two first uses keep one. The
+    /// seed in effect.
+    pub(super) async fn draw_seed(self, s: &AppState, id: i64, drawn: u32) -> DbResult<u32> {
         match self {
-            Self::Temp => s
-                .chat_temp
-                .update_settings(t)
-                .then_some(())
-                .ok_or_else(gone),
-            Self::Db => store::update_chat_thread_settings(&s.db, t).await,
+            Self::Temp => s.chat_temp.draw_seed(id, drawn).ok_or_else(gone),
+            Self::Db => store::draw_chat_thread_seed(&s.db, id, drawn)
+                .await?
+                .ok_or_else(|| GatewayError::NotFound("thread not found".into())),
+        }
+    }
+
+    /// Write the editable settings `t` holds to the thread `t.id`; `seed`
+    /// says whether the stored seed stays (chat-voice §2.2). The voice as
+    /// stored.
+    pub(super) async fn update_settings(
+        self,
+        s: &AppState,
+        t: &ChatThread,
+        seed: SeedWrite,
+    ) -> DbResult<ThreadVoice> {
+        match self {
+            Self::Temp => s.chat_temp.update_settings(t, seed).ok_or_else(gone),
+            Self::Db => store::update_chat_thread_settings(&s.db, t, seed)
+                .await?
+                .ok_or_else(|| GatewayError::NotFound("thread not found".into())),
         }
     }
 
@@ -267,7 +290,8 @@ impl ChatRepo {
     }
 
     /// A user turn with its drafts bound to it, all or nothing, naming the
-    /// knowledge bases picked for it alone (`kb_refs`).
+    /// knowledge bases picked for it alone (`kb_refs`) and, for a spoken
+    /// turn, how it was spoken (`voice`, chat-voice design §3).
     pub(super) async fn append_user_message(
         self,
         s: &AppState,
@@ -275,20 +299,53 @@ impl ChatRepo {
         content: &str,
         attachment_ids: &[i64],
         kb_refs: &[i64],
+        voice: Option<&MessageVoice>,
     ) -> DbResult<SendMessageOutcome> {
         let _write = s.chat_live.write(thread_id).await;
         match self {
             Self::Temp => s
                 .chat_temp
-                .append_user_message(thread_id, content, attachment_ids, kb_refs)
+                .append_user_message(thread_id, content, attachment_ids, kb_refs, voice)
                 .ok_or_else(gone),
             Self::Db => {
-                store::append_user_message_with_kb_refs(
+                store::append_user_message_with_voice(
                     &s.db,
                     thread_id,
                     content,
                     attachment_ids,
                     kb_refs,
+                    voice,
+                )
+                .await
+            }
+        }
+    }
+
+    /// A heard voice turn's user row (voice-audio-input design §3.3), under
+    /// the thread's conditional write `_proof` (`LiveTurns::write_if`): an
+    /// insert that moves no generation, so the reply of the turn that heard
+    /// it is still saved after it.
+    pub(super) async fn append_spoken_user(
+        self,
+        s: &AppState,
+        _proof: &HistoryWrite,
+        thread_id: i64,
+        content: &str,
+        voice: &MessageVoice,
+    ) -> DbResult<SendMessageOutcome> {
+        match self {
+            Self::Temp => s
+                .chat_temp
+                .append_user_message(thread_id, content, &[], &[], Some(voice))
+                .ok_or_else(gone),
+            Self::Db => {
+                store::append_user_message_with_voice(
+                    &s.db,
+                    thread_id,
+                    content,
+                    &[],
+                    &[],
+                    Some(voice),
                 )
                 .await
             }
@@ -397,6 +454,54 @@ impl ChatRepo {
         id: i64,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
+        match self {
+            Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
+            Self::Db => store::delete_chat_message(&s.db, thread_id, id).await,
+        }
+    }
+
+    /// Annotate a spoken reply (chat-voice design §8.3): its `voice` alone.
+    /// Not a rewrite of the history: no generation moves, no turn is
+    /// cancelled. `false` when it is not in this thread.
+    pub(super) async fn set_message_voice(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        id: i64,
+        voice: &MessageVoice,
+    ) -> DbResult<bool> {
+        match self {
+            Self::Temp => Ok(s.chat_temp.set_message_voice(thread_id, id, voice)),
+            Self::Db => store::set_chat_message_voice(&s.db, thread_id, id, voice).await,
+        }
+    }
+
+    /// Cut a spoken reply to what was heard (§8.3), under the thread's
+    /// conditional write `_proof` (`LiveTurns::write_if`).
+    pub(super) async fn cut_reply(
+        self,
+        s: &AppState,
+        _proof: &HistoryWrite,
+        thread_id: i64,
+        id: i64,
+        content: &str,
+        voice: &MessageVoice,
+    ) -> DbResult<bool> {
+        match self {
+            Self::Temp => Ok(s.chat_temp.cut_reply(thread_id, id, content, voice)),
+            Self::Db => store::cut_chat_reply(&s.db, thread_id, id, content, voice).await,
+        }
+    }
+
+    /// Delete a spoken reply nobody heard (§8.3), under the thread's
+    /// conditional write `_proof`.
+    pub(super) async fn delete_unheard(
+        self,
+        s: &AppState,
+        _proof: &HistoryWrite,
+        thread_id: i64,
+        id: i64,
+    ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
             Self::Db => store::delete_chat_message(&s.db, thread_id, id).await,
@@ -567,5 +672,38 @@ impl ChatRepo {
             Self::Temp => Ok(s.chat_temp.delete_draft(id)),
             Self::Db => store::delete_draft_chat_attachment(&s.db, id).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings write onto a thread that went away after it was read is
+    /// a `NotFound`, which the settings route answers as its 404 — on both
+    /// backings.
+    #[tokio::test]
+    async fn a_settings_write_onto_a_vanished_thread_is_not_found() {
+        let state = AppState::init_for_tests().await.unwrap();
+        let tid = store::create_chat_thread(&state.db, "m", "chat")
+            .await
+            .unwrap();
+        let repo = ChatRepo::of(tid);
+        let thread = repo.thread(&state, tid).await.unwrap().unwrap();
+        repo.delete_thread(&state, tid).await.unwrap();
+        let written = repo.update_settings(&state, &thread, SeedWrite::Keep).await;
+        assert!(
+            matches!(written, Err(GatewayError::NotFound(_))),
+            "{written:?}"
+        );
+
+        let gone = ChatThread { id: -7, ..thread };
+        let written = ChatRepo::of(gone.id)
+            .update_settings(&state, &gone, SeedWrite::Keep)
+            .await;
+        assert!(
+            matches!(written, Err(GatewayError::NotFound(_))),
+            "{written:?}"
+        );
     }
 }

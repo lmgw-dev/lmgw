@@ -9,15 +9,16 @@ import asyncio
 import base64
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.request
 
 import websockets
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chrome_profile  # noqa: E402
 
 
 async def main() -> None:
@@ -34,6 +35,7 @@ async def main() -> None:
 
     # /tmp is a tmpfs on Fedora, so a profile left behind costs RAM, not disk.
     profile = tempfile.mkdtemp(prefix="lmgw-shot-")
+    tmp_before = chrome_profile.snapshot()
     chrome = subprocess.Popen(
         [
             "google-chrome",
@@ -92,13 +94,7 @@ async def main() -> None:
     finally:
         chrome.terminate()
         chrome.wait()
-        # Chrome's network service child flushes into the profile after the
-        # browser process exits, so one rmtree can race it.
-        for _ in range(5):
-            shutil.rmtree(profile, ignore_errors=True)
-            if not os.path.exists(profile):
-                break
-            time.sleep(0.2)
+        chrome_profile.remove(profile, tmp_before)
 
 
 asyncio.run(asyncio.wait_for(main(), timeout=60))

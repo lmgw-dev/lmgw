@@ -186,8 +186,10 @@ async fn base64_is_encoded_by_the_gateway() {
         .decode(b64)
         .unwrap();
     let floats: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     assert_eq!(floats, vec![0.25, -1.5, 3.0]);
     assert!(

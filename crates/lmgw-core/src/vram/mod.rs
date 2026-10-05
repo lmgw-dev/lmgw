@@ -61,6 +61,7 @@ mod climb;
 pub mod nvml;
 pub mod peak;
 pub mod plan;
+pub mod residency;
 
 pub use background::{join, start_background, BackgroundStart, Restart};
 pub use climb::{climb, climb_for, Climbed};
@@ -88,6 +89,10 @@ mod local_hold;
 pub use local_hold::*;
 mod admission;
 pub use admission::*;
+mod beside;
+pub(crate) use beside::Crowded;
+mod on_cpu;
+pub(crate) use on_cpu::held_container_fallback;
 mod queue;
 mod verdict;
 pub(crate) use queue::*;

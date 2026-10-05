@@ -172,7 +172,7 @@ pub(super) fn ErrorsCard(
                         charts::nice_ticks_int(max, 3),
                         &|v| format!("{}", v.round()),
                     );
-                    let bw = (p.band_w(n) * 0.6).min(16.0).max(1.0);
+                    let bw = (p.band_w(n) * 0.6).clamp(1.0, 16.0);
                     let cols: Vec<AnyView> = (0..n)
                         .map(|b| {
                             let x = p.band_x(b, n) + (p.band_w(n) - bw) / 2.0;

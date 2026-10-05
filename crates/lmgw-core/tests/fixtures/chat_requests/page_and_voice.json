@@ -1,0 +1,69 @@
+[
+  {
+    "messages": [
+      {
+        "content": "Be brief.",
+        "role": "system"
+      },
+      {
+        "content": "hi",
+        "role": "user"
+      },
+      {
+        "content": "Hallo!",
+        "role": "assistant"
+      },
+      {
+        "content": "Wie spät ist es?",
+        "role": "user"
+      },
+      {
+        "content": "Das weiß ich leider nicht.",
+        "role": "assistant"
+      },
+      {
+        "content": "Und morgen?",
+        "role": "user"
+      }
+    ],
+    "model": "tgt",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  {
+    "messages": [
+      {
+        "content": "Be brief.\n\nThis reply is spoken aloud. For it, the instructions below replace any guidance above about formatting, Markdown, tables and code. Your replies are spoken aloud, so keep them short and conversational: use plain sentences, and never use markdown, lists, tables or code. The user speaks German and hears your reply in a German voice, so answer in German unless the user asks for another language. You do not know the current date or time unless the conversation says it.",
+        "role": "system"
+      },
+      {
+        "content": "hi",
+        "role": "user"
+      },
+      {
+        "content": "Hallo!",
+        "role": "assistant"
+      },
+      {
+        "content": "Wie spät ist es?",
+        "role": "user"
+      },
+      {
+        "content": "Das weiß ich leider nicht.",
+        "role": "assistant"
+      },
+      {
+        "content": "Und morgen?",
+        "role": "user"
+      }
+    ],
+    "model": "tgt",
+    "reasoning_effort": "none",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+]

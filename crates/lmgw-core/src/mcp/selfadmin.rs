@@ -50,6 +50,10 @@ mod candidate_alias;
 /// the same file-size reason; the tools themselves are `catalog/bench.rs`.
 mod bench;
 
+/// `lmgw__audio_catalog` / `lmgw__audio_model_set` dispatch (realtime fix
+/// package B7) — the tools themselves are `catalog/audio.rs`.
+mod audio;
+
 /// Prefix every tool in this module carries — the namespace reserved from
 /// southbound servers by [`super::RESERVED_TOOL_NAMESPACE`].
 pub const PREFIX: &str = super::RESERVED_TOOL_NAMESPACE;
@@ -88,7 +92,7 @@ fn enum_p(desc: &str, values: &[&str]) -> Value {
 /// every argument in this module stays a flat scalar (module doc: "no
 /// nested objects, no arrays"; pinned by `all_parameters_are_flat_scalars`),
 /// the same "structured value, flat schema" shape `capabilities_override`
-/// already uses. `hoist_ladder_arg` parses it, before `patch_from_args`'s
+/// already uses. `hoist_json_arg` parses it, before `patch_from_args`'s
 /// generic deserialize, into the real `Vec<Rung>`
 /// `LocalModelPatch.ladder` expects — unlike `capabilities_override`
 /// (`Option<Value>`, parsed downstream at save time), `ladder`'s patch field
@@ -226,19 +230,22 @@ fn arg_f64(args: &Map<String, Value>, key: &str) -> Result<Option<f64>, String> 
     }
 }
 
-/// `ladder`'s one piece of pre-processing (ladder design §6, §8 WP6): the
-/// schema declares it a JSON-encoded string (`ladder_p`'s doc), but
-/// `LocalModelPatch.ladder` is already `Option<Vec<Rung>>`, not `Value` —
-/// unlike `capabilities_override`, there is no later point where a string
-/// still parses into the right shape. So this runs before
-/// `ops::patch_from_args`'s generic deserialize, turning a JSON string into
-/// the real array it decodes to; a caller that sends the array directly
-/// anyway is accepted too, the same leniency `parse_capabilities_override`
-/// extends the other way (an object where a string is declared). Absent or
-/// already non-string is left alone — that includes `Value::Array`, `Null`
-/// and a caller's mistake, which `patch_from_args` then reports on its own.
-fn hoist_ladder_arg(args: &mut Map<String, Value>) -> Result<(), String> {
-    let Some(Value::String(s)) = args.get("ladder") else {
+/// The one piece of pre-processing a structured argument needs: `ladder`
+/// (ladder design §6, §8 WP6) and `lmgw__settings_set`'s `realtime`
+/// (realtime design §12). The schema declares each a JSON-encoded string
+/// (`ladder_p`'s doc), but the patch field is already typed —
+/// `LocalModelPatch.ladder` an `Option<Vec<Rung>>`, `SettingsPatch.realtime`
+/// an `Option<RealtimeSettingsPatch>`, not `Value` — so unlike
+/// `capabilities_override` there is no later point where a string still
+/// parses into the right shape. So this runs before `ops::patch_from_args`'s
+/// generic deserialize, turning a JSON string into the real value it decodes
+/// to; a caller that sends the array or object directly anyway is accepted
+/// too, the same leniency `parse_capabilities_override` extends the other way
+/// (an object where a string is declared). Absent or already non-string is
+/// left alone — that includes an array, an object, `Null` and a caller's
+/// mistake, which `patch_from_args` then reports on its own.
+fn hoist_json_arg(args: &mut Map<String, Value>, key: &str) -> Result<(), String> {
+    let Some(Value::String(s)) = args.get(key) else {
         return Ok(());
     };
     let s = s.trim();
@@ -248,12 +255,12 @@ fn hoist_ladder_arg(args: &mut Map<String, Value>) -> Result<(), String> {
         // field with "" is common with flat-string schemas (review T3) — so
         // an empty `ladder` must not silently clear an existing one.
         // Clearing stays explicit: `clear: "ladder"`, or `ladder: "[]"`.
-        args.remove("ladder");
+        args.remove(key);
         return Ok(());
     }
     let parsed: Value =
-        serde_json::from_str(s).map_err(|e| format!("ladder: invalid JSON ({e})"))?;
-    args.insert("ladder".to_string(), parsed);
+        serde_json::from_str(s).map_err(|e| format!("{key}: invalid JSON ({e})"))?;
+    args.insert(key.to_string(), parsed);
     Ok(())
 }
 
@@ -486,7 +493,7 @@ async fn run(
         }
         "lmgw__local_model_set" => {
             let mut a = args.unwrap_or_default();
-            hoist_ladder_arg(&mut a)?;
+            hoist_json_arg(&mut a, "ladder")?;
             ops::local_model_set(state, ops::patch_from_args(Some(a))?).await
         }
         "lmgw__aux_model_set" => ops::aux_model_set(state, ops::patch_from_args(args)?).await,
@@ -505,7 +512,11 @@ async fn run(
             let active = arg_bool(&a, "active")?.ok_or("active is required (true|false)")?;
             ops::hold_set(state, active).await
         }
-        "lmgw__settings_set" => ops::settings_set(state, ops::patch_from_args(args)?).await,
+        "lmgw__settings_set" => {
+            let mut a = args.unwrap_or_default();
+            hoist_json_arg(&mut a, "realtime")?;
+            ops::settings_set(state, ops::patch_from_args(Some(a))?).await
+        }
         "lmgw__prices_sync" => ops::prices_sync(state).await,
         "lmgw__price_set" => {
             let scope_kind = arg_str(&a, "scope_kind")?
@@ -655,6 +666,9 @@ async fn run(
             Ok(v)
         }
         bench if bench.starts_with("lmgw__bench_") => self::bench::run(state, bench, args).await,
+        "lmgw__audio_catalog" | "lmgw__audio_model_set" | "lmgw__voice_transcribe" => {
+            self::audio::run(state, name, args).await
+        }
         other => Err(format!("unhandled built-in tool '{other}'")),
     }
 }
@@ -765,6 +779,24 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(offered, table);
+    }
+
+    /// `lmgw__audio_model_set task=` spells audio.cpp's task names out as an
+    /// enum; this keeps it in step with the list a save validates against.
+    #[test]
+    fn audio_model_set_offers_exactly_the_audio_tasks() {
+        let t = catalog()
+            .into_iter()
+            .find(|t| t.name == "lmgw__audio_model_set")
+            .unwrap();
+        let (_, task) = t.props.iter().find(|(k, _)| *k == "task").unwrap();
+        let offered: Vec<&str> = task["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(offered, crate::web::audio::AUDIO_TASKS.to_vec());
     }
 
     /// The description states the default tail and the offset chunk size;

@@ -736,6 +736,7 @@ fn markdown(b: &Bundle) -> String {
         // model has changed since (review R1 item c). A reply saved before
         // that was recorded says no model rather than guess.
         let who = match (m.role.as_str(), m.model.as_deref()) {
+            ("user", _) if m.voice.is_some() => "You · spoken".to_string(),
             ("user", _) => "You".to_string(),
             ("assistant", Some(model)) => match m.answered_by.as_deref() {
                 Some(by) => format!(
@@ -747,6 +748,12 @@ fn markdown(b: &Bundle) -> String {
             },
             ("assistant", None) => "Assistant".to_string(),
             (other, _) => other.to_string(),
+        };
+        // A spoken reply says so too (chat-voice design §3).
+        let who = if m.role == "assistant" && m.voice.is_some() {
+            format!("{who} · spoken")
+        } else {
+            who
         };
         o.push_str(&format!("## {who}\n\n*{}*\n\n", m.created_at));
         let atts: Vec<&ChatAttachmentFull> = b
@@ -787,6 +794,21 @@ fn markdown(b: &Bundle) -> String {
         }
         o.push_str(m.content.trim_end());
         o.push_str("\n\n");
+        // What an interrupted reply never said aloud: after the heard text,
+        // quoted and marked, as the bubble greys it.
+        if let Some(rest) = m
+            .voice
+            .as_ref()
+            .and_then(|v| v.unheard.as_deref())
+            .filter(|r| !r.trim().is_empty())
+        {
+            let quoted: Vec<String> = rest
+                .trim()
+                .lines()
+                .map(|l| format!("> {l}").trim_end().to_string())
+                .collect();
+            o.push_str(&format!("> *(not heard)*\n>\n{}\n\n", quoted.join("\n")));
+        }
         if let Some(c) = m.context.as_ref().filter(|c| !c.excerpts.is_empty()) {
             o.push_str(&format!(
                 "<details><summary>Sources ({})</summary>\n\n",

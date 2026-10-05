@@ -118,6 +118,37 @@ pub fn ensure_dirs(models_dir: &str, m: &ImageModel) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What a start that may not write into its models dir does instead of
+/// [`ensure_dirs`] (a dev instance on a models dir outside its data dir,
+/// [`crate::config::dev_models_dir_refusal`]): nothing on disk, and one log
+/// line per process naming the rule and whichever of the dirs is missing,
+/// because sd-server's capabilities route fails without them.
+pub fn note_dirs_not_created(models_dir: &str, m: &ImageModel) {
+    static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if models_dir.trim().is_empty() || NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let root = PathBuf::from(models_dir);
+    let missing: Vec<String> = DEFAULT_DIRS
+        .iter()
+        .map(|(key, default)| root.join(dir_path(m, key, default)))
+        .filter(|dir| !dir.is_dir())
+        .map(|dir| dir.display().to_string())
+        .collect();
+    let state = match missing.is_empty() {
+        true => "both exist".to_string(),
+        false => format!(
+            "missing: {}, and sd-server's capabilities route fails without them",
+            missing.join(", ")
+        ),
+    };
+    tracing::warn!(
+        "dev instance: image starts create no LoRA or upscaler dir in {models_dir}, which is \
+         outside this instance's data dir ({}); {state}",
+        crate::config::DEV_SHARED_MODELS_DIR
+    );
+}
+
 /// Sizes of every file a row names, for the footprint estimate and the
 /// pre-flight — a directory key counts as its tree, a missing path as nothing
 /// and is named by the caller.

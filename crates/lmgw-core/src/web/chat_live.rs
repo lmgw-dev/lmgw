@@ -29,12 +29,32 @@
 //! Generations come from one counter for the whole gateway, so a thread's
 //! slot can be dropped once nothing refers to it and a new one never repeats
 //! an old value.
+//!
+//! The slot also holds **the thread's speech** (chat-voice design §6.4,
+//! [`speech`]): the stops of the read-aloud running for it — a reply read
+//! as it streams, a stored one read again — which `speech/stop` raises
+//! without touching the text; and **the thread's bound realtime session**
+//! (§8.1, [`voice`]): one per thread, a second bind taking over.
+//!
+//! **A conditional write** ([`LiveTurns::write_if`], §8.3) is the bound
+//! session's journal's: a cut or a delete of a spoken reply proceeds under
+//! the thread's lock only while the generation is still the one its turn left
+//! behind. It does not move the generation — no turn has started since (a
+//! start moves it), so none is live to cancel — and a voice finalize thus
+//! never cancels a text turn of another window. The session's binding keeps
+//! the thread's slot, and with it that generation; a slot that went (and
+//! came back with a new generation) refuses the write.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{watch, OwnedMutexGuard};
+
+mod speech;
+mod voice;
+
+pub(crate) use voice::VoiceBinding;
 
 /// Every thread's live turn and generation. `state.chat_live`.
 #[derive(Default)]
@@ -58,6 +78,11 @@ struct Slot {
 struct SlotState {
     generation: u64,
     live: Option<Live>,
+    /// The thread's read-aloud, each by its id ([`speech`]).
+    speech: Vec<(u64, crate::proxy::StopHandle)>,
+    /// The thread's bound realtime session ([`voice`]): its binding's id,
+    /// the stop that tells it another window took over, and its fence.
+    voice: Option<voice::Held>,
 }
 
 /// The turn currently answering: its ticket id, and the switch that cancels
@@ -87,6 +112,8 @@ impl Inner {
                     state: Mutex::new(SlotState {
                         generation: self.next(),
                         live: None,
+                        speech: Vec::new(),
+                        voice: None,
                     }),
                 })
             })
@@ -129,6 +156,23 @@ impl LiveTurns {
             slot: Some(slot),
             _guard: Some(guard),
         }
+    }
+
+    /// A conditional history write (module doc): the thread's lock, while
+    /// its generation is still `generation`; `None` once it moved — another
+    /// turn started, or the history was rewritten, since. The generation is
+    /// not moved. Hold the guard for the length of the write.
+    pub(crate) async fn write_if(&self, thread_id: i64, generation: u64) -> Option<HistoryWrite> {
+        let slot = self.inner.slot(thread_id);
+        let guard = slot.write.clone().lock_owned().await;
+        let current = lock(&slot.state).generation == generation;
+        let write = HistoryWrite {
+            inner: self.inner.clone(),
+            thread_id,
+            slot: Some(slot),
+            _guard: Some(guard),
+        };
+        current.then_some(write)
     }
 
     /// The thread is going away (deleted, discarded or kept): its history
@@ -207,6 +251,13 @@ pub(crate) struct SaveGuard {
 }
 
 impl Ticket {
+    /// The thread's generation this turn started at: what its reply is saved
+    /// against, and what a bound session's journal guards its later writes
+    /// with ([`LiveTurns::write_if`]).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Resolves when a newer turn of this thread started, or the thread went
     /// away; pends for as long as this turn is the live one.
     pub(crate) async fn superseded(&self) {
@@ -316,6 +367,31 @@ mod tests {
             t.save_lock().await.is_none(),
             "and moves the history after it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_conditional_write_holds_only_while_nothing_moved() {
+        let live = LiveTurns::default();
+        // The bound session's binding keeps the thread's slot, and with it
+        // the generation its turns leave behind.
+        let bound = live.bind_voice(6).guard;
+        let t = live.begin(6).await;
+        let g = t.generation();
+        drop(t);
+        // Twice in a row: the write itself moves nothing.
+        drop(live.write_if(6, g).await.expect("nothing moved"));
+        assert!(live.write_if(6, g).await.is_some());
+        // Another turn of the thread (a text send in another window).
+        let other = live.begin(6).await;
+        assert!(live.write_if(6, g).await.is_none());
+        assert!(!other.is_superseded(), "a refused write cancels nothing");
+        drop((other, bound));
+        assert_eq!(live.slots(), 0, "a refused write leaves no slot behind");
+        // A slot that went is no proof nothing moved: refused.
+        let t = live.begin(6).await;
+        let g = t.generation();
+        drop(t);
+        assert!(live.write_if(6, g).await.is_none());
     }
 
     #[tokio::test]

@@ -1,0 +1,168 @@
+[
+ {
+  "js": "'README shots of the Chat voice UI (scripts/readme-shots.sh): the composer voice menu, voice mode in the chat panel (ribbon, speaking) and in the focus view (orb, speaking), and the Voice group of Settings → Chat. Voice mode talks to the in-page mock session (scripts/realtime-mock.js) with a fake microphone (scripts/drive/fake-voice.js, no clip said, only its noise floor), so no model runs and no real microphone opens; run with --mute-audio. The mock names the thread’s own speech models, so the chips and the timing line agree.'"
+ },
+ {
+  "size": "1536x864"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw.voice.viz'); 'default visualisations: ribbon in the chat panel, orb in the focus view'"
+ },
+ {
+  "until": "!!document.querySelector('[data-voice-mode-btn]') && document.querySelector('[data-voice-mode-btn]').dataset.disabledReason === ''",
+  "timeout": 15,
+  "label": "the newest thread's voice mode button is enabled (Settings → Chat → Voice or Settings → Realtime names speech models)"
+ },
+ {
+  "script": "scripts/realtime-mock.js"
+ },
+ {
+  "script": "scripts/drive/fake-voice.js"
+ },
+ {
+  "js": "window.fakeVoice.install()"
+ },
+ {
+  "expect": "fetch('/chat/api/threads/' + new URLSearchParams(location.search).get('t')).then(r => r.json()).then(v => { const r = v.thread.voice_resolved; window.__readmeModels = {asr: r.asr.alias, chat: v.thread.model_alias, tts: r.tts.alias, voice: r.voice.name || r.voice.inherits || ''}; return !!(r.asr.alias && r.tts.alias); })",
+  "label": "the thread's speech models are read for the mock"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "click": "[data-voice-devices-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-voice-devices-btn]').getAttribute('aria-expanded') === 'true'",
+  "timeout": 5,
+  "label": "the voice menu is open"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "shot": "chat-voice-menu"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "js": "window.lmgwRealtimeMock.install({thread: Number(new URLSearchParams(location.search).get('t')), title: '', warmMs: 300, thinkMs: 1100, audioMs: 6000, models: window.__readmeModels, reply: 'Merge sort. A linked list splits and merges without extra memory, and merge sort never needs the random access that quicksort relies on.'})"
+ },
+ {
+  "click": "[data-voice-mode-btn]"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]')?.dataset.voicePhase === 'live'",
+  "timeout": 15,
+  "label": "voice mode is live"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.viz === 'ribbon' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "the ribbon draws in the chat panel"
+ },
+ {
+  "js": "window.lmgwRealtimeMock.speak('Which one would you pick for sorting a linked list?', 1500); 'first turn'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 10
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 15,
+  "label": "the first reply played out"
+ },
+ {
+  "wait": 0.8
+ },
+ {
+  "js": "Object.assign(window.lmgwRealtimeMock.opts, {audioMs: 9000, reply: 'Insertion sort. On nearly sorted data it runs in close to linear time, and on a handful of elements it beats both, which is why many libraries switch to it for small slices.'}); window.lmgwRealtimeMock.speak('And for a small array that is almost sorted already?', 1700); 'second turn'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 10
+ },
+ {
+  "wait": 3.2
+ },
+ {
+  "shot": "chat-voice-panel"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 15,
+  "label": "the second reply played out"
+ },
+ {
+  "click": "[data-rt-focus]"
+ },
+ {
+  "until": "!!document.querySelector('.rt-dock.focus') && document.querySelector('[data-rt-panel]').dataset.viz === 'orb' && /Canvas2D|WebGL2/.test(document.querySelector('.rt-viz').dataset.vizKind)",
+  "timeout": 10,
+  "label": "the focus view draws the orb"
+ },
+ {
+  "js": "Object.assign(window.lmgwRealtimeMock.opts, {audioMs: 8000, reply: 'Merge sort for linked lists and a guaranteed n log n, quicksort for fast in-place arrays, and insertion sort for tiny or nearly sorted input.'}); window.lmgwRealtimeMock.speak('Thanks. Can you sum that up in one sentence?', 1500); 'third turn'"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'speaking'",
+  "timeout": 10
+ },
+ {
+  "wait": 2.6
+ },
+ {
+  "shot": "chat-voice-focus"
+ },
+ {
+  "until": "document.querySelector('[data-rt-panel]').dataset.voiceState === 'idle'",
+  "timeout": 15
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!document.querySelector('[data-rt-panel]')",
+  "timeout": 5,
+  "label": "Esc leaves voice mode"
+ },
+ {
+  "expect": "window.fakeVoice.live() === 0 && window.fakeVoice.tracks.length === 1",
+  "label": "one session, one fake microphone, its track ended"
+ },
+ {
+  "nav": "/settings/chat"
+ },
+ {
+  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+ },
+ {
+  "until": "!!document.querySelector('#f-chat-tts-alias')",
+  "timeout": 20,
+  "label": "Settings → Chat has the Voice group"
+ },
+ {
+  "js": "document.querySelector('#f-chat-stt-alias').closest('.set-group').scrollIntoView({block: 'start'}); 'Voice group in view'"
+ },
+ {
+  "expect": "(() => { const e = [...document.querySelectorAll('body *')].find(e => e.children.length === 0 && /^v\\S+ · data in \\//.test(e.textContent)); if (!e) return false; e.textContent = e.textContent.replace(/data in .*/, 'data in ~/.local/share/lmgw'); return true; })()",
+  "label": "the header's data dir reads as an installed app's (~/.local/share/lmgw), not the dev copy's path with a user name in it"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "shot": "settings-chat-voice"
+ }
+]

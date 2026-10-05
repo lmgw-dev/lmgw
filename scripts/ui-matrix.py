@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Usage: scripts/ui-matrix.py [--routes all|/a,/b] [--sizes all|1440x900,...] [--shots DIR] [--json OUT]
+#                            [--chat-drawer open|closed]
 """Layout matrix for the dashboard: every route at every window size, measured.
 
 The dashboard is used in a window that is resized all day, so "does this page
@@ -17,10 +18,19 @@ screenshot only hints at:
   gutter             the .page is more than 2px narrower than its pane
   wrapped_btns       a .btn whose label wraps or overflows its box
   primary_offscreen  the page's primary action is not fully on screen
+  composer_input     the Chat composer's text box is under half of the
+                     composer's width (its buttons squeeze it; a narrow
+                     textarea wraps and never overflows, so nothing else
+                     sees it)
 
 Reported but never failing: screens (the main scroller's height in
 viewports), clipped_inputs (text inputs whose value is wider than the box),
 rail (sidebar collapsed) and nav_scroll (the sidebar itself scrolls).
+
+--chat-drawer open|closed sets the Chat's thread settings panel (the
+split's stored `lmgw.ui.side.chat.settings`) before the first route loads,
+so the composer is measured beside it, or without it, whatever the profile
+held (WP11 UI review m7: the drawer-open run needed a hand-set state).
 
 A route loads once at the first size and is then *resized* through the rest,
 the way a window is dragged; --reload navigates afresh per size instead.
@@ -33,17 +43,18 @@ import argparse
 import asyncio
 import base64
 import json
-import os
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.request
 from pathlib import Path
 
 import websockets
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import chrome_profile  # noqa: E402
 
 SIZES = ["1024x700", "1280x800", "1440x900", "1920x1080", "2560x1400", "1440x600", "900x1200"]
 # `{agent}`, `{agent_tab}`, `{local}` and `{kb}` are filled from the instance's own data.
@@ -58,7 +69,7 @@ ROUTES = [
     "/no-such-page",
 ]
 FAILING = ["content_scroll", "nested_v", "page_hscroll", "gutter", "wrapped_btns",
-           "primary_offscreen"]
+           "primary_offscreen", "composer_input"]
 
 MEASURE = r"""(() => {
   const vw = innerWidth, vh = innerHeight;
@@ -121,6 +132,16 @@ MEASURE = r"""(() => {
   out.primary_offscreen = prim.length;
   out.offenders.primary_offscreen = prim.map(b => b.textContent.trim().slice(0, 30));
 
+  // The Chat composer: the text box's share of the composer's content width.
+  const comp = content.querySelector('.composer');
+  const cta = comp && comp.querySelector('textarea.composer-input');
+  if (comp && cta && shown(cta)) {
+    const cs = getComputedStyle(comp);
+    const inner = comp.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const w = cta.getBoundingClientRect().width;
+    out.composer_input = { px: Math.round(w), of: Math.round(inner), share: +(w / inner).toFixed(2) };
+  } else out.composer_input = null;
+
   let main = null;
   for (const sel of ['.page-body', '.fill-pane', '.chat-scroll', '.lab-scroll', 'main.content']) {
     const el = [...content.parentElement.querySelectorAll(sel)].find(e => shown(e) &&
@@ -157,6 +178,8 @@ def fails(m: dict) -> list:
         bad.append("wrapped_btns")
     if m.get("primary_offscreen", 0) > 0:
         bad.append("primary_offscreen")
+    if m.get("composer_input") and m["composer_input"]["share"] < 0.5:
+        bad.append("composer_input")
     return bad
 
 
@@ -216,6 +239,7 @@ async def run(args, routes, sizes, token) -> list:
     # /tmp is a tmpfs on Fedora: a Chrome profile left behind is ~200 MB of RAM,
     # and a few dozen runs of them got the desktop OOM-killed on 2026-09-24.
     profile = tempfile.mkdtemp(prefix="lmgw-matrix-")
+    tmp_before = chrome_profile.snapshot()
     chrome = subprocess.Popen(
         ["google-chrome", "--headless", "--disable-gpu", f"--remote-debugging-port={port}",
          "--window-size=1440,900", f"--user-data-dir={profile}",
@@ -293,6 +317,11 @@ async def run(args, routes, sizes, token) -> list:
             await call("Network.enable")
             await call("Page.navigate", url=f"{args.base}/api/session/login?token={token}")
             await settle(1.5)
+            if args.chat_drawer:
+                # The split reads its stored state when it is built: set it
+                # before the first route loads.
+                flag = "true" if args.chat_drawer == "open" else "false"
+                await ev(f"localStorage.setItem('lmgw.ui.side.chat.settings', '{flag}')")
             for route in routes:
                 for i, size in enumerate(sizes):
                     await resize(size)
@@ -316,13 +345,7 @@ async def run(args, routes, sizes, token) -> list:
     finally:
         chrome.terminate()
         chrome.wait()
-        # Chrome's network service child flushes into the profile after the
-        # browser process exits, so one rmtree can race it.
-        for _ in range(5):
-            shutil.rmtree(profile, ignore_errors=True)
-            if not os.path.exists(profile):
-                break
-            time.sleep(0.2)
+        chrome_profile.remove(profile, tmp_before)
     return results
 
 
@@ -335,7 +358,10 @@ def report(m: dict, verbose: bool) -> None:
           f"hs={m['page_hscroll']:<4} gut={m['gutter']!s:<5} wb={m['wrapped_btns']:<2} "
           f"po={m['primary_offscreen']} | screens={m['screens']} ({m['body_px']}px "
           f"{m['scroller']}) inputs={m['clipped_inputs']} rail={int(m['rail'])} "
-          f"nav={m['nav_scroll']}  {status}")
+          f"nav={m['nav_scroll']}"
+          + (f" composer={m['composer_input']['px']}/{m['composer_input']['of']}px"
+             if m.get("composer_input") else "")
+          + f"  {status}")
     if verbose or m["fails"]:
         for k in m["fails"]:
             if m["offenders"].get(k):
@@ -357,6 +383,8 @@ def main() -> int:
                     help="most seconds to wait for a route to go quiet after navigating")
     ap.add_argument("--settle", type=float, default=0.8, help="seconds after a resize")
     ap.add_argument("--reload", action="store_true", help="navigate afresh for every size")
+    ap.add_argument("--chat-drawer", choices=["open", "closed"],
+                    help="the Chat's thread settings panel open or closed before the run")
     ap.add_argument("--podman-guard", default="lmgw-dev", metavar="PREFIX",
                     help="container names to compare before/after ('' disables)")
     ap.add_argument("-v", "--verbose", action="store_true", help="list offenders for every row")

@@ -41,6 +41,20 @@ use super::Class;
 /// host port (§3.5) is what varies per model.
 const CONTAINER_PORT: u16 = 8080;
 
+/// The label that records which `extra_run_args` a container was started
+/// with, as [`run_args_digest`]. Boot adoption compares it with what the
+/// model renders now: podman keeps a label exactly as written, where it
+/// normalizes the flags themselves, so the flags cannot be compared as text.
+pub const RUN_ARGS_LABEL: &str = "lmgw.run_args";
+
+/// A digest of `podman run` flags, for [`RUN_ARGS_LABEL`]: the first eight
+/// bytes of the SHA-256 of their JSON list, in hex.
+pub fn run_args_digest(args: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_string(args).unwrap_or_default();
+    hex::encode(&Sha256::digest(json.as_bytes())[..8])
+}
+
 /// Short llama-server aliases for flags that have a dedicated field, mapped
 /// to the long name the structured renderer emits — the dedup table §7 kept
 /// when it deleted the preset renderer.
@@ -94,7 +108,7 @@ pub enum LlamaArgs {
     Chat {
         /// Relative to the models dir, like `LocalModel::gguf_path`.
         gguf_path: String,
-        params: LlamaParams,
+        params: Box<LlamaParams>,
         /// Freeform flags with no dedicated field; deduped against `params`
         /// and the always-emitted keys (§3.6).
         args: Vec<String>,
@@ -796,6 +810,8 @@ pub fn podman_run_argv(spec: &RenderSpec) -> Vec<String> {
         format!("lmgw.model={}", spec.model_id),
         "--label".into(),
         format!("lmgw.engine={}", spec.class.engine()),
+        "--label".into(),
+        format!("{RUN_ARGS_LABEL}={}", run_args_digest(&spec.extra_run_args)),
     ]);
     args.extend(spec.extra_run_args.iter().cloned());
     // Loopback only: every client reaches a model through lmgw's own

@@ -595,6 +595,9 @@ td.up-catalog .problem { display: inline; padding: 0; }
   top: 1px; bottom: 1px; width: 2px; border-radius: 2px; background: var(--amber); }
 .field.invalid :is(.input, .select-btn) { border-color: var(--err); }
 .field-err { margin-top: 4px; font-size: 11.5px; color: var(--err); }
+/* A stored value nothing judges (Settings): amber, dashed — not the dirty
+   rule, and it blocks nothing. */
+.field.warned :is(.input, .select-btn) { border-color: var(--amber); border-style: dashed; }
 /* The save foot: always there, quiet when clean. */
 .save-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
   font-size: var(--fs-sm); min-height: var(--ctl-h); }
@@ -997,6 +1000,12 @@ dialog.modal::backdrop { background: rgba(0,0,0,.45); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--mono); font-size: var(--fs-sm); }
 .mp-src { flex: none; font: 500 10.5px var(--mono); color: var(--text-3); white-space: nowrap; }
+/* The alias wins the room (chat-voice WP10 note: "audio/nemotron-as" clipped
+   beside "audio.cpp" in a Settings column): the source label gives way first,
+   ellipsized to nothing in a narrow box, and the name is cut only when it
+   alone is longer than the box. The label is in the title, and in the pop. */
+.mp-btn > .mp-val:has(+ .mp-src) { flex: 0 0 auto; max-width: calc(100% - 18px); }
+.mp-btn > .mp-src { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .mp-src.warn { color: var(--amber); }
 /* the source's identity swatch, the model-chip convention */
 .mp-dot { flex: none; width: 8px; height: 8px; border-radius: 3px;
@@ -1533,12 +1542,29 @@ tr.detail-row td { background: var(--bg1); height: auto; padding: 10px 14px; }
   background: var(--surface-hi); overflow: hidden; display: inline-block; }
 .ctx-bar i { display: block; height: 100%; background: var(--accent);
   border-radius: 999px; }
+/* The composer keeps a usable text box at every size (chat-voice WP7 review
+   M3): its icon buttons are square, attach and knowledge sit together, the
+   voice group is one split control, and where the composer is narrow the
+   text box takes a row of its own with the buttons under it. */
+.composer-wrap { flex: none; container: composer / inline-size; }
 .composer { flex: none; display: flex; gap: 10px; padding: 10px 22px 16px;
   align-items: flex-end; }
 .composer-input { flex: 1; min-height: 44px; max-height: 200px; }
-.composer-attach { flex: none; height: 44px; font-size: 16px; }
+.composer-tools { flex: none; display: flex; gap: 2px; align-items: flex-end; }
+.composer-attach { flex: none; height: 44px; width: 36px; padding: 0;
+  justify-content: center; font-size: 16px; }
 .composer-attach svg { width: 16px; height: 16px; stroke: currentColor; fill: none;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+/* 640: voice mode's button joined the voice group (chat-voice §9.7.3), and
+   the text box keeps at least half the composer beside the buttons. */
+@container composer (width < 640px) {
+  .composer { flex-wrap: wrap; row-gap: 6px; }
+  .composer-input { order: -1; flex: 1 0 100%; }
+  .voice-split { margin-left: auto; }
+}
+/* For screen readers only (a live region, a label). */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 /* Message actions (chat-complete §3): a row under each message, shown on
    hover or focus-within, and always on a narrow transcript, where there is no
@@ -2071,6 +2097,9 @@ a.chip { text-decoration: none; }
 .agent-foot { margin-top: auto; padding-top: 4px; }
 .field-hint { font-size: 11.5px; color: var(--text-3); margin-top: 4px;
   line-height: 1.4; }
+/* A line a live block (the GPU hold, a benchmark run) changes: amber, as the
+   chip it stands beside. */
+.field-hint.warn { color: var(--amber); }
 
 /* Running text folded to its first --lines lines (widgets/clamp.rs). The
    "more" sits beside the last line, so a folded text costs no extra row; it
@@ -2326,6 +2355,41 @@ a.rail-item { text-decoration: none; }
 .forge-row > .forge-token { flex: 1 1 auto; min-width: 0; width: auto; }
 .forge-row > :is(.forge-state, .check, .btn) { flex: none; white-space: nowrap; }
 .forge-add { margin-top: 8px; align-self: flex-start; }
+/* Settings → Realtime: the cascade's GPU memory is a table and a bar, so
+   its card takes the whole row; the Smart Turn table is one grid of small
+   number boxes. */
+.set-flow-item:has(.rt-budget) { column-span: all; }
+.rt-budget { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.rt-budget-head { gap: 10px; flex-wrap: wrap; }
+.rt-budget-line { font-size: var(--fs-sm); color: var(--text-2); }
+.rt-bar { position: relative; display: flex; height: 12px; border-radius: 4px;
+  overflow: hidden; background: var(--seq0); border: 1px solid var(--border); }
+.rt-bar > i { display: block; height: 100%; flex: none; }
+.rt-bar > i + i { box-shadow: inset 1px 0 var(--surface); }
+.rt-bar > b { position: absolute; top: 0; bottom: 0; }
+.rt-outside, .legend i.rt-outside { background: repeating-linear-gradient(135deg,
+  var(--text-3) 0 3px, transparent 3px 6px); }
+.rt-bar > b.rt-cap { width: 2px; margin-left: -1px; background: var(--err); }
+.rt-summary { margin: 0; }
+.rt-stages td.wrap { min-width: 24ch; font-size: var(--fs-sm); }
+.rt-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2.5px;
+  margin-right: 6px; vertical-align: baseline; }
+.chip.rt-up { height: 18px; margin-left: 6px; font-size: 11px; padding: 0 6px; }
+.rt-budget-foot { gap: 10px; align-items: flex-start; flex-wrap: nowrap; }
+.rt-budget-foot .field-hint { flex: 1 1 auto; margin-top: 0; }
+/* The sound-tag hint: its checkbox, and the paragraph the prompt would get
+   quoted under it. */
+.set-tag-hint { display: flex; flex-direction: column; gap: 6px; }
+.set-hint-preview { margin: 0; padding: 4px 10px; border-left: 2px solid var(--border);
+  color: var(--text-2); font-size: var(--fs-sm); max-width: 80ch; }
+table.data.vad-table td { padding: 2px 6px; }
+table.data.vad-table th { text-transform: none; letter-spacing: 0; }
+/* Five rows at most: a header that sticks would only ride over the card. */
+table.data:is(.rt-stages, .vad-table) th { position: static; }
+.input.vad-cell { width: 9ch; text-align: right; }
+.input.vad-cell.dirty { border-color: var(--amber); }
+.input.vad-cell.invalid { border-color: var(--err); }
+.input.vad-cell.warned { border-color: var(--amber); border-style: dashed; }
 /* an array field: one comma-separated box that wraps and grows with its
    text (its height set from the content), never a scroller of its own */
 .list-box { min-width: 0; }

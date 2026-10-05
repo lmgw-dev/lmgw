@@ -90,6 +90,14 @@ fn serve(state: &SharedState) -> String {
     base
 }
 
+/// An image models dir inside the state's own test dir, which goes with
+/// the state: a kept `tempdir()` stayed behind in /tmp, which is RAM.
+fn models_dir(state: &SharedState) -> String {
+    let dir = state.data_dir.join("image-models");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.display().to_string()
+}
+
 /// A gateway whose image rows' containers *are* `mock`: a fake podman that
 /// starts nothing and a port allocator that hands out the mock's port.
 async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState, String) {
@@ -104,7 +112,7 @@ async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState,
     s.vram.load_timeout_seconds = 5;
     // The start refuses a class with no models dir before it renders any argv;
     // the fake podman mounts nothing, so only the path's existence matters.
-    s.image.models_dir = tempfile::tempdir().unwrap().keep().display().to_string();
+    s.image.models_dir = models_dir(&state);
     // Never the dev/prod prefix: these tests only ever label a fake container,
     // but the name is what a real `podman rm` would collide with.
     s.container_prefix = "lmgwtest".into();
@@ -991,7 +999,7 @@ async fn a_held_image_model_falls_back_and_stamps_the_header() {
     store::insert_image_model(&state.db, &row).await.unwrap();
     let mut s = state.snapshot().settings.clone();
     s.hold.active = true;
-    s.image.models_dir = tempfile::tempdir().unwrap().keep().display().to_string();
+    s.image.models_dir = models_dir(&state);
     store::save_settings(&state.db, &s).await.unwrap();
     state.reload_snapshot().await.unwrap();
 

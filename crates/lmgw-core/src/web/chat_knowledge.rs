@@ -30,11 +30,8 @@
 //! bases ([`KbTools`], wired in `agentchat`); nothing is searched up front.
 
 use std::collections::HashSet;
-use std::convert::Infallible;
 
-use axum::response::sse::Event as SseFrame;
 use serde_json::json;
-use tokio::sync::mpsc;
 
 use super::chat_live::Ticket;
 use super::chat_repo::ChatRepo;
@@ -315,7 +312,7 @@ pub(super) async fn run_auto(
     history: &mut [ChatMessageRow],
     auto: Auto,
     ticket: &Ticket,
-    tx: &mpsc::Sender<Result<SseFrame, Infallible>>,
+    tx: &super::chat_turn::Events,
 ) {
     let (message_id, context, reused) = match auto {
         Auto::Reuse {
@@ -388,9 +385,10 @@ pub(super) async fn run_auto(
     payload["message_id"] = json!(message_id);
     payload["reused"] = json!(reused);
     let _ = tx
-        .send(Ok(SseFrame::default()
-            .event("retrieval")
-            .data(payload.to_string())))
+        .send(super::chat_turn::TurnFrame::new(
+            "retrieval",
+            payload.to_string(),
+        ))
         .await;
 }
 

@@ -540,11 +540,11 @@ Written from what lmgw's parsers read and its serializers emit, not from provide
 | `POST /v1/rerank` | `model`, `query`, `documents` \| `texts`, `top_n` | Jina and TEI shapes; embedding rows refused | Jina `results` | openai, rerank, [other] |
 | `POST /v1/count_tokens` | `{model, input: string}` | lmgw's own; `x-lmgw-count-approximate` | `{model, tokens}` | openai, chat, [other] |
 | `POST /tokenize` (new) | §5.3 | §5.3 | `{tokens}` | llamacpp, chat, [other] |
-| `POST /v1/audio/speech` | OpenAI TTS (`model`, `input`, `voice`, `response_format`, `speed`, `instructions`, `language`) + audio.cpp request options | forwarded verbatim, model rewritten; row voice presets apply | audio bytes (upstream content type) | openai, tts, [openai] |
+| `POST /v1/audio/speech` | OpenAI TTS (`model`, `input`, `voice`, `response_format`, `speed`, `instructions`, `language`, `stream_format`) + audio.cpp request options | forwarded with model rewritten; refused before admission for what the engine would refuse (`empty_input`, `instructions_required`, `task_mismatch`, `streaming_unsupported`); a local row's body is shaped (native voice, language, instructions, inline tags), any other route's instructions and tags only (`x-lmgw-speech`, realtime spec §5.5); row voice presets apply | audio bytes (upstream content type); a stream states `x-lmgw-sample-rate` | openai, tts, [openai] |
 | `POST /v1/audio/transcriptions` | multipart (`file`, `model`, `language`, `prompt`, `response_format`, `temperature`) or JSON | same | JSON `{text,…}` | openai, asr, [openai] |
 | `POST /v1/audio/transcriptions/details` | as above | lmgw route: words, segments, speaker turns | JSON | openai, asr, [openai] |
 | `POST /v1/audio/alignments` | multipart `file`, `model`, `text`, `language` | lmgw route, `task: "align"` rows | JSON | openai, —, [openai] |
-| `GET /v1/audio/voices?model=` | `model` query | lmgw route | voices and presets | openai, tts, [openai] |
+| `GET /v1/audio/voices?model=` | `model`, `probe` query | lmgw route: a local row from lmgw's catalog, starting nothing, also under the GPU hold (`lmgw.held`); `probe=engine` asks its server (`x-lmgw-voices-source`) | `voices` plus an `lmgw` object for a local row | openai, tts, [openai] |
 | `POST /v1/images/generations` | `model`, `prompt` (optional `<sd_cpp_extra_args>{…}</sd_cpp_extra_args>`), `n`, `size`, `output_format`, `output_compression`; other keys for cloud | api-types `image_lab.rs` builder is the reference | `{created, data:[{b64_json}]}` | openai, image_generation, [openai] |
 | `POST /v1/images/edits` | multipart `image` (1..n), `mask`, `model`, `prompt`, `n`, `size` | refused unless the row's `edit` flag | same | openai, image_edit, [openai] |
 | `POST /v1/tasks/run`, `/v1/tasks/stream` | `{model, request: {…}}` | audio.cpp generic tasks, `request` relayed untouched | audio.cpp JSON / stream | openai, —, [other] |
@@ -584,6 +584,9 @@ pub struct LmgwHeader { pub name: &'static str /* the const where it lives */, p
 | `x-lmgw-reasoning-ignored`, `-max-tokens-defaulted`, `-max-tokens-raised` | resp | client | chat/completions, messages, responses |
 | `x-lmgw-max-tokens-clamped`, `x-lmgw-rung` | resp | client | chat/completions, messages, responses, completions |
 | `x-lmgw-count-approximate` (new) | resp | client | count_tokens, messages/count_tokens |
+| `x-lmgw-speech` (audio-class AC1) | resp | client | audio/speech |
+| `x-lmgw-voices-source` (audio-class AC1) | resp | client | audio/voices |
+| `x-lmgw-sample-rate` (audio-class AC2) | resp | client | audio/speech (streamed) |
 
 - **`headers_block()`** returns the `{name: description}` map of `Audience::Client` rows. That is exactly today's twelve headers plus the new one, with today's prose moved verbatim; only the reasoning trio gains the fourth route.
 - **The new header's prose:** "RESPONSE: on the token counters, why the number is not exactly what the backend would count for this request, comma-separated: `flattened` (the request's structure was counted as plain text — chat template, tool-definition and per-message overhead are not included, so the real prompt is larger), `tokenizer_guess` (the backend's tokenizer is unknown; counted with tiktoken o200k_base), `media_bound` (images counted at the model's per-image upper bound), `media_omitted` (image or audio parts are not in the number), `message_framing` (/v1/count_tokens: the backend counts messages, so the text was counted as one user message, framing included). Absent when the count is exact."

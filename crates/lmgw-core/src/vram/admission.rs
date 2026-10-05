@@ -244,8 +244,8 @@ pub async fn admit(
 
 /// The local model whose admission could answer [`Admission::External`] for
 /// `route`, if there is one: a local model with a row, not up (neither
-/// `ready` nor `starting`), with the trigger armed — `vram.fallback_on_external`
-/// on, admission enabled, the hold off.
+/// `ready` nor `starting`), on the GPU, with the trigger armed —
+/// `vram.fallback_on_external` on, admission enabled, the hold off.
 ///
 /// Costs a snapshot read and the registry's in-memory list; probes nothing.
 /// A caller asks this *before* it looks up and checks a fallback, so a
@@ -255,7 +255,10 @@ pub async fn admit(
 /// change this admission"; [`admit_or_external`] still re-checks everything.
 pub fn external_armed(state: &SharedState, snap: &Snapshot, route: &Route) -> Option<Target> {
     let target = classify(route)?;
+    // A model on the CPU never takes this fallback: VRAM outside lmgw's
+    // control is no reason not to start it.
     if trigger_off(snap).is_some()
+        || !snap.placement(target.class, &target.model_id).is_gpu()
         || model_runtime(snap, target.class, &target.model_id).is_none()
         || state.vram.is_up(state, &target)
     {

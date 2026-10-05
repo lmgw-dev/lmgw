@@ -634,7 +634,7 @@ fn project(cum: i64, n: usize, buckets: &[String], period: &str) -> (i64, String
             "projected to midnight".into(),
         );
     }
-    let month_days = days_in_month(d.get_full_year() as i32, d.get_month() as u32);
+    let month_days = days_in_month(d.get_full_year() as i32, d.get_month());
     let remaining = (month_days as i64 - d.get_date() as i64).max(0) as f64;
     (
         (cum as f64 + rate * remaining).round() as i64,

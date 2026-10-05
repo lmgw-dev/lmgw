@@ -1,0 +1,23 @@
+-- Where one audio model runs: a per-row override of the audio class's
+-- `backend` and `threads` (the CPU switch).
+--
+-- A speech model small enough to run on the CPU can leave the card to the
+-- models that need it: Parakeet-TDT measured 0 MiB of VRAM, 3.2 GB of RAM
+-- and a barge-in word check of 89/136 ms (p50/p95) on 8 CPU threads, far
+-- inside the check's 500 ms. A row on the CPU claims no VRAM, is never
+-- evicted and never evicts, learns no residency, and keeps serving while the
+-- GPU hold is on.
+--
+-- `backend`: NULL inherits the class's backend; `cpu` runs this row on the
+-- CPU. Only `cpu` is accepted per row for now: another GPU backend is a
+-- class setting, and it has to match the image. audio.cpp itself reads
+-- `cuda|cpu|vulkan|metal`, so widening the rule later needs no migration.
+--
+-- `threads`: NULL inherits — the class's `threads` for a row that keeps the
+-- class's backend, this machine's physical cores for a row switched to the
+-- CPU. A positive count otherwise, with no upper cap.
+--
+-- Every existing row gets NULL in both, so every one renders the very
+-- `server.json` it rendered before, and boot adoption re-creates nothing.
+ALTER TABLE audio_models ADD COLUMN backend TEXT;
+ALTER TABLE audio_models ADD COLUMN threads INTEGER;

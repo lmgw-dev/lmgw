@@ -511,7 +511,7 @@ pub fn ModelPicker(
                                     <span class="mp-pfx">{pfx.to_string()}</span>
                                     {name.to_string()}
                                 </span>
-                                <span class="mp-src">{e.group_label.clone()}</span>
+                                <span class="mp-src" title=e.group_label.clone()>{e.group_label.clone()}</span>
                             }
                                 .into_any()
                         }
@@ -741,9 +741,9 @@ fn own_list_has(all: Signal<Vec<CatalogEntry>>, id: &str) -> bool {
 /// two ("40K").
 pub(crate) fn ctx_label(n: u64) -> String {
     const K: u64 = 1024;
-    if n >= K * K && n % (K * K) == 0 {
+    if n >= K * K && n.is_multiple_of(K * K) {
         format!("{}M", n / (K * K))
-    } else if n >= K && n % K == 0 {
+    } else if n >= K && n.is_multiple_of(K) {
         format!("{}K", n / K)
     } else {
         crate::fmt::compact(n as f64)

@@ -120,8 +120,9 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "Read gateway settings: bind address, auth, log retention, the self-admin \
-                 mode, the four container configurations (chat, aux, audio, image), the GPU \
-                 hold (active, fallback_alias), the external-VRAM fallback switch \
+                 mode, the four container configurations (chat, aux, audio, image — audio \
+                 also carries catalog_revision, which revision an audio catalog download \
+                 takes), the GPU hold (active, fallback_alias), the external-VRAM fallback switch \
                  (vram.fallback_on_external) and the container-build settings (builds \
                  directory, update-check interval, which hosts have a forge token). Tokens \
                  are redacted.",
@@ -133,13 +134,18 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "The complete stored configuration of one local model — chat, aux \
-                 (embedding / rerank) or image (stable-diffusion.cpp) — every parameter, \
-                 whether each file it references actually exists on disk, static problems, \
-                 and the exact command line its container is started with. Use this to read \
-                 back what you just wrote; lmgw__models only lists names. A model id is \
-                 looked up in the chat table first, then aux, then image; the result says \
-                 which ('class'). An image row comes back with its files/args maps, its \
-                 modes and edit flag, and a files_present map saying which paths resolve. A \
+                 (embedding / rerank), image (stable-diffusion.cpp) or audio (audio.cpp) — \
+                 every parameter, whether each file it references actually exists on disk, \
+                 static problems, and the exact command line its container is started with. \
+                 Use this to read back what you just wrote; lmgw__models only lists names. A \
+                 model id is looked up in the chat table first, then aux, then image, then \
+                 audio; the result says which ('class'). An image row comes back with its \
+                 files/args maps, its modes and edit flag, and a files_present map saying \
+                 which paths resolve. An audio row comes back with every field, whether its \
+                 model directory is present, the server.json its container is started with \
+                 (audio.cpp takes no command-line flags), the image and run args in effect, \
+                 whether it runs, and its learned GPU residency with the sentence saying what \
+                 admission charges it. A \
                  chat row with a ladder additionally carries 'rungs': every rung (the base \
                  included, as rung 1) with its own command line, its per-slot context (ctx_size \
                  / parallel) and its switchover (the largest prompt that rung takes with the \
@@ -151,8 +157,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "target",
                     enum_p(
-                        "Which class to look in. Omit to search chat, then aux, then image.",
-                        &["chat", "aux", "image"],
+                        "Which class to look in. Omit to search chat, then aux, then image, \
+                         then audio.",
+                        &["chat", "aux", "image", "audio"],
                     ),
                 ),
             ],
@@ -378,7 +385,13 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "Every tracked Hugging Face download with its status, destination path and \
-                 live byte progress. Poll this after lmgw__hf_add until the status is 'done'.",
+                 live byte progress. Poll this after lmgw__hf_add until the status is 'done'. \
+                 requested_revision is what the download asks for ('main', or the commit an \
+                 audio.cpp spec pins, which an audio catalog download takes under \
+                 audio.catalog_revision 'pinned'); resolved_commit is the commit the file on \
+                 disk came from, as the hub named it. On a row from before lmgw recorded \
+                 them, requested_revision is null because every download then took main, \
+                 and resolved_commit is null because the commit is unknown.",
             props: vec![],
             required: &[],
         },

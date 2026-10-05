@@ -1,0 +1,9 @@
+event: turn
+data: {"user_message_id":1}
+
+event: error
+data: {"code":"unknown_alias","message":"unknown model alias: ghost"}
+
+event: done
+data: {"aborted":true}
+

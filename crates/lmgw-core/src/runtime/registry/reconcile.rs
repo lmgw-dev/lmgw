@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use crate::gate::facts::GateFacts;
 
 use super::*;
-use crate::runtime::argv::{render_engine_args, EngineArgs};
+use crate::runtime::argv::{render_engine_args, run_args_digest, EngineArgs, RUN_ARGS_LABEL};
 use crate::runtime::descriptor::ModelRuntime;
 use crate::runtime::image::ImageCapabilities;
 use crate::runtime::{container_name, Class};
@@ -179,6 +179,8 @@ impl Registry {
                 climbing: e.climb.as_ref().map(|m| m.status(now)),
                 sends: *e.sends.borrow(),
                 charge: e.charge.clone(),
+                resident_key: e.resident_key.clone(),
+                placement: e.placement,
                 owner: e.owner,
                 draining_for_owner: draining && e.state != RuntimeState::Stopping,
             })
@@ -217,13 +219,20 @@ impl Registry {
     /// mounted `server.json`), so audio additionally compares the config last
     /// written for this model against what would be written now.
     ///
-    /// Not compared: the image, the mounts, `-p`, `extra_run_args`, and the
-    /// labels beyond `lmgw.class`/`lmgw.model`. Those are podman-level flags
-    /// that podman normalizes (a short image ref comes back fully qualified, a
-    /// mount path comes back resolved), so a textual comparison would tear
-    /// down healthy warm containers on every boot for a difference that is not
-    /// one. Changing them takes effect through the explicit apply path
-    /// (§3.6: stop + start), not through adoption.
+    /// `extra_run_args` are compared through the label a start records them
+    /// in ([`RUN_ARGS_LABEL`], a digest): a container whose flags are not the
+    /// ones its row renders now — the GPU passthrough and `label=disable` an
+    /// empty override used to drop, or a row switched to the CPU — is
+    /// removed, and so is one from an lmgw that did not record them yet (it
+    /// starts again once, on the flags in effect).
+    ///
+    /// Not compared: the image, the mounts, `-p`, and the other labels beyond
+    /// `lmgw.class`/`lmgw.model`. Those are podman-level flags that podman
+    /// normalizes (a short image ref comes back fully qualified, a mount path
+    /// comes back resolved), so a textual comparison would tear down healthy
+    /// warm containers on every boot for a difference that is not one.
+    /// Changing them takes effect through the explicit apply path (§3.6: stop
+    /// + start), not through adoption.
     pub async fn reconcile(
         &self,
         container_prefix: &str,
@@ -281,6 +290,21 @@ impl Registry {
             // removing it here would cut a run short. The boot sweep
             // (`bench::boot_sweep`) is what collects a leftover one.
             if row.labels.contains_key(crate::bench::BENCH_LABEL) {
+                continue;
+            }
+            // An agent's container (container-runtime §6.1) carries this
+            // instance's label too, and is no model's either: adoption would
+            // fail on its missing `lmgw.class` and the container would be
+            // force-removed — a service an early App-tab request started
+            // while this `podman ps` was on its way, or an exited one whose
+            // logs a 503 quotes. The agents' own reconcile
+            // (`agents::container`) is what collects their leftovers.
+            if row
+                .labels
+                .get(crate::agents::container::LABEL_KIND)
+                .map(String::as_str)
+                == Some(crate::agents::container::KIND_AGENT)
+            {
                 continue;
             }
             match self.adopt(container_prefix, candidates, &row, &name).await {
@@ -367,7 +391,7 @@ impl Registry {
         let mut matched = None;
         for spec in &specs {
             match self
-                .adoptable(container_prefix, spec, &inspected, port)
+                .adoptable(container_prefix, spec, &inspected, &row.labels, port)
                 .await
             {
                 Ok(found) => {
@@ -471,6 +495,8 @@ impl Registry {
                     // The rung whose command line it runs — the one the
                     // ledger charges from now on.
                     charge: runtime.rung_charge(),
+                    resident_key: runtime.resident_key(),
+                    placement: runtime.placement(),
                     sends: watch::channel(0).0,
                     climb: None,
                     // Whoever started it, a previous lmgw adopts it for the
@@ -488,12 +514,13 @@ impl Registry {
     /// one) and the render; `Err` says why not.
     ///
     /// **What is compared** is [`Self::reconcile`]'s: the container command,
-    /// and for audio the mounted `server.json`.
+    /// its run args' label, and for audio the mounted `server.json`.
     async fn adoptable(
         &self,
         container_prefix: &str,
         spec: &AcquireSpec<'_>,
         inspected: &InspectRow,
+        labels: &HashMap<String, String>,
         port: u16,
     ) -> Result<(Option<ModelRuntime>, crate::runtime::argv::RenderSpec), String> {
         // Audio first, and before `render_spec`: the comparison is against the
@@ -532,6 +559,17 @@ impl Registry {
                 inspected.config.cmd.len(),
                 expected.len()
             ));
+        }
+        match labels.get(RUN_ARGS_LABEL) {
+            Some(got) if *got == run_args_digest(&render.extra_run_args) => {}
+            Some(_) => return Err("its run args are not the ones this model renders now".into()),
+            None => {
+                return Err(
+                    "it carries no record of its run args (started by an older lmgw), so \
+                     they cannot be told to be the ones this model renders now"
+                        .into(),
+                )
+            }
         }
         Ok((probed, render))
     }

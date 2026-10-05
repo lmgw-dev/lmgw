@@ -40,7 +40,7 @@ pub(super) async fn add_image_model(f: &Fixture, model_id: &str, bytes: u64) -> 
 /// Bring a model up the way a request does — through the registry's own
 /// `acquire`, which is what hands out the in-flight claim the sampler reads.
 /// The returned guard *is* the in-flight window; drop it to close it.
-async fn acquire_model(
+pub(super) async fn acquire_model(
     f: &Fixture,
     class: lmgw_core::runtime::Class,
     model_id: &str,
@@ -48,11 +48,14 @@ async fn acquire_model(
     let snap = f.state.snapshot();
     let rt = lmgw_core::runtime::descriptor::model_runtime(&snap, class, model_id)
         .expect("the row was just inserted");
-    let spec = lmgw_core::runtime::lifecycle::acquire_spec(&f.state.data_dir, &snap, &rt);
+    let spec = lmgw_core::runtime::lifecycle::acquire_spec(&f.state, &snap, &rt);
     f.state.runtime().acquire(&spec).await.unwrap()
 }
 
-async fn acquire_image(f: &Fixture, model_id: &str) -> lmgw_core::runtime::registry::AcquireGuard {
+pub(super) async fn acquire_image(
+    f: &Fixture,
+    model_id: &str,
+) -> lmgw_core::runtime::registry::AcquireGuard {
     acquire_model(f, lmgw_core::runtime::Class::Image, model_id).await
 }
 
@@ -275,9 +278,9 @@ async fn the_budget_only_branch_charges_the_learned_peak_as_well() {
 /// A driver the test writes by hand, one reading at a time. The sampler reads
 /// nothing else — no per-process figures exist on any of these probes — so
 /// this is exactly as much as it can ever know.
-struct ScriptedGpu {
-    total: u64,
-    used: Arc<Mutex<u64>>,
+pub(super) struct ScriptedGpu {
+    pub(super) total: u64,
+    pub(super) used: Arc<Mutex<u64>>,
 }
 
 impl GpuProbe for ScriptedGpu {
@@ -297,7 +300,7 @@ impl GpuProbe for ScriptedGpu {
     }
 }
 
-async fn peak_of(f: &Fixture, model_id: &str) -> Option<u64> {
+pub(super) async fn peak_of(f: &Fixture, model_id: &str) -> Option<u64> {
     f.state
         .snapshot()
         .image_models
@@ -445,6 +448,72 @@ async fn a_window_shared_with_another_start_teaches_nothing() {
         "the rise belongs to the other container, so this row learns nothing"
     );
     drop(chat_guard);
+}
+
+/// An audio model loading inside a container that was `ready` all along is
+/// the same trap one level down (realtime design §9.4): audio.cpp loads on
+/// its first request, the rise lands in the same device-wide `used` figure,
+/// and the registry's container set does not change with it. So the window
+/// it overlaps is abandoned — whether the load is only seen afterwards, as
+/// the audio container now holding its model, or caught in progress, as a
+/// request in flight on a container that has not answered one yet. With the
+/// audio containers settled, the next window learns as before.
+#[tokio::test]
+async fn an_audio_model_loading_during_a_generation_spoils_the_window() {
+    use super::audio_residency::{add_audio_model, speak, start_idle};
+    use lmgw_core::vram::peak::PeakSampler;
+
+    const IDLE: u64 = 7 * GIB;
+    let f = fixture(24 * GIB, 6 * GIB, 3 * GIB, 0).await;
+    add_image_model(&f, "z-image", IDLE).await;
+    add_audio_model(&f, "tts", 2 * GIB, 3 * GIB, None).await;
+    add_audio_model(&f, "asr", GIB, 2 * GIB, None).await;
+    let used = Arc::new(Mutex::new(IDLE));
+    f.state.vram.set_probe(Arc::new(ScriptedGpu {
+        total: 24 * GIB,
+        used: used.clone(),
+    }));
+    let set = |bytes: u64| *used.lock().unwrap() = bytes;
+    let sampler = PeakSampler::new();
+    start_idle(&f, "tts").await;
+    start_idle(&f, "asr").await;
+    drop(acquire_image(&f, "z-image").await);
+    sampler.tick(&f.state).await; // baseline
+
+    // The TTS answers between two samples: only its having loaded is seen.
+    let guard = acquire_image(&f, "z-image").await;
+    sampler.tick(&f.state).await;
+    assert_eq!(speak(&f, "tts").await, 200);
+    set(IDLE + 3 * GIB);
+    sampler.tick(&f.state).await;
+    drop(guard);
+    sampler.tick(&f.state).await;
+    assert_eq!(
+        peak_of(&f, "z-image").await,
+        None,
+        "the TTS model's weights are not this pipeline's peak"
+    );
+
+    // The ASR is caught loading: a claim in flight, no answer yet.
+    let guard = acquire_image(&f, "z-image").await;
+    let loading = acquire_model(&f, lmgw_core::runtime::Class::Audio, "asr").await;
+    sampler.tick(&f.state).await;
+    set(IDLE + 5 * GIB);
+    sampler.tick(&f.state).await;
+    drop(loading);
+    drop(guard);
+    sampler.tick(&f.state).await;
+    assert_eq!(peak_of(&f, "z-image").await, None);
+
+    // Nothing moves on the audio side any more: a generation learns.
+    let guard = acquire_image(&f, "z-image").await;
+    sampler.tick(&f.state).await;
+    set(IDLE + 5 * GIB + 2 * GIB);
+    sampler.tick(&f.state).await;
+    drop(guard);
+    set(IDLE + 5 * GIB);
+    sampler.tick(&f.state).await;
+    assert_eq!(peak_of(&f, "z-image").await, Some(2 * GIB));
 }
 
 /// A learned peak describes the pipeline it was measured on. Change the files

@@ -33,7 +33,13 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+use super::audiocpp_options::{self, Served};
+
 pub const GIB: u64 = 1024 * 1024 * 1024;
+
+/// What a [`World::thinking`] model reasons, and then answers.
+pub const THOUGHT: &str = "Der Nutzer fragt nach dem Wetter, ich antworte kurz.";
+pub const ANSWER: &str = "Es ist sonnig.";
 
 #[derive(Default)]
 pub struct World {
@@ -64,8 +70,21 @@ pub struct World {
     /// what the compatibility counters (`count_compat.rs`) sent.
     pub templated: Vec<serde_json::Value>,
     pub tokenized: Vec<serde_json::Value>,
+    /// Models whose container refuses a chat request carrying
+    /// `input_audio` with this status — at 500 in llama-server's own words
+    /// for a server without an audio projector — before any work.
+    pub refuse_audio: HashMap<String, u16>,
+    /// Models whose streamed answer is a call of this tool, unless the
+    /// request ends with a tool result: a tool loop's first model call.
+    pub calls_tool: HashMap<String, String>,
     /// The model of every chat answer a container gave, in order.
     pub chats: Vec<String>,
+    /// Models whose template reasons whatever it is told — a streamed chat
+    /// answer is [`THOUGHT`] as `reasoning_content`, then [`ANSWER`] — and
+    /// the body of every streamed chat request their containers got (also
+    /// the ones refused for their audio or their context).
+    pub thinking: HashSet<String>,
+    pub streamed_bodies: Vec<serde_json::Value>,
     /// Models whose container was started with a projector (`--mmproj`).
     /// Their `/apply-template` renders an image part; every other container
     /// refuses one, and every container refuses audio — the fake projector
@@ -89,6 +108,28 @@ pub struct World {
     /// before it unloads anything — an eviction held in flight, with the
     /// admission gate held by whoever evicts ([`Gpu::gate_stops`]).
     pub stop_gate: Option<tokio::sync::watch::Receiver<bool>>,
+    /// How long every container takes to answer a chat request — a model
+    /// call still running while a test does something else.
+    pub chat_delay: Duration,
+    /// The model of every clause an audio container synthesized, in order.
+    pub speeches: Vec<String>,
+    /// And the body each was sent with.
+    pub speech_bodies: Vec<serde_json::Value>,
+    /// Model id -> what its audio container was started with (its
+    /// `server.json`): the family and default request options its speech
+    /// requests are judged by, as audio.cpp would ([`audiocpp_options`]).
+    pub served: HashMap<String, Served>,
+    /// The speech bodies an audio container refused as audio.cpp's engine
+    /// would (conflicting `instruction` and `instruct`), in order — never
+    /// in [`Self::speech_bodies`].
+    pub refused_speech: Vec<serde_json::Value>,
+    /// The model of every upload an audio container transcribed, in order
+    /// (answered with [`Self::transcript`]).
+    pub transcriptions: Vec<String>,
+    /// What every transcription answers: empty unless a test sets words.
+    pub transcript: String,
+    /// And the `language` field each went up with, if any.
+    pub transcription_languages: Vec<Option<String>>,
 }
 
 /// The fake host PID of the process outside lmgw.
@@ -221,6 +262,9 @@ impl CommandRunner for Podman {
                 w.size.insert(model.clone(), bytes);
                 w.names.insert(name, model.clone());
                 w.ports.insert(port, model.clone());
+                if let Some(served) = audiocpp_options::served(args) {
+                    w.served.insert(model.clone(), served);
+                }
                 if args
                     .iter()
                     .any(|a| a == "--mmproj" || a.starts_with("--mmproj="))
@@ -300,23 +344,90 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
     let chat_world = world.clone();
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(move |_: &Request| {
+        .respond_with(move |req: &Request| {
             let mut w = chat_world.lock().unwrap();
             let model = w.ports.get(&port).cloned().unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let hears = body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["content"].as_array())
+                .flatten()
+                .any(|p| p["type"] == "input_audio");
+            if let Some(status) = w.refuse_audio.get(&model).copied().filter(|_| hears) {
+                w.streamed_bodies.push(body);
+                let message = match status {
+                    500 => {
+                        "audio input is not supported - hint: if this is unexpected, you may need \
+                         to provide the mmproj"
+                    }
+                    _ => "Loading model",
+                };
+                return ResponseTemplate::new(status).set_body_json(json!({"error": {
+                    "code": status, "message": message, "type": "server_error",
+                }}));
+            }
             if w.refuse_context.contains(&model) {
+                if body["stream"] == true {
+                    w.streamed_bodies.push(body);
+                }
                 return ResponseTemplate::new(400).set_body_json(json!({"error": {
                     "code": 400, "type": "exceed_context_size_error",
                     "message": "request (5000 tokens) exceeds the available context size",
                     "n_prompt_tokens": 5000, "n_ctx": 4096,
                 }}));
             }
+            let after_tool = body["messages"]
+                .as_array()
+                .and_then(|m| m.last())
+                .is_some_and(|m| m["role"] == "tool");
+            if let Some(tool) = w.calls_tool.get(&model).cloned().filter(|_| !after_tool) {
+                w.streamed_bodies.push(body);
+                w.chats.push(model.clone());
+                let chunk = |d: serde_json::Value, finish: serde_json::Value| {
+                    let c = json!({"id": "c", "object": "chat.completion.chunk", "model": model,
+                        "choices": [{"index": 0, "delta": d, "finish_reason": finish}]});
+                    format!("data: {c}\n\n")
+                };
+                let sse = [
+                    chunk(
+                        json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                            "function": {"name": tool, "arguments": "{}"}}]}),
+                        json!(null),
+                    ),
+                    chunk(json!({}), json!("tool_calls")),
+                    "data: [DONE]\n\n".to_string(),
+                ]
+                .concat();
+                return ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream");
+            }
+            if body["stream"] == true && w.thinking.contains(&model) {
+                w.streamed_bodies.push(body);
+                w.chats.push(model.clone());
+                let delta = |d: serde_json::Value, finish: serde_json::Value| {
+                    let chunk = json!({"id": "c", "object": "chat.completion.chunk", "model": model,
+                        "choices": [{"index": 0, "delta": d, "finish_reason": finish}]});
+                    format!("data: {chunk}\n\n")
+                };
+                let sse = [
+                    delta(json!({"reasoning_content": THOUGHT}), json!(null)),
+                    delta(json!({"content": ANSWER}), json!(null)),
+                    delta(json!({}), json!("stop")),
+                    "data: [DONE]\n\n".to_string(),
+                ]
+                .concat();
+                return ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream");
+            }
             w.chats.push(model.clone());
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "c", "object": "chat.completion", "created": 0, "model": model,
-                "choices": [{"index": 0, "finish_reason": "stop",
-                             "message": {"role": "assistant", "content": format!("ok from {model}")}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            }))
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "id": "c", "object": "chat.completion", "created": 0, "model": model,
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant", "content": format!("ok from {model}")}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }))
+                .set_delay(w.chat_delay)
         })
         .mount(&server)
         .await;
@@ -360,6 +471,58 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
                 }})),
                 None => ResponseTemplate::new(200).set_body_json(json!({"prompt": "p"})),
             }
+        })
+        .mount(&server)
+        .await;
+    // An audio.cpp container (`local_tts`): its health route, its voice
+    // list, and one second of speech for every clause — or the engine's
+    // refusal of options it would refuse (`audiocpp_options`).
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/audio/voices"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"voices": ["alba"]})))
+        .mount(&server)
+        .await;
+    let speech_world = world.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(move |req: &Request| {
+            let mut w = speech_world.lock().unwrap();
+            let model = w.ports.get(&port).cloned().unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let refused = w
+                .served
+                .get(&model)
+                .and_then(|s| audiocpp_options::refusal(s, &body));
+            if let Some(refused) = refused {
+                w.refused_speech.push(body);
+                return refused;
+            }
+            w.speeches.push(model);
+            w.speech_bodies.push(body);
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/wav")
+                .set_body_bytes(super::realtime_tts::wav(
+                    &super::realtime_tts::speech(1000),
+                    24_000,
+                ))
+        })
+        .mount(&server)
+        .await;
+    let asr_world = world.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(move |req: &Request| {
+            let mut w = asr_world.lock().unwrap();
+            let model = w.ports.get(&port).cloned().unwrap_or_default();
+            w.transcriptions.push(model);
+            w.transcription_languages
+                .push(multipart_text(&req.body, "language"));
+            ResponseTemplate::new(200).set_body_json(json!({"text": w.transcript}))
         })
         .mount(&server)
         .await;
@@ -635,6 +798,36 @@ impl Gpu {
         self.clouds.lock().unwrap().push(mock);
     }
 
+    /// The chat bodies every cloud alias's upstream got, in order.
+    pub async fn cloud_bodies(&self) -> Vec<serde_json::Value> {
+        // Taken out and put back: no lock is held across the reads.
+        let mocks = std::mem::take(&mut *self.clouds.lock().unwrap());
+        let mut out = Vec::new();
+        for m in &mocks {
+            for r in m.received_requests().await.unwrap_or_default() {
+                if r.url.path() == "/v1/chat/completions" {
+                    out.push(serde_json::from_slice(&r.body).unwrap_or_default());
+                }
+            }
+        }
+        self.clouds.lock().unwrap().extend(mocks);
+        out
+    }
+
+    /// Every request every cloud alias's upstream got, as `METHOD path` —
+    /// a catalog read as well as a chat call.
+    pub async fn cloud_requests(&self) -> Vec<String> {
+        let mocks = std::mem::take(&mut *self.clouds.lock().unwrap());
+        let mut out = Vec::new();
+        for m in &mocks {
+            for r in m.received_requests().await.unwrap_or_default() {
+                out.push(format!("{} {}", r.method, r.url.path()));
+            }
+        }
+        self.clouds.lock().unwrap().extend(mocks);
+        out
+    }
+
     /// The route a local model's own name resolves to.
     pub fn route(&self, id: &str) -> Route {
         self.state.snapshot().resolve(id).unwrap()
@@ -674,4 +867,14 @@ impl Gpu {
         }
         panic!("the killed container is still answering on {port}");
     }
+}
+
+/// The value of the multipart text field `name` in `body`, if it has one.
+fn multipart_text(body: &[u8], name: &str) -> Option<String> {
+    let body = String::from_utf8_lossy(body);
+    let at = body.find(&format!("name=\"{name}\""))?;
+    let rest = &body[at..];
+    let start = rest.find("\r\n\r\n")? + 4;
+    let end = rest[start..].find("\r\n")?;
+    Some(rest[start..start + end].to_string())
 }

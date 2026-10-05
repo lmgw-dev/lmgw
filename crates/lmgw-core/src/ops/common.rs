@@ -114,7 +114,9 @@ pub fn parse_capabilities_override(v: &Value) -> Result<Option<Value>, String> {
         }),
         ..Derived::default()
     };
-    capabilities::apply_owner_override(check_base, &obj)?;
+    // The protocol only picks a changed task's routes, which a shape check
+    // does not keep.
+    capabilities::apply_owner_override(check_base, &obj, crate::config::Protocol::Openai)?;
     Ok(Some(obj))
 }
 
@@ -168,6 +170,16 @@ pub(super) fn clear_names(clear: Option<&str>) -> impl Iterator<Item = &str> {
 /// Whether a `clear` argument names `field` (see [`clear_names`]).
 pub(crate) fn clear_has(clear: Option<&str>, field: &str) -> bool {
     clear_names(clear).any(|n| n == field)
+}
+
+/// A per-model `extra_run_args` override as it is stored: one that holds no
+/// args is no override, so it becomes `None` and the class's own run args
+/// apply. Stored as `[]` it meant "run with no extra args", which drops the
+/// class's GPU passthrough and `label=disable` — a container that cannot
+/// read its own models under SELinux and has no card. Nobody asks for that by
+/// leaving a field blank; an owner who wants other flags names them.
+pub(crate) fn run_args_override(args: Option<Vec<String>>) -> Option<Vec<String>> {
+    args.filter(|a| !a.is_empty())
 }
 
 /// A caller-supplied GGUF path as stored: the in-container `/models/` prefix

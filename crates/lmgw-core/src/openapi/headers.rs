@@ -147,6 +147,12 @@ const COUNT_APPROXIMATE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/messages/count_tokens"),
 ];
 
+/// `x-lmgw-speech`'s and `x-lmgw-sample-rate`'s one route.
+const SPEECH_ROUTES: &[(&str, &str)] = &[("POST", "/v1/audio/speech")];
+
+/// `x-lmgw-voices-source`'s one route.
+const VOICES_ROUTES: &[(&str, &str)] = &[("GET", "/v1/audio/voices")];
+
 /// The table (§4.9). In spec order: the reasoning trio, then the two
 /// literal-only headers (`x-lmgw-run`, `x-lmgw-admin-token`), the internal
 /// `x-lmgw-face`, the gated-response trio, the three "route could not
@@ -159,7 +165,12 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
         audience: Audience::Client,
         scope: Scope::Routes(REASONING_ROUTES),
         schema: HeaderSchema::Enum(&["on", "off"]),
-        description: "on|off — per-request thinking switch; wins over body fields. Accepted on \
+        description: "on|off — per-request thinking switch; wins over body fields. On a cloud \
+            model, off goes out in the form the model takes: no reasoning control where it has \
+            none, its lowest level where it cannot stop (x-lmgw-reasoning-ignored then says \
+            enabled). An off never ends in an error: a refused one is retried with what the \
+            refusal names and, failing that, with no reasoning control, so a model that cannot \
+            run without reasoning answers with its default reasoning. Accepted on \
             /v1/chat/completions, /v1/messages, /v1/messages/count_tokens and /v1/responses.",
     },
     LmgwHeader {
@@ -266,7 +277,10 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
         scope: Scope::Routes(REASONING_IGNORED_ROUTES),
         schema: HeaderSchema::Enum(&["enabled", "effort", "budget"]),
         description: "RESPONSE: comma-separated controls (enabled, effort, budget) the route \
-            could not express; absent when everything was applied.",
+            could not express — enabled also when an off went out as no control or as the \
+            model's lowest level, because the model cannot take the off itself, or the \
+            provider refused every form of off and the model answered with its default \
+            reasoning; absent when everything was applied.",
     },
     LmgwHeader {
         name: "x-lmgw-max-tokens-defaulted",
@@ -336,12 +350,59 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
             (/v1/count_tokens: the backend counts messages, so the text was counted as one user \
             message, framing included). Absent when the count is exact.",
     },
+    LmgwHeader {
+        name: "x-lmgw-speech",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(SPEECH_ROUTES),
+        schema: HeaderSchema::Text,
+        description: "RESPONSE: on POST /v1/audio/speech, what lmgw changed in the request \
+            so the model understands it, '; '-separated: voice=options.voice_id (a voice the \
+            model ships, which this family reads from options.voice_id — MagpieTTS), \
+            voice=preset->options.voice_id (the same for a preset's voice id), voice=<name> (a \
+            shipped voice sent in the model's own spelling), language=<asked>-><sent> (the \
+            language in the model's own vocabulary, e.g. de->german for Qwen3-TTS, en->en-us \
+            for Kokoro), instructions=options.instruct (moved where the family reads them), \
+            instructions=also:options.instruct or instructions=also:options.instruction (the \
+            model's default request options describe the voice under that other key, which \
+            the engine would merge in beside the request's and refuse as conflicting — the \
+            request's text went there too, so it replaces the default), instructions=dropped \
+            (the model reads none — capabilities.speech.instructions is none), tags=mapped:<n>,stripped:<n> (inline tags in input rewritten into the \
+            model's spelling, or removed so they are never read out). The voice and language \
+            parts apply to local audio models only. Absent when the request went as it came; \
+            input changes only for its inline tags.",
+    },
+    LmgwHeader {
+        name: "x-lmgw-sample-rate",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(SPEECH_ROUTES),
+        schema: HeaderSchema::Integer,
+        description: "RESPONSE: on a streamed POST /v1/audio/speech (stream_format sse or \
+            audio) to a local audio model, the sample rate of its PCM16 in Hz — the stream has \
+            no header of its own. Learned from the model's last WAV answer through lmgw (also \
+            capabilities.speech.sample_rate); absent until it has answered one since lmgw \
+            started.",
+    },
+    LmgwHeader {
+        name: "x-lmgw-voices-source",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(VOICES_ROUTES),
+        schema: HeaderSchema::Enum(&["config", "engine"]),
+        description: "RESPONSE: on GET /v1/audio/voices, where the list came from: config (a \
+            local audio model answered from lmgw's own catalog — its presets, the voices its \
+            package ships, its embeddings and the voice library — without starting it) or \
+            engine (the model's own server: a remote upstream, or a local container with \
+            ?probe=engine, which starts it if it is down).",
+    },
 ];
 
 /// The `{name: description}` map `/v1/models`' `lmgw.headers` publishes
 /// (§4.9): every `Audience::Client` row, request or response alike — the
 /// eleven headers the old hand-written block carried plus
-/// `x-lmgw-count-approximate` (§5.1), twelve in total. `Agent`, `Owner` and
+/// `x-lmgw-count-approximate` (§5.1), `x-lmgw-speech`,
+/// `x-lmgw-sample-rate` and `x-lmgw-voices-source`. `Agent`, `Owner` and
 /// `Internal` rows (`x-lmgw-run`, `x-lmgw-admin-token`, `x-lmgw-face`) are in
 /// the table for the drift guard to find, not for a client reading
 /// `/v1/models` to see.
@@ -358,9 +419,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn headers_block_has_exactly_the_twelve_client_rows() {
+    fn headers_block_has_exactly_the_client_rows() {
         let block = headers_block();
-        assert_eq!(block.len(), 12, "{block:#?}");
+        assert_eq!(block.len(), 15, "{block:#?}");
         assert!(block.contains_key("x-lmgw-count-approximate"));
         assert!(block.contains_key("x-lmgw-reasoning"));
     }

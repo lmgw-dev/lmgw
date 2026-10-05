@@ -1,0 +1,30 @@
+{
+ "file": "en_two_sentences_pause.wav",
+ "text": "I am tired. I will rest now.",
+ "voice": "en_US-ljspeech-medium",
+ "licence": {
+  "model_licence": "MIT (rhasspy/piper-voices repo metadata); trained from scratch",
+  "dataset_licence": "public domain (LJ Speech, https://keithito.com/LJ-Speech-Dataset/)"
+ },
+ "tts": "piper-tts 1.3, soxr VHQ 22.05k->24k, amplitude-trimmed (>2% of peak, 5 ms pad/fades), peak-normalised to 0.7",
+ "sample_rate": 24000,
+ "channels": 1,
+ "format": "PCM16 WAV",
+ "duration_ms": 3649,
+ "samples": 87584,
+ "speech_segments_ms": [
+  {
+   "start_ms": 300,
+   "end_ms": 1098,
+   "text": "I am tired."
+  },
+  {
+   "start_ms": 1798,
+   "end_ms": 2849,
+   "text": "I will rest now."
+  }
+ ],
+ "segments_note": "derived from generation (positions of inserted silence), not from a VAD",
+ "inter_sentence_pause_ms": 700,
+ "expectation": "500 ms silence window splits into two utterances; >700 ms window does not"
+}

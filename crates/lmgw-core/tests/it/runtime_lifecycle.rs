@@ -305,7 +305,7 @@ fn chat_runtime(model_id: &str) -> ModelRuntime {
         enabled: true,
         llama: Some(LlamaArgs::Chat {
             gguf_path: format!("{model_id}.gguf"),
-            params: LlamaParams::default(),
+            params: Box::default(),
             args: vec![],
         }),
         audio: None,
@@ -370,6 +370,7 @@ fn spec(rt: &ModelRuntime) -> AcquireSpec<'_> {
         container_prefix: "lmgw",
         models_dir: "/srv/models",
         data_dir: Path::new(DATA_DIR),
+        may_write_models_dir: true,
         load_timeout: Duration::from_millis(2_000),
         stop_timeout: Duration::from_millis(500),
     }
@@ -384,14 +385,36 @@ fn rendered_cmd(rt: &ModelRuntime, port: u16) -> Vec<String> {
     render_engine_args(&render)
 }
 
-/// The four labels [`podman_run_argv`](lmgw_core::runtime::argv::podman_run_argv)
-/// puts on every managed container (§3.3).
+/// The labels [`podman_run_argv`](lmgw_core::runtime::argv::podman_run_argv)
+/// puts on every managed container (§3.3), its run args' digest for the
+/// args this file's runtimes of `class` carry.
 fn managed(class: Class, model_id: &str) -> HashMap<String, String> {
+    let args: Vec<String> = match class {
+        Class::Audio => vec![],
+        _ => vec!["--device".into(), "nvidia.com/gpu=all".into()],
+    };
+    managed_with(class, model_id, &args)
+}
+
+/// [`managed`] for a row of `f`'s, with the run args its descriptor
+/// renders now.
+fn managed_now(f: &Fixture, class: Class, model_id: &str) -> HashMap<String, String> {
+    let snap = f.state.snapshot();
+    let rt = model_runtime(&snap, class, model_id).expect("the row");
+    managed_with(class, model_id, &rt.extra_run_args)
+}
+
+/// [`managed`], started with `run_args`.
+fn managed_with(class: Class, model_id: &str, run_args: &[String]) -> HashMap<String, String> {
     HashMap::from([
         ("lmgw.instance".to_string(), "lmgw".to_string()),
         ("lmgw.class".to_string(), class.as_str().to_string()),
         ("lmgw.model".to_string(), model_id.to_string()),
         ("lmgw.engine".to_string(), class.engine().to_string()),
+        (
+            lmgw_core::runtime::argv::RUN_ARGS_LABEL.to_string(),
+            lmgw_core::runtime::argv::run_args_digest(run_args),
+        ),
     ])
 }
 
@@ -460,6 +483,48 @@ async fn reconcile_adopts_a_matching_running_container_and_acquire_reuses_it() {
     assert_eq!(facts.model_id, "m1");
     assert_eq!(facts.models_dir, "/srv/models");
     assert_eq!(facts.gguf_path, "m1.gguf");
+}
+
+/// A container whose `podman run` flags are not the ones its row renders
+/// now is not adopted: one started with an empty override (no GPU, no
+/// `label=disable`) before migration 0055 moved the row onto its class's
+/// flags, and one from an lmgw that kept no record of its flags. Both are
+/// removed, saying why, and the next start renders the flags in effect.
+#[tokio::test]
+async fn reconcile_removes_a_container_whose_run_args_differ_from_the_render() {
+    let health = container_at(200).await;
+    let port = health.address().port();
+    let rt = chat_runtime("m1");
+    let name = container_name("lmgw", Class::Chat, "m1");
+    for (labels, why) in [
+        (
+            managed_with(Class::Chat, "m1", &[]),
+            "its run args are not the ones",
+        ),
+        (
+            {
+                let mut l = managed(Class::Chat, "m1");
+                l.remove(lmgw_core::runtime::argv::RUN_ARGS_LABEL);
+                l
+            },
+            "no record of its run args",
+        ),
+    ] {
+        let podman = Arc::new(Podman::default());
+        podman.add(FakeContainer {
+            name: name.clone(),
+            labels,
+            state: "running".into(),
+            cmd: rendered_cmd(&rt, port),
+            host_port: port,
+        });
+        let reg = registry(podman.clone(), vec![]);
+        let report = reg.reconcile("lmgw", &[spec(&rt)]).await;
+        assert!(report.adopted.is_empty(), "{why}: {:?}", report.adopted);
+        assert_eq!(report.removed.len(), 1, "{why}");
+        assert!(report.removed[0].1.contains(why), "{:?}", report.removed);
+        assert!(reg.list().is_empty());
+    }
 }
 
 /// Reconciliation runs concurrently with the listener on purpose (`server.rs`
@@ -681,6 +746,8 @@ fn audio_runtime(model_id: &str, family: &str) -> ModelRuntime {
             mode: "offline".into(),
             lazy: None,
             busy_timeout_ms: None,
+            backend: None,
+            threads: None,
             load_options: Default::default(),
             session_options: Default::default(),
             default_request_options: Default::default(),
@@ -695,6 +762,7 @@ fn audio_runtime(model_id: &str, family: &str) -> ModelRuntime {
             warm_start: false,
             hold_fallback_mode: Default::default(),
             hold_fallback: None,
+            residency: None,
         }),
         audio_settings: Some(AudioSettings::default()),
         image_model: None,
@@ -728,6 +796,7 @@ async fn an_adopted_image_container_keeps_the_capabilities_its_probe_read() {
         container_prefix: "lmgw",
         models_dir: &dir,
         data_dir: Path::new(DATA_DIR),
+        may_write_models_dir: true,
         load_timeout: Duration::from_millis(2_000),
         stop_timeout: Duration::from_millis(500),
     };
@@ -780,6 +849,7 @@ async fn audio_adoption_compares_the_mounted_config_not_just_the_argv() {
         container_prefix: "lmgw",
         models_dir: "/srv/audio",
         data_dir: data_dir.path(),
+        may_write_models_dir: true,
         load_timeout: Duration::from_millis(2_000),
         stop_timeout: Duration::from_millis(500),
     };
@@ -810,6 +880,7 @@ async fn audio_adoption_compares_the_mounted_config_not_just_the_argv() {
         container_prefix: "lmgw",
         models_dir: "/srv/audio",
         data_dir: data_dir.path(),
+        may_write_models_dir: true,
         load_timeout: Duration::from_millis(2_000),
         stop_timeout: Duration::from_millis(500),
     };
@@ -920,7 +991,7 @@ async fn acquire_guard(
 ) -> lmgw_core::runtime::registry::AcquireGuard {
     let snap = state.snapshot();
     let rt = model_runtime(&snap, Class::Chat, model_id).expect("configured model");
-    let spec = lifecycle::acquire_spec(&state.data_dir, &snap, &rt);
+    let spec = lifecycle::acquire_spec(state, &snap, &rt);
     state.runtime().acquire(&spec).await.expect("acquire")
 }
 
@@ -1097,7 +1168,7 @@ async fn boot_never_sweeps_a_name_reconciliation_just_adopted() {
     let health = container_at(200).await;
     f.podman.add(FakeContainer {
         name: adopted.clone(),
-        labels: managed(Class::Chat, "warm"),
+        labels: managed_now(&f, Class::Chat, "warm"),
         state: "running".into(),
         cmd: {
             let snap = f.state.snapshot();
@@ -1156,7 +1227,7 @@ async fn boot_stops_an_adopted_container_and_skips_warm_starts_when_hold_is_pers
     let health = container_at(200).await;
     f.podman.add(FakeContainer {
         name: adopted.clone(),
-        labels: managed(Class::Chat, "warm"),
+        labels: managed_now(&f, Class::Chat, "warm"),
         state: "running".into(),
         cmd: {
             let snap = f.state.snapshot();
@@ -1666,7 +1737,7 @@ async fn left_running_at(f: &Fixture, rung: usize) -> MockServer {
     let port = health.address().port();
     f.podman.add(FakeContainer {
         name: container_name("lmgw", Class::Chat, LADDER),
-        labels: managed(Class::Chat, LADDER),
+        labels: managed_now(f, Class::Chat, LADDER),
         state: "running".into(),
         cmd: ladder_cmd(f, rung, port),
         host_port: port,
@@ -1769,7 +1840,7 @@ async fn boot_removes_a_ladder_container_that_matches_no_rung() {
     let name = container_name("lmgw", Class::Chat, LADDER);
     f.podman.add(FakeContainer {
         name: name.clone(),
-        labels: managed(Class::Chat, LADDER),
+        labels: managed_now(&f, Class::Chat, LADDER),
         state: "running".into(),
         cmd,
         host_port: port,
@@ -1886,4 +1957,40 @@ async fn restart_brings_a_climbed_ladder_back_to_its_base() {
     let live = f.state.runtime().list();
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].rung.as_ref().unwrap().rung, 1, "{live:?}");
+}
+
+/// An agent's containers carry this instance's label like the model
+/// containers, and no model's: the model reconcile must leave them alone —
+/// a service container an early App-tab request started while the boot's
+/// `podman ps` was on its way, and an exited one whose logs a 503 quotes.
+/// The agents' own reconcile collects their leftovers.
+#[tokio::test]
+async fn the_model_reconcile_leaves_an_agent_s_containers_alone() {
+    let podman = Arc::new(Podman::default());
+    for (name, run, state) in [
+        ("lmgw-agentsvc-folder-chat", "service", "running"),
+        ("lmgw-agent-mail-labeler-7", "7", "exited"),
+    ] {
+        podman.add(FakeContainer {
+            name: name.into(),
+            labels: HashMap::from([
+                ("lmgw.instance".to_string(), "lmgw".to_string()),
+                ("lmgw.kind".to_string(), "agent".to_string()),
+                ("lmgw.agent".to_string(), "folder-chat".to_string()),
+                ("lmgw.run".to_string(), run.to_string()),
+            ]),
+            state: state.into(),
+            cmd: Vec::new(),
+            host_port: 0,
+        });
+    }
+    let reg = registry(podman.clone(), vec![]);
+    let rt = chat_runtime("m1");
+
+    let report = reg.reconcile("lmgw", &[spec(&rt)]).await;
+    assert!(report.listed);
+    assert!(report.adopted.is_empty(), "{:?}", report.adopted);
+    assert!(report.removed.is_empty(), "{:?}", report.removed);
+    assert!(podman.removed().is_empty(), "{:?}", podman.removed());
+    assert!(reg.list().is_empty());
 }

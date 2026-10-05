@@ -75,6 +75,11 @@ pub(super) fn keep(
                 refresh.run(());
                 toasts.ok("chat kept");
             }
+            // The voice session's gateway side closes after its journal
+            // drained; a Keep that came first is refused for it (§8.1).
+            Err(crate::api::Error::Api(e)) if e.code == "voice_session_active" => {
+                toasts.err("the voice session is still closing: try Keep again in a moment")
+            }
             Err(e) => toasts.err(format!("keeping the chat failed: {e}")),
         }
     });
@@ -89,6 +94,15 @@ pub(super) fn TempBanner(
     /// A reply is streaming in it: Keep waits.
     #[prop(into)]
     streaming: Signal<bool>,
+    /// Voice mode is on: Keep waits until it ends (the gateway refuses it
+    /// while the thread is bound, chat-voice §8.1).
+    #[prop(into)]
+    voice_mode: Signal<bool>,
+    /// Voice mode was left and the gateway's side of the session has not
+    /// closed yet: its journal still drains, and the thread is still bound
+    /// (WP9 review NIT 9).
+    #[prop(into)]
+    voice_closing: Signal<bool>,
     busy: RwSignal<bool>,
     on_keep: Callback<()>,
 ) -> impl IntoView {
@@ -101,11 +115,19 @@ pub(super) fn TempBanner(
                 title=move || {
                     if streaming.get() {
                         "wait for the reply to finish".to_string()
+                    } else if voice_mode.get() {
+                        "leave voice mode first: a chat in voice mode is kept once the session ends"
+                            .to_string()
+                    } else if voice_closing.get() {
+                        "the voice session is still closing: Keep in a moment".to_string()
                     } else {
                         "Save this chat as an ordinary conversation".to_string()
                     }
                 }
-                disabled=move || busy.get() || streaming.get()
+                data-keep=""
+                disabled=move || {
+                    busy.get() || streaming.get() || voice_mode.get() || voice_closing.get()
+                }
                 on:click=move |_| on_keep.run(())
             >
                 "Keep"

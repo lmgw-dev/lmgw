@@ -40,6 +40,10 @@
 //! **The hold wins.** Under both, a site answers as the hold does: the hold
 //! is the owner's own switch and ends the run anyway (§3.3).
 //!
+//! **Per model** ([`Snapshot::gpu_block_for`]): an audio row on the CPU
+//! (`runtime::Placement::Cpu`) is blocked by the lease and never by the
+//! hold. Every site that decides for one model asks that instead.
+//!
 //! **Not the outside-VRAM trigger.** Unlike the hold, the lease leaves
 //! §4.7's measurement on: the run's container is attributed as lmgw's
 //! (`vram/ledger.rs`, from [`crate::bench::state::OnCard`]), so Overview shows
@@ -50,6 +54,7 @@ use std::sync::Arc;
 use crate::config::Snapshot;
 use crate::error::GatewayError;
 use crate::gate::FallbackReason;
+use crate::runtime::{Class, Placement};
 
 /// "A benchmark holds the card": the run that took it, and its model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +81,43 @@ impl Snapshot {
             return Some(GpuBlock::Hold);
         }
         self.gpu_lease.clone().map(GpuBlock::Benchmark)
+    }
+
+    /// [`Self::gpu_block`] for one model, by where it runs
+    /// ([`Self::placement`]): a model on the CPU uses no VRAM, so the hold
+    /// has no claim on it — the owner reads the hold as "lmgw may use zero
+    /// VRAM". A benchmark's lease still covers it: the run measures the
+    /// whole machine, and its drain needs no exception.
+    pub fn gpu_block_for(&self, class: Class, model_id: &str) -> Option<GpuBlock> {
+        self.gpu_block_at(self.placement(class, model_id))
+    }
+
+    /// [`Self::gpu_block`] for a start on `placement` — the placement of the
+    /// descriptor that will actually be started. A check after an await asks
+    /// this rather than [`Self::gpu_block_for`]: the row may have been
+    /// switched while the start waited, and its container is still the one
+    /// rendered before the wait.
+    pub fn gpu_block_at(&self, placement: Placement) -> Option<GpuBlock> {
+        match placement {
+            Placement::Gpu => self.gpu_block(),
+            Placement::Cpu => self.gpu_lease.clone().map(GpuBlock::Benchmark),
+        }
+    }
+
+    /// Where `model_id` of `class` computes as its row is configured now —
+    /// what its next start runs on. An unknown model reads as `Gpu`, the
+    /// stricter answer. A running container's own placement is its
+    /// registry entry's ([`crate::runtime::registry::Registry::placement_of`]).
+    pub fn placement(&self, class: Class, model_id: &str) -> Placement {
+        if class != Class::Audio {
+            return Placement::Gpu;
+        }
+        self.audio_models
+            .iter()
+            .find(|m| m.model_id == model_id)
+            .map_or(Placement::Gpu, |m| {
+                crate::runtime::audio::placement(m, &self.settings.audio)
+            })
     }
 }
 
@@ -198,5 +240,58 @@ mod tests {
         let b = snap.gpu_block().unwrap();
         assert_eq!(b, GpuBlock::Hold);
         assert_eq!(b.refusal("other", "").code(), "gpu_hold");
+    }
+
+    /// A model on the CPU is blocked by a benchmark's lease, never by the
+    /// hold; every other model by both, the hold winning.
+    #[test]
+    fn the_hold_has_no_claim_on_a_model_on_the_cpu() {
+        let row = |id: &str, backend: Option<&str>| {
+            serde_json::from_value::<crate::config::AudioModel>(serde_json::json!({
+                "id": 1, "model_id": id, "family": "parakeet_tdt", "path": "p",
+                "task": "asr", "mode": "offline", "load_options": {}, "session_options": {},
+                "voice_presets": {}, "default_voice_preset": null, "enabled": true,
+                "image": null, "extra_run_args": null, "warm_start": false,
+                "backend": backend
+            }))
+            .unwrap()
+        };
+        let mut snap = Snapshot {
+            audio_models: vec![row("cpu-asr", Some("cpu")), row("gpu-tts", None)],
+            ..Snapshot::default()
+        };
+        let block = |s: &Snapshot, class, id| s.gpu_block_for(class, id);
+        assert_eq!(snap.placement(Class::Audio, "cpu-asr"), Placement::Cpu);
+        assert_eq!(snap.placement(Class::Audio, "gpu-tts"), Placement::Gpu);
+        assert_eq!(snap.placement(Class::Audio, "unknown"), Placement::Gpu);
+        assert_eq!(snap.placement(Class::Chat, "cpu-asr"), Placement::Gpu);
+        assert_eq!(block(&snap, Class::Audio, "cpu-asr"), None);
+
+        snap.settings.hold.active = true;
+        assert_eq!(block(&snap, Class::Audio, "cpu-asr"), None, "hold only");
+        assert_eq!(block(&snap, Class::Audio, "gpu-tts"), Some(GpuBlock::Hold));
+        assert_eq!(block(&snap, Class::Chat, "x"), Some(GpuBlock::Hold));
+
+        snap.gpu_lease = Some(lease(3, "qwen"));
+        assert!(matches!(
+            block(&snap, Class::Audio, "cpu-asr"),
+            Some(GpuBlock::Benchmark(l)) if l.run_id == 3
+        ));
+        assert_eq!(
+            block(&snap, Class::Audio, "gpu-tts"),
+            Some(GpuBlock::Hold),
+            "the hold wins on the GPU"
+        );
+        snap.settings.hold.active = false;
+        assert!(matches!(
+            block(&snap, Class::Audio, "cpu-asr"),
+            Some(GpuBlock::Benchmark(_))
+        ));
+        // A class whose backend is the CPU puts every row that inherits it
+        // there.
+        snap.gpu_lease = None;
+        snap.settings.hold.active = true;
+        snap.settings.audio.backend = "cpu".into();
+        assert_eq!(block(&snap, Class::Audio, "gpu-tts"), None);
     }
 }

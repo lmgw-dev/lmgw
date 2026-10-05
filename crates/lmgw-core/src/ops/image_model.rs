@@ -152,6 +152,9 @@ pub struct ImageModelPatch {
     pub enabled: Option<bool>,
     /// Per-model image override; empty clears back to the class image.
     pub image: Option<String>,
+    /// `podman run` args override; name it in `clear` to revert to the class
+    /// setting. An empty list inherits too (it is never stored as one);
+    /// blank text leaves the current value.
     pub extra_run_args: Option<ArgList>,
     pub warm_start: Option<bool>,
     pub idle_seconds: Option<i64>,
@@ -503,8 +506,12 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
                 edit: p.edit.unwrap_or(false),
                 enabled: p.enabled.unwrap_or(true),
                 image: opt(&p.image),
+                // A named clear wins over the value on create as on update:
+                // the editor sends a blank field as `""` *and* names it. An
+                // empty list without the clear is no override either.
                 extra_run_args: match &p.extra_run_args {
-                    Some(a) => Some(a.tokens()?),
+                    _ if p.clears("extra_run_args") => None,
+                    Some(a) => run_args_override(Some(a.tokens()?)),
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
@@ -555,14 +562,17 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
             let (caps, vocab_note) =
                 image_vocabulary(state, &effective_image_image(state, &image)).await;
             check_image_row(&caps, &models_dir, &files, &args)?;
+            // An empty list inherits the class; blank text is "not supplied".
             let extra_run_args = if p.clears("extra_run_args") {
                 None
             } else {
                 match &p.extra_run_args {
+                    Some(a) if a.is_blank_text() => cur.extra_run_args.clone(),
                     Some(a) => Some(a.tokens()?),
                     None => cur.extra_run_args.clone(),
                 }
             };
+            let extra_run_args = run_args_override(extra_run_args);
             let (hold_fallback_mode, hold_fallback) = resolve_hold_fallback_text(
                 &snap,
                 p.hold_fallback_mode.as_deref(),

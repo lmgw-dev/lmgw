@@ -9,6 +9,7 @@
 //! `/chat/api` is `{code, message}`, so a client would have to special-case
 //! exactly these. Swapping the extractor type is all a handler does to opt in.
 
+use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request};
 use axum::http::request::Parts;
@@ -50,6 +51,35 @@ where
 
 fn json_rejected(e: JsonRejection) -> Response {
     rejected(e.status(), e.body_text())
+}
+
+/// An optional JSON body (chat-voice design §6.4: regenerate and continue
+/// took none, and still accept none): an empty body, or one of only
+/// whitespace, is `T::default()`; anything else is read as JSON whatever
+/// its content type, and refused as an `ApiError` when it is not `T`.
+pub(super) struct ChatOptJson<T>(pub T);
+
+impl<T, S> FromRequest<S> for ChatOptJson<T>
+where
+    T: DeserializeOwned + Default,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let body = Bytes::from_request(req, state)
+            .await
+            .map_err(|e| rejected(e.status(), e.body_text()))?;
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Self(T::default()));
+        }
+        serde_json::from_slice(&body).map(Self).map_err(|e| {
+            rejected(
+                StatusCode::BAD_REQUEST,
+                format!("the body is not the JSON this route reads: {e}"),
+            )
+        })
+    }
 }
 
 /// [`Query`], refused as an `ApiError`.

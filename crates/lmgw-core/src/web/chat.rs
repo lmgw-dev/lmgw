@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
-use axum::response::sse::Event as SseFrame;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::ApiError;
@@ -35,6 +34,8 @@ use crate::ir::{ChatRequest, Params, StreamDelta, Usage};
 use crate::proxy::{self, drive_upstream};
 use crate::state::SharedState;
 use crate::store::{self, ChatThread, ThreadMcp};
+
+mod stopped;
 
 // ---------------------------------------------------------------------------
 // Thread JSON API
@@ -60,7 +61,8 @@ pub struct ListThreadsQuery {
 /// `archived_count`, so the sidebar's toggle (and the Agent Runs tab) can
 /// label itself without a second round trip. Agent- and admin-kind threads
 /// are not special-cased here or in the sweep — they archive and purge like
-/// any other thread.
+/// any other thread. A listed thread carries its `voice` but not
+/// `voice_resolved`: that is for the open thread (`GET …/threads/{id}`).
 ///
 /// Every mode also carries `temporary`: the temporary threads (chat-complete
 /// design §7), most recently active first, in their own array — they are
@@ -79,11 +81,11 @@ pub async fn list_threads(
         .await
         .unwrap_or_default();
     let archived_count = ChatRepo::archived_count(&state).await.unwrap_or(0);
-    let purge_days = state.snapshot().settings.chat_purge_days;
-    let out: Vec<Value> = threads.iter().map(|t| thread_json(t, purge_days)).collect();
+    let snap = state.snapshot();
+    let out: Vec<Value> = threads.iter().map(|t| thread_row_json(t, &snap)).collect();
     let temporary: Vec<Value> = ChatRepo::temporary_threads(&state)
         .iter()
-        .map(|t| thread_json(t, purge_days))
+        .map(|t| thread_row_json(t, &snap))
         .collect();
     // Folders ride along in every mode (with their thread counts), so the
     // sidebar needs one request.
@@ -134,7 +136,6 @@ pub async fn create_thread(
         "chat"
     };
     let snap = state.snapshot();
-    let purge_days = snap.settings.chat_purge_days;
     let prompt = if kind == ADMIN_KIND {
         ""
     } else {
@@ -162,7 +163,7 @@ pub async fn create_thread(
         )
         .await
         {
-            Ok(t) => Json(thread_json(&t, purge_days)).into_response(),
+            Ok(t) => Json(thread_json(&state, &t).await).into_response(),
             Err(r) => r,
         };
     }
@@ -170,7 +171,7 @@ pub async fn create_thread(
         .create_thread(&state, &req.model_alias, kind, prompt)
         .await
     {
-        Ok(t) => Json(thread_json(&t, purge_days)).into_response(),
+        Ok(t) => Json(thread_json(&state, &t).await).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
     }
 }
@@ -181,9 +182,22 @@ pub async fn create_thread(
 /// immediately instead of only the next time it is archived. `None` when
 /// active, pinned, or purging is switched off (design §1) — a pinned thread
 /// cannot really carry both flags at once (pinning restores), but the guard
-/// costs nothing and keeps the promise literal either way. And `temporary`:
-/// whether the thread lives only in memory (chat-complete design §7).
-pub(super) fn thread_json(t: &ChatThread, purge_days: i64) -> Value {
+/// costs nothing and keeps the promise literal either way. `temporary`:
+/// whether the thread lives only in memory (chat-complete design §7). And
+/// `voice_resolved`: what its voice resolves to now, field by field with
+/// each value's source (chat-voice design §2.3), its speech style the one
+/// its speech uses.
+pub(super) async fn thread_json(state: &SharedState, t: &ChatThread) -> Value {
+    let mut v = thread_row_json(t, &state.snapshot());
+    v["voice_resolved"] = json!(super::chat_voice::resolve_shown(state, t).await);
+    v
+}
+
+/// [`thread_json`] as the thread list carries it: without
+/// `voice_resolved`, which only an open thread shows, so a list refresh
+/// resolves nothing.
+fn thread_row_json(t: &ChatThread, snap: &crate::config::Snapshot) -> Value {
+    let purge_days = snap.settings.chat_purge_days;
     let mut v = serde_json::to_value(t).expect("ChatThread always serializes");
     let purge_at = (!t.pinned && purge_days > 0)
         .then_some(t.archived_at.as_deref())
@@ -236,7 +250,7 @@ pub async fn get_thread(State(state): State<SharedState>, ChatPath(id): ChatPath
         })
         .collect();
     let snap = state.snapshot();
-    let mut thread_v = thread_json(&thread, snap.settings.chat_purge_days);
+    let mut thread_v = thread_json(&state, &thread).await;
     thread_v["continue"] = json!(chat_turn::continue_state(&snap, &thread, last));
     Json(json!({
         "thread": thread_v,
@@ -303,10 +317,7 @@ pub async fn archive_thread(
 /// [`store::set_chat_thread_pinned`]'s implicit restore fired underneath it.
 async fn respond_with_thread(state: &SharedState, id: i64) -> Response {
     match ChatRepo::of(id).thread(state, id).await {
-        Ok(Some(t)) => {
-            let purge_days = state.snapshot().settings.chat_purge_days;
-            Json(thread_json(&t, purge_days)).into_response()
-        }
+        Ok(Some(t)) => Json(thread_json(state, &t).await).into_response(),
         _ => err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
@@ -365,6 +376,10 @@ pub struct SettingsReq {
     kb_mode: Option<String>,
     #[serde(default, deserialize_with = "present")]
     kb_budget_tokens: Option<Option<i64>>,
+    /// The voice overrides as a whole object (chat-voice design §2.2,
+    /// [`super::chat_voice::apply_thread_voice`]); `null` clears them.
+    #[serde(default, deserialize_with = "present")]
+    voice: Option<Value>,
 }
 
 /// `Some(value)` for a field that was sent — including one sent as `null`,
@@ -379,11 +394,12 @@ where
 }
 
 /// `POST /chat/api/threads/{id}/settings` — patch model + sampling settings,
-/// the reasoning overrides, the thread's attached MCP servers and its
-/// knowledge bases (the title is preserved; it auto-names on first send). Overrides that contradict each
+/// the reasoning overrides, the thread's attached MCP servers, its
+/// knowledge bases and its voice (the title is preserved; it auto-names on first send). Overrides that contradict each
 /// other are a 400 `bad_request`, and nothing is written. Answers `{ok,
-/// continue}`: the thread's `continue` re-judged under the new settings (a
-/// model switch or reasoning toggle changes it).
+/// continue, voice, voice_resolved}`: the thread's `continue` re-judged under
+/// the new settings (a model switch or reasoning toggle changes it), its
+/// voice as stored and what that resolves to now.
 pub async fn update_thread(
     State(state): State<SharedState>,
     ChatPath(id): ChatPath<i64>,
@@ -455,12 +471,28 @@ pub async fn update_thread(
     {
         return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
     }
-    match repo.update_settings(&state, &t).await {
-        Ok(()) => {
+    let seed = match super::chat_voice::apply_thread_voice(&state, &mut t, req.voice).await {
+        Ok(seed) => seed,
+        Err(msg) => return err_json(StatusCode::BAD_REQUEST, "bad_request", msg),
+    };
+    match repo.update_settings(&state, &t, seed).await {
+        Ok(voice) => {
+            t.voice = voice;
             let last = repo.last_message(&state, id).await.ok().flatten();
-            let verdict = chat_turn::continue_state(&state.snapshot(), &t, last.as_ref());
-            Json(json!({ "ok": true, "continue": verdict })).into_response()
+            let snap = state.snapshot();
+            let verdict = chat_turn::continue_state(&snap, &t, last.as_ref());
+            Json(json!({
+                "ok": true,
+                "continue": verdict,
+                "voice": t.voice,
+                "voice_resolved": super::chat_voice::resolve_shown(&state, &t).await,
+            }))
+            .into_response()
         }
+        // The thread went away between the read above and this write (a
+        // delete in another tab, a temporary chat discarded or kept): the
+        // 404 of any missing thread.
+        Err(GatewayError::NotFound(msg)) => err_json(StatusCode::NOT_FOUND, "not_found", msg),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
     }
 }
@@ -526,7 +558,11 @@ fn body_limit_413(max_mb: u32) -> Response {
 /// limit is the one path that covers both cases as this route's own shape:
 /// declared-oversize is still refused before a byte is read, and a chunked
 /// overrun is caught by the same [`axum::body::to_bytes`] call that reads it.
-async fn read_upload_body(body: Body, headers: &HeaderMap, max_mb: u32) -> Result<Bytes, Response> {
+pub(super) async fn read_upload_body(
+    body: Body,
+    headers: &HeaderMap,
+    max_mb: u32,
+) -> Result<Bytes, Response> {
     if max_mb == 0 {
         return axum::body::to_bytes(body, usize::MAX)
             .await
@@ -591,7 +627,7 @@ pub async fn upload_attachment(
     }
     let name = q.name.trim();
     let name = if name.is_empty() { "untitled" } else { name };
-    let new = match chat_attach_ingest::ingest(&state, &thread.model_alias, name, body).await {
+    let new = match chat_attach_ingest::ingest(&state, &thread, name, body).await {
         Ok(n) => n,
         Err((status, code, msg)) => return err_json(status, code, msg),
     };
@@ -673,6 +709,13 @@ pub struct SendReq {
     /// thread's own (chat-complete design §9.3).
     #[serde(default)]
     kb_refs: Vec<i64>,
+    /// A dictated message's `{via: "dictation", asr, asr_answered_by, asr_ms,
+    /// audio_ms}` (chat-voice design §3, §5), stored on the user message.
+    #[serde(default)]
+    voice: Option<Value>,
+    /// Read the reply aloud as it streams (chat-voice design §6.4).
+    #[serde(default)]
+    speak: bool,
 }
 
 /// `POST /chat/api/threads/{id}/send` — persist the user turn, then stream the
@@ -700,6 +743,11 @@ pub async fn send(
             "the message is empty",
         );
     }
+    let voice = match req.voice.map(store::MessageVoice::dictation_from_input) {
+        None => None,
+        Some(Ok(v)) => Some(v),
+        Some(Err(msg)) => return err_json(StatusCode::BAD_REQUEST, "bad_request", msg),
+    };
     let repo = ChatRepo::of(id);
     let Ok(Some(thread)) = repo.thread(&state, id).await else {
         return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
@@ -758,8 +806,8 @@ pub async fn send(
     // that cannot see them, audio nothing can hear or transcribe): the same
     // predicate the draft chips show as `blockers`.
     let mut new_atts = new_atts;
-    chat_attach_retry::retry_failed(&state, &mut new_atts, caps).await;
-    let stt_set = !state.snapshot().settings.chat_stt_alias.is_empty();
+    chat_attach_retry::retry_failed(&state, &thread, &mut new_atts, caps).await;
+    let stt_set = super::chat_voice::asr_alias(&state.snapshot(), &thread).is_some();
     let blocked: Vec<String> = new_atts
         .iter()
         .flat_map(|a| chat_attach_gate::blockers(a, &thread.model_alias, caps, stt_set))
@@ -781,7 +829,14 @@ pub async fn send(
     // `store::append_user_message_with_attachments`. A DB failure here is a
     // 500, never a silent "sent with no attachments".
     let user_message_id = match repo
-        .append_user_message(&state, id, &content, &attachment_ids, &kb_refs)
+        .append_user_message(
+            &state,
+            id,
+            &content,
+            &attachment_ids,
+            &kb_refs,
+            voice.as_ref(),
+        )
         .await
     {
         Ok(store::SendMessageOutcome::Sent(mid)) => mid,
@@ -813,15 +868,18 @@ pub async fn send(
     let mode = TurnMode::Fresh {
         user_message_id: Some(user_message_id),
     };
-    chat_turn::start_turn(&state, repo, &thread, mode, caps).await
+    let speak = req.speak.then(super::chat_voice::ReadAloud::default);
+    chat_turn::start_turn(&state, repo, &thread, mode, caps, speak).await
 }
 
-/// Open the upstream chat stream through the gate's send, mapping every
-/// failure mode to a `(status, error-kind, message)` triple for uniform
-/// reporting. A request the gate sends elsewhere before anything was sent —
-/// a ladder climb's fallback, a candidate alias's next pick — comes back as
+/// Open the upstream chat stream through the gate's send. A failure is the
+/// row's status and the gateway error (the upstream's own status for an
+/// error answer, which the row has always said). A request the gate sends
+/// elsewhere before anything was sent — a ladder climb's fallback, a
+/// candidate alias's next pick — comes back as
 /// [`crate::gate::Sent::Rerouted`]; an upstream response is always a
-/// successful one.
+/// successful one. `prompt_sent` says whether a request is out that the
+/// upstream may be working on, for a stop's row ([`stopped`]).
 #[allow(clippy::too_many_arguments)]
 async fn open_upstream(
     state: &SharedState,
@@ -832,46 +890,51 @@ async fn open_upstream(
     params: &Params,
     timeout: Option<Duration>,
     egress: &'static dyn Egress,
-) -> Result<crate::gate::Sent, (u16, &'static str, String)> {
+    prompt_sent: &std::sync::atomic::AtomicBool,
+    fitted: &mut proxy::reasoning_fit::Fitted,
+    fallback: Option<crate::gate::FallbackReason>,
+) -> Result<crate::gate::Sent, (u16, GatewayError)> {
     // The connect goes through the shared dead-container retry (§3.2); the
     // relay that follows is the client's stream and is not replayable. On a
     // ladder row it only starts once the count says the request fits the
-    // rung that answered.
-    let sent = crate::gate::send_gated(
+    // rung that answered. A refused off is retried before that (§5.6).
+    use std::sync::atomic::Ordering;
+    let sent = proxy::reasoning_fit::send_chat(
         state,
         hold,
         route,
         lease,
-        crate::gate::CountInput::Chat {
-            ir,
-            params,
-            stream: true,
-        },
+        ir,
+        params,
+        true,
         None,
         timeout,
-        |r| {
-            egress.build_chat(
-                &state.http,
-                &r.upstream,
-                &r.upstream_model,
-                ir,
-                params,
-                true,
-            )
+        Some(prompt_sent),
+        fitted,
+        proxy::reasoning_fit::RowAs::InProcess {
+            key: proxy::KeyRef::default(),
+            ingress_proto: "chat",
+            alias: &ir.model_alias,
+            fallback,
+        },
+        |r, p| {
+            prompt_sent.store(true, Ordering::Relaxed);
+            egress.build_chat(&state.http, &r.upstream, &r.upstream_model, ir, p, true)
         },
     )
     .await
-    .map_err(|e| (e.http_status().as_u16(), e.kind(), e.to_string()))?;
+    .map_err(|e| (e.http_status().as_u16(), e))?;
     let crate::gate::Sent::Upstream(resp) = sent else {
         return Ok(sent);
     };
     let status = resp.status();
     if !status.is_success() {
+        // An error answer: the upstream took no prompt to work on.
+        prompt_sent.store(false, Ordering::Relaxed);
         let bytes = resp.bytes().await.unwrap_or_default();
         return Err((
             status.as_u16(),
-            "upstream",
-            crate::gate::attribute(egress.map_error(status.as_u16(), &bytes), route).to_string(),
+            crate::gate::attribute(egress.map_error(status.as_u16(), &bytes), route),
         ));
     }
     Ok(crate::gate::Sent::Upstream(resp))
@@ -892,11 +955,7 @@ pub(super) async fn run_send(
 ) {
     let emit = |ev: &'static str, data: String| {
         let tx = tx.clone();
-        async move {
-            tx.send(Ok(SseFrame::default().event(ev).data(data)))
-                .await
-                .is_ok()
-        }
+        async move { tx.send(chat_turn::TurnFrame::new(ev, data)).await.is_ok() }
     };
 
     // Resolve the alias exactly like an API client would — including the GPU
@@ -916,13 +975,10 @@ pub(super) async fn run_send(
     let routed = match resolved {
         Ok(Ok(r)) => r,
         Ok(Err(f)) => {
-            let _ = emit(
-                "error",
-                json!({ "message": f.error.to_string() }).to_string(),
-            )
-            .await;
-            let _ = emit("done", json!({ "aborted": true }).to_string()).await;
-            return;
+            // The GPU hold or a benchmark refuses a local model with no
+            // usable fallback here, before admission: `held` all the same.
+            super::chat_voice::held_at_resolve(&tx, &ir.model_alias, &f.error).await;
+            return chat_turn::refuse(&tx, &f.error).await;
         }
         Err(why) => return turn.report_stop(why, &tx).await,
     };
@@ -941,7 +997,10 @@ pub(super) async fn run_send(
     // it does not enable (`Routed::using`).
     let uses = crate::gate::request_facets(&ir, None);
     let admitted = match routed.using(uses) {
-        Ok(routed) => turn.or_stop(&tx, routed.admit(&state)).await,
+        Ok(routed) => {
+            let admit = super::chat_voice::admit_reporting(&state, routed, &ir.model_alias, &tx);
+            turn.or_stop(&tx, admit).await
+        }
         Err(f) => Ok(Err(f)),
     };
     let mut opened = match admitted {
@@ -970,9 +1029,9 @@ pub(super) async fn run_send(
                 // contract allows it): close the gauge opened above.
                 state.telemetry.request_abandoned();
             }
-            let _ = emit("error", json!({ "message": e.to_string() }).to_string()).await;
-            let _ = emit("done", json!({ "aborted": true }).to_string()).await;
-            return;
+            let sent =
+                chat_turn::SentAs::of(chat_turn::answered_by(&state.snapshot(), &f.headers), &ir);
+            return chat_turn::refuse_sent(&tx, &e, sent).await;
         }
         Err(why) => {
             // Stopped while waiting for the GPU or a cold start: the
@@ -1015,6 +1074,8 @@ where
         headers,
     } = opened;
     let answered_by = chat_turn::answered_by(&state.snapshot(), &headers);
+    // What a refusal below says the request went out as (`TurnFrame::sent`).
+    let sent_as = chat_turn::SentAs::of(answered_by.clone(), ir);
 
     // Ask llama-server for per-token timings so the stats panel shows real
     // server-measured prefill/decode speeds live during generation (not client
@@ -1041,7 +1102,7 @@ where
     // settled on — a GPU-hold or outside-VRAM fallback, a ladder climb, a
     // candidate — refused by name rather than answered with a fresh message
     // appended to the reply being continued.
-    let fit = match chat_turn::fit_route(&route, ir, turn.is_continue()) {
+    let fit = match chat_turn::fit_route(&route, ir, (turn.is_continue(), turn.local_only())) {
         Ok(fit) => fit,
         Err(e) => {
             record_chat_call(
@@ -1059,13 +1120,15 @@ where
                 Some((e.kind(), e.to_string())),
             )
             .await;
-            let _ = emit("error", json!({ "message": e.to_string() }).to_string()).await;
-            let _ = emit("done", json!({ "aborted": true }).to_string()).await;
+            chat_turn::refuse_sent(tx, &e, sent_as).await;
             return None;
         }
     };
     let mut params = fit.params.with_defaults(&route.param_defaults);
-    let reasoning_ignored = fit.ignored;
+    let mut reasoning_ignored = fit.ignored;
+    // An off this cloud model cannot take as asked goes out in the form it
+    // can (model-capabilities design §5.6), and says so with the rest.
+    let mut fitted = proxy::reasoning_fit::fit(state, &route, &mut params).await;
     let continued = if turn.is_continue() {
         chat_turn::mark_continuation(&route, ir)
     } else {
@@ -1076,6 +1139,7 @@ where
     // reservation, a ladder's clamp, held until the stream below has been
     // drained) and the send itself, both given up the moment the turn is
     // stopped: dropping them drops the reservation and the request.
+    let prompt_sent = std::sync::atomic::AtomicBool::new(false);
     let sent = turn
         .or_stop(tx, async {
             let (mut lease, gated) = crate::gate::fit_chat(
@@ -1097,6 +1161,9 @@ where
                 &params,
                 timeout,
                 egress,
+                &prompt_sent,
+                &mut fitted,
+                headers.fallback_reason(),
             )
             .await;
             Ok::<_, crate::gate::FitRefusal>((lease, opened))
@@ -1122,22 +1189,39 @@ where
                 Some((f.error.kind(), f.error.to_string())),
             )
             .await;
-            let _ = emit(
-                "error",
-                json!({ "message": f.error.to_string() }).to_string(),
-            )
-            .await;
-            let _ = emit("done", json!({ "aborted": true }).to_string()).await;
+            chat_turn::refuse_sent(tx, &f.error, sent_as).await;
             return None;
         }
         Err(why) => {
-            state.telemetry.request_abandoned();
+            if prompt_sent.into_inner() {
+                // Stopped while the upstream had the request: the prompt
+                // it may be working on counts, as on the stock path.
+                let (usage, note) = proxy::unanswered_usage(ir);
+                record_chat_call(
+                    state,
+                    &ir.model_alias,
+                    &route,
+                    headers.fallback_reason(),
+                    started,
+                    200,
+                    None,
+                    usage,
+                    None,
+                    None,
+                    None,
+                    Some(("canceled", note)),
+                )
+                .await;
+            } else {
+                state.telemetry.request_abandoned();
+            }
             turn.report_stop(why, tx).await;
             return None;
         }
     };
     let max_tokens_clamped = lease.max_tokens_clamped();
     let rung = lease.rung_log();
+    fitted.report(&mut reasoning_ignored);
     let resp = match opened {
         Ok(crate::gate::Sent::Upstream(r)) => r,
         Ok(crate::gate::Sent::Rerouted(Ok(next))) => {
@@ -1154,6 +1238,10 @@ where
         // under the refusal's own headers.
         Ok(crate::gate::Sent::Rerouted(Err(f))) => {
             let e = f.error;
+            let sent_as = chat_turn::SentAs {
+                answered_by: chat_turn::answered_by(&state.snapshot(), &f.headers),
+                ..sent_as
+            };
             record_chat_call(
                 state,
                 &ir.model_alias,
@@ -1169,11 +1257,10 @@ where
                 Some((e.kind(), e.to_string())),
             )
             .await;
-            let _ = emit("error", json!({ "message": e.to_string() }).to_string()).await;
-            let _ = emit("done", json!({ "aborted": true }).to_string()).await;
+            chat_turn::refuse_sent(tx, &e, sent_as).await;
             return None;
         }
-        Err((status, kind, msg)) => {
+        Err((status, e)) => {
             record_chat_call(
                 state,
                 &ir.model_alias,
@@ -1186,11 +1273,10 @@ where
                 None,
                 max_tokens_clamped,
                 rung,
-                Some((kind, msg.clone())),
+                Some((e.kind(), e.to_string())),
             )
             .await;
-            let _ = emit("error", json!({ "message": msg }).to_string()).await;
-            let _ = emit("done", json!({ "aborted": true }).to_string()).await;
+            chat_turn::refuse_sent(tx, &e, sent_as).await;
             return None;
         }
     };
@@ -1200,7 +1286,10 @@ where
     let decoder = egress.new_decoder();
     let mut assistant = String::new();
     let mut reasoning = String::new();
+    // Kept outside the stream's future, which a stop drops (`stopped`).
+    let mut read = stopped::Read::default();
     let drained = drive_upstream(resp, decoder, timeout, started, &state.telemetry, |delta| {
+        read.note(&delta, started);
         let (ev, data) = match &delta {
             StreamDelta::TextDelta(t) => {
                 assistant.push_str(t);
@@ -1238,19 +1327,19 @@ where
     // prefill emits nothing, and the GPU should not finish it for nobody.
     let (outcome, stopped) = match turn.or_stop(tx, drained).await {
         Ok(o) => (o, None),
-        Err(why) => (
-            proxy::StreamOutcome {
-                aborted: true,
-                ..Default::default()
-            },
-            Some(why),
-        ),
+        Err(why) => (read.stopped(), Some(why)),
     };
     // The upstream has ended (`drive_upstream` consumed and dropped the
     // response): this send no longer occupies the pool — at once when it ran
     // to its end, once llama-server lets go of the slot otherwise (the
     // dashboard tab closed mid-answer, a stall, an upstream error).
     lease.end(outcome.completed);
+    // The send is over, and so is its GPU claim: nothing below needs the
+    // model. A heard voice turn's save waits for its user row, which waits
+    // for its transcript — an ASR call that may need the very VRAM this
+    // claim pins (voice-audio-input design §3.4; the tool loop lets go of
+    // its claim at the same point).
+    drop(admission);
 
     // Persist the assistant reply (even if partial / the client went away):
     // a new row, or the continued one grown by it — unless the thread moved
@@ -1266,11 +1355,21 @@ where
                 ir_messages: None,
                 answered_by: answered_by.clone(),
                 stopped: outcome.aborted,
+                failed: outcome.error.is_some(),
             },
         )
         .await;
 
     let status = if outcome.error.is_some() { 502 } else { 200 };
+    // A stop (the turn's, or a reader gone) is the stock path's `canceled`
+    // row with what the call cost so far (`stopped`).
+    let (row_usage, row_error) = match stopped::usage(&outcome, ir, read.produced) {
+        Some((usage, note)) => (usage, Some(("canceled", note))),
+        None => (
+            outcome.usage,
+            outcome.error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
+        ),
+    };
     record_chat_call(
         state,
         &ir.model_alias,
@@ -1279,18 +1378,32 @@ where
         started,
         status,
         outcome.ttfb_ms,
-        outcome.usage,
+        row_usage,
         outcome.timings,
         max_tokens_clamped,
         rung,
-        outcome.error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
+        row_error,
     )
     .await;
 
-    if let Some(why) = stopped {
+    // A caller that raised its own stop still reads: it gets `done`, which
+    // names the partial reply just saved.
+    if let Some(why) = stopped.filter(|w| *w != chat_turn::Stopped::Interrupted) {
         turn.report_stop(why, tx).await;
         return None;
     }
+    // A stream that broke before it said anything saved nothing: `done
+    // {aborted}`, as for an upstream that refused outright.
+    if outcome.error.is_some() && assistant.is_empty() && reasoning.is_empty() {
+        let _ = emit("done", json!({ "aborted": true }).to_string()).await;
+        return None;
+    }
+    // A model that reasoned although off was asked — a local template that
+    // cannot stop, a cloud model at its lowest level — keeps its reasoning
+    // with the reply, and the turn says so (model-capabilities design §5.6).
+    fitted.observe(&route, !reasoning.is_empty());
+    fitted.report(&mut reasoning_ignored);
+    let reasoning_note = fitted.note(answered_by.as_deref().unwrap_or(turn.model()));
     let total_ms = started.elapsed().as_millis() as i64;
     if saved.refused {
         let _ = emit(
@@ -1320,6 +1433,8 @@ where
             // The thread's reasoning and sampling overrides this route did
             // not send.
             "reasoning_ignored": reasoning_ignored,
+            // The model reasoned although off was asked, in a sentence.
+            "reasoning_note": reasoning_note,
         })
         .to_string(),
     )
@@ -1332,7 +1447,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// First line of the first user message, clipped to a sidebar-friendly length.
-fn derive_title(s: &str) -> String {
+pub(super) fn derive_title(s: &str) -> String {
     let first = s
         .lines()
         .find(|l| !l.trim().is_empty())
@@ -1372,7 +1487,7 @@ async fn record_chat_call(
     // unify the streaming call path too if/when sample_once grows a stream mode.
     proxy::record_in_process(
         proxy::InProcessLog {
-            client_key: None,
+            key: proxy::KeyRef::default(),
             ingress_proto: "chat",
             alias: model,
             route,

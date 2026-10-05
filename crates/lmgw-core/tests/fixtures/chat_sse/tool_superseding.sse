@@ -1,0 +1,12 @@
+event: turn
+data: {"user_message_id":2}
+
+event: delta
+data: {"text":"fi"}
+
+event: delta
+data: {"text":"ne"}
+
+event: done
+data: {"aborted":false,"answered_by":null,"completion_tokens":1,"message_id":3,"model":"m","prompt_tokens":3,"reasoning_ignored":[],"reasoning_note":null,"saved":true,"timings":null,"total_ms":0,"ttfb_ms":0}
+

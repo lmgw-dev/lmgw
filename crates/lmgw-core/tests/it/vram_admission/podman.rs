@@ -149,6 +149,7 @@ impl CommandRunner for Podman {
                 w.names.insert(name, model.clone());
                 w.ports.insert(port, model.clone());
                 w.loaded.insert(model.clone());
+                w.argv.insert(model.clone(), args.to_vec());
                 w.runs.push(model);
                 Ok(ok)
             }

@@ -384,6 +384,8 @@ fn audio(model_id: &str, task: &str) -> AudioModel {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -398,6 +400,7 @@ fn audio(model_id: &str, task: &str) -> AudioModel {
         warm_start: false,
         hold_fallback_mode: Default::default(),
         hold_fallback: None,
+        residency: None,
     }
 }
 
@@ -636,6 +639,7 @@ fn an_image_rows_override_merges_over_the_derived_object() {
             "capabilities": {"output_modalities": ["image", "video"]},
             "notes": ["This box renders 512x512 in half a second."],
         }),
+        Protocol::Openai,
     )
     .expect("a well-formed override applies");
     let caps = applied.capabilities.expect("capabilities");
@@ -705,4 +709,59 @@ fn a_chat_model_that_also_outputs_images_stays_chat() {
         .expect("capabilities");
     assert_eq!(caps.task, "chat");
     assert!(caps.endpoints.iter().any(|e| e == "/v1/chat/completions"));
+}
+
+// ---------------------------------------------------------------------------
+// A silent OpenAI catalog: the name says the task (realtime live run 3, D1)
+// ---------------------------------------------------------------------------
+
+/// `api.openai.com/v1/models` lists `{id, object, created, owned_by}` and
+/// nothing else. Taking every such entry for a chat model published the
+/// chat routes (and `/v1/realtime`) on OpenAI's speech models, and refused
+/// them as a session's TTS and ASR. The name says what they are.
+#[test]
+fn a_silent_openai_catalog_entry_takes_its_task_from_its_name() {
+    let entry = |id: &str| json!({"id": id, "object": "model", "created": 1, "owned_by": "openai"});
+    for (id, task, endpoints) in [
+        ("gpt-4o-mini-tts", "tts", vec!["/v1/audio/speech"]),
+        ("tts-1-hd", "tts", vec!["/v1/audio/speech"]),
+        (
+            "gpt-4o-mini-transcribe",
+            "asr",
+            vec!["/v1/audio/transcriptions"],
+        ),
+        ("whisper-1", "asr", vec!["/v1/audio/transcriptions"]),
+        ("gpt-realtime", "realtime", vec![]),
+        ("gpt-4o-mini", "chat", CHAT_OPENAI.to_vec()),
+    ] {
+        let info = parse_openai_entry(&entry(id)).expect("parses");
+        assert_eq!(info.task, None, "the catalog states none for {id}");
+        let d = capabilities::for_catalog(&info, Protocol::Openai, "openai");
+        let caps = d.capabilities.expect("capabilities");
+        assert_eq!(caps.task, task, "{id}");
+        assert_eq!(caps.endpoints, strings(&endpoints), "{id}");
+        assert_eq!(caps.source, "catalog");
+        assert_eq!(
+            d.notes[0].contains("by OpenAI's naming"),
+            task != "chat",
+            "{id}: {:?}",
+            d.notes
+        );
+    }
+    // A catalog that states its modalities is not second-guessed.
+    let stated = json!({"id": "vendor/some-tts", "architecture": {"output_modalities": ["text"]}});
+    let info = parse_openai_entry(&stated).expect("parses");
+    let caps = capabilities::for_catalog(&info, Protocol::Openai, "kilo")
+        .capabilities
+        .unwrap();
+    assert_eq!(caps.task, "chat");
+    // Nor is another protocol's catalog read by OpenAI's naming.
+    let info = ModelInfo {
+        id: "gemini-2.5-flash-preview-tts".into(),
+        ..Default::default()
+    };
+    let caps = capabilities::for_catalog(&info, Protocol::Gemini, "gemini")
+        .capabilities
+        .unwrap();
+    assert_eq!(caps.task, "chat");
 }

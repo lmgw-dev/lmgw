@@ -241,7 +241,13 @@ fn iso_bmff(b: &[u8]) -> Option<Result<Sniffed, SniffError>> {
     }
     let size = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
     let end = size.clamp(16, b.len());
-    let compatible = b.get(16..end).unwrap_or(&[]).chunks_exact(4);
+    let compatible = b
+        .get(16..end)
+        .unwrap_or(&[])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| c.as_slice());
     let audio = |x: &[u8]| matches!(x, b"M4A " | b"M4B " | b"M4P " | b"F4A " | b"F4B ");
     if audio(brand) || compatible.clone().any(audio) {
         return Some(ok(Kind::Audio, "audio/mp4", "m4a"));

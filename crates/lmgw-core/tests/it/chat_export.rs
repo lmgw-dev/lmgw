@@ -50,7 +50,9 @@ async fn rich_thread(state: &SharedState, title: &str) -> i64 {
     t.kb_ids = vec![7];
     t.kb_mode = KbMode::Tool;
     t.kb_budget_tokens = Some(1234);
-    store::update_chat_thread_settings(db, &t).await.unwrap();
+    store::update_chat_thread_settings(db, &t, store::SeedWrite::AsGiven)
+        .await
+        .unwrap();
 
     let aid = store::insert_chat_attachment_new(
         db,
@@ -96,6 +98,7 @@ async fn rich_thread(state: &SharedState, title: &str) -> i64 {
             ir_messages: Some(ir.into()),
             model: Some("m-earlier".into()),
             answered_by: Some("cloud-fb".into()),
+            voice: None,
         },
     )
     .await

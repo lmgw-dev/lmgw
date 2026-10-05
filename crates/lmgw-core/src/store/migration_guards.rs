@@ -1,6 +1,10 @@
-//! Pre-migration guard (migration 0023) and pre-migration repair (migration 0018)
+//! Pre-migration guard (migration 0023), pre-migration repair (migration
+//! 0018) and pre-migration notice (migration 0055, [`empty_run_args`])
 
 use sqlx::{Row, SqlitePool};
+
+mod empty_run_args;
+pub(super) use empty_run_args::empty_run_args_notice;
 
 /// Version of `0023_managed_upstreams_go_synthetic.sql`, the migration this
 /// guard stands in front of.

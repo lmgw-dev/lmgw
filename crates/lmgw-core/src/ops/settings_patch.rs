@@ -48,9 +48,32 @@ pub struct SettingsPatch {
     pub chat_system_prompt: Option<String>,
     /// How a text PDF attached in Chat starts out: `text` | `images` | `ask`.
     pub chat_pdf_mode: Option<String>,
-    /// Speech-to-text alias for Chat audio attachments; `""` = none. Must
-    /// resolve to a model whose capability task is `asr`.
+    /// The Chat's speech-to-text alias — dictation, realtime mode and audio
+    /// attachments (chat-voice design §2.1); `""` = `realtime.asr_alias`.
+    /// Must resolve to a model whose capability task is `asr`.
     pub chat_stt_alias: Option<String>,
+    /// The Chat's text-to-speech alias; `""` = `realtime.tts_alias`. Must be
+    /// a model whose capability task is `tts` or `vdes`.
+    pub chat_tts_alias: Option<String>,
+    /// The Chat's voice; `""` = `realtime.default_voice`, then realtime's
+    /// chain.
+    pub chat_voice: Option<String>,
+    /// The Chat's speech instructions; `""` = `realtime.speech_instructions`.
+    pub chat_speech_style: Option<String>,
+    /// The language the user speaks, an ISO 639-1 code — what the
+    /// speech-to-text model is told; `""` = none.
+    pub chat_voice_language: Option<String>,
+    /// The language replies are in, an ISO 639-1 code — what the model is
+    /// asked to answer in and the voice speaks; `""` = `chat_voice_language`.
+    pub chat_voice_reply_language: Option<String>,
+    /// Read Chat replies aloud as they stream.
+    pub chat_read_aloud: Option<bool>,
+    /// `semantic_vad` | `server_vad` | `push_to_talk`.
+    pub chat_turn_detection: Option<String>,
+    /// `off` | `local`: whether a voice turn goes to the chat model as audio
+    /// when it is a local model lmgw runs that takes audio input
+    /// (experimental; a cloud chat model never gets audio).
+    pub chat_voice_audio_input: Option<String>,
     /// Tokens of knowledge-base excerpts one Chat turn may carry. Must be
     /// above zero.
     pub chat_kb_budget_tokens: Option<i64>,
@@ -70,6 +93,15 @@ pub struct SettingsPatch {
     /// (container-builds §8). At most
     /// [`MAX_CHECK_HOURS`](crate::backends::updates::MAX_CHECK_HOURS).
     pub build_update_check_hours: Option<u32>,
+    /// `audio.catalog_revision`: `pinned` (an audio catalog download takes
+    /// the commit the spec pins) or `latest` (always `main`). Not part of
+    /// the audio class's container definition, so not one of the dashboard-
+    /// only container settings above.
+    pub audio_catalog_revision: Option<String>,
+    /// `GET /v1/realtime`'s settings (realtime design §12): any of its fields,
+    /// checked as the dashboard's save checks them. The self-admin tool takes
+    /// it as a JSON-encoded object (`hoist_json_arg`).
+    pub realtime: Option<super::RealtimeSettingsPatch>,
 }
 
 /// A GPU-hold fallback alias is "usable" (gpu-hold design §2) when it
@@ -191,6 +223,23 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
         s.chat_kb_budget_tokens = validate_chat_kb_budget(v)?;
         changed.push("chat_kb_budget_tokens");
     }
+    changed.extend(
+        super::apply_chat_voice(
+            state,
+            &mut s,
+            super::ChatVoicePatch {
+                chat_tts_alias: p.chat_tts_alias,
+                chat_voice: p.chat_voice,
+                chat_speech_style: p.chat_speech_style,
+                chat_voice_language: p.chat_voice_language,
+                chat_voice_reply_language: p.chat_voice_reply_language,
+                chat_read_aloud: p.chat_read_aloud,
+                chat_turn_detection: p.chat_turn_detection,
+                chat_voice_audio_input: p.chat_voice_audio_input,
+            },
+        )
+        .await?,
+    );
     if let Some(v) = p.sampling_alias.as_deref() {
         s.sampling_alias = v.trim().to_string();
         changed.push("sampling_alias");
@@ -216,6 +265,15 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
     if let Some(v) = p.build_update_check_hours {
         s.build_update_check_hours = crate::backends::updates::validate_check_hours(v)?;
         changed.push("build_update_check_hours");
+    }
+
+    if let Some(v) = p.audio_catalog_revision.as_deref() {
+        s.audio.catalog_revision = crate::config::CatalogRevision::parse(v)?;
+        changed.push("audio_catalog_revision");
+    }
+
+    if let Some(r) = p.realtime {
+        changed.extend(super::apply_realtime(state, &mut s.realtime, r).await?);
     }
 
     if changed.is_empty() {

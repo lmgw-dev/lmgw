@@ -21,7 +21,7 @@
 //! draft; they carry an "applies now" tag. Secrets: empty keeps what is
 //! stored, the clear tick erases it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use leptos::prelude::*;
@@ -38,6 +38,13 @@ use crate::widgets::{
     use_dirty_guard, use_slash_focus, use_toasts, Explain, Field, FormState, ImageClass,
     ImagePicker, Kind, ModelPicker, PageFrame, PageMode, SaveBar, Section, Select,
 };
+
+/// The Realtime category (realtime design §12): its rows, the controls only
+/// it has, and its VRAM budget.
+mod realtime;
+use realtime::{BudgetPanel, SpeechStyleField, TagHintField, VoiceField, WordsField};
+/// The Chat's Voice group (chat-voice design §2.1).
+mod chat_voice;
 
 // ---------------------------------------------------------------------------
 // The table
@@ -75,7 +82,12 @@ const CATS: &[(&str, &str, &str)] = &[
     (
         "chat",
         "Chat",
-        "the system prompt new conversations start with, how attachments are read, the knowledge budget",
+        "the system prompt new conversations start with, how attachments are read, the knowledge budget, the voice",
+    ),
+    (
+        "realtime",
+        "Realtime",
+        "spoken conversations on /v1/realtime: the voice cascade and its GPU memory, turns, barge-in, output",
     ),
     (
         "agents",
@@ -102,6 +114,7 @@ const CAT_SLUGS: &[&str] = &[
     "runtimes",
     "backends",
     "chat",
+    "realtime",
     "agents",
     "docs",
     "tokens",
@@ -176,6 +189,16 @@ const GROUPS: &[Group] = &[
     g("chat", "prompt", "Default system prompt"),
     g("chat", "attachments", "Attachments"),
     g("chat", "knowledge", "Knowledge bases"),
+    g("chat", "chat-voice", "Voice"),
+    g("realtime", "rt-cascade", "Voice cascade"),
+    g("realtime", "rt-budget", "GPU memory of the cascade"),
+    g("realtime", "rt-prompt", "Voice instructions"),
+    g("realtime", "rt-names", "Client names"),
+    g("realtime", "rt-vad", "Turn detection"),
+    g("realtime", "rt-smart", "Smart Turn (semantic_vad)"),
+    g("realtime", "rt-barge", "Barge-in"),
+    g("realtime", "rt-output", "Output"),
+    g("realtime", "rt-limits", "Connection"),
     g("agents", "agent-containers", "Agent containers"),
     g("agents", "tool-loop", "Responses tool loop"),
     g("agents", "mcp", "MCP"),
@@ -201,6 +224,8 @@ enum Ctl {
     Mono,
     /// A whole number no smaller than this (`i64::MIN`: any).
     Int(i64),
+    /// A number in `[min, max]` (both inclusive).
+    Float(f64, f64),
     /// A whole number in `[min, max]` (both inclusive) — like [`Ctl::Int`],
     /// with an upper bound too, for the one setting
     /// (`build_update_check_hours`) the server refuses past a real maximum
@@ -224,12 +249,42 @@ enum Ctl {
     ForgeTokens,
     /// The builds directory, with the path in use now and the tmpfs warning.
     BuildsDir,
-    /// The default Chat system prompt: prose in a tall box, and a Reset that
-    /// puts the built-in text back (the server's `…_builtin` beside it).
-    Prompt,
+    /// A default prompt: prose in a tall box, and a Reset that puts the
+    /// built-in text back — the server's `…_builtin` at this `SettingsFull`
+    /// pointer.
+    Prompt(&'static str),
+    /// A name → name map, one `name = value` per line in the box, an object
+    /// in the patch ([`realtime::map_text`]).
+    Map,
+    /// A list of short words as one comma-separated box that wraps and grows
+    /// ([`realtime::WordsField`]); a list in the patch.
+    Words,
+    /// A voice of the TTS model the draft names — the first of these keys
+    /// that is set — typed or picked from its list
+    /// ([`realtime::VoiceField`]).
+    Voice(&'static [&'static str]),
+    /// The speech style, told what the drafted TTS (the first of these keys
+    /// that is set) does with it ([`realtime::SpeechStyleField`]).
+    SpeechStyle(&'static [&'static str]),
+    /// The sound-tag hint, a checkbox with the text the prompt would get
+    /// ([`realtime::TagHintField`]).
+    TagHint,
+    /// One of the Chat's two languages — the one the user speaks, the one
+    /// replies are in — with where the saved speech model of its stage does
+    /// not take it ([`chat_voice::LanguageField`]).
+    VoiceLanguage,
+    /// One cell of the Smart Turn table (`realtime.semantic_vad`): its
+    /// column, `0..4` ([`realtime::VAD_COLS`]).
+    Vad(usize),
+    /// What the draft's voice cascade holds on the GPU — read, never part
+    /// of the draft ([`realtime::BudgetPanel`]).
+    Budget,
     /// A model alias: (the tasks it is for, why a local model is refused —
     /// `None` when one is fine, what empty means).
     Model(&'static [&'static str], Option<&'static str>, &'static str),
+    /// A model alias that must be local: (the tasks, why a cloud model is
+    /// refused, what empty means).
+    LocalModel(&'static [&'static str], &'static str, &'static str),
     // Acts at once; never in the draft.
     Hold,
     Apply(&'static str),
@@ -251,15 +306,27 @@ impl Ctl {
             | Ctl::Choice(_)
             | Ctl::Image(_)
             | Ctl::BuildsDir
-            | Ctl::Prompt
-            | Ctl::Model(..) => Kind::Text,
+            | Ctl::Prompt(_)
+            | Ctl::Map
+            | Ctl::Words
+            | Ctl::Voice(_)
+            | Ctl::SpeechStyle(_)
+            | Ctl::VoiceLanguage
+            | Ctl::Model(..)
+            | Ctl::LocalModel(..) => Kind::Text,
             Ctl::ForgeTokens => Kind::Raw,
             Ctl::Int(_) | Ctl::IntRange(..) => Kind::Int,
+            Ctl::Float(..) => Kind::Float,
+            Ctl::Vad(col) => realtime::vad_kind(col),
             Ctl::Money => Kind::OptFloat,
-            Ctl::Bool => Kind::Flag,
-            Ctl::Hold | Ctl::Apply(_) | Ctl::CheckNow | Ctl::Theme | Ctl::Scale | Ctl::Link(_) => {
-                return None
-            }
+            Ctl::Bool | Ctl::TagHint => Kind::Flag,
+            Ctl::Hold
+            | Ctl::Apply(_)
+            | Ctl::CheckNow
+            | Ctl::Theme
+            | Ctl::Scale
+            | Ctl::Link(_)
+            | Ctl::Budget => return None,
         })
     }
 }
@@ -345,6 +412,10 @@ const PDF_MODES: &[(&str, &str)] = &[
     ("text", "text"),
     ("images", "page images"),
     ("ask", "ask each time"),
+];
+const CATALOG_REVISIONS: &[(&str, &str)] = &[
+    ("pinned", "the commit the spec pins"),
+    ("latest", "latest (main)"),
 ];
 const BACKENDS: &[(&str, &str)] = &[
     ("cuda", "cuda"),
@@ -743,6 +814,33 @@ const AUDIO: &[Def] = &[
     f(
         "runtimes",
         "audio",
+        "audio.voice_transcribe_alias",
+        "Clip transcripts",
+        Ctl::LocalModel(
+            &["asr"],
+            "only a local model may hear your voice clips",
+            "none — a clip is transcribed only when you ask",
+        ),
+    )
+    .l()
+    .hint("writes an uploaded clip's transcript, which cloning models need")
+    .terms("voice clip transcript reference text asr transcribe library"),
+    f(
+        "runtimes",
+        "audio",
+        "audio.catalog_revision",
+        "Catalog downloads",
+        Ctl::Choice(CATALOG_REVISIONS),
+    )
+    .l()
+    .hint(
+        "a spec's pin is the commit its engine was tested with; latest takes main even where a \
+         spec pins one",
+    )
+    .terms("audio catalog download revision commit pin pinned latest main hugging face"),
+    f(
+        "runtimes",
+        "audio",
         "audio.backend",
         "Backend",
         Ctl::Choice(BACKENDS),
@@ -899,7 +997,7 @@ const REST: &[Def] = &[
         "prompt",
         "chat_system_prompt",
         "System prompt",
-        Ctl::Prompt,
+        Ctl::Prompt("/chat_system_prompt_builtin"),
     )
     .hint(
         "what a new chat thread starts with, as its own copy — existing threads keep theirs; \
@@ -918,15 +1016,6 @@ const REST: &[Def] = &[
          unset and blocks Send until you choose",
     )
     .terms("chat pdf attachment text images pages ask mode"),
-    f(
-        "chat",
-        "attachments",
-        "chat_stt_alias",
-        "Transcription model",
-        Ctl::Model(&["asr"], None, "none — audio needs a model that hears it"),
-    )
-    .hint("turns an audio attachment into a transcript when the chat model takes no audio")
-    .terms("chat audio stt speech transcription whisper asr attachment"),
     f(
         "chat",
         "knowledge",
@@ -1104,6 +1193,8 @@ fn fields() -> impl Iterator<Item = &'static Def> {
         .chain(IMAGE.iter())
         .chain(BUILDS.iter())
         .chain(REST.iter())
+        .chain(chat_voice::CHAT_VOICE.iter())
+        .chain(realtime::REALTIME.iter())
 }
 
 /// `vram.headroom_mb` → `f-vram-headroom-mb`: what `/settings/gpu#…` names.
@@ -1181,6 +1272,12 @@ fn baseline(s: &Value) -> Map<String, Value> {
                     },
                 );
             }
+            Ctl::Map => {
+                m.insert(d.key.into(), Value::String(realtime::map_text(&read())));
+            }
+            Ctl::Words => {
+                m.insert(d.key.into(), Value::String(realtime::words_text(&read())));
+            }
             Ctl::Lines => {
                 let lines: Vec<String> = read()
                     .as_array()
@@ -1247,6 +1344,12 @@ fn finish(mut patch: Value) -> Value {
             Ctl::Money => {
                 *v = json!(v.as_f64().map_or(0, |u| (u * 1e6).round() as i64));
             }
+            Ctl::Map => {
+                *v = realtime::map_object(v.as_str().unwrap_or_default());
+            }
+            Ctl::Words => {
+                *v = realtime::words_list(v.as_str().unwrap_or_default());
+            }
             _ => {}
         }
     }
@@ -1273,6 +1376,12 @@ fn range_error(d: &Def, text: &str) -> Option<String> {
             Ok(n) if n < min || n > max => Some(format!("must be between {min} and {max}")),
             _ => None,
         },
+        Ctl::Float(min, max) => match t.parse::<f64>() {
+            Ok(n) if !(min..=max).contains(&n) => Some(format!("must be between {min} and {max}")),
+            _ => None,
+        },
+        Ctl::Vad(col) => realtime::vad_range_error(col, t),
+        Ctl::Map => realtime::map_error(t),
         Ctl::Money => match t.replace(',', ".").parse::<f64>() {
             Ok(v) if v < 0.0 => Some("must be 0 or more, or empty for none".to_string()),
             _ => None,
@@ -1285,6 +1394,60 @@ fn range_error(d: &Def, text: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// What is wrong with a field's draft, in words: [`range_error`], a
+/// cross-field refusal ([`realtime::cross_error`]), or a forge row the
+/// server would refuse.
+fn problem(form: FormState, d: &Def) -> Option<String> {
+    range_error(d, &form.text(d.key))
+        .or_else(|| chat_voice::error(d.key, &form.text(d.key)))
+        .or_else(|| realtime::cross_error(form, d.key))
+        .or_else(|| match d.ctl {
+            Ctl::ForgeTokens => forge_error(&forge_rows(&form.value(d.key))),
+            _ => None,
+        })
+}
+
+/// The keys a save of the changed keys `dirty` judges — the server's rule
+/// (realtime design §12, "Judged when touched"): what it changes, and what
+/// a change is judged together with ([`realtime::judged_with`]). A value a
+/// hand edit broke in a field nobody touched is shown, as a warning, but
+/// holds back no other change: the server would not refuse it either.
+fn judged_keys(dirty: &[String]) -> BTreeSet<&'static str> {
+    let groups: BTreeSet<&str> = dirty
+        .iter()
+        .filter_map(|k| realtime::judged_with(k))
+        .collect();
+    fields()
+        .map(|d| d.key)
+        .filter(|k| {
+            dirty.iter().any(|d| d == k)
+                || realtime::judged_with(k).is_some_and(|g| groups.contains(g))
+        })
+        .collect()
+}
+
+/// A field's message as the page shows it: `(error, warning)` — the
+/// problem as an error Save waits for when the save judges the field, else
+/// as a warning about the stored value.
+fn messages(form: FormState, d: &Def, judged: bool) -> (Option<String>, Option<String>) {
+    match problem(form, d) {
+        Some(m) if judged => (Some(m), None),
+        Some(m) => (
+            None,
+            Some(format!("as stored: {m} — other changes still save")),
+        ),
+        None => (None, None),
+    }
+}
+
+/// What Save waits for, per key: the problems of the fields `judged`.
+fn blocking(form: FormState, judged: &BTreeSet<&'static str>) -> BTreeMap<&'static str, String> {
+    fields()
+        .filter(|d| judged.contains(d.key))
+        .filter_map(|d| problem(form, d).map(|e| (d.key, e)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,11 +1602,14 @@ fn forge_error(rows: &[ForgeRow]) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// What every part of the page reads: the draft, the server's last answer,
-/// the search, the category, the class sections' open state.
+/// the keys a save of the draft judges, the search, the category, the class
+/// sections' open state.
 #[derive(Clone, Copy)]
 struct Page {
     form: FormState,
     data: RwSignal<Option<Value>>,
+    /// [`judged_keys`] of the draft's changes.
+    judged: Memo<BTreeSet<&'static str>>,
     words: Memo<Vec<String>>,
     active: Memo<&'static str>,
     folds: [(&'static str, RwSignal<bool>); 4],
@@ -1536,9 +1702,11 @@ pub fn Settings() -> impl IntoView {
             crate::prefs::persisted_bool(&format!("open.{persist}"), open),
         )
     };
+    let judged = Memo::new(move |_| judged_keys(&form.dirty_keys()));
     let page = Page {
         form,
         data,
+        judged,
         words,
         active,
         folds: [
@@ -1549,28 +1717,9 @@ pub fn Settings() -> impl IntoView {
         ],
     };
 
-    // Numbers that parse but are out of range, per key.
-    let range_errs = Memo::new(move |_| {
-        let mut out = BTreeMap::new();
-        for d in fields() {
-            if d.req
-                || matches!(
-                    d.ctl,
-                    Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Money | Ctl::BuildsDir
-                )
-            {
-                if let Some(e) = range_error(d, &form.text(d.key)) {
-                    out.insert(d.key, e);
-                }
-            }
-            if matches!(d.ctl, Ctl::ForgeTokens) {
-                if let Some(e) = forge_error(&forge_rows(&form.value(d.key))) {
-                    out.insert(d.key, e);
-                }
-            }
-        }
-        out
-    });
+    // Numbers that parse but are out of range, and what the server would
+    // refuse across fields — of the fields this save judges only, per key.
+    let range_errs = Memo::new(move |_| judged.with(|j| blocking(form, j)));
     let invalid = Signal::derive(move || form.invalid_count() + range_errs.with(|r| r.len()));
     let dirty_count = Signal::derive(move || form.dirty_count());
     let dirty_by_cat = Memo::new(move |_| {
@@ -1924,12 +2073,24 @@ enum Lay {
     Checks,
     Block,
     Acts,
+    /// The Smart Turn table: a run of [`Ctl::Vad`] cells, one table.
+    Vad,
 }
 
 fn lay(d: &Def) -> Lay {
     match d.ctl {
         Ctl::Bool => Lay::Checks,
-        Ctl::Lines | Ctl::Link(_) | Ctl::Hold | Ctl::ForgeTokens | Ctl::Prompt => Lay::Block,
+        Ctl::Lines
+        | Ctl::Link(_)
+        | Ctl::Hold
+        | Ctl::ForgeTokens
+        | Ctl::Prompt(_)
+        | Ctl::Map
+        | Ctl::Words
+        | Ctl::SpeechStyle(_)
+        | Ctl::TagHint
+        | Ctl::Budget => Lay::Block,
+        Ctl::Vad(_) => Lay::Vad,
         Ctl::Apply(_) | Ctl::CheckNow => Lay::Acts,
         Ctl::Theme | Ctl::Scale => Lay::Grid(Size::S),
         _ => Lay::Grid(d.size),
@@ -2010,6 +2171,9 @@ fn group_view(grp: &'static Group, page: Page) -> AnyView {
 }
 
 fn run_view(l: Lay, defs: Vec<&'static Def>, page: Page) -> AnyView {
+    if l == Lay::Vad {
+        return realtime::vad_table(defs, page);
+    }
     let any_shown = {
         let defs = defs.clone();
         move || defs.iter().any(|d| page.shows(d))
@@ -2022,6 +2186,7 @@ fn run_view(l: Lay, defs: Vec<&'static Def>, page: Page) -> AnyView {
         Lay::Checks => "set-checks",
         Lay::Block => "set-blocks",
         Lay::Acts => "set-acts",
+        Lay::Vad => unreachable!("drawn by realtime::vad_table above"),
     };
     view! { <div class=class hidden=move || !any_shown()>{items}</div> }.into_any()
 }
@@ -2058,11 +2223,18 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
     let id = anchor(k);
     let hidden = Signal::derive(move || !page.shows(d));
     let dirty = form.dirty_signal(k);
-    let error = Signal::derive(move || form.error(k).or_else(|| range_error(d, &form.text(k))));
+    // A problem of a field this save does not judge is the stored value's:
+    // a warning, and Save goes ahead (`judged_keys`).
+    let shown = Memo::new(move |_| messages(form, d, page.judged.with(|j| j.contains(k))));
+    let error = Signal::derive(move || form.error(k).or_else(|| shown.get().0));
+    let warn = Signal::derive(move || shown.get().1);
     match d.ctl {
-        Ctl::Text | Ctl::Mono | Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Money => {
+        Ctl::Text | Ctl::Mono | Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Float(..) | Ctl::Money => {
             let money = matches!(d.ctl, Ctl::Money);
-            let numeric = matches!(d.ctl, Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Money);
+            let numeric = matches!(
+                d.ctl,
+                Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Float(..) | Ctl::Money
+            );
             let class = if matches!(d.ctl, Ctl::Text) {
                 "input"
             } else {
@@ -2075,6 +2247,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     hint=d.hint
                     dirty=dirty
                     error=error
+                    warn=warn
                     id=id
                     hidden=hidden
                 >
@@ -2134,6 +2307,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     hint=d.hint
                     dirty=dirty
                     error=error
+                    warn=warn
                     id=id
                     hidden=hidden
                 >
@@ -2142,13 +2316,10 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             }
             .into_any()
         }
-        Ctl::ForgeTokens => {
-            let error = Signal::derive(move || {
-                form.error(k)
-                    .or_else(|| forge_error(&forge_rows(&form.value(k))))
-            });
-            view! { <ForgeTokensField page=page id=id hidden=hidden error=error/> }.into_any()
+        Ctl::ForgeTokens => view! {
+            <ForgeTokensField page=page id=id hidden=hidden error=error warn=warn/>
         }
+        .into_any(),
         Ctl::BuildsDir => {
             let server = move |key: &'static str| {
                 page.data.with(|d| {
@@ -2165,6 +2336,7 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     hint=d.hint
                     dirty=dirty
                     error=error
+                    warn=warn
                     id=id
                     hidden=hidden
                 >
@@ -2215,6 +2387,29 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     hidden=hidden
                 >
                     {picker}
+                </Field>
+            }
+            .into_any()
+        }
+        Ctl::LocalModel(tasks, reason, empty) => {
+            let value = bridge(form, k);
+            view! {
+                <Field
+                    label=d.label
+                    unit=d.unit
+                    hint=d.hint
+                    dirty=dirty
+                    error=Signal::derive(move || form.error(k))
+                    id=id
+                    hidden=hidden
+                >
+                    <ModelPicker
+                        value=value
+                        tasks=tasks
+                        empty_label=empty
+                        recent_key="settings"
+                        disallow=(Callback::new(|e: CatalogEntry| !e.local), reason)
+                    />
                 </Field>
             }
             .into_any()
@@ -2284,11 +2479,12 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             }
             .into_any()
         }
-        Ctl::Prompt => {
+        Ctl::Prompt(builtin_at) => {
             let builtin = move || {
                 page.data.with(|d| {
                     d.as_ref()
-                        .and_then(|v| v["chat_system_prompt_builtin"].as_str())
+                        .and_then(|v| v.pointer(builtin_at))
+                        .and_then(Value::as_str)
                         .map(str::to_string)
                         .unwrap_or_default()
                 })
@@ -2296,10 +2492,21 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             // What Save would store is the built-in default when the box holds
             // its text: that one keeps following it as it improves.
             let is_builtin = move || form.text(k).trim() == builtin().trim();
+            // Only the Chat's prompt has placeholders; the voice prompt goes
+            // to the model as it is.
+            let placeholders = k == "chat_system_prompt";
             view! {
                 <Field
                     label=d.label
-                    unit=Signal::derive(move || if is_builtin() { "built-in" } else { "your own" })
+                    unit=Signal::derive(move || {
+                        if is_builtin() {
+                            "built-in"
+                        } else if form.text(k).trim().is_empty() {
+                            "none"
+                        } else {
+                            "your own"
+                        }
+                    })
                     hint=d.hint
                     dirty=dirty
                     id=id
@@ -2307,15 +2514,30 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                 >
                     <textarea
                         class="input ta set-ta set-prompt"
-                        rows="18"
+                        rows=if placeholders { "18" } else { "6" }
                         prop:value=move || form.text(k)
                         on:input=move |ev| form.set_text(k, event_target_value(&ev))
                     ></textarea>
                     <div class="set-prompt-foot">
-                        <span class="field-hint">
-                            <code>"{{model}}"</code> " becomes the thread's model alias and "
-                            <code>"{{date}}"</code> " today's date, each time a message is sent."
-                        </span>
+                        {if placeholders {
+                            view! {
+                                <span class="field-hint">
+                                    <code>"{{model}}"</code>
+                                    " becomes the thread's model alias and "
+                                    <code>"{{date}}"</code>
+                                    " today's date, each time a message is sent."
+                                </span>
+                            }
+                                .into_any()
+                        } else {
+                            view! {
+                                <span class="field-hint">
+                                    "Reset follows the built-in text as releases improve it; an \
+                                     empty box sends none."
+                                </span>
+                            }
+                                .into_any()
+                        }}
                         <button
                             class="btn ghost sm"
                             disabled=is_builtin
@@ -2329,6 +2551,69 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             }
             .into_any()
         }
+        Ctl::Map => {
+            let rows = move || (form.text(k).lines().count() + 1).max(2).to_string();
+            view! {
+                <Field
+                    label=d.label
+                    unit=d.unit
+                    hint=d.hint
+                    dirty=dirty
+                    error=error
+                    warn=warn
+                    id=id
+                    hidden=hidden
+                >
+                    <textarea
+                        class="input mono ta set-ta"
+                        rows=rows
+                        spellcheck="false"
+                        placeholder=d.ph
+                        prop:value=move || form.text(k)
+                        on:input=move |ev| form.set_text(k, event_target_value(&ev))
+                    ></textarea>
+                </Field>
+            }
+            .into_any()
+        }
+        Ctl::Words => view! {
+            <WordsField d=d page=page dirty=dirty error=error id=id hidden=hidden/>
+        }
+        .into_any(),
+        Ctl::Voice(keys) => view! {
+            <VoiceField d=d page=page dirty=dirty error=error id=id hidden=hidden tts_keys=keys/>
+        }
+        .into_any(),
+        Ctl::SpeechStyle(keys) => view! {
+            <SpeechStyleField
+                d=d
+                page=page
+                dirty=dirty
+                error=error
+                id=id
+                hidden=hidden
+                tts_keys=keys
+            />
+        }
+        .into_any(),
+        Ctl::TagHint => view! { <TagHintField d=d page=page dirty=dirty id=id hidden=hidden/> }
+            .into_any(),
+        Ctl::VoiceLanguage => view! {
+            <chat_voice::LanguageField
+                d=d
+                page=page
+                dirty=dirty
+                error=error
+                warn=warn
+                id=id
+                hidden=hidden
+            />
+        }
+        .into_any(),
+        Ctl::Budget => view! { <BudgetPanel d=d page=page id=id hidden=hidden/> }
+            .into_any(),
+        // Drawn as one table by `run_view`; never reached.
+        Ctl::Vad(_) => ().into_any(),
         Ctl::Link(href) => {
             let what = move || match k {
                 "api_keys" => {
@@ -2572,18 +2857,16 @@ fn explain(group: &'static str, page: Page) -> Option<AnyView> {
             }
             .into_any(),
         ),
-        _ => return None,
+        other => realtime::explain(other)?,
     };
     // Why the stored suffix shadows the gateway, when it does: said where the
     // setting is read, not only where it was typed (origins §4.1).
-    let warning = (group == "agent-containers").then(|| {
-        move || {
-            page.data.with(|d| {
-                d.as_ref()
-                    .and_then(|v| v["agent_origin_suffix_warning"].as_str())
-                    .map(|w| view! { <div class="notice warn">{w.to_string()}</div> })
-            })
-        }
+    let warning = (group == "agent-containers").then_some(move || {
+        page.data.with(|d| {
+            d.as_ref()
+                .and_then(|v| v["agent_origin_suffix_warning"].as_str())
+                .map(|w| view! { <div class="notice warn">{w.to_string()}</div> })
+        })
     });
     Some(
         view! {
@@ -2613,6 +2896,7 @@ fn ForgeTokensField(
     id: String,
     hidden: Signal<bool>,
     error: Signal<Option<String>>,
+    warn: Signal<Option<String>>,
 ) -> impl IntoView {
     const K: &str = "forge_tokens";
     let form = page.form;
@@ -2737,6 +3021,7 @@ fn ForgeTokensField(
             hint="Per host; an empty box keeps what is stored. Saved with the rest of the page."
             dirty=form.dirty_signal(K)
             error=error
+            warn=warn
             id=id
             hidden=hidden
         >
@@ -3190,5 +3475,133 @@ mod tests {
             assert!(range_error(def(k), "  ").is_some(), "{k}");
             assert!(range_error(def(k), "x").is_none(), "{k}");
         }
+    }
+
+    /// A form whose baseline is `flat` — what the server holds, as the
+    /// page's boxes show it.
+    fn stored(flat: Value) -> FormState {
+        FormState::new(flat.as_object().unwrap().clone())
+    }
+
+    /// The keys Save waits for with the form's changes.
+    fn waits_for(form: FormState) -> Vec<&'static str> {
+        blocking(form, &judged_keys(&form.dirty_keys()))
+            .into_keys()
+            .collect()
+    }
+
+    /// Settings a hand edit broke: the low row's floor above its threshold,
+    /// both WebSocket limits at 0, the bind address emptied.
+    fn hand_edited() -> Value {
+        json!({
+            "bind_addr": "",
+            "realtime.barge_in_min_ms": 200,
+            "realtime.ping_interval_s": 20,
+            "realtime.max_message_mb": 0,
+            "realtime.max_frame_mb": 0,
+            "realtime.semantic_floor_window_ms": 300,
+            "realtime.semantic_vad.high.threshold": 0.5,
+            "realtime.semantic_vad.high.floor": 0.25,
+            "realtime.semantic_vad.high.max_wait_ms": 2000,
+            "realtime.semantic_vad.low.threshold": 0.5,
+            "realtime.semantic_vad.low.floor": 0.9,
+            "realtime.semantic_vad.low.max_wait_ms": 4000,
+        })
+    }
+
+    #[test]
+    fn a_broken_stored_value_is_shown_but_does_not_block_an_unrelated_save() {
+        // WP8 review: the page judged every field, the server only what a
+        // save changes — so one broken row blocked every other change.
+        let owner = Owner::new();
+        owner.with(|| {
+            let def = |k: &str| fields().find(|d| d.key == k).unwrap();
+            let form = stored(hand_edited());
+            assert!(
+                waits_for(form).is_empty(),
+                "nothing changed, nothing judged"
+            );
+            form.set_text("realtime.barge_in_min_ms", "250");
+            form.set_text("realtime.ping_interval_s", "30");
+            assert_eq!(form.dirty_count(), 2);
+            assert!(waits_for(form).is_empty(), "{:?}", waits_for(form));
+            assert_eq!(form.invalid_count(), 0);
+            // Each broken value is said at its field, as a warning.
+            for (k, says) in [
+                ("realtime.semantic_vad.low.floor", "above the threshold 0.5"),
+                ("realtime.max_frame_mb", "cannot both be 0"),
+                ("bind_addr", "cannot be empty"),
+            ] {
+                let (error, warn) = messages(form, def(k), false);
+                assert_eq!(error, None, "{k}");
+                let warn = warn.unwrap_or_else(|| panic!("{k}: no warning"));
+                assert!(
+                    warn.starts_with("as stored: ") && warn.contains(says),
+                    "{k}: {warn}"
+                );
+                assert!(warn.ends_with("other changes still save"), "{k}: {warn}");
+            }
+            // A sound value says nothing either way.
+            let row = def("realtime.semantic_vad.high.floor");
+            assert_eq!(messages(form, row, false), (None, None));
+        });
+    }
+
+    #[test]
+    fn editing_a_broken_value_or_what_it_is_judged_with_is_still_refused() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let low_floor = ["realtime.semantic_vad.low.floor"];
+            // The broken row itself: its threshold moves, still below its
+            // floor — the error is the floor's, where it can be fixed.
+            let form = stored(hand_edited());
+            form.set_text("realtime.semantic_vad.low.threshold", "0.6");
+            assert_eq!(waits_for(form), low_floor);
+            let floor = fields().find(|d| d.key == low_floor[0]).unwrap();
+            let (error, warn) = messages(form, floor, true);
+            assert!(error.unwrap().contains("above the threshold 0.6"));
+            assert_eq!(warn, None);
+            // Another cell of the table, or the floor window: the server
+            // judges the whole table then (`SemanticVadTable::problems`).
+            for (k, v) in [
+                ("realtime.semantic_vad.high.max_wait_ms", "2500"),
+                ("realtime.semantic_floor_window_ms", "250"),
+            ] {
+                let form = stored(hand_edited());
+                form.set_text(k, v);
+                assert_eq!(waits_for(form), low_floor, "{k}");
+            }
+            // Fixed, it saves.
+            let form = stored(hand_edited());
+            form.set_text("realtime.semantic_vad.low.floor", "0.4");
+            assert!(waits_for(form).is_empty(), "{:?}", waits_for(form));
+            // The two limits are judged together once either moves.
+            let form = stored(hand_edited());
+            form.set_text("realtime.max_message_mb", "8");
+            assert!(waits_for(form).is_empty());
+            let form = stored(json!({"realtime.max_message_mb": 16, "realtime.max_frame_mb": 0}));
+            form.set_text("realtime.max_message_mb", "0");
+            assert_eq!(waits_for(form), ["realtime.max_frame_mb"]);
+            // A field edited to a value the server refuses is refused.
+            let form = stored(json!({"bind_addr": "127.0.0.1:8001"}));
+            form.set_text("bind_addr", " ");
+            assert_eq!(waits_for(form), ["bind_addr"]);
+        });
+    }
+
+    #[test]
+    fn the_smart_turn_table_and_the_limits_are_judged_as_wholes() {
+        let judged = judged_keys(&["realtime.semantic_vad.medium.threshold".to_string()]);
+        assert!(judged.contains("realtime.semantic_vad.low.floor"));
+        assert!(judged.contains("realtime.semantic_floor_window_ms"));
+        assert!(!judged.contains("realtime.semantic_vad_engine"));
+        assert!(!judged.contains("realtime.max_frame_mb"));
+        let judged = judged_keys(&["realtime.max_frame_mb".to_string()]);
+        assert_eq!(
+            judged.into_iter().collect::<Vec<_>>(),
+            ["realtime.max_frame_mb", "realtime.max_message_mb"]
+        );
+        let judged = judged_keys(&["bind_addr".to_string()]);
+        assert_eq!(judged.into_iter().collect::<Vec<_>>(), ["bind_addr"]);
     }
 }

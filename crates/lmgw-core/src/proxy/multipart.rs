@@ -10,7 +10,8 @@ use crate::error::GatewayError;
 use crate::state::SharedState;
 
 /// One buffered field of a `multipart/form-data` request: a form value, or an
-/// upload held whole.
+/// upload held whole (a clone shares the upload's bytes).
+#[derive(Clone)]
 pub(super) enum MultipartField {
     Text(String, String),
     File(String, String, Option<String>, Bytes),

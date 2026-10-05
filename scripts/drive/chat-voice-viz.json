@@ -1,0 +1,596 @@
+[
+ {
+  "js": "'Chat voice WP9: the three visualisation variants alone (chat-voice §10). Each is imported from /voice/viz/, mounted on a 640x184 canvas with two synthetic voices as its analysers (formant-filtered sawtooths behind a zero gain), walked through every state, and destroyed: no frame after destroy, the backing store and the orb WebGL2 context released, the analysers given back their settings, and no listener, interval or observer left behind over three rounds. Run: scripts/ui-drive.py scripts/drive/chat-voice-viz.json --mute-audio --shots <dir> (nothing is audible: the voices end in a zero gain and Chrome is muted).'"
+ },
+ {
+  "nav": "/"
+ },
+ {
+  "script": "scripts/drive/viz-harness.js"
+ },
+ {
+  "expect": "window.vizHarness.start().then(s => s === 'running')",
+  "label": "the synthetic voices run (an AudioContext at 24 kHz)"
+ },
+ {
+  "expect": "window.vizHarness.mount('ribbon').then(r => r.kind === 'Canvas2D' && r.fft === 2048 && r.smoothing === 0)",
+  "label": "warm-up: the ribbon mounts (Canvas2D) and sets the analysers' fftSize and smoothing as the sample does"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "warm-up: destroyed cleanly"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "snap": "a"
+ },
+ {
+  "expect": "window.vizHarness.mount('ribbon').then(r => (r.kind === 'Canvas2D'))",
+  "label": "round 1: ribbon mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 1: ribbon draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "shot": "harness-ribbon-idle"
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "harness-ribbon-listening"
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "shot": "harness-ribbon-thinking"
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "harness-ribbon-speaking"
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "shot": "harness-ribbon-interrupted"
+ },
+ {
+  "js": "window.vizHarness.stats()"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 1: ribbon destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('orb').then(r => (r.kind === 'Canvas2D' || r.kind === 'WebGL2'))",
+  "label": "round 1: orb mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 1: orb draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "shot": "harness-orb-idle"
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "harness-orb-listening"
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "shot": "harness-orb-thinking"
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "harness-orb-speaking"
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "shot": "harness-orb-interrupted"
+ },
+ {
+  "js": "window.vizHarness.stats()"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 1: orb destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ring').then(r => (r.kind === 'Canvas2D'))",
+  "label": "round 1: ring mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 1: ring draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "shot": "harness-ring-idle"
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "harness-ring-listening"
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "shot": "harness-ring-thinking"
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "shot": "harness-ring-speaking"
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "shot": "harness-ring-interrupted"
+ },
+ {
+  "js": "window.vizHarness.stats()"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 1: ring destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ribbon').then(r => (r.kind === 'Canvas2D'))",
+  "label": "round 2: ribbon mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 2: ribbon draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 2: ribbon destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('orb').then(r => (r.kind === 'Canvas2D' || r.kind === 'WebGL2'))",
+  "label": "round 2: orb mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 2: orb draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 2: orb destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ring').then(r => (r.kind === 'Canvas2D'))",
+  "label": "round 2: ring mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 2: ring draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 2: ring destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ribbon').then(r => (r.kind === 'Canvas2D'))",
+  "label": "round 3: ribbon mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 3: ribbon draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 3: ribbon destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('orb').then(r => (r.kind === 'Canvas2D' || r.kind === 'WebGL2'))",
+  "label": "round 3: orb mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 3: orb draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 3: orb destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ring').then(r => (r.kind === 'Canvas2D'))",
+  "label": "round 3: ring mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "round 3: ring draws frames on its own loop"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('thinking')"
+ },
+ {
+  "wait": 1.4
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "window.vizHarness.state('interrupted')"
+ },
+ {
+  "wait": 0.25
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "round 3: ring destroyed: no frame after, canvas released, analysers restored"
+ },
+ {
+  "js": "window.vizHarness.lastDestroy"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "js": "'Idle and quiet, the engine draws at its calm rate (15 fps); a state change brings the full rate back at once (WP11 UI review NIT 8).'"
+ },
+ {
+  "expect": "window.vizHarness.mount('ribbon', {quiet: true}).then(r => r.kind === 'Canvas2D')",
+  "label": "calm: a ribbon with quiet taps mounts"
+ },
+ {
+  "js": "window.vizHarness.state('idle')"
+ },
+ {
+  "wait": 2.5
+ },
+ {
+  "expect": "window.vizHarness.rate(1000).then(r => r.calm === true && r.frames >= 8 && r.frames <= 20)",
+  "label": "calm: idle with both taps quiet draws about 15 frames a second"
+ },
+ {
+  "js": "window.vizHarness.rate(1000)"
+ },
+ {
+  "js": "window.vizHarness.state('listening')"
+ },
+ {
+  "expect": "window.vizHarness.rate(1000).then(r => r.calm === false && r.frames > 25)",
+  "label": "calm: a state change brings the full rate back"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "calm: destroyed cleanly"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('orb', {reduced: true}).then(r => !!r.kind)",
+  "label": "calm: an orb in reduced motion mounts"
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "window.vizHarness.rate(1000).then(r => r.calm === true && r.frames >= 8 && r.frames <= 20)",
+  "label": "calm: reduced motion draws at the calm rate, speaking too"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "calm: the reduced orb destroyed cleanly"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "snap": "b"
+ },
+ {
+  "same": [
+   "a",
+   "b"
+  ],
+  "nodes": 0,
+  "label": "nine mounts and destroys leave no listener, interval, observer or detached node behind"
+ }
+]

@@ -10,8 +10,17 @@
 # copy reads production's database with `sqlite3 -readonly … .backup` and nothing else of it, then
 # sets the copy apart before anything boots on it: container_prefix lmgw-dev, bind_addr addr, every
 # agent disabled, and legacy_container_names emptied — a boot sweeps those names, and they are
-# production's (examples/headless.rs only steers the prefix of a dir still on the default one). It
-# refuses to overwrite a copy, and refuses production's own dir.
+# production's (examples/headless.rs only steers the prefix of a dir still on the default one).
+# Hugging Face downloads production had queued or in flight are marked failed in the copy (with a
+# note saying why): a boot resumes those, and the copy's models dirs are production's, so it would
+# write the same <models_dir>/<file>.part production resumes into. The gateway itself refuses every
+# other write a dev instance would make into a models dir outside its data dir (downloads, deletes,
+# voice-library clips); copy prints the two ways that stay open. It refuses to overwrite a copy,
+# and refuses production's own dir under every name it has.
+#
+# Production's dir is LMGW_PROD_DIR, else $XDG_DATA_HOME/lmgw, else ~/.local/share/lmgw (the app's
+# own rule); dir may be none of those three, so a moved XDG_DATA_HOME or LMGW_PROD_DIR cannot make
+# the real dir look like a copy.
 #
 # start writes <dir>.pid, <dir>.log and <dir>.token (0600: the owner bearer for /api/op/*, from
 # the log's login line) next to dir, and waits up to 120 s for /v1/models. The copy's
@@ -22,12 +31,17 @@ cd "$(dirname "$0")/.."
 cmd="${1:-}"
 dir="$(realpath -m "${2:-target/dev-copy}")"
 addr="${3:-127.0.0.1:8899}"
-prod="$(realpath -m "${LMGW_PROD_DIR:-$HOME/.local/share/lmgw}")"
+home_prod="$(realpath -m "$HOME/.local/share/lmgw")"
+xdg_prod=""
+[ -n "${XDG_DATA_HOME:-}" ] && xdg_prod="$(realpath -m "$XDG_DATA_HOME/lmgw")"
+prod="$(realpath -m "${LMGW_PROD_DIR:-${xdg_prod:-$home_prod}}")"
 
-if [ "$dir" = "$prod" ]; then
-    echo "refusing: $dir is production's data dir" >&2
-    exit 1
-fi
+for p in "$prod" "$home_prod" "$xdg_prod"; do
+    if [ -n "$p" ] && [ "$dir" = "$p" ]; then
+        echo "refusing: $dir is production's data dir" >&2
+        exit 1
+    fi
+done
 
 alive() { [ -f "$dir.pid" ] && kill -0 "$(cat "$dir.pid")" 2>/dev/null; }
 
@@ -42,17 +56,25 @@ copy)
     python3 - "$dir/lmgw.sqlite" "$addr" <<'EOF'
 import json, sqlite3, sys
 db, addr = sys.argv[1], sys.argv[2]
+NOTE = ("not resumed in this dev copy (scripts/dev-copy.sh copy): production had it queued or "
+        "in flight, and the copy's models dirs are production's; retry it in production")
 c = sqlite3.connect(db)
 s = json.loads(c.execute("SELECT value FROM settings WHERE key = 'settings'").fetchone()[0])
 s.update(container_prefix="lmgw-dev", bind_addr=addr, legacy_container_names=[])
 c.execute("UPDATE settings SET value = ? WHERE key = 'settings'", (json.dumps(s),))
 c.execute("UPDATE agents SET enabled = 0")
+stopped = c.execute("UPDATE hf_models SET status = 'failed', error = ? "
+                    "WHERE status IN ('queued', 'downloading')", (NOTE,)).rowcount
 c.commit()
 s = json.loads(c.execute("SELECT value FROM settings WHERE key = 'settings'").fetchone()[0])
 on = c.execute("SELECT count(*) FROM agents WHERE enabled = 1").fetchone()[0]
+live = c.execute("SELECT count(*) FROM hf_models "
+                 "WHERE status IN ('queued', 'downloading')").fetchone()[0]
 print(f"copied: prefix {s['container_prefix']}, bind {s['bind_addr']}, "
-      f"legacy names {s['legacy_container_names']}, agents enabled {on}")
+      f"legacy names {s['legacy_container_names']}, agents enabled {on}, "
+      f"hf downloads marked failed {stopped} (left to resume {live})")
 EOF
+    echo "still reaching production's paths: a row's own extra run args, and any agent you re-enable here (its read-write mounts are production's)"
     ;;
 start)
     [ -e "$dir/lmgw.sqlite" ] || { echo "no copy at $dir (scripts/dev-copy.sh copy first)" >&2; exit 1; }

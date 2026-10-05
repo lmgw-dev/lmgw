@@ -7,14 +7,25 @@ members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-ui", "crate
 default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "FSL-1.1-MIT"
 
+# Keep debug assertions off here: the shell treats `cfg!(debug_assertions)` as
+# "this is a dev run" (src-tauri/src/dev_guard.rs) — a release build with them
+# on would refuse to start without LMGW_DATA_DIR and key its audio as lmgw-dev.
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+# Line tables only, not full DWARF: every backtrace frame still names its
+# file and line (a test failure reads the same), but no variables or types
+# for a debugger. Measured 2026-10-03: the tests/it binary 1.30 GB -> 0.59 GB,
+# a rebuild after a lmgw-core change 28.8 s -> 26.1 s, after a test change
+# 10.6 s -> 9.6 s. For a debugging session: CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
 
 # Trunk builds lmgw-ui with --release for bundle size; wasm-opt does the rest.
 [profile.release.package.lmgw-ui]
@@ -31,3 +42,48 @@ opt-level = "s"
 # monomorphized view types grew the name section fourfold, to 0.65 GB.
 [profile.dev.package.lmgw-ui]
 debug = false
+
+# rubato's sinc loops (realtime audio resampling) are ~20x slower unoptimised:
+# the realtime DSP tests take 21 s with it at opt-level 0 and 1.3 s at 3.
+[profile.dev.package.rubato]
+opt-level = 3
+
+# The same for Smart Turn's Whisper front end (realtime `turn/mel.rs`): 800
+# FFTs per score, which the session and corpus tests run on every pause.
+[profile.dev.package.rustfft]
+opt-level = 3
+
+# Every reqwest client built reads and decodes the system trust store
+# (rustls-platform-verifier → rustls-native-certs): 20 ms per client at
+# opt-level 0, 3 ms with these two at 3, measured 2026-10-03 on Fedora's
+# store. The test suites build thousands of clients.
+[profile.dev.package.rustls-pki-types]
+opt-level = 3
+
+[profile.dev.package.rustls-native-certs]
+opt-level = 3
+
+# tiktoken's o200k_base encoder, built once per process (the count route,
+# the knowledge bases' limits and quickdoc's budget): 450 ms at opt-level 0,
+# 85 ms with tiktoken-rs and the crates its table build and its regex spend
+# their time in at 3. Encoding gets the same speed-up.
+[profile.dev.package.tiktoken-rs]
+opt-level = 3
+
+[profile.dev.package.fancy-regex]
+opt-level = 3
+
+[profile.dev.package.regex-automata]
+opt-level = 3
+
+[profile.dev.package.regex-syntax]
+opt-level = 3
+
+[profile.dev.package.base64]
+opt-level = 3
+
+[profile.dev.package.rustc-hash]
+opt-level = 3
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3

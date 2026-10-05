@@ -114,9 +114,9 @@ pub struct LocalModelPatch {
     /// override back to inheriting the class image.
     pub image: Option<String>,
     /// `podman run` args override, one per line — same convention as
-    /// `extra_args`. Empty (or absent) leaves it unset; `clear` reverts a
+    /// `extra_args`. Empty (or absent) leaves it unchanged; `clear` reverts a
     /// previously set override back to inheriting the class's
-    /// `extra_run_args`.
+    /// `extra_run_args`. An override is never stored as an empty list.
     pub extra_run_args: Option<String>,
     /// Start this model's own container at app launch, once the per-model
     /// runtime exists.
@@ -350,23 +350,19 @@ pub async fn local_model_get(
     target: Option<&str>,
 ) -> Result<Value, String> {
     let class = parse_class_target(target)?;
-    if class == Some(Class::Audio) {
-        return Err(
-            "audio models are configured on the dashboard's Audio page; this tool \
-                    reads chat, aux (embedding / rerank) and image models"
-                .into(),
-        );
-    }
     let all = store::list_local_models(&state.db)
         .await
         .map_err(|e| e.to_string())?;
     let model_id = model_id.map(str::trim).filter(|s| !s.is_empty());
     // A row id is per table, so it only selects within the class named (chat
     // when none is); a model id is looked up in chat first, then aux, then
-    // image, so an embedding model or a diffusion pipeline is found without
-    // the caller knowing which table holds it. `target=` narrows the lookup to
-    // that one table.
-    let elsewhere = matches!(class, Some(Class::Aux) | Some(Class::Image));
+    // image, then audio, so an embedding model, a diffusion pipeline or an
+    // audio.cpp model is found without the caller knowing which table holds
+    // it. `target=` narrows the lookup to that one table.
+    let elsewhere = matches!(
+        class,
+        Some(Class::Aux) | Some(Class::Image) | Some(Class::Audio)
+    );
     let found = if elsewhere {
         None
     } else {
@@ -377,14 +373,19 @@ pub async fn local_model_get(
         }
     };
     let Some(m) = found else {
-        if !matches!(class, Some(Class::Chat) | Some(Class::Image)) {
+        if matches!(class, None | Some(Class::Aux)) {
             if let Some(v) = aux_model_get(state, id, model_id).await? {
                 return Ok(v);
             }
         }
         let snap = state.snapshot();
-        if !matches!(class, Some(Class::Chat) | Some(Class::Aux)) {
+        if matches!(class, None | Some(Class::Image)) {
             if let Some(v) = image_model_get(&snap, state, id, model_id)? {
+                return Ok(v);
+            }
+        }
+        if matches!(class, None | Some(Class::Audio)) {
+            if let Some(v) = audio_model_get(state, id, model_id).await? {
                 return Ok(v);
             }
         }
@@ -399,6 +400,11 @@ pub async fn local_model_get(
                 snap.image_models
                     .iter()
                     .map(|m| format!("{} (image)", m.model_id)),
+            );
+            known.extend(
+                snap.audio_models
+                    .iter()
+                    .map(|m| format!("{} (audio)", m.model_id)),
             );
         }
         return Err(format!(
@@ -474,7 +480,7 @@ pub async fn local_model_get(
     // produce, and with a placeholder port because the real one is allocated
     // per start (§3.5).
     let command_line = command_line_preview(state, Class::Chat, &m.model_id);
-    let rungs_detail = ladder_rungs_detail(state, &models_dir, &m).await;
+    let rungs_detail = ladder_rungs_detail(state, &models_dir, m).await;
 
     Ok(json!({
         "id": m.id,
@@ -921,8 +927,11 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                 enabled: p.enabled.unwrap_or(true),
                 public: p.public.unwrap_or(true),
                 image: opt(&p.image),
+                // A named clear wins over the value on create as on update,
+                // and text that holds no args is no override either.
                 extra_run_args: match opt(&p.extra_run_args) {
-                    Some(text) => Some(argv::parse_args_text(&text)?),
+                    _ if clear_has(p.clear.as_deref(), "extra_run_args") => None,
+                    Some(text) => run_args_override(Some(argv::parse_args_text(&text)?)),
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
@@ -1045,6 +1054,7 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                     None => cur.extra_run_args,
                 }
             };
+            let extra_run_args = run_args_override(extra_run_args);
             let (hold_fallback_mode, hold_fallback) = resolve_hold_fallback(
                 &snap,
                 &p,

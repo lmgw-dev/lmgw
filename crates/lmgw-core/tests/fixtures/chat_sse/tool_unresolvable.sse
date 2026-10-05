@@ -1,0 +1,12 @@
+event: turn
+data: {"user_message_id":1}
+
+event: error
+data: {"message":"MCP server 'ghost': no MCP server with label 'ghost' is registered on this gateway (available: lmgw, docs, kb). lmgw resolves server_label against its own servers and does not dial a server_url."}
+
+event: error
+data: {"message":"none of this thread's MCP servers offered a usable tool — check them on the MCP page, or detach them under thread settings"}
+
+event: done
+data: {"aborted":true}
+

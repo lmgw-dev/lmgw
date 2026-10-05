@@ -36,9 +36,6 @@
 //! answer was cut short instead of silently receiving a partial one.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -49,6 +46,16 @@ use crate::ir::{
     ChatRequest, Completion, ContentPart, FinishReason, Message, Role, StreamDelta, ToolDef,
     ToolResultBlock, Usage,
 };
+
+mod cancel;
+mod record;
+mod relay;
+#[cfg(test)]
+mod relay_tests;
+
+pub use cancel::{Cancel, CANCEL_POLL};
+pub use record::RunError;
+pub(crate) use record::{close_trailing_calls, ABANDONED_CALL, UNMADE_CALL};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -147,75 +154,6 @@ pub struct Budget {
     pub wall_clock: Duration,
 }
 
-/// How often a pending await is re-checked against [`Cancel`].
-///
-/// A cancel is a person waiting for a button to do something, so the interval
-/// is set by what a person notices, not by what is cheap: a quarter second of
-/// a stopped clock reads as instant. It is a *sampling rate*, not a bound on
-/// anything — the awaits themselves carry their own deadline.
-pub const CANCEL_POLL: Duration = Duration::from_millis(250);
-
-/// Cooperative cancellation for one run: a flag the loop races **every** await
-/// against, rather than a check between them.
-///
-/// The difference is the whole point. A tool loop's awaits are a model call and
-/// a tool call, and both can take minutes; a flag observed only at the
-/// boundaries means Cancel does nothing at all for as long as one of them is in
-/// flight, which is exactly when it is pressed. [`Self::guard`] drops the
-/// future instead — for a streaming model call that closes the upstream
-/// connection, so the generation stops on the server too and not just here.
-///
-/// The default is [`Self::none`]: a run nothing can cancel, which is what
-/// `/v1/responses` wants — its client going away is reported by the
-/// [`EventSink`] returning `false`, and that path is untouched.
-#[derive(Clone, Default)]
-pub struct Cancel(Option<Arc<AtomicBool>>);
-
-impl Cancel {
-    /// Nothing cancels this run; the awaits below are not raced at all.
-    pub fn none() -> Self {
-        Self(None)
-    }
-
-    /// Race against `flag` — a job's [`JobCtx::canceled`](crate::jobs::JobCtx)
-    /// bit, shared as-is rather than copied, so raising it is seen here.
-    pub fn flag(flag: Arc<AtomicBool>) -> Self {
-        Self(Some(flag))
-    }
-
-    /// Whether the flag is raised right now (never, without a flag).
-    pub fn is_raised(&self) -> bool {
-        self.0.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
-    }
-
-    /// Resolves once the flag is raised; pends forever when there is no flag,
-    /// so a `select!` arm over it simply never fires.
-    pub async fn raised(&self) {
-        let Some(flag) = &self.0 else {
-            std::future::pending::<()>().await;
-            return;
-        };
-        while !flag.load(Ordering::Relaxed) {
-            tokio::time::sleep(CANCEL_POLL).await;
-        }
-    }
-
-    /// Await `fut`, abandoning it the moment the cancel is raised. `None` means
-    /// it was abandoned — and abandoned means *dropped*, which is what makes
-    /// the upstream connection close rather than the run merely stopping to
-    /// wait for it.
-    pub async fn guard<T>(&self, fut: impl Future<Output = T>) -> Option<T> {
-        if self.0.is_none() {
-            return Some(fut.await);
-        }
-        tokio::select! {
-            biased;
-            () = self.raised() => None,
-            v = fut => Some(v),
-        }
-    }
-}
-
 /// What ended the run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StopReason {
@@ -237,11 +175,6 @@ pub const REASON_TIME_LIMIT: &str = "time_limit";
 /// A [`Cancel`] was raised while the run was inside a model or tool call. Not a
 /// budget: nothing ran out, the owner asked it to stop.
 pub const REASON_CANCELED: &str = "canceled";
-/// What a tool call's record says when the cancel landed while it was in
-/// flight. Dropping the batch does not un-send what it sent, so whether the far
-/// side ran it is not knowable from here — and saying so is the honest report.
-pub(crate) const ABANDONED_CALL: &str =
-    "abandoned when the run was cancelled; it had already been sent, so it may still have run";
 
 // ---------------------------------------------------------------------------
 // Tool execution
@@ -469,6 +402,31 @@ impl TurnAccumulator {
 /// keep each delta alive for the whole call.
 pub trait DeltaSink: Send {
     fn on_delta(&mut self, d: &StreamDelta);
+
+    /// The consumer's cooperative stop ([`crate::proxy::StopSignal`], realtime
+    /// design §4.3), if it has one: once raised, a streamed in-process call
+    /// ends at its next await and still writes its row. `None`, the default,
+    /// never stops a call.
+    fn stop(&self) -> Option<crate::proxy::StopSignal> {
+        None
+    }
+
+    /// Close whatever the sink holds open, as a tool call or the end of the
+    /// stream would (chat-voice design §7.5): a speaking sink says its
+    /// clause in progress now, so a preamble is heard before the tool runs.
+    /// Nothing, by default.
+    ///
+    /// Call it only at a tool call or a turn boundary. A speaking sink resets
+    /// its whole reading state here (code fence, list numbering, cues), so a
+    /// flush inside an open code block would make the rest of it speakable.
+    fn flush(&mut self) {}
+
+    /// What the call's request row records it cost, said once the row is
+    /// written — on every path a streamed in-process call writes one,
+    /// stopped and failed calls included (`proxy::stream_once_on`). A meter
+    /// tallies it (`agents::batch`'s, WP11 server review n4). Nothing, by
+    /// default.
+    fn billed(&mut self, _usage: &crate::ir::Usage) {}
 }
 
 impl<F: FnMut(&StreamDelta) + Send> DeltaSink for F {
@@ -545,24 +503,19 @@ pub struct RunResult {
 }
 
 /// Drive the model until it stops calling tools we own, a budget runs out, or
-/// the client goes away.
+/// the client goes away. `Err` when a model turn failed; it keeps the record
+/// of the turns before ([`RunError`]).
 pub async fn run(
     mut ir: ChatRequest,
     cfg: RunConfig,
     runner: &dyn TurnRunner,
     exec: &dyn ToolExecutor,
     sink: &mut dyn EventSink,
-) -> Result<RunResult, GatewayError> {
+) -> Result<RunResult, RunError> {
     let started = Instant::now();
-    let owners: HashMap<&str, &ResolvedTool> =
-        cfg.tools.iter().map(|t| (t.def.name.as_str(), t)).collect();
-    let label_of = |name: &str| -> Option<String> {
-        owners
-            .get(name)
-            .and_then(|t| t.server_label.as_deref())
-            .map(str::to_string)
-    };
-    let gated = |name: &str| -> bool { owners.get(name).is_some_and(|t| t.needs_approval) };
+    let owners = relay::Owners::new(&cfg.tools);
+    let label_of = |name: &str| owners.label_of(name);
+    let gated = |name: &str| owners.gated(name);
 
     ir.tools = cfg.tools.iter().map(|t| t.def.clone()).collect();
     // The loop consumes the turn boundaries itself; a client asking for a
@@ -574,16 +527,23 @@ pub async fn run(
     let mut next_index: usize = 0;
     let mut turn: usize = 0;
 
+    /// The sink gave up: the client went away.
+    macro_rules! gone {
+        () => {
+            return Ok(RunResult {
+                reason: StopReason::Incomplete("client_disconnected"),
+                usage,
+                messages: ir.messages,
+                pending: Vec::new(),
+                aborted: true,
+            })
+        };
+    }
+
     macro_rules! emit {
         ($ev:expr) => {
             if !sink.emit($ev).await {
-                return Ok(RunResult {
-                    reason: StopReason::Incomplete("client_disconnected"),
-                    usage,
-                    messages: ir.messages,
-                    pending: Vec::new(),
-                    aborted: true,
-                });
+                gone!()
             }
         };
     }
@@ -593,26 +553,21 @@ pub async fn run(
     /// a sink whose owner just cancelled is about to say "stop" anyway, and
     /// the run is already stopping.
     ///
-    /// `$abandoned` are the calls that were in flight when it landed. They are
-    /// reported before the terminal event rather than not at all: an apply that
-    /// was writing labels when Cancel was pressed has to say which calls it had
-    /// sent, because "no record" reads as "nothing happened" (§4.1).
+    /// `$closed` are the calls the cancel cut off, each with what its result
+    /// says ([`record::Closed`]). They are reported before the terminal event
+    /// rather than not at all: an apply that was writing labels when Cancel
+    /// was pressed has to say which calls it had sent, because "no record"
+    /// reads as "nothing happened" (§4.1). The record gets the same results,
+    /// so every call in it still has its result and the conversation stays
+    /// replayable (chat-voice design §7.3).
     macro_rules! canceled {
-        () => {
-            canceled!(&[] as &[(String, String, Value)])
-        };
-        ($abandoned:expr) => {{
-            for (i, (id, name, _)) in $abandoned.iter().enumerate() {
-                sink.emit(LoopEvent::CallResult {
-                    index: next_index + i,
-                    call_id: id.clone(),
-                    name: name.clone(),
-                    server_label: label_of(name).unwrap_or_default(),
-                    blocks: ToolOutcome::error(ABANDONED_CALL).blocks,
-                    is_error: true,
-                    ms: 0,
-                })
-                .await;
+        ($closed:expr) => {{
+            let closed: Vec<record::Closed> = $closed;
+            if let Some(results) = record::results(&closed) {
+                ir.messages.push(results);
+            }
+            for c in &closed {
+                sink.emit(c.event()).await;
             }
             sink.emit(LoopEvent::Done {
                 reason: StopReason::Incomplete(REASON_CANCELED),
@@ -655,16 +610,40 @@ pub async fn run(
                 needs_approval: false,
             });
         }
+        // The resume as a cancel leaves it: one result per entry, in the
+        // model's order and at the index its `CallReady` had — each denial
+        // kept, each approved call saying `says`.
+        let cut = |says: &str| -> Vec<record::Closed> {
+            cfg.resume
+                .iter()
+                .enumerate()
+                .map(|(i, d)| record::Closed {
+                    index: i,
+                    call_id: d.call.call_id.clone(),
+                    name: d.call.name.clone(),
+                    server_label: d.call.server_label.clone(),
+                    says: if d.approved {
+                        says.to_string()
+                    } else {
+                        d.denial.clone()
+                    },
+                })
+                .collect()
+        };
+        if cfg.cancel.is_raised() {
+            canceled!(cut(UNMADE_CALL))
+        }
         let Some(outcomes) = cfg
             .cancel
             .guard(execute(exec, &approved, cfg.parallel_tool_calls))
             .await
         else {
-            canceled!(&approved)
+            canceled!(cut(ABANDONED_CALL))
         };
         let mut outcomes = outcomes.into_iter();
 
         let mut results: Vec<ContentPart> = Vec::with_capacity(cfg.resume.len());
+        let mut reports = Vec::with_capacity(cfg.resume.len());
         for (i, d) in cfg.resume.iter().enumerate() {
             let (outcome, ms) = if d.approved {
                 outcomes
@@ -673,7 +652,7 @@ pub async fn run(
             } else {
                 (ToolOutcome::error(d.denial.clone()), 0)
             };
-            emit!(LoopEvent::CallResult {
+            reports.push(LoopEvent::CallResult {
                 index: i,
                 call_id: d.call.call_id.clone(),
                 name: d.call.name.clone(),
@@ -691,10 +670,15 @@ pub async fn run(
         }
         calls_made += approved.len() as u32;
         next_index += cfg.resume.len();
+        // Recorded before they are reported: a client gone mid-report leaves
+        // a record in which every call has its result.
         ir.messages.push(Message {
             role: Role::Tool,
             content: results,
         });
+        for ev in reports {
+            emit!(ev);
+        }
     }
 
     loop {
@@ -718,68 +702,47 @@ pub async fn run(
 
         emit!(LoopEvent::TurnStarted { turn });
 
-        // Stream the turn through, folding it up as it goes so the loop has the
-        // finished assistant message and the client has the tokens live.
-        let mut acc = TurnAccumulator::default();
-        let mut pending: Vec<StreamDelta> = Vec::new();
-        // Raced against the cancel rather than merely followed by a check on
-        // it: this is the await that lasts minutes, and dropping the future
-        // is what closes the upstream stream (§4.1).
-        let turn_out = cfg
-            .cancel
-            .guard(runner.run_turn(&ir, remaining, &mut |d: &StreamDelta| {
-                acc.on_delta(d);
-                pending.push(d.clone());
-            }))
-            .await;
-        let Some(completion) = turn_out else {
-            canceled!()
-        };
-        let completion = completion?;
-        // A unary runner never touches the sink, in which case the completion
-        // *is* the turn; a streaming one has already folded everything up.
-        let completion = if pending.is_empty() {
-            completion
-        } else {
-            acc.finish(completion.model.clone())
-        };
-
-        // Relay this turn's text/reasoning. Tool-call deltas are re-emitted
-        // below as loop events instead, so the consumer learns where each call
-        // runs at the moment it starts rather than after the turn ends.
-        let mut tool_delta_indices: HashMap<usize, usize> = HashMap::new();
-        for d in &pending {
-            match d {
-                StreamDelta::TextDelta(t) if !t.is_empty() => {
-                    emit!(LoopEvent::Text(t.clone()))
-                }
-                StreamDelta::ReasoningDelta(r) if !r.is_empty() => {
-                    emit!(LoopEvent::Reasoning(r.clone()))
-                }
-                StreamDelta::ToolCallStart { index, id, name } => {
-                    let global = next_index + tool_delta_indices.len();
-                    tool_delta_indices.insert(*index, global);
-                    emit!(LoopEvent::CallStarted {
-                        index: global,
-                        call_id: id.clone(),
-                        name: name.clone(),
-                        server_label: label_of(name),
-                        needs_approval: gated(name),
-                    });
-                }
-                StreamDelta::ToolCallArgsDelta { index, fragment } => {
-                    if let Some(global) = tool_delta_indices.get(index) {
-                        emit!(LoopEvent::CallArgs {
-                            index: *global,
-                            fragment: fragment.clone(),
-                        });
+        // Stream the turn through as it arrives, folding it up as it goes so
+        // the loop has the finished assistant message and the client has the
+        // tokens live ([`relay`]).
+        let end = relay::turn(
+            runner,
+            &ir,
+            remaining,
+            &cfg.cancel,
+            &mut *sink,
+            &owners,
+            next_index,
+        )
+        .await;
+        let (completion, acc, streamed) = match end {
+            relay::TurnEnd::Returned(r) => {
+                let relay::Returned { out, acc, streamed } = *r;
+                match out {
+                    Ok(completion) => (completion, acc, streamed),
+                    // The turns before keep their record (`RunError`).
+                    Err(error) => {
+                        return Err(RunError {
+                            error,
+                            messages: ir.messages,
+                            usage,
+                        })
                     }
                 }
-                _ => {}
             }
-        }
+            // No calls of the cancelled turn are in the record.
+            relay::TurnEnd::Canceled => canceled!(Vec::new()),
+            relay::TurnEnd::SinkGone => gone!(),
+        };
+        // A unary runner never touches the sink, in which case the completion
+        // *is* the turn; a streaming one has already folded everything up.
+        let completion = if streamed {
+            acc.finish(completion.model.clone())
+        } else {
+            completion
+        };
         // Unary turns produced no deltas — surface their content now.
-        if pending.is_empty() {
+        if !streamed {
             if !completion.reasoning.is_empty() {
                 emit!(LoopEvent::Reasoning(completion.reasoning.clone()));
             }
@@ -914,17 +877,33 @@ pub async fn run(
             });
         }
 
+        // A cancel that is already raised made none of the calls; one that
+        // lands while they run abandons them in flight.
+        if cfg.cancel.is_raised() {
+            canceled!(record::Closed::all(
+                &calls,
+                next_index,
+                UNMADE_CALL,
+                label_of
+            ))
+        }
         let Some(outcomes) = cfg
             .cancel
             .guard(execute(exec, &calls, cfg.parallel_tool_calls))
             .await
         else {
-            canceled!(&calls)
+            canceled!(record::Closed::all(
+                &calls,
+                next_index,
+                ABANDONED_CALL,
+                label_of
+            ))
         };
 
         let mut results: Vec<ContentPart> = Vec::with_capacity(calls.len());
+        let mut reports = Vec::with_capacity(calls.len());
         for (i, ((id, name, _), (outcome, ms))) in calls.iter().zip(outcomes).enumerate() {
-            emit!(LoopEvent::CallResult {
+            reports.push(LoopEvent::CallResult {
                 index: next_index + i,
                 call_id: id.clone(),
                 name: name.clone(),
@@ -943,10 +922,15 @@ pub async fn run(
 
         calls_made += calls.len() as u32;
         next_index += calls.len();
+        // Recorded before they are reported: a client gone mid-report leaves
+        // a record in which every call has its result.
         ir.messages.push(Message {
             role: Role::Tool,
             content: results,
         });
+        for ev in reports {
+            emit!(ev);
+        }
     }
 }
 

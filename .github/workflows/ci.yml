@@ -78,6 +78,9 @@ jobs:
         run: |
           echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo" >> "$GITHUB_ENV"
           echo "XDG_CACHE_HOME=$GITHUB_WORKSPACE/.cache" >> "$GITHUB_ENV"
+          # ort-sys extracts into XDG_CACHE_HOME itself when that is set; name a
+          # subdirectory so the cache entry below is exact (realtime design §13).
+          echo "ORT_CACHE_DIR=$GITHUB_WORKSPACE/.cache/ort.pyke.io" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install build dependencies
@@ -98,7 +101,11 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          cache-directories: .cache/trunk
+          # Trunk's tools, and ort's prebuilt ONNX Runtime (realtime
+          # design §13), both under XDG_CACHE_HOME.
+          cache-directories: |
+            .cache/trunk
+            .cache/ort.pyke.io
           cache-bin: "false"
           cache-on-failure: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}

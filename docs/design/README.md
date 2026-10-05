@@ -29,6 +29,8 @@ is kept stable.
 | 2026-09-28 | [API reference page](2026-09-28-api-docs-page-design.md): the OpenAPI document, client-compatible token counters |
 | 2026-09-29 | [Benchmarks](2026-09-29-benchmark-design.md): measuring models and engine builds |
 | 2026-09-30 | [Chat, made complete](2026-09-30-chat-complete-design.md): rendering, parameters, folders, search, knowledge bases |
+| 2026-10-01 | [Realtime voice API](2026-10-01-realtime-voice-design.md): OpenAI Realtime over WebSocket, served as a cascade of ASR, chat and TTS aliases |
+| 2026-10-02 | [Audio catalog revisions](2026-10-02-audio-catalog-revisions-design.md): downloads at the commit an audio.cpp spec pins, and the commit every download came from |
 
 ## Dashboard rebuild (2026-08)
 

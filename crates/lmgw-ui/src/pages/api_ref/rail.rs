@@ -10,6 +10,8 @@ use crate::widgets::Select;
 use super::doc::{Operation, Undocumented};
 
 #[derive(Clone, PartialEq)]
+// Short-lived render rows; boxing `Op` would ripple through every match arm for no gain.
+#[allow(clippy::large_enum_variant)]
 enum RailRow {
     /// The tag group's eyebrow (§6.2: group → tag head → items).
     Group(String),

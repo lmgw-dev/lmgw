@@ -90,16 +90,36 @@ pub(crate) fn speech_request(g: &mut SchemaGenerator) -> Schema {
                 "model": {"type": "string"},
                 "input": {"type": "string"},
                 "voice": {"type": "string", "description": "A row's own voice preset id, \
-                    when it defines any (GET /v1/audio/voices)."},
+                    when it defines any (GET /v1/audio/voices). A voice-library clip with no \
+                    transcript, for a model that cannot clone one without, is 400 \
+                    voice_needs_transcript before anything starts (lmgw.needs_transcript in \
+                    the voice list); send reference_text, or transcribe the clip in the Audio \
+                    lab. A local model whose audio.cpp image lacks eSpeak NG is 400 \
+                    audio_image_lacks_espeak."},
                 "response_format": {"type": "string"},
                 "speed": {"type": "number"},
-                "instructions": {"type": "string"},
-                "language": {"type": "string"}
+                "instructions": {"type": "string", "description": "A speaking style, or the \
+                    description a voice-design model builds its voice from (required there: \
+                    400 instructions_required without one, unless the row has a default). \
+                    Dropped for a model that reads none — capabilities.speech.instructions \
+                    says which, x-lmgw-speech says when."},
+                "language": {"type": "string", "description": "An ISO 639-1 code or BCP-47 \
+                    tag; a local model gets it in its own vocabulary."},
+                "stream_format": {"type": "string", "enum": ["sse", "audio"],
+                    "description": "Stream PCM16 (response_format pcm): speech.audio.delta events, or raw \
+                    chunked PCM. A local model streams only when its row runs in streaming \
+                    mode — an offline row is 400 streaming_unsupported before anything starts \
+                    (capabilities.speech.streaming says which); x-lmgw-sample-rate states the \
+                    PCM's rate."}
             },
             "additionalProperties": true,
             "description": "OpenAI's TTS shape plus audio.cpp's own request options, \
-                forwarded verbatim with model rewritten to the upstream's own id; a row's \
-                configured voice presets apply on top."
+                forwarded with model rewritten to the upstream's own id; a row's configured \
+                voice presets apply on top. input may carry inline tags ([laughs], or a stage \
+                direction such as (sighs)): rendered by a model whose \
+                capabilities.speech.inline_tags says so, stripped everywhere else — never read \
+                out. An input of nothing but tags is 400 empty_input, refused before any \
+                model is started."
         }),
     )
 }
@@ -192,9 +212,51 @@ pub(crate) fn voices_response(g: &mut SchemaGenerator) -> Schema {
         "AudioVoices",
         schemars::json_schema!({
             "type": "object",
-            "description": "lmgw's own route: the row's voice ids and presets, when it \
-                defines any.",
-            "additionalProperties": true
+            "properties": {
+                "voices": {"type": "array", "items": {"type": "string"},
+                    "description": "Every name the model answers to as `voice`, sorted."},
+                "lmgw": {
+                    "type": "object",
+                    "description": "Only on a local audio model answered from lmgw's catalog \
+                        (x-lmgw-voices-source: config).",
+                    "properties": {
+                        "source": {"type": "string", "enum": ["config"]},
+                        "engine_asked": {"type": "boolean"},
+                        "held": {"type": "boolean", "description": "The GPU hold (or a \
+                            benchmark run) holds the card and the model has no fallback: the \
+                            list stands, its speech is refused (503 gpu_hold) until the hold \
+                            is released."},
+                        "entries": {"type": "array", "items": {
+                            "type": "object",
+                            "required": ["id", "kind", "send"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "kind": {"type": "string",
+                                    "enum": ["preset", "library", "native", "embedding"]},
+                                "send": {"type": "string", "enum": ["voice", "options.voice_id"],
+                                    "description": "Where lmgw puts the name in the engine's \
+                                        request; clients always send it as `voice`."},
+                                "transcript": {"type": "boolean",
+                                    "description": "A library clip's transcript is recorded."}
+                            }
+                        }},
+                        "default": {"type": ["string", "null"],
+                            "description": "What speaks when a request names no voice."},
+                        "missing": {"type": "array", "items": {"type": "string"},
+                            "description": "Voices the spec names whose file the package \
+                                lacks."},
+                        "needs_transcript": {"type": "boolean",
+                            "description": "The model cannot clone a library clip without its \
+                                transcript: speech with an entry whose `transcript` is false \
+                                is refused (400 voice_needs_transcript) until it has one \
+                                (Audio lab → Transcribe)."}
+                    }
+                }
+            },
+            "additionalProperties": true,
+            "description": "lmgw's own route. A local audio model is answered from lmgw's \
+                catalog without starting it (?probe=engine asks its own server, starting it); \
+                a remote one is asked."
         }),
     )
 }

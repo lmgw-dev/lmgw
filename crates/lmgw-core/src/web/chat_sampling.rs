@@ -49,7 +49,7 @@ pub(super) fn check(t: &mut ChatThread) -> Result<(), String> {
             ));
         }
     }
-    if let Some(r) = t.repeat_penalty.filter(|r| !(*r > 0.0)) {
+    if let Some(r) = t.repeat_penalty.filter(|r| *r <= 0.0 || r.is_nan()) {
         return Err(format!(
             "repeat_penalty: expected a number above 0, got {r}"
         ));
@@ -207,13 +207,16 @@ mod tests {
         assert!(ignored.is_empty());
     }
 
+    /// A setter that puts one sampling field out of range, and the name the refusal must carry.
+    type BadValue = (fn(&mut ChatThread), &'static str);
+
     fn thread() -> ChatThread {
         ChatThread::default()
     }
 
     #[test]
     fn check_refuses_out_of_range_values_by_name() {
-        let cases: [(fn(&mut ChatThread), &str); 6] = [
+        let cases: [BadValue; 6] = [
             (|t| t.top_p = Some(1.5), "top_p"),
             (|t| t.min_p = Some(-0.1), "min_p"),
             (|t| t.top_k = Some(-1), "top_k"),

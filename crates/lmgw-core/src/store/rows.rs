@@ -34,6 +34,15 @@ pub(super) fn to_json_opt<T: serde::Serialize>(v: &Option<T>) -> DbResult<Option
     v.as_ref().map(to_json).transpose()
 }
 
+/// A per-model `extra_run_args` column: NULL inherits the class's run args,
+/// and so does an empty list — never stored as `[]`, which would start the
+/// container without the class's GPU and SELinux flags. The ops plane
+/// already folds an empty override into "none" (`ops::run_args_override`);
+/// this keeps every other writer to the same rule.
+pub(super) fn run_args_json(v: &Option<Vec<String>>) -> DbResult<Option<String>> {
+    to_json_opt(&v.as_ref().filter(|a| !a.is_empty()))
+}
+
 /// A stored `capabilities_override` (model-capabilities design §7): free-form
 /// JSON the owner wrote, so it is read back as a `Value` rather than a typed
 /// struct.

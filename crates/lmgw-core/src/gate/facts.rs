@@ -110,7 +110,7 @@ impl GateFacts {
             model_id: runtime.model_id.clone(),
             models_dir: models_dir.to_string(),
             gguf_path: gguf_path.clone(),
-            params: params.clone(),
+            params: (**params).clone(),
             args: args.clone(),
             trained_context,
             rung: runtime.rung,
@@ -183,7 +183,7 @@ mod tests {
             enabled: true,
             llama: Some(LlamaArgs::Chat {
                 gguf_path: "m.gguf".into(),
-                params,
+                params: Box::new(params),
                 args: vec!["--image-max-tokens".into(), "300".into()],
             }),
             audio: None,

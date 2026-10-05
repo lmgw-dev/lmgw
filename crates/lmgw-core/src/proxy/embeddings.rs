@@ -69,7 +69,7 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     proto,
                     ctx: &ctx,
                     alias,
-                    route: route.as_ref(),
+                    route: route.as_deref(),
                     started,
                     streamed: false,
                     class: RequestClass::Aux,
@@ -251,12 +251,15 @@ pub(crate) async fn embed_in_process(
         ))
     })
     .await
-    .map_err(|e| (Some(route.clone()), headers.clone(), e))?;
+    .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
     let status = resp.status();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (Some(route.clone()), headers.clone(), GatewayError::from(e)))?;
+    let bytes = resp.bytes().await.map_err(|e| {
+        (
+            Some(Box::new(route.clone())),
+            headers.clone(),
+            GatewayError::from(e),
+        )
+    })?;
     if !status.is_success() {
         // `map_error`'s backstop can return `GatewayError::ContextExceeded`
         // with an empty `model` — it has no route to name one. Fill it in
@@ -264,14 +267,14 @@ pub(crate) async fn embed_in_process(
         // (review finding 6): an embedding request can overflow a guarded
         // row's context exactly like a chat one can.
         return Err((
-            Some(route.clone()),
+            Some(Box::new(route.clone())),
             headers,
             crate::gate::attribute(egress.map_error(status.as_u16(), &bytes), &route),
         ));
     }
     let parsed = egress
         .parse_embeddings(&bytes)
-        .map_err(|e| (Some(route.clone()), headers.clone(), e))?;
+        .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
     if let Some(want) = dimensions {
         if let Some(got) = parsed
             .embeddings
@@ -285,7 +288,7 @@ pub(crate) async fn embed_in_process(
                 ""
             };
             return Err((
-                Some(route.clone()),
+                Some(Box::new(route.clone())),
                 headers,
                 GatewayError::Unsupported(format!(
                     "'dimensions' on '{}' (upstream '{}'): asked for {want}, it returned \
@@ -333,7 +336,7 @@ pub(crate) async fn embed_once(
         },
         match &result {
             Ok((route, _, resp)) => Ok((route, resp.usage)),
-            Err((route, _, e)) => Err((route.as_ref(), e)),
+            Err((route, _, e)) => Err((route.as_deref(), e)),
         },
     )
     .await;
@@ -390,7 +393,7 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     proto,
                     ctx: &ctx,
                     alias,
-                    route: route.as_ref(),
+                    route: route.as_deref(),
                     started,
                     streamed: false,
                     class: RequestClass::Aux,
@@ -516,29 +519,32 @@ pub(crate) async fn rerank_in_process(
         ))
     })
     .await
-    .map_err(|e| (Some(route.clone()), headers.clone(), e))?;
+    .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
     let status = resp.status();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (Some(route.clone()), headers.clone(), GatewayError::from(e)))?;
+    let bytes = resp.bytes().await.map_err(|e| {
+        (
+            Some(Box::new(route.clone())),
+            headers.clone(),
+            GatewayError::from(e),
+        )
+    })?;
     if !status.is_success() {
         // Same reason as `embed_in_process` above (review finding 6):
         // `map_error`'s backstop can hand back an unattributed
         // `ContextExceeded`, and a rerank request can overflow a guarded
         // row's context exactly like a chat one can.
         return Err((
-            Some(route.clone()),
+            Some(Box::new(route.clone())),
             headers,
             crate::gate::attribute(egress.map_error(status.as_u16(), &bytes), &route),
         ));
     }
     let parsed = egress
         .parse_rerank(&bytes)
-        .map_err(|e| (Some(route.clone()), headers.clone(), e))?;
+        .map_err(|e| (Some(Box::new(route.clone())), headers.clone(), e))?;
     if let Some(bad) = parsed.results.iter().find(|r| r.index >= n) {
         return Err((
-            Some(route.clone()),
+            Some(Box::new(route.clone())),
             headers,
             GatewayError::Transport(format!(
                 "rerank upstream scored document {} of {n} — the response does not match the \
@@ -575,7 +581,7 @@ pub(crate) async fn rerank_once(
         },
         match &result {
             Ok((route, _, resp)) => Ok((route, resp.usage)),
-            Err((route, _, e)) => Err((route.as_ref(), e)),
+            Err((route, _, e)) => Err((route.as_deref(), e)),
         },
     )
     .await;
@@ -610,7 +616,7 @@ async fn log_in_process_aux(
     };
     record_in_process(
         InProcessLog {
-            client_key: None,
+            key: KeyRef::default(),
             ingress_proto,
             alias,
             route,

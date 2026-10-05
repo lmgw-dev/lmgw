@@ -26,13 +26,23 @@ pub enum ChatEvent {
     /// first delta (chat-complete §9.3).
     Retrieval(super::chat_retrieval::KbContext),
     Stop,
-    Error(String),
+    /// The turn failed: the message, and the gateway's code when a gateway
+    /// error is behind it (`gpu_hold`, `context_length_exceeded`, …; none for
+    /// a stream that broke mid-way).
+    Error {
+        message: String,
+        code: Option<String>,
+    },
     /// A newer turn of the thread (or a rewrite of its history) stopped this
     /// reply — not a failure, and it is not saved.
     Superseded,
     /// The reply's save was refused; `done` follows with `saved: false`.
     NotSaved(String),
     Done(Value),
+    /// A voice frame (chat-voice §4.3, §6.3): a model's `state`, the
+    /// read-aloud's `voice`, `speech`, `speech_done` or `speech_error` —
+    /// the name and its data, for `chat_voice` to read.
+    Voice(&'static str, Value),
 }
 
 fn parse_record(record: &str) -> Option<ChatEvent> {
@@ -50,6 +60,13 @@ fn parse_record(record: &str) -> Option<ChatEvent> {
         // ":" keep-alive comments fall through untouched
     }
     let v: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+    frame(event, v)
+}
+
+/// One frame by its event name and data: an SSE record's, or a chat-turn
+/// frame a bound realtime session relays verbatim (`lmgw.chat.frame`,
+/// chat-voice §8.7) — the same bubble code renders both.
+pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
     Some(match event {
         "turn" => ChatEvent::Turn(v["user_message_id"].as_i64()?),
         "delta" => ChatEvent::Delta(v["text"].as_str().unwrap_or_default().to_string()),
@@ -70,10 +87,18 @@ fn parse_record(record: &str) -> Option<ChatEvent> {
             match v["code"].as_str() {
                 Some("superseded") => ChatEvent::Superseded,
                 Some("not_saved") => ChatEvent::NotSaved(msg),
-                _ => ChatEvent::Error(msg),
+                code => ChatEvent::Error {
+                    message: msg,
+                    code: code.filter(|c| !c.is_empty()).map(str::to_string),
+                },
             }
         }
         "done" => ChatEvent::Done(v),
+        "state" => ChatEvent::Voice("state", v),
+        "voice" => ChatEvent::Voice("voice", v),
+        "speech" => ChatEvent::Voice("speech", v),
+        "speech_done" => ChatEvent::Voice("speech_done", v),
+        "speech_error" => ChatEvent::Voice("speech_error", v),
         _ => return None,
     })
 }
@@ -136,4 +161,36 @@ pub async fn send_stream(
 
 fn find_record_end(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_error_frame_keeps_its_code() {
+        match frame("error", json!({"message": "held", "code": "gpu_hold"})) {
+            Some(ChatEvent::Error { message, code }) => {
+                assert_eq!(
+                    (message.as_str(), code.as_deref()),
+                    ("held", Some("gpu_hold"))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // A stream that broke mid-way has no gateway error behind it.
+        match frame("error", json!({"message": "stream failed"})) {
+            Some(ChatEvent::Error { code: None, .. }) => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            frame("error", json!({"message": "m", "code": "superseded"})),
+            Some(ChatEvent::Superseded)
+        ));
+        assert!(matches!(
+            frame("error", json!({"message": "m", "code": "not_saved"})),
+            Some(ChatEvent::NotSaved(_))
+        ));
+    }
 }

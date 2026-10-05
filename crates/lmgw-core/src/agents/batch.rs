@@ -461,7 +461,7 @@ impl TurnRunner for AgentRunner {
             self.fallback,
             ir,
             AGENT_PROTO,
-            None,
+            proxy::KeyRef::default(),
             deadline,
             sink,
         )
@@ -806,45 +806,8 @@ impl agent::EventSink for RunSink<'_> {
     }
 }
 
-/// A [`TurnRunner`] that keeps a running total of what the model spent.
-///
-/// The loop reports usage on its `Ok` return only, so a run that ended in a
-/// transport error would price at zero however many turns it had already paid
-/// for. Tallying at the call makes the number independent of how the loop
-/// ended (§4.5).
-struct MeteredRunner<'a> {
-    inner: &'a dyn TurnRunner,
-    usage: Mutex<Usage>,
-}
-
-impl<'a> MeteredRunner<'a> {
-    fn new(inner: &'a dyn TurnRunner) -> Self {
-        Self {
-            inner,
-            usage: Mutex::new(Usage::default()),
-        }
-    }
-
-    fn usage(&self) -> Usage {
-        *self.usage.lock().unwrap()
-    }
-}
-
-#[async_trait]
-impl TurnRunner for MeteredRunner<'_> {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
-        deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        let out = self.inner.run_turn(ir, deadline, sink).await;
-        if let Ok(c) = &out {
-            self.usage.lock().unwrap().add(&c.usage);
-        }
-        out
-    }
-}
+mod metered;
+use metered::MeteredRunner;
 
 impl Run<'_> {
     /// The manifest's sampling knobs, minus `max_tokens`: the model's context

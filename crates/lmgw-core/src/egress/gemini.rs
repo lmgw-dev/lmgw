@@ -446,7 +446,7 @@ impl Egress for GeminiEgress {
         if let Some(key) = up.api_key.as_deref().filter(|k| !k.is_empty()) {
             rb = rb.header("x-goog-api-key", key);
         }
-        Ok(CountPlan::Request(apply_extra_headers(rb, up)))
+        Ok(CountPlan::Request(Box::new(apply_extra_headers(rb, up))))
     }
 
     fn parse_count(&self, body: &[u8]) -> Result<u64, GatewayError> {

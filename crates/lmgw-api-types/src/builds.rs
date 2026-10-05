@@ -333,7 +333,10 @@ pub struct BuildSpec {
     pub ccache: bool,
     /// `CCACHE_MAXSIZE`, e.g. `10G`, `500M`; `0` is ccache's "no limit".
     pub ccache_max_size: String,
-    /// `--cpuset-cpus` (`0-15`, `0,2,4`). `None` = all cores.
+    /// `--cpuset-cpus` (`0-15`, `0,2,4`). `None` = all cores. Needs podman to
+    /// have the `cpuset` cgroup controller (rootless: delegated to
+    /// `user@.service`); without it a save and a run refuse, naming the fix.
+    /// CPUs the host does not have online are refused the same way.
     pub cpus: Option<String>,
     /// Extra `--build-arg` lines, one `KEY=VALUE` per line.
     pub build_args: String,
@@ -999,6 +1002,10 @@ pub struct BuildSetResponse {
     pub removed_images: Vec<String>,
     pub kept: Vec<KeptImage>,
     pub removed_caches: Vec<String>,
+    /// What a `create` / `update` saved without being able to check — today
+    /// a `cpus` podman (or the kernel's CPU list) could not be asked about,
+    /// which is then passed as set. Empty otherwise.
+    pub notes: Vec<String>,
 }
 
 /// `build_resolve` response (§15): what a spec resolves to right now — the

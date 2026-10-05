@@ -28,6 +28,8 @@ fn model(id: &str, family: &str, path: &str, task: &str, enabled: bool) -> Audio
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -42,6 +44,7 @@ fn model(id: &str, family: &str, path: &str, task: &str, enabled: bool) -> Audio
         warm_start: false,
         hold_fallback_mode: Default::default(),
         hold_fallback: None,
+        residency: None,
     }
 }
 
@@ -161,7 +164,7 @@ fn renders_the_class_bounds_and_the_voice_library() {
 #[test]
 fn renders_per_model_engine_keys_only_when_set() {
     let plain = model("plain", "pocket_tts", "p", "tts", true);
-    let before = render_server_config(&AudioSettings::default(), &[plain.clone()]);
+    let before = render_server_config(&AudioSettings::default(), std::slice::from_ref(&plain));
     let v: Value = serde_json::from_str(&before).unwrap();
     for key in [
         "lazy",
@@ -398,6 +401,8 @@ async fn audio_model_crud_round_trips_json_options() {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: serde_json::Map::from_iter([(
             "language".into(),
             Value::String("english".into()),
@@ -1585,10 +1590,11 @@ impl lmgw_core::runtime::registry::CommandRunner for FakePodman {
     }
 }
 
-/// `GET /v1/audio/voices` was one of the paths that free-rode on the always-on
-/// audio.cpp port: it resolved a route and read its `base_url` without ever
-/// asking whether the model was loaded. §5 names it, and this is the fix — it
-/// admits like every other local touch, so the answer comes from the container
+/// `GET /v1/audio/voices?probe=engine` (the default read before audio-class
+/// gap 6) was one of the paths that free-rode on the always-on audio.cpp
+/// port: it resolved a route and read its `base_url` without ever asking
+/// whether the model was loaded. §5 names it, and this is the fix — it admits
+/// like every other local touch, so the answer comes from the container
 /// admission just started, on the port that container came up on.
 ///
 /// It also proves the resolution half: no `upstreams` row exists here, and
@@ -1635,6 +1641,8 @@ async fn audio_voices_admits_the_local_model_and_reads_its_container() {
             mode: "offline".into(),
             lazy: None,
             busy_timeout_ms: None,
+            backend: None,
+            threads: None,
             load_options: Default::default(),
             session_options: Default::default(),
             default_request_options: Default::default(),
@@ -1657,15 +1665,19 @@ async fn audio_voices_admits_the_local_model_and_reads_its_container() {
 
     let base = serve(state.clone()).await;
 
-    let v: Value = base
+    // `probe=engine`: since audio-class gap 6 the default answer for a local
+    // row comes from lmgw's own catalog and starts nothing; asking the model
+    // itself is the explicit probe.
+    let resp = base
         .client()
-        .get(format!("{base}/v1/audio/voices?model=audio/pocket-tts"))
+        .get(format!(
+            "{base}/v1/audio/voices?model=audio/pocket-tts&probe=engine"
+        ))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
+    assert_eq!(resp.headers()["x-lmgw-voices-source"], "engine");
+    let v: Value = resp.json().await.unwrap();
     assert_eq!(v["voices"][0].as_str(), Some("alba"));
 
     // The container really was started for it — the read did not go to a
@@ -1744,6 +1756,8 @@ async fn lab_with_one_audio_model(
             mode: "offline".into(),
             lazy: None,
             busy_timeout_ms: None,
+            backend: None,
+            threads: None,
             load_options: Default::default(),
             session_options: Default::default(),
             default_request_options: Default::default(),
@@ -2004,6 +2018,8 @@ async fn a_chat_completion_against_an_audio_model_is_refused_before_admission() 
             mode: "offline".into(),
             lazy: None,
             busy_timeout_ms: None,
+            backend: None,
+            threads: None,
             load_options: Default::default(),
             session_options: Default::default(),
             default_request_options: Default::default(),

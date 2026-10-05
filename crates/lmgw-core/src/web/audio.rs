@@ -12,6 +12,8 @@
 //! Callers are the `/api` plane and [`crate::ops`]; the askama page this
 //! served went away at the P8 cutover.
 
+use std::collections::HashSet;
+
 use lmgw_api_types as dto;
 
 use crate::audio::{self, CatalogSnapshot, SpecPackage};
@@ -139,8 +141,22 @@ pub(crate) async fn catalog_cached(state: &SharedState) -> Option<CatalogSnapsho
 }
 
 /// Live-fetch the catalog and persist it (memory + kv).
+///
+/// The refresh also lists each package repo on Hugging Face once
+/// ([`audio::published`]), so the browser knows which packages a download
+/// would be refused for. Listing failures do not fail the refresh: they keep
+/// the repo's previous listing and become warnings on the snapshot.
 pub(crate) async fn catalog_refresh(state: &SharedState) -> Result<CatalogSnapshot, String> {
-    let snapshot = audio::fetch_catalog(&state.http).await?;
+    // The snapshot this replaces: a spec file that fails now keeps its
+    // family from it, and a repo that cannot be listed keeps its listing.
+    let previous = catalog_cached(state).await;
+    let mut snapshot = audio::fetch_catalog(&state.http, previous.as_ref()).await?;
+    let previous = previous.map(|s| s.listings).unwrap_or_default();
+    let token = state.snapshot().settings.hf_token.clone();
+    let (listings, warnings) =
+        audio::published::list_repos(&state.http, &token, &snapshot.specs, &previous).await;
+    snapshot.listings = listings;
+    snapshot.warnings.extend(warnings);
     *state.audio_catalog.lock().unwrap() = Some(snapshot.clone());
     if let Ok(json) = serde_json::to_string(&snapshot) {
         let _ = store::set_kv(&state.db, CATALOG_KV_KEY, &json).await;
@@ -148,29 +164,11 @@ pub(crate) async fn catalog_refresh(state: &SharedState) -> Result<CatalogSnapsh
     Ok(snapshot)
 }
 
-/// Map a spec task tag (`tts`, `clone`, `music`, …) to an audio.cpp server
-/// task name (the `--task` values in [`AUDIO_TASKS`]).
-///
-/// The aliases are upstream's own, from the `kVocabulary` table: a spec says
-/// what the audio is *for* (`music`, `sfx`, `edit`, `audio_generation`), the
-/// runtime has one generation kind (`gen`). Guessing them separately is what
-/// put `design` and `sfx` families into the editor as `tts` rows.
-fn suggest_task(tasks: &[String]) -> String {
-    for t in tasks {
-        let t = t.as_str();
-        if AUDIO_TASKS.contains(&t) {
-            return t.to_string();
-        }
-        match t {
-            "clone" => return "clon".into(),
-            "music" | "sfx" | "edit" | "audio_generation" => return "gen".into(),
-            "design" => return "vdes".into(),
-            "speaker" => return "spk".into(),
-            _ => {}
-        }
-    }
-    "tts".into()
-}
+mod install;
+mod served;
+mod suggest;
+use served::RowWeights;
+use suggest::{suggest_mode, suggest_task};
 
 /// Client-facing id suggestion for a package (`pocket_tts_english_q8_0` →
 /// `pocket-tts-english-q8-0`).
@@ -195,10 +193,19 @@ fn suggest_path(repo: &str, pkg: &SpecPackage) -> String {
 
 /// Compose the browser view: catalog snapshot × tracked downloads × configured
 /// audio models. Pure, so the install-state rules are unit-testable.
+///
+/// `absent` are the tracked rows whose file is gone from disk
+/// ([`install::absent_on_disk`]), and `rows` the enabled audio rows with the
+/// weights they load ([`served::gather`]) — both read by the caller.
+///
+/// `mode` is `audio.catalog_revision`: whether a download follows a spec's
+/// pin, which decides the listing a package's availability is read from.
 pub(crate) fn catalog_view(
     snapshot: &CatalogSnapshot,
     tracked: &[store::HfModelRow],
-    served: &[crate::config::AudioModel],
+    rows: &[RowWeights],
+    absent: &HashSet<i64>,
+    mode: crate::config::CatalogRevision,
 ) -> dto::AudioCatalog {
     let mut families: Vec<dto::AudioFamily> = snapshot
         .specs
@@ -208,7 +215,7 @@ pub(crate) fn catalog_view(
                 .recommended()
                 .map(|p| p.id.as_str())
                 .unwrap_or_default();
-            let packages: Vec<dto::AudioPackage> = spec
+            let mut packages: Vec<dto::AudioPackage> = spec
                 .packages
                 .iter()
                 .map(|pkg| {
@@ -223,21 +230,29 @@ pub(crate) fn catalog_view(
                             .collect(),
                         None => Vec::new(),
                     };
-                    let have = |want_done: bool| {
-                        repo.is_some()
-                            && pkg.files.iter().all(|f| {
-                                rows.iter()
-                                    .any(|r| &r.file == f && (!want_done || r.status == "done"))
-                            })
-                    };
-                    let installed = have(true);
+                    // Installed = every spec file downloaded and still on
+                    // disk (audio-class gap 4): a spec that grew, or a file
+                    // that went, leaves the package short of those.
+                    let missing = install::missing_files(&pkg.files, &rows, absent);
+                    let installed = repo.is_some() && missing.is_empty();
                     let partial = !installed && !rows.is_empty();
+                    // Downloaded once, short of files now, nothing on its
+                    // way: what "complete install" is for.
+                    let incomplete = partial
+                        && missing.len() < pkg.files.len()
+                        && !rows.iter().any(|r| install::in_flight(r));
                     let size = match rows.iter().map(|r| r.size_bytes).sum::<Option<i64>>() {
                         Some(total) if installed => crate::hf::fmt_bytes(total.max(0) as u64),
                         _ => String::new(),
                     };
                     let suggested_path = repo.map(|r| suggest_path(r, pkg)).unwrap_or_default();
                     let download = spec.package_download(pkg);
+                    let pinned_commit = audio::pins::spec_pin(spec, pkg).unwrap_or_default();
+                    let revision = audio::pins::download_revision(spec, pkg, mode);
+                    let (unpublished_files, availability_note) = match repo {
+                        Some(r) => availability(snapshot, r, revision, &pkg.files),
+                        None => Default::default(),
+                    };
                     dto::AudioPackage {
                         id: pkg.id.clone(),
                         display_name: pkg.display_name.clone(),
@@ -252,27 +267,51 @@ pub(crate) fn catalog_view(
                         revision: download
                             .and_then(|d| d.revision.clone())
                             .unwrap_or_default(),
+                        pinned_commit: pinned_commit.to_string(),
+                        pin_followed: !pinned_commit.is_empty()
+                            && mode == crate::config::CatalogRevision::Pinned,
+                        // Under `pinned`, files from a revision other than
+                        // the one the spec names now say so.
+                        downloaded_from: audio::pins::downloaded_from(
+                            &rows,
+                            (mode == crate::config::CatalogRevision::Pinned).then_some(revision),
+                        ),
+                        unpublished_files,
+                        availability_note,
                         file_count: pkg.files.len() as u32,
                         size,
                         recommended: pkg.id == recommended_id,
                         installed,
                         partial,
+                        missing_files: if rows.is_empty() { Vec::new() } else { missing },
+                        incomplete,
                         repo: repo.unwrap_or_default().to_string(),
-                        served: served
-                            .iter()
-                            .any(|m| !suggested_path.is_empty() && m.path == suggested_path),
+                        // Filled in below, once every package's install
+                        // state is known (the directory fallback needs it).
+                        served: false,
+                        served_by: Vec::new(),
+                        serving_unclear: String::new(),
                         download_ids: rows.iter().map(|r| r.id).collect(),
                         suggested_model_id: suggest_model_id(&pkg.id),
                         suggested_path,
-                        suggested_task: suggest_task(&spec.tasks),
-                        suggested_mode: spec
-                            .modes
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "offline".into()),
+                        suggested_task: suggest_task(spec, pkg),
+                        suggested_mode: suggest_mode(spec),
                     }
                 })
                 .collect();
+            let installed: HashSet<String> = packages
+                .iter()
+                .filter(|p| p.installed)
+                .map(|p| p.id.clone())
+                .collect();
+            let mut serving = served::family_serving(spec, rows, &installed);
+            for p in &mut packages {
+                if let Some(s) = serving.packages.remove(&p.id) {
+                    p.served = !s.served_by.is_empty();
+                    p.served_by = s.served_by;
+                    p.serving_unclear = s.unclear.join("; ");
+                }
+            }
             let option = |o: &crate::audio::SpecOption| dto::AudioFamilyOption {
                 name: o.name.clone(),
                 kind: o.kind.clone(),
@@ -303,7 +342,10 @@ pub(crate) fn catalog_view(
                     session: spec.options.session.iter().map(option).collect(),
                 },
                 any_installed: packages.iter().any(|p| p.installed),
-                served: served.iter().any(|m| m.family == spec.family),
+                // A package of it is loaded — not merely "a row names this
+                // family", which also held for a row loading nothing at all.
+                served: packages.iter().any(|p| p.served),
+                serving_note: serving.unmatched.join("; "),
                 packages,
             }
         })
@@ -311,11 +353,51 @@ pub(crate) fn catalog_view(
     // What is already on this machine floats to the top (stable otherwise:
     // `fetch_catalog` sorts by family).
     families.sort_by_key(|f| !(f.any_installed || f.served));
+    let mut warnings = snapshot.warnings.clone();
+    // A snapshot from before the refresh listed the repos: said once here,
+    // not as a note on every package.
+    let has_repos = families
+        .iter()
+        .any(|f| f.packages.iter().any(|p| !p.repo.is_empty()));
+    if snapshot.listings.is_empty() && has_repos {
+        warnings.insert(0, NOT_CHECKED.to_string());
+    }
     dto::AudioCatalog {
         fetched_at: snapshot.fetched_at.clone(),
         families,
+        warnings,
     }
 }
+
+/// [`audio::published::availability`] of a package's files in the listing
+/// of `repo` at the revision its download takes. A snapshot listed before
+/// that revision was (one from before pins, a family carried over from an
+/// earlier refresh) says so rather than nothing.
+fn availability(
+    snapshot: &CatalogSnapshot,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+) -> (Vec<String>, String) {
+    use audio::published::{listing_key, listing_label};
+    let label = listing_label(repo, revision);
+    match snapshot.listings.get(&listing_key(repo, revision)) {
+        Some(listing) => audio::published::availability(&label, files, Some(listing)),
+        // Nothing listed at all: the catalog says it once (NOT_CHECKED).
+        None if snapshot.listings.is_empty() => Default::default(),
+        None => (
+            Vec::new(),
+            format!(
+                "whether {label} publishes these files has not been checked yet — a catalog \
+                 refresh checks it"
+            ),
+        ),
+    }
+}
+
+/// The catalog's line for a snapshot whose package files were never checked.
+const NOT_CHECKED: &str = "which package files Hugging Face publishes has not been checked yet \
+                           — refreshing the catalog checks it";
 
 /// The catalog as the UI reads it — cached only, no implicit network call.
 pub(crate) async fn catalog(state: &SharedState) -> dto::AudioCatalog {
@@ -325,10 +407,35 @@ pub(crate) async fn catalog(state: &SharedState) -> dto::AudioCatalog {
     let tracked = store::list_hf_models_by_target(&state.db, "audio")
         .await
         .unwrap_or_default();
-    let served = store::list_audio_models(&state.db)
+    let models = store::list_audio_models(&state.db)
         .await
         .unwrap_or_default();
-    catalog_view(&snapshot, &tracked, &served)
+    let absent = absent_rows(state, &tracked).await;
+    let rows = row_weights(state, models).await;
+    let mode = state.snapshot().settings.audio.catalog_revision;
+    catalog_view(&snapshot, &tracked, &rows, &absent, mode)
+}
+
+/// [`served::gather`] on the blocking pool: each enabled row's root is walked
+/// for the weights it loads.
+async fn row_weights(
+    state: &SharedState,
+    models: Vec<crate::config::AudioModel>,
+) -> Vec<RowWeights> {
+    let dir = state.snapshot().settings.audio.models_dir.clone();
+    tokio::task::spawn_blocking(move || served::gather(&dir, &models))
+        .await
+        .unwrap_or_default()
+}
+
+/// [`install::absent_on_disk`] on the blocking pool, against the audio
+/// models dir.
+async fn absent_rows(state: &SharedState, tracked: &[store::HfModelRow]) -> HashSet<i64> {
+    let dir = state.snapshot().settings.audio.models_dir.clone();
+    let rows = tracked.to_vec();
+    tokio::task::spawn_blocking(move || install::absent_on_disk(&dir, &rows))
+        .await
+        .unwrap_or_default()
 }
 
 /// Queue a package's files (the WebUI's "install") through the shared HF
@@ -357,6 +464,10 @@ pub(crate) async fn catalog_download(
         .package_repo(pkg)
         .ok_or_else(|| format!("package '{package}' names no download source"))?
         .to_string();
+    // The spec's pin, unless the setting says latest (audio/pins.rs).
+    let mode = state.snapshot().settings.audio.catalog_revision;
+    let revision = audio::pins::download_revision(spec, pkg, mode).to_string();
+    let pinned = revision != audio::pins::MAIN;
     // A gated repo answers every file with a 401 until a token with the
     // accepted licence is configured — queueing first would spend the click on
     // a list of identical failures instead of saying what is missing.
@@ -373,13 +484,82 @@ pub(crate) async fn catalog_download(
              file comes back 401"
         ));
     }
-    let queued = super::hf::queue_files(state, &repo, &pkg.files, "audio").await?;
+    // Only what the package lacks (audio-class gap 4): a package installed
+    // before its spec grew gets the new file, not every file again. One
+    // never downloaded gets everything.
+    let tracked = store::list_hf_models_by_target(&state.db, "audio")
+        .await
+        .unwrap_or_default();
+    let rows: Vec<&store::HfModelRow> = tracked
+        .iter()
+        .filter(|t| t.repo == repo && pkg.files.contains(&t.file))
+        .collect();
+    let absent = absent_rows(state, &tracked).await;
+    let missing = install::missing_files(&pkg.files, &rows, &absent);
+    // Under pinned, the package's installed files from another commit than
+    // the pin come along: a pin moves when its files were re-tested
+    // together, and fetching only what is missing would leave one package
+    // from two commits (a new tokenizer beside an old GGUF).
+    // Only those the pin changed: one whose bytes are the same at the pin is
+    // recorded at it instead of fetched again.
+    let (stale, recorded) = match mode {
+        crate::config::CatalogRevision::Pinned => {
+            let stale = install::at_another_revision(&rows, &absent, &revision);
+            install::changed_at_pin(state, &rows, stale, &revision).await
+        }
+        crate::config::CatalogRevision::Latest => (Vec::new(), Vec::new()),
+    };
+    let unchanged = match recorded.is_empty() {
+        true => String::new(),
+        false => format!(
+            "; unchanged at the pin, so recorded at it rather than fetched again: {}",
+            recorded.join(", ")
+        ),
+    };
+    let wanted: Vec<String> = missing
+        .iter()
+        .chain(stale.iter().filter(|f| !missing.contains(f)))
+        .cloned()
+        .collect();
+    if wanted.is_empty() {
+        return Ok(dto::AudioCatalogInstall {
+            ok: true,
+            family: family.to_string(),
+            package: package.to_string(),
+            repo,
+            revision,
+            files_queued: 0,
+            downloads: Vec::new(),
+            message: format!(
+                "every file of {} is already installed — nothing to download{unchanged}",
+                pkg.display_name
+            ),
+        });
+    }
+    let completing = !rows.is_empty();
+    let pin_note = pinned.then(|| audio::pins::no_fallback(&repo, &revision));
+    let queued = super::hf::queue_files_at(
+        state,
+        &repo,
+        &wanted,
+        "audio",
+        &revision,
+        pin_note.as_deref(),
+    )
+    .await?;
+    let at = match pinned {
+        true => format!(
+            " at commit {}, the one the spec pins",
+            audio::pins::short(&revision)
+        ),
+        false => String::new(),
+    };
     // Hand back the queued rows so the caller can follow its own download
     // instead of diffing the whole tracked list (same as `ops::hf_add`).
     let tracked = store::list_hf_models(&state.db).await.unwrap_or_default();
     let downloads = tracked
         .iter()
-        .filter(|r| r.repo == repo && pkg.files.contains(&r.file))
+        .filter(|r| r.repo == repo && wanted.contains(&r.file))
         .map(|r| dto::QueuedDownload {
             id: r.id,
             file: r.file.clone(),
@@ -392,12 +572,33 @@ pub(crate) async fn catalog_download(
         family: family.to_string(),
         package: package.to_string(),
         repo,
+        revision,
         files_queued: queued as u32,
         downloads,
-        message: format!(
-            "downloading {} — {queued} file(s); the package is servable once they finish",
-            pkg.display_name
-        ),
+        message: if completing {
+            let lacks = match missing.is_empty() {
+                true => String::new(),
+                false => format!("the file(s) it lacks: {}", missing.join(", ")),
+            };
+            let moved = match stale.is_empty() {
+                true => String::new(),
+                false => format!(
+                    "{}the installed file(s) from another commit than the pin, so the package \
+                     is one commit again: {}",
+                    if lacks.is_empty() { "" } else { "; " },
+                    stale.join(", ")
+                ),
+            };
+            format!(
+                "completing {} — downloading {queued} file(s){at}: {lacks}{moved}{unchanged}",
+                pkg.display_name
+            )
+        } else {
+            format!(
+                "downloading {} — {queued} file(s){at}; the package is servable once they finish",
+                pkg.display_name
+            )
+        },
     })
 }
 
@@ -435,6 +636,8 @@ mod tests {
                 mode: "offline".into(),
                 lazy: None,
                 busy_timeout_ms: None,
+                backend: None,
+                threads: None,
                 load_options: Default::default(),
                 session_options: Default::default(),
                 default_request_options: Default::default(),
@@ -503,6 +706,8 @@ mod tests {
     // Spec catalog
     // -----------------------------------------------------------------------
 
+    const PINNED: crate::config::CatalogRevision = crate::config::CatalogRevision::Pinned;
+
     fn spec_snapshot() -> CatalogSnapshot {
         let spec = audio::parse_spec(&json!({
             "family": "pocket_tts",
@@ -553,6 +758,8 @@ mod tests {
         CatalogSnapshot {
             fetched_at: "2026-08-29T10:00:00Z".into(),
             specs: vec![spec],
+            listings: Default::default(),
+            warnings: Vec::new(),
         }
     }
 
@@ -568,6 +775,8 @@ mod tests {
             status: status.into(),
             error: None,
             downloaded_at: None,
+            requested_revision: Some("main".into()),
+            resolved_commit: None,
         }
     }
 
@@ -594,7 +803,7 @@ mod tests {
             ),
             tracked("audio-cpp/PocketTTS-Multi", "multi/model.gguf", "queued", 0),
         ];
-        let view = catalog_view(&snapshot, &rows, &[]);
+        let view = catalog_view(&snapshot, &rows, &[], &HashSet::new(), PINNED);
         assert_eq!(view.fetched_at, "2026-08-29T10:00:00Z");
         let fam = &view.families[0];
         assert_eq!(fam.display_name, "Pocket TTS");
@@ -628,38 +837,193 @@ mod tests {
         assert!(byo.suggested_path.is_empty());
     }
 
-    /// A configured audio model marks its family and package as served, which
-    /// is what floats a family to the top of the browser.
+    /// An enabled row marks the package whose weights it loads — by the
+    /// file, not by sharing a directory with it — and with it the family
+    /// (what floats it to the top of the browser).
     #[test]
-    fn catalog_view_marks_served_families() {
-        let served = [crate::config::AudioModel {
-            id: 1,
+    fn catalog_view_marks_the_package_a_row_loads() {
+        let row = |candidates: &[&str]| RowWeights {
             model_id: "pocket-tts".into(),
             family: "pocket_tts".into(),
             path: "audio-cpp/PocketTTS-GGUF/english".into(),
-            task: "tts".into(),
-            mode: "offline".into(),
-            lazy: None,
-            busy_timeout_ms: None,
-            load_options: Default::default(),
-            session_options: Default::default(),
-            default_request_options: Default::default(),
-            model_spec_override: None,
-            config_id: None,
             weight_id: None,
-            voice_presets: Default::default(),
-            default_voice_preset: None,
-            enabled: true,
-            image: None,
-            extra_run_args: None,
-            warm_start: false,
-            hold_fallback_mode: Default::default(),
-            hold_fallback: None,
-        }];
-        let view = catalog_view(&spec_snapshot(), &[], &served);
-        assert!(view.families[0].served);
-        assert!(view.families[0].packages[0].served);
-        assert!(!view.families[0].packages[1].served);
+            candidates: candidates.iter().map(|c| c.to_string()).collect(),
+            any_gguf: !candidates.is_empty(),
+        };
+        let english = "audio-cpp/PocketTTS-GGUF/english/model.gguf";
+        let view = catalog_view(
+            &spec_snapshot(),
+            &[],
+            &[row(&[english])],
+            &HashSet::new(),
+            PINNED,
+        );
+        let fam = &view.families[0];
+        assert!(fam.served);
+        assert!(fam.packages[0].served);
+        assert_eq!(fam.packages[0].served_by, ["pocket-tts"]);
+        assert!(fam.packages[0].serving_unclear.is_empty());
+        assert!(!fam.packages[1].served);
+
+        // A pick across two packages serves neither and says so on both.
+        let multi = "audio-cpp/PocketTTS-Multi/multi/model.gguf";
+        let view = catalog_view(
+            &spec_snapshot(),
+            &[],
+            &[row(&[english, multi])],
+            &HashSet::new(),
+            PINNED,
+        );
+        let fam = &view.families[0];
+        assert!(
+            !fam.served,
+            "no package of it is loaded, so the family is not serving"
+        );
+        assert!(fam.serving_note.is_empty(), "the packages say it");
+        for p in &fam.packages[..2] {
+            assert!(!p.served && p.served_by.is_empty(), "{p:?}");
+            assert!(p.serving_unclear.contains("no weight_id"), "{p:?}");
+        }
+        assert!(
+            fam.packages[2].serving_unclear.is_empty(),
+            "no download source"
+        );
+
+        // A row loading a GGUF no package ships: no "serving" chip with
+        // nothing under it, a family note instead.
+        let stray = "audio-cpp/PocketTTS-GGUF/english/old.gguf";
+        let view = catalog_view(
+            &spec_snapshot(),
+            &[],
+            &[row(&[stray])],
+            &HashSet::new(),
+            PINNED,
+        );
+        let fam = &view.families[0];
+        assert!(!fam.served);
+        assert!(
+            fam.serving_note
+                .contains("loads old.gguf under audio-cpp/PocketTTS-GGUF/english"),
+            "{}",
+            fam.serving_note
+        );
+    }
+
+    /// A refresh's listings reach the packages: a file its repo does not
+    /// publish (the Orukeet case), a repo that could not be listed — and,
+    /// before anything was listed, one line for the whole catalog.
+    #[test]
+    fn catalog_view_says_which_files_are_not_published() {
+        use crate::audio::published::RepoListing;
+        let mut snapshot = spec_snapshot();
+        let view = catalog_view(&snapshot, &[], &[], &HashSet::new(), PINNED);
+        assert_eq!(view.warnings, [NOT_CHECKED]);
+        assert!(view.families[0]
+            .packages
+            .iter()
+            .all(|p| p.availability_note.is_empty() && p.unpublished_files.is_empty()));
+
+        snapshot.listings.insert(
+            "audio-cpp/PocketTTS-GGUF".into(),
+            RepoListing {
+                listed_at: "2026-10-02T12:00:00Z".into(),
+                present: Some(["english/model.gguf".to_string()].into()),
+                checked: ["english/model.gguf", "english/voices.bin"]
+                    .map(String::from)
+                    .into(),
+                error: String::new(),
+            },
+        );
+        snapshot.listings.insert(
+            "audio-cpp/PocketTTS-Multi".into(),
+            RepoListing {
+                error: "offline".into(),
+                ..Default::default()
+            },
+        );
+        snapshot.warnings = vec!["could not list audio-cpp/PocketTTS-Multi".into()];
+        let view = catalog_view(&snapshot, &[], &[], &HashSet::new(), PINNED);
+        assert_eq!(
+            view.warnings, snapshot.warnings,
+            "checked: no not-checked line"
+        );
+        let [english, multi, byo] = &view.families[0].packages[..] else {
+            panic!("three packages");
+        };
+        assert_eq!(english.unpublished_files, ["english/voices.bin"]);
+        assert!(
+            english
+                .availability_note
+                .contains("has no english/voices.bin (listed 2026-10-02)"),
+            "{}",
+            english.availability_note
+        );
+        assert!(multi.unpublished_files.is_empty());
+        assert!(multi.availability_note.ends_with(": offline"), "{multi:?}");
+        assert!(byo.unpublished_files.is_empty() && byo.availability_note.is_empty());
+    }
+
+    /// A package the spec pins to a commit: the chip's facts, and which
+    /// listing "not published" is read from — the pin under `pinned`, `main`
+    /// under `latest`.
+    #[test]
+    fn catalog_view_reads_a_pinned_package_at_the_revision_it_downloads() {
+        use crate::audio::published::{listing_key, RepoListing};
+        use crate::config::CatalogRevision;
+        let pin = "607a30d783dfa663caf39e06633721c8d4cfcd7e";
+        let mut snapshot = spec_snapshot();
+        let multi = &mut snapshot.specs[0].packages[1];
+        multi.download.as_mut().unwrap().revision = Some(pin.into());
+        let repo = "audio-cpp/PocketTTS-Multi";
+        let listed = |present: &[&str]| RepoListing {
+            listed_at: "2026-10-02T12:00:00Z".into(),
+            present: Some(present.iter().map(|f| f.to_string()).collect()),
+            checked: ["multi/model.gguf".to_string()].into(),
+            error: String::new(),
+        };
+        // At main the file is gone (a re-upload); at the pin it is there.
+        snapshot
+            .listings
+            .insert(listing_key(repo, "main"), listed(&[]));
+        snapshot
+            .listings
+            .insert(listing_key(repo, pin), listed(&["multi/model.gguf"]));
+
+        let view = catalog_view(&snapshot, &[], &[], &HashSet::new(), PINNED);
+        let p = &view.families[0].packages[1];
+        assert_eq!(p.pinned_commit, pin);
+        assert!(p.pin_followed);
+        assert!(p.unpublished_files.is_empty(), "{p:?}");
+
+        let view = catalog_view(
+            &snapshot,
+            &[],
+            &[],
+            &HashSet::new(),
+            CatalogRevision::Latest,
+        );
+        let p = &view.families[0].packages[1];
+        assert_eq!(p.pinned_commit, pin);
+        assert!(!p.pin_followed);
+        assert_eq!(p.unpublished_files, ["multi/model.gguf"]);
+        assert!(
+            p.availability_note.starts_with(&format!("{repo} has no")),
+            "{p:?}"
+        );
+        // Unpinned packages: no pin, nothing followed.
+        let english = &view.families[0].packages[0];
+        assert!(english.pinned_commit.is_empty() && !english.pin_followed);
+
+        // Listed before the pin was (an older snapshot): said, not silent.
+        snapshot.listings.remove(&listing_key(repo, pin));
+        let view = catalog_view(&snapshot, &[], &[], &HashSet::new(), PINNED);
+        let p = &view.families[0].packages[1];
+        assert!(
+            p.availability_note.starts_with(&format!(
+                "whether {repo} at 607a30d publishes these files has not"
+            )),
+            "{p:?}"
+        );
     }
 
     /// Nothing cached → an empty view, and no network call: the page opens

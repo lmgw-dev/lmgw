@@ -65,8 +65,14 @@ impl VramScheduler {
         // missed site puts a container back on the card the owner is gaming on.
         // A benchmark's lease is the same net (benchmark design §3.2): the run
         // has the card to itself, and nothing of any class may start on it.
-        if let Some(block) = snap.gpu_block() {
+        // Per model, by the descriptor this admission starts: an audio row
+        // on the CPU is not held (`gpu_block_at`) — unless the container it
+        // would join still runs on the GPU.
+        if let Some(block) = snap.gpu_block_at(runtime.placement()) {
             return Err(block.refusal(target.model_id.clone(), ""));
+        }
+        if let Some(refusal) = super::on_cpu::gpu_container_under_hold(state, snap, target) {
+            return Err(refusal);
         }
         let mut fallback = fallback;
         // The snapshot and descriptor a retry after a failed climb re-read.
@@ -77,13 +83,16 @@ impl VramScheduler {
                     Some((s, r)) => (&**s, r),
                     None => (snap, runtime),
                 };
+                // A CPU start takes nothing from the card: no gate, no queue,
+                // no reservation, and no `vram_too_large`.
+                let on_gpu = runtime.placement().is_gpu();
                 // Arbitrate only when there is something to arbitrate: the switch
                 // is on, and the model is not already up. A model the registry
                 // already holds takes no gate, no measurement and no queue —
                 // admission must not put a serialization point in front of
                 // traffic that fits.
                 let up = self.is_up(state, target);
-                let reservation = if snap.settings.vram.enabled && !up {
+                let reservation = if snap.settings.vram.enabled && !up && on_gpu {
                     match self
                         .arbitrate(state, snap, target, alias, fallback.as_deref_mut())
                         .await?
@@ -101,7 +110,10 @@ impl VramScheduler {
                 // request's arrival, not its start. The registry refuses a
                 // start under the lease anyway (`runtime/registry/lease.rs`);
                 // this is the same refusal in the admission's own words.
-                if let Some(block) = state.snapshot().gpu_block() {
+                // By the placement of the descriptor `acquire` starts below,
+                // not the row's: a row switched to the CPU while this request
+                // queued still has its GPU descriptor started here.
+                if let Some(block) = state.snapshot().gpu_block_at(runtime.placement()) {
                     return Err(block.refusal(target.model_id.clone(), ""));
                 }
                 // Always. Admission decided *whether and when*; this is what makes
@@ -126,7 +138,7 @@ impl VramScheduler {
                     Err(RuntimeError::ClimbFailed { message, .. }) => {
                         tracing::debug!("re-admitting '{alias}' after a failed climb: {message}");
                         let now = state.snapshot();
-                        if let Some(block) = now.gpu_block() {
+                        if let Some(block) = now.gpu_block_for(target.class, &target.model_id) {
                             return Err(block.refusal(target.model_id.clone(), ""));
                         }
                         let runtime = model_runtime(&now, target.class, &target.model_id)
@@ -199,8 +211,13 @@ impl VramScheduler {
         // admission (gpu-hold design §1). An install with admission switched
         // off, or no NVML at all, would otherwise answer `Unchecked` and warm
         // every flagged model straight onto the card the owner just took back.
-        if let Some(block) = snap.gpu_block() {
+        // Per model: an audio row on the CPU is not held, and takes nothing
+        // from the card, so it goes ahead without a reservation.
+        if let Some(block) = snap.gpu_block_for(class, model_id) {
             return held(&block, model_id);
+        }
+        if !snap.placement(class, model_id).is_gpu() {
+            return Fit::Go(StartPermit { _reservation: None });
         }
         if !snap.settings.vram.enabled {
             return Fit::Unchecked;
@@ -227,6 +244,8 @@ impl VramScheduler {
         // while it waited for the footprint, the gate or the ledger. Under
         // the gate, so a benchmark's drain — which takes the gate once before
         // it looks — never looks while a start it cannot see yet is decided.
+        // The global block, not the row's: past the CPU exit above this is a
+        // GPU start, whatever the row has been switched to since.
         if let Some(block) = state.snapshot().gpu_block() {
             return held(&block, model_id);
         }
@@ -391,7 +410,10 @@ impl VramScheduler {
         loop {
             // Switched on while this request waited — the hold, or a
             // benchmark's lease (benchmark design §3.2): nothing new goes on
-            // the card, however long this request has queued for it.
+            // the card, however long this request has queued for it. The
+            // global block, not the row's: only a GPU start is arbitrated,
+            // and a row switched to the CPU meanwhile does not change the
+            // descriptor this request will start.
             if let Some(block) = state.snapshot().gpu_block() {
                 return Err(block.refusal(target.model_id.clone(), ""));
             }
@@ -663,7 +685,7 @@ pub(super) fn lifecycle_spec<'a>(
     snap: &'a Snapshot,
     runtime: &'a ModelRuntime,
 ) -> crate::runtime::registry::AcquireSpec<'a> {
-    crate::runtime::lifecycle::acquire_spec(&state.data_dir, snap, runtime)
+    crate::runtime::lifecycle::acquire_spec(state, snap, runtime)
 }
 
 /// A container that would not start is an upstream failure, not a client one:
@@ -788,7 +810,7 @@ pub(super) fn describe_holders(l: &Ledger) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{}/{} ({}{}{})",
+                "{}/{} ({}{}{}{})",
                 r.container.as_str(),
                 r.model,
                 fmt_bytes(r.estimated_bytes),
@@ -798,6 +820,14 @@ pub(super) fn describe_holders(l: &Ledger) -> String {
                 // why the free figure is smaller than the card looks.
                 match r.peak_extra_bytes {
                     Some(p) => format!(" + {} peak", fmt_bytes(p)),
+                    None => String::new(),
+                },
+                // The part of an audio model's estimate it has not loaded
+                // yet: not on the card, so the driver does not show it, and
+                // kept free for it — why the free figure is smaller than the
+                // driver says (realtime design §9.4).
+                match r.pending_bytes {
+                    Some(p) => format!(", {} of it until loaded", fmt_bytes(p)),
                     None => String::new(),
                 },
                 if r.in_flight > 0 {

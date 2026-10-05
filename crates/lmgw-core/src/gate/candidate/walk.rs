@@ -243,7 +243,7 @@ async fn repick_as(
             let mut headers = GateHeaders::default();
             headers.chose(model.to_string());
             Err(OpenFailed {
-                route: Some(state.snapshot().chat_local_route(model)),
+                route: Some(Box::new(state.snapshot().chat_local_route(model))),
                 headers,
                 error: cause,
             })
@@ -429,7 +429,7 @@ impl Walk<'_> {
             if primary_failed.is_none() {
                 let route = self.snap.chat_local_route(p);
                 match vram::start_background(self.state, &route, self.alias).await {
-                    Ok(BackgroundStart::Started(hold)) => return Ok(self.chosen(route, hold, p)),
+                    Ok(BackgroundStart::Started(hold)) => return Ok(self.chosen(route, *hold, p)),
                     Ok(BackgroundStart::Blocked(why)) => blocked = Some(why),
                     Err(GatewayError::GpuHold { .. } | GatewayError::GpuBenchmark { .. }) => {
                         return self.held().await
@@ -525,7 +525,7 @@ impl Walk<'_> {
         let mut headers = GateHeaders::default();
         headers.chose(primary.to_string());
         OpenFailed {
-            route: Some(self.snap.chat_local_route(primary)),
+            route: Some(Box::new(self.snap.chat_local_route(primary))),
             headers,
             error,
         }

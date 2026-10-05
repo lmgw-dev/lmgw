@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::extract::{self, ExtractError, Extracted, Kind, PdfClass, PdfError};
 use crate::state::SharedState;
-use crate::store::NewAttachment;
+use crate::store::{ChatThread, NewAttachment};
 
 use super::chat_turn;
 
@@ -38,14 +38,16 @@ fn extract_refusal(e: ExtractError) -> Refusal {
     }
 }
 
-/// Sniff and extract `body`, named `name`, for a thread answered by
-/// `model_alias`.
+/// Sniff and extract `body`, named `name`, for `thread` — answered by its
+/// model, and transcribed (audio its model cannot hear) with its
+/// speech-to-text alias (chat-voice design §2.1).
 pub(super) async fn ingest(
     state: &SharedState,
-    model_alias: &str,
+    thread: &ChatThread,
     name: &str,
     body: Bytes,
 ) -> Result<NewAttachment, Refusal> {
+    let model_alias = thread.model_alias.as_str();
     let sniffed = extract::sniff_async(body.clone()).await.map_err(|e| {
         (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -104,13 +106,20 @@ pub(super) async fn ingest(
         }
         Kind::Audio => {
             new.meta = json!({ "format": sniffed.sub });
-            let stt = state.snapshot().settings.chat_stt_alias.clone();
+            let stt = super::chat_voice::asr_alias(&state.snapshot(), thread);
             let caps = chat_turn::model_caps(state, model_alias).await;
             let native = super::chat_attach_gate::native_audio(caps, sniffed.mime).is_some();
-            if !native && !stt.is_empty() {
-                match crate::proxy::transcribe(state, &stt, body.clone(), &new.name, sniffed.mime)
-                    .await
-                {
+            if let Some(stt) = stt.filter(|_| !native) {
+                let proto = super::chat_voice::speech_proto(thread);
+                let text = crate::proxy::transcribe_for(
+                    state,
+                    proto,
+                    &stt,
+                    body.clone(),
+                    &new.name,
+                    sniffed.mime,
+                );
+                match text.await {
                     Ok(text) => apply_transcript(&mut new.meta, &stt, &text, &mut new.extracted),
                     Err(e) => new.meta["transcript_error"] = Value::String(e.to_string()),
                 }

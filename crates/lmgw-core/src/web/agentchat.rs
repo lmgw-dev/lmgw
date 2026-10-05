@@ -33,18 +33,15 @@
 //! chat can inspect the gateway and nothing more, and the mutating tools are
 //! not even listed. The page says so, rather than failing mysteriously.
 
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use axum::response::sse::Event as SseFrame;
 use serde_json::json;
-use tokio::sync::mpsc;
 
 use super::chat_knowledge::KbTools;
-use super::chat_turn::{self, Reply, Turn, NOT_SAVED};
+use super::chat_turn::{self, Events, Reply, Stopped, Turn, TurnFrame, NOT_SAVED};
 use crate::agent::{
     self, Budget, Cancel, DeltaSink, EventSink, LoopEvent, ResolvedTool, RunConfig, StopReason,
     TurnRunner,
@@ -57,10 +54,14 @@ use crate::mcp::exec::{
     self as mcp_exec, self_admin_tools, DocsExecutor, KbExecutor, McpExecutor, SelfAdminExecutor,
     SplitExecutor, KB_LABEL, SELF_ADMIN_LABEL,
 };
-use crate::proxy::{self, PerRoute, RequestCtx};
+use crate::proxy::{self, PerRoute, RequestCtx, StopSignal};
 use crate::state::SharedState;
 use crate::store::ThreadMcp;
 use crate::telemetry::{ADMIN_PROTO, CHAT_TOOL_PROTO};
+
+mod claim;
+mod heard;
+mod refused;
 
 /// `chat_threads.kind` for an Admin Chat thread.
 pub const ADMIN_KIND: &str = "admin";
@@ -150,11 +151,15 @@ struct ChatRunner {
     proto: &'static str,
     /// GPU admission for the whole loop (§9b) — see
     /// [`crate::vram::LocalHold`] for why a tool loop holds one guard
-    /// rather than one per turn.
-    _admission: Option<crate::vram::LocalHold>,
+    /// rather than one per turn — let go while a heard turn's tools wait
+    /// for its user row ([`claim`]).
+    claim: claim::LoopClaim,
     /// The turn continues the thread's last reply: the loop's first request
     /// ends with it, and says so ([`chat_turn::mark_continuation`]).
     continuing: bool,
+    /// Every model call carries the user's speech as audio: each goes only
+    /// to a route this lmgw runs (voice-audio-input design §3.4).
+    local_only: bool,
     /// Who the admitted route answers as ([`chat_turn::answered_by`]).
     admitted_as: Option<String>,
     /// What the last model call went out as: the overrides its route
@@ -166,6 +171,9 @@ struct ChatRunner {
 struct Answering {
     ignored: Vec<&'static str>,
     answered_by: Option<String>,
+    /// How the last model call's reasoning off went out, and whether it
+    /// reasoned anyway (model-capabilities design §5.6).
+    fitted: Option<proxy::reasoning_fit::Fitted>,
 }
 
 /// The loop's request as each route takes it — the admitted one, and every
@@ -188,7 +196,7 @@ impl PerRoute for ChatRunner {
                 .messages
                 .last()
                 .is_some_and(|m| m.role == Role::Assistant);
-        let fit = chat_turn::fit_route(route, ir, continuing)?;
+        let fit = chat_turn::fit_route(route, ir, (continuing, self.local_only))?;
         let answered_by = match rerouted {
             Some(h) => chat_turn::answered_by(&self.state.snapshot(), h),
             None => self.admitted_as.clone(),
@@ -196,6 +204,7 @@ impl PerRoute for ChatRunner {
         *self.answering.lock().unwrap_or_else(|e| e.into_inner()) = Answering {
             ignored: fit.ignored,
             answered_by,
+            fitted: None,
         };
         if !continuing && !fit.params_changed {
             // The request as the loop built it is what this route takes —
@@ -209,6 +218,13 @@ impl PerRoute for ChatRunner {
         }
         Ok(Some(req))
     }
+
+    /// An off the route took in another form joins the overrides it dropped.
+    fn fitted(&self, fitted: &proxy::reasoning_fit::Fitted) {
+        let mut answering = self.answering.lock().unwrap_or_else(|e| e.into_inner());
+        fitted.report(&mut answering.ignored);
+        answering.fitted = Some(fitted.clone());
+    }
 }
 
 #[async_trait]
@@ -219,15 +235,35 @@ impl TurnRunner for ChatRunner {
         deadline: Duration,
         sink: &mut dyn DeltaSink,
     ) -> Result<Completion, GatewayError> {
+        let started = Instant::now();
+        let hold = match self.claim.for_call().await {
+            Ok(hold) => hold,
+            Err(e) => {
+                // A claim let go and refused again: its request row, as any
+                // refusal of the loop's (`refused`).
+                let (alias, route) = (&ir.model_alias, &self.route);
+                refused::record(
+                    &self.state,
+                    alias,
+                    self.proto,
+                    route,
+                    self.fallback,
+                    started,
+                    &e,
+                )
+                .await;
+                return Err(e);
+            }
+        };
         proxy::stream_once_on(
             &self.state,
-            self._admission.as_ref(),
+            hold.as_ref(),
             &self.route,
             self.fallback,
             ir,
             self.proto,
-            None,
-            deadline,
+            proxy::KeyRef::default(),
+            deadline.saturating_sub(started.elapsed()),
             sink,
             Some((self, None)),
         )
@@ -238,7 +274,11 @@ impl TurnRunner for ChatRunner {
 /// Turns loop events into the SSE frames the Chat island already speaks, and
 /// accumulates the turn for persistence.
 struct ChatSink {
-    tx: mpsc::Sender<Result<SseFrame, Infallible>>,
+    tx: Events,
+    /// Raised the moment the turn is stopped. From then on no text is relayed
+    /// or kept, so the partial reply is what the reader had been sent, and no
+    /// frame waits for a reader that stopped reading.
+    stop: StopSignal,
     text: String,
     reasoning: String,
     usage: Usage,
@@ -246,11 +286,30 @@ struct ChatSink {
 }
 
 impl ChatSink {
+    /// One of the loop's frames. Once the turn is stopped it waits for no
+    /// reader: a frame that still has room goes out, any other is dropped.
+    /// The turn's own last frame is [`Self::say`]'s.
     async fn emit_raw(&self, ev: &'static str, data: String) -> bool {
-        self.tx
-            .send(Ok(SseFrame::default().event(ev).data(data)))
-            .await
-            .is_ok()
+        let frame = TurnFrame::new(ev, data);
+        if self.stop.is_raised() {
+            return !matches!(
+                self.tx.try_send(frame),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+            );
+        }
+        tokio::select! {
+            biased;
+            sent = self.tx.send(frame) => sent.is_ok(),
+            // The stop landed while a stalled reader held this frame up.
+            () = self.stop.raised() => true,
+        }
+    }
+
+    /// A frame the reader must get even after a stop (`error`, `done`): sent
+    /// once the loop and its GPU admission are gone, so waiting on a slow
+    /// reader holds nothing.
+    async fn say(&self, ev: &'static str, data: String) {
+        let _ = self.tx.send(TurnFrame::new(ev, data)).await;
     }
 }
 
@@ -262,6 +321,8 @@ impl EventSink for ChatSink {
             // the island renders one assistant bubble per send, with the tool
             // activity shown inline, which is what the transcript looks like.
             LoopEvent::TurnStarted { .. } => true,
+            // Nothing said after a stop is relayed or kept.
+            LoopEvent::Text(_) | LoopEvent::Reasoning(_) if self.stop.is_raised() => true,
             LoopEvent::Text(t) => {
                 self.first_at.get_or_insert_with(Instant::now);
                 self.text.push_str(&t);
@@ -318,7 +379,11 @@ impl EventSink for ChatSink {
             }
             LoopEvent::Done { usage, reason } => {
                 self.usage = usage;
-                if let StopReason::Incomplete(why) = reason {
+                // A cancel is the turn being stopped, and the turn says so
+                // itself (`report_stop`, or `done` to a caller that stopped
+                // it): there is no budget to raise.
+                let stopped = reason == StopReason::Incomplete(agent::REASON_CANCELED);
+                if let (StopReason::Incomplete(why), false) = (reason, stopped) {
                     let msg = format!(
                         "the run stopped early: {why} (raise it under Settings → Agents & \
                          tools if this was too tight)"
@@ -342,23 +407,20 @@ pub(super) async fn run_send(
     turn: Turn,
     ir: ChatRequest,
     plan: ToolPlan,
-    tx: mpsc::Sender<Result<SseFrame, Infallible>>,
+    tx: Events,
 ) {
     let started = Instant::now();
     let snap = state.snapshot();
+    // A refusal that is no gateway error (a thread with no usable tool):
+    // its message alone. A gateway error's goes with its code
+    // (`chat_turn::refuse`).
     let refuse = |message: String| {
         let tx = tx.clone();
         async move {
-            let _ = tx
-                .send(Ok(SseFrame::default()
-                    .event("error")
-                    .data(json!({ "message": message }).to_string())))
-                .await;
-            let _ = tx
-                .send(Ok(SseFrame::default()
-                    .event("done")
-                    .data(json!({ "aborted": true }).to_string())))
-                .await;
+            let error = json!({ "message": message }).to_string();
+            let _ = tx.send(TurnFrame::new("error", error)).await;
+            let done = json!({ "aborted": true }).to_string();
+            let _ = tx.send(TurnFrame::new("done", done)).await;
         }
     };
     // The gate's routing stages — the GPU hold's re-route/refusal, like every
@@ -374,7 +436,11 @@ pub(super) async fn run_send(
         .await;
     let routed = match resolved {
         Ok(Ok(r)) => r,
-        Ok(Err(f)) => return refuse(f.error.to_string()).await,
+        Ok(Err(f)) => {
+            // `held` for the GPU hold or a benchmark, as the plain path says.
+            super::chat_voice::held_at_resolve(&tx, &ir.model_alias, &f.error).await;
+            return chat_turn::refuse(&tx, &f.error).await;
+        }
         Err(why) => return turn.report_stop(why, &tx).await,
     };
 
@@ -434,11 +500,8 @@ pub(super) async fn run_send(
             } else {
                 format!("MCP server '{label}': {why}")
             };
-            let _ = tx
-                .send(Ok(SseFrame::default()
-                    .event("error")
-                    .data(json!({ "message": message }).to_string())))
-                .await;
+            let error = json!({ "message": message }).to_string();
+            let _ = tx.send(TurnFrame::new("error", error)).await;
         }
         // A thread may attach the same self-admin toolset an admin thread gets
         // automatically; the set is what dispatches, so duplicates are inert.
@@ -473,8 +536,13 @@ pub(super) async fn run_send(
     // refuses a facet it does not enable — tool calls among them, since this
     // loop always gives the model tools (`Routed::using`).
     let uses = crate::gate::request_facets(&ir, None).insert(crate::candidates::Facet::ToolCalls);
+    // The loop's request rows' protocol, a refusal's below too.
+    let proto = if plan.admin { ADMIN_PROTO } else { "chat" };
     let admitted = match routed.using(uses) {
-        Ok(routed) => turn.or_stop(&tx, routed.admit(&state)).await,
+        Ok(routed) => {
+            let admit = super::chat_voice::admit_reporting(&state, routed, &ir.model_alias, &tx);
+            turn.or_stop(&tx, admit).await
+        }
         Err(f) => Ok(Err(f)),
     };
     let crate::gate::Opened {
@@ -483,28 +551,53 @@ pub(super) async fn run_send(
         headers,
     } = match admitted {
         Ok(Ok(o)) => o,
-        Ok(Err(f)) => return refuse(f.error.to_string()).await,
+        Ok(Err(f)) => {
+            // Its request row, as the plain path writes one (`refused`).
+            if let Some(route) = &f.route {
+                let fallback = f.headers.fallback_reason();
+                let e = &f.error;
+                refused::record(&state, &ir.model_alias, proto, route, fallback, started, e).await;
+            }
+            let sent = chat_turn::SentAs::of(chat_turn::answered_by(&snap, &f.headers), &ir);
+            return chat_turn::refuse_sent(&tx, &f.error, sent).await;
+        }
         Err(why) => return turn.report_stop(why, &tx).await,
     };
     // A continue on the route admission settled on — see the plain path's
     // twin of this check in `chat::relay`; every re-route inside the loop is
     // checked again by the runner ([`PerRoute`]).
-    let first = chat_turn::fit_route(&route, &ir, turn.is_continue());
+    let first = chat_turn::fit_route(&route, &ir, (turn.is_continue(), turn.local_only()));
     let first = match first {
         Ok(fit) => fit,
-        Err(e) => return refuse(e.to_string()).await,
+        Err(e) => {
+            let fallback = headers.fallback_reason();
+            refused::record(
+                &state,
+                &ir.model_alias,
+                proto,
+                &route,
+                fallback,
+                started,
+                &e,
+            )
+            .await;
+            let sent = chat_turn::SentAs::of(chat_turn::answered_by(&snap, &headers), &ir);
+            return chat_turn::refuse_sent(&tx, &e, sent).await;
+        }
     };
     let runner = ChatRunner {
         state: state.clone(),
         route,
         fallback: headers.fallback_reason(),
-        proto: if plan.admin { ADMIN_PROTO } else { "chat" },
-        _admission: admission,
+        proto,
+        claim: claim::LoopClaim::new(admission),
         continuing: turn.is_continue(),
+        local_only: turn.local_only(),
         admitted_as: chat_turn::answered_by(&snap, &headers),
         answering: Mutex::new(Answering {
             ignored: first.ignored,
             answered_by: chat_turn::answered_by(&snap, &headers),
+            fitted: None,
         }),
     };
     // One executor for both planes, always: with no `lmgw__*` tools attached
@@ -527,13 +620,26 @@ pub(super) async fn run_send(
                 .with_proto(CHAT_TOOL_PROTO),
         );
     }
-    // The loop races every model and tool call against this flag; it is
-    // raised when the turn is stopped or replaced.
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cfg = RunConfig::new(tools, budget(&state), true).with_cancel(Cancel::flag(cancel.clone()));
+    // The thread's own tool names: a call to any other name is the model's
+    // invention, and its record says so (`close_trailing_calls` below).
+    let known: HashSet<String> = tools.iter().map(|t| t.def.name.clone()).collect();
+    // The loop races every model and tool call and every frame against this
+    // stop; it is raised the moment the turn is stopped or replaced, and a
+    // model call in flight then ends at its next await and still writes its
+    // row (chat-voice design §7.2).
+    let (stop_run, stop_signal) = proxy::stop_pair();
+    let cfg = RunConfig::new(tools, budget(&state), true)
+        .with_cancel(Cancel::signal(stop_signal.clone()));
+    // A heard voice turn's tools wait for its user row (`heard`), the
+    // loop's claim let go meanwhile (`claim`).
+    let exec = heard::HeardTools::new(&exec, turn.user_row(), &stop_run, &runner.claim);
     let base_len = ir.messages.len();
+    // What the loop's refusal below says its requests carried
+    // (`TurnFrame::sent`).
+    let images = crate::gate::media_parts(&ir).images > 0;
     let mut sink = ChatSink {
         tx: tx.clone(),
+        stop: stop_signal,
         text: String::new(),
         reasoning: String::new(),
         usage: Usage::default(),
@@ -544,23 +650,50 @@ pub(super) async fn run_send(
     let result = {
         let run = agent::run(ir, cfg, &runner, &exec, &mut sink);
         tokio::pin!(run);
+        // The stop first: once it is raised the loop is not polled again
+        // before it hears of it.
         tokio::select! {
-            r = &mut run => r,
+            biased;
             why = turn.stopped(&tx) => {
                 stopped = Some(why);
-                cancel.store(true, Ordering::Relaxed);
+                stop_run.stop();
                 run.await
             }
+            r = &mut run => r,
         }
     };
     let (mut messages, err) = match result {
         Ok(r) => (r.messages[base_len.min(r.messages.len())..].to_vec(), None),
-        Err(e) => (Vec::new(), Some(e.to_string())),
+        // A turn that failed after tools ran keeps their record: the calls
+        // happened, and the model must learn that they did, or it makes a
+        // side-effecting call again.
+        Err(e) => {
+            sink.usage = e.usage;
+            let record = e.messages[base_len.min(e.messages.len())..].to_vec();
+            (record, Some(e.error))
+        }
     };
-    if let Some(msg) = err.as_ref().filter(|_| stopped.is_none()) {
-        let _ = sink
-            .emit_raw("error", json!({ "message": msg }).to_string())
-            .await;
+    // The loop is over. Its GPU admission goes now, before the last frames,
+    // which a reader that stopped reading could hold up.
+    let answering = runner
+        .answering
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    // Whether the tool gate stopped the turn (`heard`), read before the
+    // executor goes with the claim it borrows.
+    let held_off = exec.held_off();
+    drop(exec);
+    drop(runner);
+    if let Some(e) = err.as_ref().filter(|_| stopped.is_none()) {
+        // With its code, as every refusal of the turn (WP11 server review
+        // M1): a context overflow, a budget, a lost candidate — and who the
+        // last model call went to.
+        let sent = chat_turn::SentAs {
+            answered_by: answering.answered_by.clone(),
+            images,
+        };
+        let _ = sink.tx.send(TurnFrame::error_sent(e, sent)).await;
     }
 
     // A continue whose continuation went into the tool loop: the model's
@@ -572,6 +705,18 @@ pub(super) async fn run_send(
     if let Some(prefix) = turn.continued_text() {
         prefix_record(&mut messages, prefix);
     }
+    // Calls the turn ended before making (the tool-call budget ran out, the
+    // page left as they were announced, the model named a tool the thread
+    // does not have) get a result too: a record ending in a call with none
+    // is one no later request can replay. A thread's loop never hands a
+    // call back to a client, so every trailing call was never made.
+    agent::close_trailing_calls(&mut messages, |name| {
+        Some(if known.contains(name) {
+            agent::UNMADE_CALL.to_string()
+        } else {
+            format!("not run: this thread has no tool named '{name}'")
+        })
+    });
 
     // Persist the assistant turn: the visible text plus the IR the loop
     // produced, so the *next* turn replays the tool calls it actually made.
@@ -581,11 +726,7 @@ pub(super) async fn run_send(
     let ir_json = Some(trim_trailing_text(&messages, &sink.text))
         .filter(|record| !record.is_empty())
         .and_then(|record| serde_json::to_string(&record).ok());
-    let answering = runner
-        .answering
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let wrote_nothing = sink.text.is_empty() && sink.reasoning.is_empty() && ir_json.is_none();
     let saved = turn
         .persist(
             &state,
@@ -597,43 +738,57 @@ pub(super) async fn run_send(
                 ir_messages: ir_json.as_deref(),
                 answered_by: answering.answered_by.clone(),
                 stopped: stopped.is_some(),
+                failed: err.is_some(),
             },
         )
         .await;
 
-    if let Some(why) = stopped {
+    // A caller that raised its own stop still reads: it gets `done`, which
+    // names the partial turn just saved.
+    if let Some(why) = stopped.filter(|w| *w != Stopped::Interrupted) {
         return turn.report_stop(why, &tx).await;
+    }
+    // A turn that failed before it said or ran anything saves nothing, and
+    // says so as the plain path does: `done {aborted}`, no message id. Its
+    // user message stays owed, and the next send merges with it (§7.4).
+    if err.is_some() && wrote_nothing {
+        sink.say("done", json!({ "aborted": true }).to_string())
+            .await;
+        return;
     }
     let ttfb = sink
         .first_at
         .map(|t| t.duration_since(started).as_millis() as i64);
     if saved.refused {
-        let _ = sink
-            .emit_raw(
-                "error",
-                json!({ "message": NOT_SAVED, "code": "not_saved" }).to_string(),
-            )
-            .await;
-    }
-    let _ = sink
-        .emit_raw(
-            "done",
-            json!({
-                "message_id": saved.id,
-                "saved": saved.saved(),
-                "model": turn.model(),
-                "answered_by": answering.answered_by,
-                "prompt_tokens": sink.usage.prompt_tokens,
-                "completion_tokens": sink.usage.completion_tokens,
-                "ttfb_ms": ttfb,
-                "total_ms": started.elapsed().as_millis() as i64,
-                "aborted": err.is_some(),
-                "timings": serde_json::Value::Null,
-                "reasoning_ignored": answering.ignored,
-            })
-            .to_string(),
+        sink.say(
+            "error",
+            json!({ "message": NOT_SAVED, "code": "not_saved" }).to_string(),
         )
         .await;
+    }
+    sink.say(
+        "done",
+        json!({
+            "message_id": saved.id,
+            "saved": saved.saved(),
+            "model": turn.model(),
+            "answered_by": answering.answered_by,
+            "prompt_tokens": sink.usage.prompt_tokens,
+            "completion_tokens": sink.usage.completion_tokens,
+            "ttfb_ms": ttfb,
+            "total_ms": started.elapsed().as_millis() as i64,
+            "aborted": err.is_some() || stopped.is_some() || held_off,
+            "timings": serde_json::Value::Null,
+            "reasoning_ignored": answering.ignored,
+            // The model reasoned although off was asked, in a sentence.
+            "reasoning_note": answering
+                .fitted
+                .as_ref()
+                .and_then(|f| f.note(answering.answered_by.as_deref().unwrap_or(turn.model()))),
+        })
+        .to_string(),
+    )
+    .await;
 }
 
 /// Put a continue's prefill `prefix` in front of the record's first assistant

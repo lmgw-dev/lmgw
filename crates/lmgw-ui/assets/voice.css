@@ -1,0 +1,284 @@
+/* The Chat's voice styles (chat-voice design §2.2, §2.4, §5, §6.5, §9-§12):
+   the Voice settings section, the composer's voice menu and devices, dictation
+   and read-aloud, and voice mode's realtime panel. Loaded after app.css, whose
+   tokens they use (WP11 UI review NIT 11: kept together, out of app.css). */
+
+/* ===== Chat voice (chat-voice §2.2): the Voice section of a thread's
+   settings and of a folder's defaults. Its fields nest inside one .field,
+   so the drawer's own spacing does not reach them: the section spaces them,
+   and a grid row's cells start together however long their hints are. ===== */
+.voice-section { display: flex; flex-direction: column; gap: 8px; }
+.voice-section > label { margin-bottom: 0; }
+.voice-section .field { margin: 0; }
+.voice-section .field-grid { align-items: start; }
+.voice-section .select { display: block; width: 100%; }
+.voice-section .input { width: 100%; }
+.voice-section .notice { margin: 0; }
+.voice-seed { justify-content: space-between; font-size: var(--fs-sm); }
+
+/* ===== Chat voice (chat-voice §2.4, §12): the composer's voice menu and
+   its popover — read replies aloud, the device lists, the level meters, the
+   echo chip. */
+.composer-voice-menu { width: 30px; gap: 1px; }
+.composer-voice-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor;
+  stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.composer-voice-menu svg.vm-caret { width: 7px; height: 7px; stroke-width: 1.4; }
+.composer-voice-menu.on { color: var(--accent); }
+.composer-voice-menu.warn { color: var(--amber); }
+.vm-read { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.vm-switch { display: flex; align-items: center; gap: 10px; width: 100%; padding: 4px 0;
+  border: 0; background: none; color: var(--text); font: inherit; text-align: left;
+  cursor: pointer; }
+.vm-switch:disabled { cursor: default; opacity: .6; }
+.vm-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
+  border-radius: 4px; }
+.vm-track { flex: none; position: relative; width: 30px; height: 16px; border-radius: 999px;
+  background: var(--surface-hi); border: 1px solid var(--border-strong); }
+.vm-track i { position: absolute; top: 2px; left: 2px; width: 10px; height: 10px;
+  border-radius: 50%; background: var(--text-2); transition: left .12s; }
+.vm-switch[aria-checked="true"] .vm-track { background: var(--accent-bg);
+  border-color: var(--accent); }
+.vm-switch[aria-checked="true"] .vm-track i { left: 16px; background: var(--accent); }
+@media (prefers-reduced-motion: reduce) { .vm-track i { transition: none; } }
+.pop.voice-dev-pop { padding: 10px 12px; width: min(440px, 92vw); overflow-y: auto; }
+.voice-dev { display: flex; flex-direction: column; gap: 14px; }
+.voice-dev .notice { margin: 0; }
+.vd-section { display: flex; flex-direction: column; gap: 6px; }
+.vd-head { font-size: 11px; font-weight: 600; color: var(--text-3);
+  text-transform: uppercase; letter-spacing: .05em; }
+.vd-list { display: flex; flex-direction: column; gap: 1px; max-height: 180px; overflow-y: auto; }
+.vd-opt { display: flex; align-items: center; gap: 8px; width: 100%; border: 0;
+  background: none; font: inherit; text-align: left; }
+.vd-opt:hover:not(:disabled):not(.sel) { background: var(--surface); }
+.vd-opt:disabled { cursor: default; opacity: .75; }
+.vd-opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.vd-tag { flex: none; font: 500 10.5px var(--mono); color: var(--text-3); }
+.vd-test { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.vd-test .btn { flex: none; }
+.vd-note { font-size: 12px; overflow-wrap: anywhere; }
+.vd-note.warn { color: var(--amber); }
+.vu { flex: 1; height: 6px; min-width: 60px; border-radius: 999px; background: var(--surface);
+  overflow: hidden; }
+.vu i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 999px;
+  transition: width 60ms linear; }
+@media (prefers-reduced-motion: reduce) { .vu i { transition: none; } }
+.echo { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.echo-chip { border: 0; cursor: pointer; font-family: inherit; }
+.echo-chip .select-arrow { color: inherit; opacity: .7; }
+.echo-warn { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  color: var(--amber); font-size: 12px; }
+.echo-warn .link-btn { font-size: 12px; color: var(--amber); text-decoration: underline; }
+.echo-modes { display: flex; flex-direction: column; gap: 2px; width: 100%; }
+.echo-mode { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px;
+  border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit;
+  text-align: left; cursor: pointer; }
+.echo-mode:hover { background: var(--surface); }
+.echo-mode.sel { background: var(--accent-bg); }
+.echo-mode.sel .echo-mode-name { color: var(--accent); }
+.echo-mode-hint { font-size: 12px; color: var(--text-3); }
+
+/* ===== Chat voice, dictation and read-aloud (chat-voice §5, §6.5, §3):
+   the composer's microphone and read-aloud toggle, the voice status line
+   above the composer, the speaker button in a reply's actions, the mic and
+   speaker badges, the greyed unheard rest and the cue chips. */
+.voice-split { flex: none; display: flex; align-items: flex-end; }
+.composer-mic { position: relative; }
+.composer-mic svg { width: 16px; height: 16px; fill: none;
+  stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+/* The speech-to-text is off this machine: a small cloud on the microphone. */
+.composer-mic svg.mark-cloud { position: absolute; top: 8px; right: 2px; width: 11px;
+  height: 11px; stroke-width: 1.5; }
+.composer-mic.rec { color: var(--err); border-color: var(--err); background: var(--err-bg); }
+.composer-mic.busy { color: var(--accent); }
+.composer-mic.warn:not(.rec) { color: var(--amber); }
+.voice-status { flex: none; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 4px 12px; width: 100%; max-width: calc(110ch + 44px); margin: 0 auto;
+  padding: 2px 22px 0; font-size: 12px; color: var(--text-2); }
+.vs-rec { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.vs-rec.on { color: var(--text); }
+.vs-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.vs-rec.on .vs-dot { background: var(--err); animation: blink 1.4s ease-in-out infinite; }
+.vs-vu { flex: 0 1 120px; }
+.vs-hint { font-size: 11.5px; }
+.vs-note { display: inline-flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.vs-note.busy { color: var(--text-2); }
+.vs-note.busy::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--amber); animation: blink 1.4s ease-in-out infinite; }
+.vs-note.warn { color: var(--amber); }
+.vs-note.hold { color: var(--amber); background: var(--amber-bg); border-radius: 999px;
+  padding: 1px 8px; }
+.vs-note.err { color: var(--err); }
+.vs-note .link-btn { font-size: 12px; }
+.vs-mark { display: inline-flex; align-items: center; gap: 5px; color: var(--accent);
+  background: var(--accent-bg); border-radius: 999px; padding: 1px 4px 1px 8px; }
+.vs-mark svg, .voice-badge svg { width: 12px; height: 12px; fill: none; stroke: currentColor;
+  stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+/* 24×24 px, WCAG 2.2's least target, without raising the line. */
+.vs-x { border: 0; background: none; color: inherit; opacity: .7; cursor: pointer;
+  font-size: 11px; padding: 0; min-width: 24px; min-height: 24px; margin: -5px -4px;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; }
+.vs-x:hover { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .vs-rec.on .vs-dot, .vs-note.busy::before { animation: none; }
+}
+.msg-actions .msg-act.msg-speak.on { color: var(--accent); background: var(--accent-bg); }
+.msg-actions .msg-act.msg-speak.warn:not(.on) { color: var(--amber); }
+.voice-badge { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
+  font-size: 11px; color: var(--text-3); }
+.msg-item-user .voice-badge { align-self: flex-end; }
+.voice-reply-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.voice-timing { font-size: 11px; }
+.voice-timing summary { cursor: pointer; }
+/* One timing item never breaks inside (a model's name has hyphens); a name
+   longer than the line is ellipsized, its full text in the title. */
+.voice-timing summary .ti { display: inline-block; max-width: 100%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.voice-timing ul { margin: 4px 0 0; padding-left: 18px; }
+/* The unheard rest: the secondary text colour (AA contrast in both themes,
+   review m8), in italics behind a dashed rule — muted, never pastel. */
+.msg-unheard { margin-top: 6px; color: var(--text-2); }
+.msg-unheard .unheard-text { border-left: 2px dashed var(--border-strong); padding-left: 10px;
+  font-style: italic; }
+.msg-unheard .unheard-text, .msg-unheard .unheard-text * { color: var(--text-2); }
+.unheard-mark { display: inline-block; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .05em; border: 1px dashed var(--border-strong); border-radius: 5px;
+  padding: 0 6px; margin-bottom: 2px; }
+.cue-chip { display: inline-block; font-size: 11px; line-height: 16px; padding: 0 7px;
+  border-radius: 999px; color: var(--text-2); background: var(--surface-hi);
+  border: 1px solid var(--border); font-style: italic; vertical-align: 1px; }
+
+/* ===== Chat voice mode (chat-voice §9, WP9): the realtime panel in the
+   composer's place, ported from the owner's visualisation sample. The
+   stage behind the visualisation is one step darker than the chat in both
+   themes so the glow reads; its colours are the --rt-* tokens the
+   visualisation is handed (§10: graphite and the accent blue for the
+   assistant, amber for the user — never pastel). ===== */
+:root {
+  --rt-panel-bg: #121518;
+}
+[data-theme="light"] {
+  --rt-panel-bg: var(--surface);
+}
+.rt-panel {
+  --rt-bg: #121518; --rt-fg: #E2E6EA;
+  --rt-accent-deep: #0F4F7A; --rt-accent: #3DAEE9; --rt-accent-hi: #C4E9FB;
+  --rt-think-deep: #163E5A; --rt-think: #5AA9D6; --rt-think-hi: #CFE6F4;
+  --rt-idle-deep: #1E2A35; --rt-idle: #4F6476; --rt-idle-hi: #9DB0C0;
+  --rt-user-deep: #6E420C; --rt-user: #E8A33D; --rt-user-hi: #FFE0AE;
+  background: var(--rt-panel-bg); border: 1px solid var(--border); border-radius: 14px;
+  overflow: hidden; display: flex; flex-direction: column;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025); }
+/* Focused on entry so its keys act (tabindex -1, never in the Tab order):
+   a container, its controls keep their own rings. */
+.rt-panel:focus { outline: none; }
+.rt-dock { flex: none; width: 100%; max-width: calc(110ch + 44px); margin-inline: auto;
+  padding: 10px 22px 16px; display: flex; flex-direction: column; }
+.rt-stage { position: relative; flex: none; background: var(--rt-bg); }
+[data-theme="light"] .rt-stage { margin: 8px 8px 0; border-radius: 10px 10px 0 0; overflow: hidden; }
+.rt-viz { position: relative; height: 184px; }
+.rt-viz canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.rt-viz-failed { position: absolute; left: 12px; right: 12px; bottom: 10px; margin: 0;
+  text-align: center; font-size: 12px; color: var(--amber); overflow-wrap: anywhere; }
+/* A short window: the transcript keeps its room. */
+@media (max-height: 760px) { .rt-viz { height: 132px; } }
+.rt-viz-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px;
+  opacity: .55; transition: opacity .15s; }
+.rt-stage:hover .rt-viz-tools, .rt-viz-tools:focus-within { opacity: 1; }
+.rt-tool { height: 22px; padding: 0 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.08);
+  background: rgba(18,21,24,.6); color: #98A2AC; font: 500 11px var(--sans); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px; }
+.rt-tool:hover { color: #E2E6EA; border-color: rgba(255,255,255,.18); }
+.rt-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rt-tool .select-arrow { color: inherit; opacity: .7; }
+.rt-tool-icon { width: 22px; padding: 0; justify-content: center; }
+.rt-tool-icon svg { width: 12px; height: 12px; fill: none; stroke: currentColor;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* speaker label and tag stay put; only the words clip, at the left, so the
+   newest words win */
+.rt-caption { height: 26px; padding: 0 18px; display: flex; align-items: center;
+  justify-content: center; overflow: hidden; background: var(--rt-bg); }
+[data-theme="light"] .rt-caption { margin: 0 8px; border-radius: 0 0 10px 10px; }
+.rt-caption .cap-inner { display: flex; gap: 8px; align-items: baseline; max-width: 100%;
+  white-space: nowrap; font-size: 13.5px; color: var(--rt-fg); }
+.rt-caption .cap-clip { min-width: 0; overflow: hidden; display: flex; justify-content: flex-end; }
+.rt-caption .cap-clip.clipped { -webkit-mask-image: linear-gradient(to right, transparent, #000 48px);
+  mask-image: linear-gradient(to right, transparent, #000 48px); }
+.rt-caption .cap-who { flex: none; font: 500 11px var(--mono); text-transform: uppercase;
+  letter-spacing: .05em; }
+.rt-caption .cap-who.user { color: var(--rt-user); }
+.rt-caption .cap-who.assistant { color: var(--rt-accent); }
+.rt-caption .cap-text { flex: none; }
+.rt-caption .cap-text.hint { color: #7D868F; }
+.rt-caption .cap-text.past { color: #98A2AC; }
+.rt-caption .cap-tag { flex: none; font: 500 10.5px var(--mono); color: var(--rt-user);
+  background: rgba(232,163,61,.13); padding: 1px 6px; border-radius: 999px; }
+.rt-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0; }
+.rt-chip { border: 1px solid var(--border); background: none; color: var(--text-2);
+  font: 400 12px var(--mono); cursor: default; max-width: 34ch; }
+button.rt-chip { cursor: pointer; }
+button.rt-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.rt-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rt-chip .rt-chip-k { font: 500 10px var(--sans); letter-spacing: .05em; color: var(--text-3); }
+.rt-chip .rt-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rt-chip .rt-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.rt-chip.warn { color: var(--amber); border-color: rgba(232,163,61,.35); background: var(--amber-bg); }
+.rt-chip.warn .rt-chip-k { color: inherit; opacity: .8; }
+.rt-chip .rt-served { color: var(--amber); }
+.rt-chip svg.rt-cloud { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor;
+  stroke-width: 1.4; stroke-linejoin: round; }
+.rt-chip.rt-admin { font-family: var(--sans); font-weight: 500; }
+.rt-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 10px 8px 12px; }
+.rt-controls .state-chip { color: var(--text-2); background: var(--surface-hi);
+  transition: color .25s, background-color .25s; }
+.rt-controls .state-chip[data-s="listening"], .rt-controls .state-chip[data-s="interrupted"] {
+  color: var(--amber); background: var(--amber-bg); }
+.rt-controls .state-chip[data-s="speaking"] { color: var(--accent); background: var(--accent-bg); }
+.rt-controls .state-chip[data-s="thinking"] { color: var(--accent-hi); background: rgba(61,174,233,.07); }
+.rt-controls .state-chip[data-s="thinking"] .dot { animation: blink 1.1s ease-in-out infinite; }
+.rt-timer { font-size: 11.5px; color: var(--text-3); }
+.rt-controls .ico { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.rt-stop .ico { fill: currentColor; stroke: none; }
+.rt-leave .ico { fill: currentColor; stroke: none; }
+.rt-mute .slash { display: none; }
+.rt-mute.on { color: var(--err); border-color: var(--err); background: var(--err-bg); }
+.rt-mute.on .slash { display: inline; }
+.rt-talk.on { color: var(--amber); border-color: var(--amber); background: var(--amber-bg); }
+.rt-mode .seg-btn { padding: 0 11px; height: 24px; font-size: var(--fs-sm); }
+.rt-mode .seg-btn:disabled { opacity: .5; cursor: default; }
+.rt-status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+  padding: 0 12px 10px; font-size: 12px; color: var(--text-2); }
+/* The notes are the status region; the end's alert and the timing sit
+   beside it (WP11 UI review NIT 7), so the line hides only when all three
+   say nothing. */
+.rt-status:not(:has(> .rt-ended, > .rt-timing, > .rt-notes:not(:empty))) { display: none; }
+.rt-notes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
+.rt-notes:empty { display: none; }
+.rt-status .rt-ended { gap: 10px; }
+.rt-status .rt-timing { min-width: 0; max-width: 100%; }
+.rt-status .rt-timing summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rt-status .rt-timing[open] summary { white-space: normal; }
+.pop.rt-pop { padding: 10px 12px; width: min(420px, 92vw); }
+.rt-pop .vd-section { gap: 8px; }
+.rt-pick-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.voice-note { font-size: 11px; color: var(--amber); }
+/* Focus view: the transcript steps aside and the panel takes the column. */
+.chat-main:has(.rt-dock.focus) :is(.chat-scroll, .stats-row) { display: none; }
+.rt-dock.focus { flex: 1; min-height: 0; padding-top: 16px; }
+.rt-dock.focus .rt-panel { flex: 1; min-height: 0; }
+.rt-dock.focus .rt-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rt-dock.focus .rt-viz { flex: 1; height: auto; min-height: 0; }
+.rt-dock.focus .rt-caption { height: 34px; }
+.rt-dock.focus .cap-inner { font-size: 15.5px; }
+/* The composer's voice-mode button (the split control's middle). */
+.composer-voice-mode svg { width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.6; stroke-linecap: round; }
+.composer-voice-mode.off, .composer-mic.off { opacity: .45; cursor: default; }
+/* A speaker button resting in voice mode (it would play into the session's
+   microphone): focusable, its reason in the title and described. */
+.msg-speak.off { opacity: .45; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .rt-controls .state-chip .dot { animation: none !important; }
+  .rt-viz-tools, .rt-controls .state-chip { transition: none; }
+}

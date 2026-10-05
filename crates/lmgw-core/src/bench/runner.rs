@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use lmgw_api_types::bench::{LoadResult, Phase};
+use lmgw_api_types::bench::{BuildIdentity, LoadResult, Phase};
 use lmgw_api_types::bench_ops::{BenchArgs, BenchJobDetail, BenchStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +40,7 @@ use super::state::{CurrentRun, OnCard, Stranded};
 use super::{run_suite, Bench, BenchTarget, Sampler, SuiteEnd};
 use crate::agent::Cancel;
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress};
+use crate::runtime::registry::PortRetry;
 use crate::state::SharedState;
 use crate::store::{self, NewBenchRun};
 
@@ -424,11 +425,7 @@ async fn load_and_measure(
     // §3.4: the container, as the row (plus overrides) renders it.
     let snap = st.snapshot();
     let prefix = snap.settings.container_prefix.clone();
-    let port = match launcher.free_port() {
-        Ok(p) => p,
-        Err(e) => return Ended::failed(format!("no free host port could be allocated: {e}")),
-    };
-    let (_spec, argv) = match plan::render(prep, &prefix, port, &st.data_dir, run_id) {
+    let (mut port, mut argv) = match port_and_argv(launcher, prep, &prefix, &st.data_dir, run_id) {
         Ok(r) => r,
         Err(e) => return Ended::failed(e),
     };
@@ -446,24 +443,7 @@ async fn load_and_measure(
             ))
         }
     };
-    let command_line = launcher::command_line(&argv);
-    if let Err(e) = store::set_bench_run_identity(
-        &st.db,
-        run_id,
-        &NewBenchRun {
-            model: &prep.model,
-            build: &build,
-            settings: &prep.settings,
-            settings_hash: &prep.settings_hash,
-            command_line: &command_line,
-            params: &prep.params,
-            notes: "",
-        },
-    )
-    .await
-    {
-        tracing::warn!("benchmark run {run_id}: recording its identity: {e}");
-    }
+    record_identity(st, run_id, prep, &build, &argv).await;
 
     // Named before `podman run`, so every end — and the hold's abort, which
     // reads it — removes whatever the run may have created.
@@ -486,12 +466,43 @@ async fn load_and_measure(
         return Ended::canceled();
     }
     let t0 = Instant::now();
-    match cancel.guard(bc.launch(&argv)).await {
-        Some(Ok(())) => {}
-        Some(Err(e)) => return Ended::failed(bc.load_failure(&e).await),
-        // Dropped mid-run (the child is killed with it): the container may
-        // or may not exist, and the end removes it by name either way.
-        None => return Ended::canceled(),
+    // At most two attempts, and the second only for a host port taken
+    // between `free_port` releasing it and podman binding it — the race a
+    // model's start retries the same way (per-model containers §10.4).
+    let mut retry = PortRetry::default();
+    loop {
+        match cancel.guard(bc.launch(&argv)).await {
+            Some(Ok(())) => break,
+            Some(Err(e)) if retry.again(&e) => {
+                stage(
+                    sink,
+                    format!(
+                        "host port {port} was taken before podman bound it; starting again on a \
+                         fresh port"
+                    ),
+                )
+                .await;
+                // The failed run leaves its container behind in `created`
+                // (§10.4, measured): collected before the run on a fresh
+                // port, and the run's command line is the one that ran.
+                if cancel.guard(bc.remove()).await.is_none() {
+                    return Ended::canceled();
+                }
+                (port, argv) = match port_and_argv(launcher, prep, &prefix, &st.data_dir, run_id) {
+                    Ok(r) => r,
+                    Err(e) => return Ended::failed(e),
+                };
+                record_identity(st, run_id, prep, &build, &argv).await;
+                if cancel.is_raised() {
+                    return Ended::canceled();
+                }
+            }
+            Some(Err(e)) => return Ended::failed(bc.load_failure(&e).await),
+            // Dropped mid-run (the child is killed with it): the container
+            // may or may not exist, and the end removes it by name either
+            // way.
+            None => return Ended::canceled(),
+        }
     }
     stage(
         sink,
@@ -561,6 +572,51 @@ async fn load_and_measure(
         SuiteEnd::Done => Ended::done(),
         SuiteEnd::Canceled => Ended::canceled(),
         SuiteEnd::Failed(e) => Ended::failed(e),
+    }
+}
+
+/// A free host port from `launcher`, and the run's `podman run` argv
+/// publishing it (§3.4).
+fn port_and_argv(
+    launcher: &dyn BenchLauncher,
+    prep: &Prepared,
+    prefix: &str,
+    data_dir: &std::path::Path,
+    run_id: i64,
+) -> Result<(u16, Vec<String>), String> {
+    let port = launcher
+        .free_port()
+        .map_err(|e| format!("no free host port could be allocated: {e}"))?;
+    let (_spec, argv) = plan::render(prep, prefix, port, data_dir, run_id)?;
+    Ok((port, argv))
+}
+
+/// The run's identity on its row, with `argv` as its command line — again
+/// when a port retry changed it, so the line stored is the one that ran.
+async fn record_identity(
+    st: &SharedState,
+    run_id: i64,
+    prep: &Prepared,
+    build: &BuildIdentity,
+    argv: &[String],
+) {
+    let command_line = launcher::command_line(argv);
+    if let Err(e) = store::set_bench_run_identity(
+        &st.db,
+        run_id,
+        &NewBenchRun {
+            model: &prep.model,
+            build,
+            settings: &prep.settings,
+            settings_hash: &prep.settings_hash,
+            command_line: &command_line,
+            params: &prep.params,
+            notes: "",
+        },
+    )
+    .await
+    {
+        tracing::warn!("benchmark run {run_id}: recording its identity: {e}");
     }
 }
 

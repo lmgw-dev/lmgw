@@ -1,0 +1,9 @@
+event: turn
+data: {"user_message_id":1}
+
+event: error
+data: {"code":"upstream","message":"upstream error (500): the model fell over"}
+
+event: done
+data: {"aborted":true}
+

@@ -13,6 +13,9 @@ use serde_json::{json, Map, Value};
 
 use crate::catalog::CatalogEntry;
 use crate::model_ops::ContainerStatusRow;
+
+mod audio_placement;
+mod run_args_note;
 use crate::widgets::model_picker::ListStatus;
 use crate::widgets::{
     use_toasts, ImageClass, ImagePicker, MenuItem, Modal, ModalFooter, ModalSize, ModelPicker,
@@ -657,11 +660,11 @@ fn AuxForm(
             "args": arg_lines,
             "idle_seconds": idle_v,
             "image": image.get_untracked().trim(),
-            "extra_run_args": era_lines,
+            // Empty inherits the class settings, whose run args carry the GPU
+            // and SELinux flags: no list is sent, and the field is named in
+            // `clear` so an override saved before goes too.
+            "extra_run_args": if era_empty { Value::Null } else { json!(era_lines) },
             "warm_start": warm_start.get_untracked(),
-            // Empty inherits the class settings; `image` already clears on an
-            // empty string, `extra_run_args` needs naming here (an empty
-            // array is itself a valid override — "run with no extra args").
             "clear": if era_empty { "extra_run_args" } else { "" },
         });
         saving.set(true);
@@ -783,7 +786,7 @@ fn AuxForm(
                     ></textarea>
                 </div>
                 <p class="dim mini-note">
-                    "Blank image/args inherit the aux class settings (Settings → Runtimes → Aux)."
+                    "Blank image/args inherit the aux class settings (Settings → Runtimes → Aux)." " " {run_args_note::OVERRIDE_REPLACES}
                 </p>
                 <ContainerStatusRow class="aux" model_id=saved_model_id/>
             </section>
@@ -935,6 +938,7 @@ fn AudioForm(
         Some(false) => "false".to_string(),
     });
     let busy_timeout = RwSignal::new(m.busy_timeout_ms.map(|v| v.to_string()).unwrap_or_default());
+    let placement = audio_placement::RowPlacement::new(&m);
     let spec_override = RwSignal::new(m.model_spec_override.clone().unwrap_or_default());
     let config_id = RwSignal::new(m.config_id.clone().unwrap_or_default());
     let weight_id = RwSignal::new(m.weight_id.clone().unwrap_or_default());
@@ -958,6 +962,7 @@ fn AudioForm(
     });
     let class_settings =
         LocalResource::new(|| crate::api::get::<SettingsFull>("/api/settings-full"));
+    let settings = Signal::derive(move || class_settings.get().and_then(|r| r.ok()));
     let saving = RwSignal::new(false);
     let task_opts = Signal::derive(|| {
         AUDIO_TASKS
@@ -1081,7 +1086,13 @@ fn AudioForm(
                 }
             }
         };
-        let mut clear: Vec<&str> = Vec::new();
+        let (backend, threads, mut clear) = match placement.body() {
+            Ok(b) => b,
+            Err(e) => {
+                toasts.err(e);
+                return;
+            }
+        };
         if era_empty {
             clear.push("extra_run_args");
         }
@@ -1120,13 +1131,16 @@ fn AudioForm(
                 Some(v) => json!(v),
                 None => Value::Null,
             },
+            "backend": backend,
+            "threads": threads,
             "model_spec_override": spec_override.get_untracked().trim(),
             "config_id": config_id.get_untracked().trim(),
             "weight_id": weight_id.get_untracked().trim(),
             "voice_presets": presets,
             "default_voice_preset": default_preset,
             "image": image.get_untracked().trim(),
-            "extra_run_args": era_lines,
+            // Blank inherits the class (named in `clear` above): no list.
+            "extra_run_args": if era_empty { Value::Null } else { json!(era_lines) },
             "warm_start": warm_start.get_untracked(),
             "clear": clear.join(" "),
         });
@@ -1224,7 +1238,9 @@ fn AudioForm(
                             prop:value=move || busy_timeout.get()
                             on:input=move |ev| busy_timeout.set(event_target_value(&ev))/>
                     </div>
+                    <audio_placement::RunsOnFields p=placement settings=settings/>
                 </div>
+                <audio_placement::RunsOnNote/>
                 <p class="dim mini-note">
                     "Busy timeout bounds how long a request waits for this model while it is already "
                     "running, and caps what a request may ask for. Minutes-long work (music "
@@ -1318,6 +1334,7 @@ fn AudioForm(
                     "Audio models never inherit the global fallback, only their own row does, so "
                     "\"Inherit\" here means the same as \"None\": refuse with a 503."
                 </p>
+                <audio_placement::CpuHoldNote p=placement settings=settings/>
                 <div class="field">
                     <label>"Image override"</label>
                     <ImagePicker
@@ -1345,18 +1362,18 @@ fn AudioForm(
                     <textarea
                         class="input mono ta"
                         placeholder=move || {
-                            class_settings
+                            settings
                                 .get()
-                                .and_then(|r| r.ok())
-                                .map(|s| s.audio.extra_run_args.join("\n"))
+                                .map(|s| audio_placement::inherited_args(placement, &s))
                                 .unwrap_or_default()
                         }
                         prop:value=move || extra_run_args.get()
                         on:input=move |ev| extra_run_args.set(event_target_value(&ev))
                     ></textarea>
                 </div>
+                <audio_placement::CpuGpuArgsNote p=placement own=extra_run_args settings=settings/>
                 <p class="dim mini-note">
-                    "Blank image/args inherit the audio class settings (Settings → Runtimes → Audio)."
+                    "Blank image/args inherit the audio class settings (Settings → Runtimes → Audio)." " " {run_args_note::OVERRIDE_REPLACES}
                 </p>
                 <ContainerStatusRow class="audio" model_id=saved_model_id/>
             </section>
@@ -1943,9 +1960,9 @@ fn ImageForm(
             }
         };
         // Empty inherits the class settings; `image` clears on an empty
-        // string, the rest have to be named — an empty `extra_run_args` array
-        // is itself a valid override ("run with no extra args"), and an empty
-        // `capabilities_override` string is not a clear for this patch.
+        // string, the rest have to be named — `extra_run_args` so an override
+        // saved before goes too (blank text alone leaves it as it is), and an
+        // empty `capabilities_override` string is not a clear for this patch.
         let mut clear: Vec<&str> = Vec::new();
         if era_empty {
             clear.push("extra_run_args");
@@ -1964,7 +1981,7 @@ fn ImageForm(
             "enabled": enabled.get_untracked(),
             "idle_seconds": idle_v,
             "image": image.get_untracked().trim(),
-            "extra_run_args": era,
+            "extra_run_args": if era_empty { Value::Null } else { json!(era) },
             "warm_start": warm_start.get_untracked(),
             "hold_fallback_mode": hf_mode,
             "hold_fallback": hf_alias,
@@ -2153,7 +2170,7 @@ fn ImageForm(
                 .enumerate()
                 .map(|(i, (key, label, role))| {
                     let sig = role_sigs.with_value(|rs| rs[i].1);
-                    let key: &'static str = *key;
+                    let key: &'static str = key;
                     view! {
                         <Show when=move || shown_roles.with(|s| s.contains(&key))>
                             <ImageFileField
@@ -2369,7 +2386,7 @@ fn ImageForm(
                 ></textarea>
             </div>
             <p class="dim mini-note">
-                "Blank image/args inherit the image class settings (Settings → Runtimes → Image)."
+                "Blank image/args inherit the image class settings (Settings → Runtimes → Image)." " " {run_args_note::OVERRIDE_REPLACES}
             </p>
             <ContainerStatusRow class="image" model_id=saved_model_id/>
         </section>

@@ -25,6 +25,15 @@ pub(crate) async fn gateway(
     kind: UpstreamKind,
     protocol: Protocol,
 ) -> (SharedState, Gw) {
+    gateway_at(&mock.uri(), kind, protocol).await
+}
+
+/// [`gateway`] on an upstream at `base` that is not a wiremock server.
+pub(crate) async fn gateway_at(
+    base: &str,
+    kind: UpstreamKind,
+    protocol: Protocol,
+) -> (SharedState, Gw) {
     let state = AppState::init_for_tests().await.unwrap();
     let up_id = store::insert_upstream(
         &state.db,
@@ -32,7 +41,7 @@ pub(crate) async fn gateway(
             name: "test-up".into(),
             protocol,
             kind,
-            base_url: mock.uri(),
+            base_url: base.to_string(),
             api_key: Some("sk-up".into()),
             extra_headers: vec![],
             timeout_ms: 5_000,

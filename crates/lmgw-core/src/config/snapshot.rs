@@ -274,7 +274,9 @@ impl Snapshot {
                 fallback: None,
             });
         };
-        let Some(block) = self.gpu_block() else {
+        // Per model: an audio row on the CPU is not held, and its fallback
+        // goes unused (`gpu_block_for`).
+        let Some(block) = self.gpu_block_for(target.class, &target.model_id) else {
             return Ok(Resolved {
                 route,
                 fallback: None,

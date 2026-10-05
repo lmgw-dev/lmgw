@@ -210,6 +210,8 @@ fn audio(model_id: &str, enabled: bool) -> AudioModel {
         mode: "offline".into(),
         lazy: None,
         busy_timeout_ms: None,
+        backend: None,
+        threads: None,
         load_options: Default::default(),
         session_options: Default::default(),
         default_request_options: Default::default(),
@@ -224,6 +226,7 @@ fn audio(model_id: &str, enabled: bool) -> AudioModel {
         warm_start: false,
         hold_fallback_mode: Default::default(),
         hold_fallback: None,
+        residency: None,
     }
 }
 

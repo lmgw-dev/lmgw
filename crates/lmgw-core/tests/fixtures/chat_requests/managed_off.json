@@ -1,0 +1,183 @@
+{
+  "bodies": [
+    {
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      },
+      "messages": [
+        {
+          "content": "You are talking with the owner of lmgw through the Chat page of its dashboard. lmgw is a self-hosted LLM gateway running on the owner's own machine: one OpenAI- and Anthropic-compatible API in front of cloud providers and of local models served by llama.cpp. You are the model behind the alias \"gemma\". Today is <date>. If asked which model you are, name the alias above instead of guessing from your training data. Your training data ends before today, so recent events may be missing from it.\n- Files the owner attaches arrive inside their message: images as images, text files as text. An image you cannot see arrives as a short note in square brackets instead; say so rather than describing it.\n- Your reply is rendered as Markdown, including tables and syntax-highlighted fenced code blocks (name the language after the opening fence). LaTeX is not rendered, so write formulas as plain text or in a code block, and do not use raw HTML.\n- Any thinking you do before answering is shown to the owner in a separate, collapsible block.\n- You can call tools only when tool definitions come with the request. Without them you have no web access, no files and no code execution, so never claim to have looked something up or run something.\n\nAnswer directly and accurately, in the language the owner writes in, and say so when you are not sure.\n\nThis reply is spoken aloud. For it, the instructions below replace any guidance above about formatting, Markdown, tables and code. Your replies are spoken aloud, so keep them short and conversational: use plain sentences, and never use markdown, lists, tables or code. The user speaks German and hears your reply in a German voice, so answer in German unless the user asks for another language.",
+          "role": "system"
+        },
+        {
+          "content": "Wie spät ist es?",
+          "role": "user"
+        }
+      ],
+      "model": "gemma",
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      },
+      "timings_per_token": true
+    }
+  ],
+  "events": [
+    {
+      "data": [],
+      "event": null,
+      "keys": [
+        "content",
+        "event_id",
+        "message_id",
+        "type",
+        "voice"
+      ],
+      "type": "lmgw.chat.user",
+      "voice": [
+        "asr",
+        "asr_ms",
+        "audio_ms",
+        "via"
+      ]
+    },
+    {
+      "data": [],
+      "event": null,
+      "keys": [
+        "chat_thread",
+        "event_id",
+        "type"
+      ],
+      "type": "lmgw.chat.thread",
+      "voice": []
+    },
+    {
+      "data": [
+        "user_message_id"
+      ],
+      "event": "turn",
+      "keys": [
+        "data",
+        "event",
+        "event_id",
+        "response_id",
+        "type"
+      ],
+      "type": "lmgw.chat.frame",
+      "voice": []
+    },
+    {
+      "data": [
+        "text"
+      ],
+      "event": "reasoning",
+      "keys": [
+        "data",
+        "event",
+        "event_id",
+        "response_id",
+        "type"
+      ],
+      "type": "lmgw.chat.frame",
+      "voice": []
+    },
+    {
+      "data": [
+        "text"
+      ],
+      "event": "delta",
+      "keys": [
+        "data",
+        "event",
+        "event_id",
+        "response_id",
+        "type"
+      ],
+      "type": "lmgw.chat.frame",
+      "voice": []
+    },
+    {
+      "data": [
+        "reason"
+      ],
+      "event": "stop",
+      "keys": [
+        "data",
+        "event",
+        "event_id",
+        "response_id",
+        "type"
+      ],
+      "type": "lmgw.chat.frame",
+      "voice": []
+    },
+    {
+      "data": [
+        "aborted",
+        "answered_by",
+        "completion_tokens",
+        "message_id",
+        "model",
+        "prompt_tokens",
+        "reasoning_ignored",
+        "reasoning_note",
+        "saved",
+        "timings",
+        "total_ms",
+        "ttfb_ms"
+      ],
+      "event": "done",
+      "keys": [
+        "data",
+        "event",
+        "event_id",
+        "response_id",
+        "type"
+      ],
+      "type": "lmgw.chat.frame",
+      "voice": []
+    },
+    {
+      "data": [],
+      "event": null,
+      "keys": [
+        "content",
+        "event_id",
+        "message_id",
+        "type",
+        "unheard",
+        "voice"
+      ],
+      "type": "lmgw.chat.reply",
+      "voice": [
+        "timing",
+        "tts",
+        "via",
+        "voice"
+      ]
+    },
+    {
+      "data": [],
+      "event": null,
+      "keys": [
+        "asr_ms",
+        "cold",
+        "end_of_turn_ms",
+        "event_id",
+        "first_audio_ms",
+        "first_clause_ms",
+        "first_token_ms",
+        "message_id",
+        "models",
+        "reasoning_ms",
+        "response_id",
+        "to_first_audio_ms",
+        "total_ms",
+        "type"
+      ],
+      "type": "lmgw.response.timing",
+      "voice": []
+    }
+  ]
+}

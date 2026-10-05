@@ -244,6 +244,19 @@ pub struct AudioModel {
     /// for the fast ones.
     #[serde(default)]
     pub busy_timeout_ms: Option<i64>,
+    /// Per-model override of [`AudioSettings::backend`]: `Some("cpu")` runs
+    /// this row on the CPU — no VRAM charged, never evicted, served under
+    /// the GPU hold ([`crate::runtime::Placement`]). `None` inherits the
+    /// class. Only `cpu` is accepted per row: another GPU backend is a class
+    /// setting, tied to the image.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Per-model override of [`AudioSettings::threads`]. `None` inherits:
+    /// the class's figure for a row on the class's backend, this machine's
+    /// physical cores for a row switched to the CPU
+    /// ([`crate::runtime::audio::engine_settings`]).
+    #[serde(default)]
+    pub threads: Option<i64>,
     /// `default_request_options`: request options applied to every request for
     /// this model, each overridable by the request that names it. Where
     /// `load_options` and `session_options` configure the *model*, these are
@@ -299,6 +312,28 @@ pub struct AudioModel {
     /// [`Self::hold_fallback_mode`] is `Alias`.
     #[serde(default)]
     pub hold_fallback: Option<String>,
+    /// What this model's container was measured to hold on the GPU once it
+    /// had served a request (realtime design §9.4, [`crate::vram::residency`]).
+    ///
+    /// `None` is "not learned yet", and the row is then charged at its
+    /// on-disk size — never at a guessed multiple of it. Learned by the
+    /// gateway, never written by the owner's edits; `audio_model_set`'s
+    /// `clear: "residency"` is the owner's reset.
+    #[serde(default)]
+    pub residency: Option<LearnedResidency>,
+}
+
+/// A learned audio residency: the figure, when it was read, and the
+/// configuration it was read under ([`crate::vram::residency::resident_key`]).
+/// A row whose configuration changed keeps the figure but is not charged by
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnedResidency {
+    pub bytes: u64,
+    /// `datetime('now')` of the reading.
+    pub learned_at: String,
+    /// The 12-hex configuration key the figure belongs to.
+    pub key: String,
 }
 
 /// One image-generation pipeline, served by stable-diffusion.cpp's

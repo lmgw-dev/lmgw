@@ -499,7 +499,7 @@ pub async fn get_log(pool: &SqlitePool, id: i64) -> DbResult<Option<RequestLogRo
         .bind(id)
         .fetch_optional(pool)
         .await?;
-    Ok(row.as_ref().map(|r| log_from_row(r)))
+    Ok(row.as_ref().map(log_from_row))
 }
 
 /// Prune by age and by max row count (§10).

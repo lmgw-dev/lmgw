@@ -8,6 +8,7 @@
 //! call logs like any request. `record_in_process` is that core; `sample_once`
 //! wraps it with the egress call.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -23,14 +24,19 @@ use crate::telemetry::{RequestClass, RequestSummary};
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// Everything `record_in_process` needs that isn't the per-call status/usage.
 /// A plain struct (not the `ClientProto`-keyed `LogParams`) because in-process
 /// callers carry an arbitrary `ingress_proto` label ("chat" / "workflow" /
 /// "mcp-sampling"), not one of the two public ingress protocols.
 pub(crate) struct InProcessLog<'a> {
-    /// Gateway key name, if the in-process call originated from an authenticated
-    /// request context (sampling carries the originating server's, chat none).
-    pub client_key: Option<String>,
+    /// Whom the row is charged to, if the in-process call originated from an
+    /// authenticated request context (sampling carries the originating
+    /// server's label, chat none, a realtime session its key's identity —
+    /// [`KeyRef`]).
+    pub key: KeyRef,
     /// The `request_logs.ingress_proto` label — e.g. `"mcp-sampling"` (§8/§10):
     /// real LLM traffic that **does** count in stats, unlike `"mcp"`.
     pub ingress_proto: &'a str,
@@ -73,12 +79,12 @@ pub(crate) async fn record_in_process(
         p.alias,
         Some(p.route.upstream.id),
         Some(p.route.upstream_model.as_str()),
-        p.client_key.as_deref(),
+        &p.key,
         p.ingress_proto,
         &usage,
     );
     let row = NewRequestLog {
-        client_key: p.client_key,
+        client_key: priced.client_key,
         ingress_proto: p.ingress_proto.to_string(),
         requested_alias: p.alias.to_string(),
         upstream_id: Some(p.route.upstream.id),
@@ -195,7 +201,7 @@ pub(crate) async fn sample_once(
         fallback,
         ir,
         ingress_proto,
-        client_key,
+        KeyRef::named(client_key),
         deadline,
         None,
     )
@@ -223,6 +229,9 @@ impl FallbackNote {
 }
 
 /// [`sample_once`], telling `note` when the turn was handed to the fallback.
+/// `key` is the caller's key — with its id when the caller has one, so a
+/// loop that outlives a rename of its key records each turn against the key
+/// it is (A2 review 4).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sample_once_noting(
     state: &SharedState,
@@ -231,7 +240,7 @@ pub(crate) async fn sample_once_noting(
     fallback: Option<FallbackReason>,
     ir: &ChatRequest,
     ingress_proto: &str,
-    client_key: Option<String>,
+    key: KeyRef,
     deadline: Duration,
     note: Option<&FallbackNote>,
 ) -> Result<Completion, GatewayError> {
@@ -252,7 +261,7 @@ pub(crate) async fn sample_once_noting(
     {
         record_in_process(
             InProcessLog {
-                client_key: client_key.clone(),
+                key: key.clone(),
                 ingress_proto,
                 alias: &ir.model_alias,
                 route,
@@ -276,6 +285,9 @@ pub(crate) async fn sample_once_noting(
 
     let egress = for_protocol(route.upstream.protocol);
     let mut params = ir.params.clone().with_defaults(&route.param_defaults);
+    // An off this cloud model cannot take as asked goes out in the form it
+    // can (model-capabilities design §5.6).
+    let mut fitted = super::reasoning_fit::fit(state, route, &mut params).await;
 
     // The caller's `deadline` is a bound on this whole call, the gate
     // included (second review, finding 7): it runs from `started`, and the gate's
@@ -324,28 +336,27 @@ pub(crate) async fn sample_once_noting(
         // on a ladder row the count beside it and the climb): with the hold
         // in hand this is the same turn re-issued against a fresh container
         // when the one we hold a claim on has died.
-        let sent = crate::gate::send_gated(
+        let sent = super::reasoning_fit::send_chat(
             state,
             hold,
             route,
             &mut lease,
-            crate::gate::CountInput::Chat {
-                ir: &ir,
-                params: &params,
-                stream: false,
-            },
+            &ir,
+            &params,
+            false,
             deadline_at,
             Some(effective),
-            |r| {
+            None,
+            &mut fitted,
+            super::reasoning_fit::RowAs::InProcess {
+                key: key.clone(),
+                ingress_proto,
+                alias: &ir.model_alias,
+                fallback,
+            },
+            |r, p| {
                 Ok(egress
-                    .build_chat(
-                        &state.http,
-                        &r.upstream,
-                        &r.upstream_model,
-                        &ir,
-                        &params,
-                        false,
-                    )?
+                    .build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, false)?
                     .timeout(effective))
             },
         )
@@ -399,7 +410,7 @@ pub(crate) async fn sample_once_noting(
                 opened.headers.fallback_reason(),
                 ir,
                 ingress_proto,
-                client_key,
+                key,
                 left,
                 note,
             ))
@@ -418,7 +429,7 @@ pub(crate) async fn sample_once_noting(
     };
     record_in_process(
         InProcessLog {
-            client_key,
+            key,
             ingress_proto,
             alias: &ir.model_alias,
             route,
@@ -461,10 +472,12 @@ pub(super) enum Turn<T> {
 ///
 /// Every in-process caller normally closes its own out through
 /// `record_in_process`, and that is still the path. This is for the case that
-/// has no path at all: a cancelled agent run stops a model call by dropping it
-/// where it stands (`agent::Cancel::guard`), so nothing after the await ever
-/// runs — and without this the in-flight gauge would go on counting a call
-/// that is over.
+/// has no path at all: a call dropped where it stands, so nothing after the
+/// await ever runs — a unary turn of a cancelled agent run
+/// (`agent::Cancel::guard`; a streamed turn is stopped cooperatively instead
+/// and logs its row, `agent/relay.rs`), or a caller's own future dropped
+/// whole. Without this the in-flight gauge would go on counting a call that
+/// is over.
 struct InFlight<'a> {
     telemetry: &'a crate::telemetry::TelemetryBus,
     armed: bool,
@@ -513,7 +526,7 @@ pub(crate) async fn stream_once(
     fallback: Option<FallbackReason>,
     ir: &ChatRequest,
     ingress_proto: &str,
-    client_key: Option<String>,
+    key: KeyRef,
     deadline: Duration,
     sink: &mut dyn crate::agent::DeltaSink,
 ) -> Result<Completion, GatewayError> {
@@ -524,7 +537,7 @@ pub(crate) async fn stream_once(
         fallback,
         ir,
         ingress_proto,
-        client_key,
+        key,
         deadline,
         sink,
         None,
@@ -550,6 +563,20 @@ pub(crate) trait PerRoute: Send + Sync {
         rerouted: Option<&crate::gate::GateHeaders>,
         ir: &ChatRequest,
     ) -> Result<Option<ChatRequest>, GatewayError>;
+
+    /// How the request's reasoning off went out on the route [`Self::request`]
+    /// was last asked about (model-capabilities design §5.6) — told once the
+    /// send is over, a retry included, so a caller that reports the controls
+    /// a route did not send can add it ([`super::reasoning_fit::Fitted::report`]).
+    fn fitted(&self, _fitted: &super::reasoning_fit::Fitted) {}
+}
+
+/// The error of a call its consumer stopped before the upstream answered
+/// ([`DeltaSink::stop`](crate::agent::DeltaSink::stop)): nothing was read,
+/// so its row carries no output — and the prompt only once the request went
+/// out.
+fn before_answer() -> GatewayError {
+    super::canceled("stopped by the caller before the upstream answered")
 }
 
 /// [`stream_once`], with `per_route` deciding what goes out on each route
@@ -563,7 +590,7 @@ pub(crate) async fn stream_once_on(
     fallback: Option<FallbackReason>,
     ir: &ChatRequest,
     ingress_proto: &str,
-    client_key: Option<String>,
+    key: KeyRef,
     deadline: Duration,
     sink: &mut dyn crate::agent::DeltaSink,
     per_route: Option<(&dyn PerRoute, Option<&crate::gate::GateHeaders>)>,
@@ -571,6 +598,14 @@ pub(crate) async fn stream_once_on(
     let started = Instant::now();
     state.telemetry.request_started();
     let mut in_flight = InFlight::armed(&state.telemetry);
+    // The consumer's cooperative stop (realtime design §4.3): every wait
+    // below is raced against it, and a stopped call still writes its row.
+    let stop = sink.stop();
+    let stop = stop.as_ref();
+    let mut produced = 0usize;
+    // The answer carried reasoning — with an off asked, the model did not
+    // take it (`Fitted::observe`).
+    let mut reasoned = false;
 
     let own = ir;
     let prepared = match per_route {
@@ -585,6 +620,14 @@ pub(crate) async fn stream_once_on(
     let ir: &ChatRequest = &ir;
     let egress = for_protocol(route.upstream.protocol);
     let mut params = ir.params.clone().with_defaults(&route.param_defaults);
+    // As in `sample_once`: an off fitted to the model (§5.6) — not for a
+    // route the caller refused, which gets nothing, not even a catalog read
+    // (voice-audio-input WP2 review #8: a heard turn's audio refused on a
+    // cloud route).
+    let mut fitted = match refused {
+        Some(_) => super::reasoning_fit::Fitted::default(),
+        None => super::reasoning_fit::fit(state, route, &mut params).await,
+    };
     // Same rule as `sample_once`: the caller's deadline may tighten the
     // upstream's own ceiling but never loosen it, and an upstream with no
     // ceiling leaves the deadline standing alone. Both are visible. Between
@@ -603,6 +646,14 @@ pub(crate) async fn stream_once_on(
     let mut outcome = StreamOutcome::default();
     let mut max_tokens_clamped = None;
     let mut rung = None;
+    // The request went out and no answer has begun: a stop now still costs
+    // the prompt the upstream may be working on (`stop::unanswered_usage`).
+    // Set by the request's build, as each attempt goes out — not when the
+    // send is first polled: the send can wait long before anything leaves
+    // (a ladder climb in progress, a candidate's re-pick and its start), and
+    // a stop there sent no prompt to bill (package A review #3). Atomic only
+    // because the build closure is `Fn` and the call's future must be `Send`.
+    let prompt_sent = AtomicBool::new(false);
 
     let result: Result<Turn<()>, GatewayError> = async {
         // The caller's refusal of this route: the turn's row, like any other.
@@ -611,8 +662,11 @@ pub(crate) async fn stream_once_on(
         }
         // The gate's per-send half, per turn — see `sample_once`. The lease
         // lives until the stream below has been drained, and no longer.
-        let fit =
-            crate::gate::fit_chat(state, hold, route, ir, &mut params, true, deadline_at).await;
+        let fit = tokio::select! {
+            biased;
+            () = super::stopped(stop) => return Err(before_answer()),
+            f = crate::gate::fit_chat(state, hold, route, ir, &mut params, true, deadline_at) => f,
+        };
         let (mut lease, ir) = match fit {
             Ok(fit) => fit,
             // Same reason as `sample_once` (review finding 7): the clamp
@@ -632,38 +686,63 @@ pub(crate) async fn stream_once_on(
         // (§3.2); the body below is not, and cannot be — by then deltas have
         // already reached the caller's sink. On a ladder row nothing reaches
         // the sink before the count's verdict on the rung that answered.
-        let sent = crate::gate::send_gated(
+        // A re-pick clears the record (A2 review 2): what the candidate it
+        // left was sent is not being worked on.
+        let send = super::reasoning_fit::send_chat(
             state,
             hold,
             route,
             &mut lease,
-            crate::gate::CountInput::Chat {
-                ir: &ir,
-                params: &params,
-                stream: true,
-            },
+            &ir,
+            &params,
+            true,
             deadline_at,
             Some(effective.min(left)),
-            |r| {
-                egress.build_chat(
-                    &state.http,
-                    &r.upstream,
-                    &r.upstream_model,
-                    &ir,
-                    &params,
-                    true,
-                )
+            Some(&prompt_sent),
+            &mut fitted,
+            super::reasoning_fit::RowAs::InProcess {
+                key: key.clone(),
+                ingress_proto,
+                alias: &ir.model_alias,
+                fallback,
             },
-        )
-        .await;
+            |r, p| {
+                prompt_sent.store(true, Ordering::Relaxed);
+                egress.build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, true)
+            },
+        );
+        // Dropping the send closes its connection, so a stop while the
+        // upstream prefills ends the work there too.
+        let sent = tokio::select! {
+            biased;
+            () = super::stopped(stop) => None,
+            s = send => Some(s),
+        };
         rung = lease.rung_log();
+        let Some(sent) = sent else {
+            return Err(before_answer());
+        };
         let resp = match sent? {
             crate::gate::Sent::Upstream(resp) => resp,
             crate::gate::Sent::Rerouted(r) => return Ok(Turn::Rerouted(r)),
         };
         let status = resp.status();
         if !status.is_success() {
-            let bytes = resp.bytes().await;
+            // Raced against the stop like every other wait here: with no
+            // deadline of the caller's (realtime passes `Duration::MAX`) and
+            // an upstream `request_timeout` of 0, an error body that stalls
+            // would otherwise pin this call — and its hold — for good.
+            let bytes = tokio::select! {
+                biased;
+                () = super::stopped(stop) => None,
+                b = resp.bytes() => Some(b),
+            };
+            let Some(bytes) = bytes else {
+                lease.end(false);
+                // An error answer: the upstream took no prompt to work on.
+                prompt_sent.store(false, Ordering::Relaxed);
+                return Err(before_answer());
+            };
             // An error answer read to its end is a task the server is done
             // with; an unreadable one is released once `/slots` says so.
             lease.end(bytes.is_ok());
@@ -673,7 +752,7 @@ pub(crate) async fn stream_once_on(
                 route,
             ));
         }
-        outcome = drive_upstream(
+        outcome = drive_upstream_until(
             resp,
             egress.new_decoder(),
             Some(effective),
@@ -681,9 +760,17 @@ pub(crate) async fn stream_once_on(
             &state.telemetry,
             |delta| {
                 acc.on_delta(&delta);
+                produced += super::produced_chars(&delta);
+                if matches!(&delta, crate::ir::StreamDelta::ReasoningDelta(r) if !r.is_empty()) {
+                    reasoned = true;
+                }
                 sink.on_delta(&delta);
-                async { true }
+                // Checked after the delta went out, so a stop raised by the
+                // sink itself ends the stream here.
+                let go = !stop.is_some_and(crate::proxy::StopSignal::is_raised);
+                async move { go }
             },
+            super::stopped(stop),
         )
         .await;
         // `drive_upstream` consumed the response, so the connection is closed
@@ -694,6 +781,10 @@ pub(crate) async fn stream_once_on(
         Ok(Turn::Answered(()))
     }
     .await;
+    fitted.observe(route, reasoned);
+    if let Some((p, _)) = per_route {
+        p.fitted(&fitted);
+    }
     let result = match result {
         Ok(Turn::Answered(())) => Ok(()),
         Err(e) => Err(e),
@@ -712,7 +803,7 @@ pub(crate) async fn stream_once_on(
                 opened.headers.fallback_reason(),
                 own,
                 ingress_proto,
-                client_key,
+                key,
                 left,
                 sink,
                 per_route.map(|(p, _)| (p, Some(&opened.headers))),
@@ -722,20 +813,39 @@ pub(crate) async fn stream_once_on(
     };
 
     // A mid-stream failure is reported by `drive_upstream` in the outcome rather
-    // than as an Err, so both have to be folded into one status here.
+    // than as an Err, so both have to be folded into one status here. A
+    // stream its consumer stopped (the only early end here) is the public
+    // relay's `canceled` row — status 200 — with what it cost so far,
+    // estimated where the upstream had not said yet; so is a call stopped
+    // before the upstream answered (`stop::row_status`), whose prompt counts
+    // once it was sent.
+    let mut usage = acc.usage();
+    let stopped = result.is_ok() && outcome.error.is_none() && outcome.aborted;
+    let stopped_unanswered =
+        prompt_sent.into_inner() && matches!(&result, Err(e) if super::is_canceled(e));
     let error: Option<(String, String)> = match &result {
+        Err(_) if stopped_unanswered => {
+            let (u, note) = super::unanswered_usage(ir);
+            usage = u;
+            Some(("canceled".to_string(), note))
+        }
         Err(e) => Some((e.kind().to_string(), e.to_string())),
+        Ok(()) if stopped => {
+            let (u, note) = super::stopped_usage(usage, outcome.timings.as_ref(), ir, produced);
+            usage = u;
+            Some(("canceled".to_string(), note))
+        }
         Ok(()) => outcome.error.clone(),
     };
     let status = match &result {
-        Err(e) => e.http_status().as_u16(),
-        Ok(()) if error.is_some() => StatusCode::BAD_GATEWAY.as_u16(),
+        Err(e) => super::row_status(e),
+        Ok(()) if error.is_some() && !stopped => StatusCode::BAD_GATEWAY.as_u16(),
         Ok(()) => StatusCode::OK.as_u16(),
     };
     in_flight.logging();
     record_in_process(
         InProcessLog {
-            client_key,
+            key,
             ingress_proto,
             alias: &ir.model_alias,
             route,
@@ -749,13 +859,18 @@ pub(crate) async fn stream_once_on(
         },
         status,
         outcome.ttfb_ms,
-        acc.usage(),
+        usage,
         error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
         state,
     )
     .await;
+    sink.billed(&usage);
 
     result?;
+    // The consumer asked for the stop; what it got so far is all it gets.
+    if stopped {
+        return Err(super::canceled("stopped by the caller mid-stream"));
+    }
     // A stream that died mid-flight has no usable turn — surfacing the partial
     // text as if the model had finished would make the loop act on a truncated
     // answer, so it fails loudly instead (§14).

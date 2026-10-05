@@ -3,16 +3,25 @@
 //! one (chat-complete §3). The four differ in where the stream is opened and
 //! what the bubbles do around it; consuming it — deltas, reasoning, tool
 //! cards, usage, the stats row, the settle — is this one function.
+//!
+//! A thread that reads its replies aloud sends every turn with `speak:
+//! true` (chat-voice §6.4): the stream then carries the speech frames
+//! beside the text, for the page's read-aloud (`chat_voice::LiveSpeech`).
+//! The turn settles at the text's `done` — the composer takes the next
+//! send — while the rest of the stream is still read for the speech (§6.5:
+//! aborting the fetch at `done` would stop the speech).
 
 use std::cell::Cell;
 use std::rc::Rc;
 
+use futures::future::{select, Either, FutureExt};
 use leptos::prelude::*;
 use serde_json::Value;
 
 use super::chat::{scroll_down, ChatThread, Msg, Stats, ToolCard};
 use super::chat_reply::Finished;
 use super::chat_stream::{send_stream, ChatEvent};
+use super::chat_voice::PageVoice;
 use crate::scope::Scope;
 use crate::widgets::Toasts;
 
@@ -33,6 +42,8 @@ pub(super) struct TurnEnv {
     pub ctx_max: Memo<Option<i64>>,
     pub toasts: Toasts,
     pub scope: Scope,
+    /// Dictation, read-aloud and the voice status line (chat-voice WP7).
+    pub voice: PageVoice,
 }
 
 /// What to stream and where it lands.
@@ -75,7 +86,7 @@ pub(super) async fn run_turn(
     let Turn {
         tid,
         url,
-        body,
+        mut body,
         target,
         continuing,
         what,
@@ -104,6 +115,14 @@ pub(super) async fn run_turn(
     )));
     let ctrl = web_sys::AbortController::new().ok();
     let signal = ctrl.as_ref().map(|c| c.signal());
+    // Read aloud as it streams, when the thread says so: `speak` goes on
+    // the body, and the speech frames to the page's read-aloud.
+    let speech = env
+        .voice
+        .for_turn(tid, target.key, &mut body, ctrl.as_ref())
+        .map(Rc::new);
+    let (text_done_tx, text_done) = futures::channel::oneshot::channel::<()>();
+    let text_done_tx = Rc::new(Cell::new(Some(text_done_tx)));
     aborter.set_value(ctrl);
 
     // Only the thread on screen scrolls: the owner may be reading another.
@@ -128,6 +147,7 @@ pub(super) async fn run_turn(
     let failed = Rc::new(Cell::new(false));
     let superseded = Rc::new(Cell::new(false));
     let superseded2 = superseded.clone();
+    let (speech2, voice) = (speech.clone(), env.voice);
     let cm = ctx_max.get_untracked();
     let (first_at2, delta_count2, usage_seen2, any_event2, failed2) = (
         first_at.clone(),
@@ -190,8 +210,12 @@ pub(super) async fn run_turn(
             }
             ChatEvent::Retrieval(c) => a_context.set(Some(c)),
             ChatEvent::Stop => {}
-            ChatEvent::Error(msg) => {
+            ChatEvent::Error { message: msg, code } => {
                 failed2.set(true);
+                // A gateway refusal is worded on the composer's line too, by
+                // its code: the hold as the amber chip, in place of the chat
+                // stage's `held` note (WP11 UI review m6).
+                voice.turn_error(code.as_deref(), &msg);
                 if continuing {
                     toasts.err(format!("{what} failed: {msg}"));
                 } else {
@@ -293,15 +317,52 @@ pub(super) async fn run_turn(
                             .collect()
                     })
                     .unwrap_or_default();
-                stats.set(Some((tid, Stats { ignored, ..s })));
+                let reasoning_note = done["reasoning_note"].as_str().map(str::to_string);
+                // The composer's line says it once: a model that reasoned
+                // although off was asked.
+                voice.status.reasoning(&done);
+                stats.set(Some((
+                    tid,
+                    Stats {
+                        ignored,
+                        reasoning_note,
+                        ..s
+                    },
+                )));
                 if done["aborted"].as_bool().unwrap_or(false) && !continuing && !superseded2.get() {
                     a_content.update(|c| c.push_str(" ⏹"));
                 }
+                if let Some(s) = &speech2 {
+                    s.text_done();
+                    if let Some(tx) = text_done_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
             }
+            ChatEvent::Voice(name, data) => voice.turn_frame(speech2.as_deref(), name, &data),
         }
     };
     let sig = signal.unwrap_or_else(|| web_sys::AbortController::new().unwrap().signal());
-    let res = send_stream(&url, &body, &sig, handle).await;
+    let reading = async move { send_stream(&url, &body, &sig, handle).await }.boxed_local();
+    let res = match &speech {
+        None => reading.await,
+        // The text's `done` settles the turn; the stream is read on for the
+        // speech, to its end.
+        Some(s) => match select(reading, text_done).await {
+            Either::Left((res, _)) => {
+                s.finish();
+                res
+            }
+            Either::Right((_, rest)) => {
+                let s = s.clone();
+                leptos::task::spawn_local(async move {
+                    let _ = rest.await;
+                    s.finish();
+                });
+                Ok(())
+            }
+        },
+    };
     a_streaming.set(false);
     streaming.set(None);
     live.try_set_value(None);
@@ -335,7 +396,7 @@ pub(super) async fn run_turn(
 }
 
 /// A `tool` frame: find or open the card at its index and apply the step.
-fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
+pub(super) fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
     let index = v["index"].as_i64().unwrap_or(0);
     tools.update(|tools| {
         let card = match tools.iter().find(|c| c.index == index) {

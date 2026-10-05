@@ -167,6 +167,9 @@ impl ActionEnv {
                         m.model.set(r.model.clone());
                         m.answered_by.set(r.answered_by.clone());
                     }
+                    if m.voice.with_untracked(|v| *v != r.voice) {
+                        m.voice.set(r.voice.clone());
+                    }
                 }
             });
         });
@@ -274,6 +277,11 @@ impl ActionEnv {
                 move |id| user_db.set(Some(id)),
                 move || {
                     // Accepted: the text is replaced and the later bubbles go.
+                    // A dictated message whose text changed is typed now
+                    // (chat-voice §3).
+                    if accept_msg.content.with_untracked(|c| *c != accept_text) {
+                        accept_msg.voice.set(None);
+                    }
                     accept_msg.content.set(accept_text.clone());
                     accept_msg.kb_refs.set(accept_kb.clone());
                     // Runs under `spawn_local`, not the page scope: a task dropped with the page
@@ -452,6 +460,7 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
     let db_id = m.db_id;
     let own_streaming = m.streaming;
     let unsaved = m.unsaved;
+    let m_voice = m.voice;
     let off = Signal::derive(move || ops.busy.get() || db_id.get().is_none() || editing.get());
     let off_title = move |what: &'static str| {
         move || {
@@ -498,6 +507,9 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
                 // A reply that was never stored has no row to edit, answer again,
                 // continue or delete: Copy is all it has.
                 <Show when=move || !unsaved.get()>
+                {(!is_user).then(|| view! {
+                    <super::chat_voice::SpeakerButton key=key db_id=db_id editing=editing/>
+                })}
                 <button
                     type="button"
                     class="msg-act"
@@ -519,13 +531,23 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
                 // everything after it, and the model answers it again.
                 {move || {
                         let n = later.get();
-                        let tip = off_title(
-                            if is_user {
-                                "Answer this message again — deletes everything after it"
-                            } else {
+                        // A voice turn the model heard as audio is answered
+                        // again from its transcript (voice-audio-input §3.4).
+                        let heard = m_voice.with(|v| v.as_ref().is_some_and(|v| v.heard_as_audio()));
+                        let tip = off_title(match (is_user, heard) {
+                            (true, false) => "Answer this message again — deletes everything after it",
+                            (true, true) => {
+                                "Answer this message again — answers from the transcript: the audio \
+                                 is not kept — deletes everything after it"
+                            }
+                            (false, false) => {
                                 "Answer again — deletes this reply and everything after it"
-                            },
-                        );
+                            }
+                            (false, true) => {
+                                "Answer again — answers from the transcript: the audio is not kept \
+                                 — deletes this reply and everything after it"
+                            }
+                        });
                         if n > 0 {
                             view! {
                                 <ConfirmButton

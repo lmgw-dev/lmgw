@@ -38,6 +38,21 @@ pub(super) fn check_defaults(d: &mut ThreadDefaults) -> Result<(), String> {
     d.reasoning_effort = d.reasoning_effort.take().and(t.reasoning_effort);
     // No tool servers is the global behaviour, not a default to record.
     d.mcp_tools = d.mcp_tools.take().filter(|m| !m.is_empty());
+    // Voice (chat-voice design §2.2): normalised as a thread's own; one that
+    // sets nothing is no default. No seed: each thread draws its own on
+    // first use, and one copied into every new thread would give the whole
+    // folder one voice behind a field the form never shows.
+    if let Some(v) = d.voice.as_mut() {
+        if v.seed.is_some() {
+            return Err(
+                "voice.seed cannot be a folder default: each thread draws its own seed on \
+                 first use"
+                    .into(),
+            );
+        }
+        v.normalise()?;
+    }
+    d.voice = d.voice.take().filter(|v| !v.is_empty());
     chat_knowledge::check_defaults(d)
 }
 
@@ -110,6 +125,11 @@ pub async fn create_folder(
     if let Err(msg) = chat_knowledge::check_default_kbs(&state, &defaults, &[]).await {
         return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
     }
+    if let Some(v) = &defaults.voice {
+        if let Err(msg) = super::chat_voice::check_voice_aliases(&state, v, None).await {
+            return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
+        }
+    }
     let id = match store::create_chat_folder(&state.db, &name, &defaults).await {
         Ok(id) => id,
         Err(e) => return internal(e),
@@ -161,13 +181,23 @@ pub async fn update_folder(
     if let Some(d) = &patch.defaults {
         // Bases the folder already named are not checked again (a base
         // deleted since must not block renaming the folder).
-        let already = match store::get_chat_folder(&state.db, id).await {
-            Ok(Some(f)) => f.defaults.kb_ids.unwrap_or_default(),
+        let stored = match store::get_chat_folder(&state.db, id).await {
+            Ok(Some(f)) => f.defaults,
             Ok(None) => return not_found(),
             Err(e) => return internal(e),
         };
+        let already = stored.kb_ids.clone().unwrap_or_default();
         if let Err(msg) = chat_knowledge::check_default_kbs(&state, d, &already).await {
             return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
+        }
+        // Voice aliases the folder already named are not checked again
+        // either.
+        if let Some(v) = &d.voice {
+            let before = stored.voice.unwrap_or_default();
+            if let Err(msg) = super::chat_voice::check_voice_aliases(&state, v, Some(&before)).await
+            {
+                return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
+            }
         }
     }
     match store::update_chat_folder(&state.db, id, &patch).await {
@@ -238,10 +268,7 @@ pub async fn move_thread(
         return internal(e);
     }
     match store::get_chat_thread(&state.db, id).await {
-        Ok(Some(t)) => {
-            let purge_days = state.snapshot().settings.chat_purge_days;
-            Json(thread_json(&t, purge_days)).into_response()
-        }
+        Ok(Some(t)) => Json(thread_json(&state, &t).await).into_response(),
         _ => internal("the thread vanished immediately after being moved"),
     }
 }

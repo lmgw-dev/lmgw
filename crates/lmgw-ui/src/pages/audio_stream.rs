@@ -133,6 +133,28 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Bytes → standard-alphabet base64 with padding, the inverse of
+/// [`b64_decode`]: realtime's `input_audio_buffer.append` carries the page's
+/// PCM this way (chat-voice §11.2).
+pub fn b64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.len();
+        let v = (chunk[0] as u32) << 16
+            | (chunk.get(1).copied().unwrap_or(0) as u32) << 8
+            | chunk.get(2).copied().unwrap_or(0) as u32;
+        for i in 0..4 {
+            if i <= n {
+                out.push(ALPHABET[(v >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Wrap raw PCM in the canonical 44-byte RIFF/WAVE header.
 ///
 /// A headless PCM stream carries no format at all, so `rate` / `channels` /
@@ -242,6 +264,22 @@ mod tests {
         assert_eq!(b64_decode("QUJD\nREVG").unwrap(), b"ABCDEF");
         assert_eq!(b64_decode("//8=").unwrap(), vec![0xFF, 0xFF]);
         assert!(b64_decode("not*base64").is_none());
+    }
+
+    #[test]
+    fn base64_encodes_with_padding_and_round_trips() {
+        assert_eq!(b64_encode(b""), "");
+        assert_eq!(b64_encode(b"A"), "QQ==");
+        assert_eq!(b64_encode(b"AB"), "QUI=");
+        assert_eq!(b64_encode(b"ABC"), "QUJD");
+        assert_eq!(b64_encode(&[0xFF, 0xFF]), "//8=");
+        assert_eq!(b64_encode(&[0xFB, 0xEF, 0xBE]), "++++");
+        // Every byte value at every offset within a group of three.
+        let bytes: Vec<u8> = (0..=255u8).chain((0..=255u8).rev()).collect();
+        for len in [0, 1, 2, 3, 4, 5, 511, 512] {
+            let b = &bytes[..len];
+            assert_eq!(b64_decode(&b64_encode(b)).unwrap(), b, "length {len}");
+        }
     }
 
     fn fold(records: &[&str]) -> StreamAcc {

@@ -7,7 +7,9 @@
 //! on tmpfs, git missing or too old, a live run of the same build — then
 //! opens the `build_runs` row and its log, and spawns the job. The job
 //! ([`BuildRunExecutor`]) walks the phases of §15's job detail, each one a
-//! section of the log:
+//! section of the log — after one check that needs podman and so cannot be
+//! made up front: a `cpus` that podman lacks the `cpuset` controller for
+//! fails the run at once ([`cpus`]), before any lock or clone:
 //!
 //! 1. **waiting** — for the machine-wide build lock ([`lock`]), naming the
 //!    holder; the cancel flag is polled while it waits;
@@ -39,6 +41,7 @@
 //!
 //! [`Spawner`]: crate::agents::container::Spawner
 
+pub(crate) mod cpus;
 mod lock;
 mod log;
 mod podman;
@@ -60,6 +63,7 @@ pub use promote::promote_run;
 pub use resolve::{build_env, check_merge, resolve_preview};
 pub use verify::verify_run;
 
+pub(crate) use cpus::check as check_cpus;
 pub(crate) use podman::{
     buildah_dirs, cache_mount_dir, cache_mount_root, real_uid, short_id, Podman,
 };
@@ -720,6 +724,13 @@ impl Execution {
     // -- the run --------------------------------------------------------------
 
     async fn go(&mut self) -> (BuildRunStatus, Option<String>) {
+        // A `cpus` podman cannot enforce would fail `podman build` after the
+        // clone, in cgroup words; it fails here, saying what to delegate.
+        match cpus::check(&self.podman, self.spec.cpus.as_deref()).await {
+            Ok(None) => {}
+            Ok(Some(note)) => self.log.line(&format!("note: {note}")),
+            Err(why) => return self.stopped(Stop::Failed(why)),
+        }
         let lock = match self.acquire_lock().await {
             Ok(l) => l,
             Err(stop) => return self.stopped(stop),

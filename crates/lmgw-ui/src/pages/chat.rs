@@ -32,6 +32,7 @@ use super::chat_search::{install_reveal, MessageHits};
 use super::chat_settings::{draft_patch, DraftErrors, SettingsFields};
 use super::chat_temp::{self, TempBanner};
 use super::chat_turn::{run_turn, Turn, TurnEnv};
+use super::chat_voice::{self, MsgVoice, ThreadVoice, VoiceDraft, VoiceResolved};
 use super::knowledge_source::SourceModal;
 use crate::scope::Scope;
 pub use crate::widgets::tool_picker::ThreadMcp;
@@ -95,6 +96,10 @@ pub struct ChatThread {
     /// Whether the last reply can be continued, and if not why (§3).
     #[serde(rename = "continue")]
     pub cont: Option<ContinueState>,
+    /// The thread's own voice settings, and what its voice resolves to
+    /// (chat-voice §2.2, §2.3).
+    pub voice: ThreadVoice,
+    pub voice_resolved: Option<VoiceResolved>,
 }
 
 /// A file dropped, pasted or picked into a message — either uploaded and
@@ -152,6 +157,7 @@ pub(super) struct SettingsDraft {
     pub(super) sampling: SamplingDraft,
     pub(super) picked: RwSignal<Vec<ThreadMcp>>,
     pub(super) kb: KbDraft,
+    pub(super) voice: VoiceDraft,
 }
 
 impl SettingsDraft {
@@ -166,6 +172,7 @@ impl SettingsDraft {
             sampling: SamplingDraft::new(),
             picked: RwSignal::new(Vec::new()),
             kb: KbDraft::new(),
+            voice: VoiceDraft::new(),
         }
     }
 
@@ -180,6 +187,7 @@ impl SettingsDraft {
         self.sampling.seed(text.sampling);
         self.picked.set(t.mcp_tools.clone());
         self.kb.seed(t);
+        self.voice.load(&t.voice);
     }
 
     /// The form as it stands (tracked).
@@ -200,6 +208,7 @@ impl SettingsDraft {
         self.text().differs(&SettingsText::of(t))
             || self.picked.with(|p| *p != t.mcp_tools)
             || self.kb.differs_from(t)
+            || self.voice.differs_from(&t.voice)
     }
 }
 
@@ -308,6 +317,9 @@ pub(super) struct MsgRow {
     /// A user message's own knowledge bases and what they retrieved.
     pub(super) kb_refs: Vec<i64>,
     pub(super) context: Option<KbContext>,
+    /// How the turn was spoken (chat-voice §3); `None`: typed.
+    #[serde(deserialize_with = "chat_voice::tolerant_voice")]
+    pub(super) voice: Option<MsgVoice>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -356,6 +368,8 @@ pub(super) struct Msg {
     pub(super) answered_by: RwSignal<Option<String>>,
     /// The reply was not stored (`done.saved` false): dimmed, Copy only.
     pub(super) unsaved: RwSignal<bool>,
+    /// How the turn was spoken (chat-voice §3).
+    pub(super) voice: RwSignal<Option<MsgVoice>>,
 }
 
 pub(super) fn new_msg(key: u64, role: &str, content: String) -> Msg {
@@ -374,6 +388,7 @@ pub(super) fn new_msg(key: u64, role: &str, content: String) -> Msg {
         model: RwSignal::new(None),
         answered_by: RwSignal::new(None),
         unsaved: RwSignal::new(false),
+        voice: RwSignal::new(None),
     }
 }
 
@@ -552,6 +567,9 @@ pub(super) struct Stats {
     /// The thread's reasoning overrides the answering route did not send
     /// (`enabled` | `effort` | `budget`).
     pub(super) ignored: Vec<String>,
+    /// The turn's `reasoning_note`: the model reasoned although off was
+    /// asked, in a sentence — the badge's title says it.
+    pub(super) reasoning_note: Option<String>,
 }
 
 impl Stats {
@@ -614,10 +632,14 @@ pub fn Chat() -> impl IntoView {
     // Knowledge (chat-complete §9.3): the bases, the one source viewer, and
     // the `#` picks of the message being written.
     let kbui = KbUi::provide(Scope::new());
+    // This window's audio devices and echo mode (chat-voice §2.4).
+    chat_voice::provide_voice_devices();
     let draft_kbs = RwSignal::new(Vec::<i64>::new());
     let composer_ta: NodeRef<leptos::html::Textarea> = NodeRef::new();
     let composer_box: NodeRef<leptos::html::Div> = NodeRef::new();
     let kb_pick = KbPick::new(draft_kbs, composer, composer_ta);
+    // Dictation, read-aloud and their status line (chat-voice WP7).
+    let page_voice = chat_voice::provide_page_voice(current, composer, composer_ta);
     // The thread whose reply is streaming, not just "something is": the
     // owner may open another thread meanwhile, and that one's Stop must not
     // abort this stream, nor its stats row show this stream's numbers.
@@ -715,7 +737,7 @@ pub fn Chat() -> impl IntoView {
 
     // Per-message signals are created here rather than in the calling task, so
     // they belong to the component and die with it (see `owner` above).
-    let load_msgs = move |rows: Vec<MsgRow>| {
+    let msgs_of_rows = move |rows: Vec<MsgRow>| -> Vec<Msg> {
         let mapped = in_owner(owner, || {
             // The retrieval of the user message an answer follows.
             let mut answering: Option<KbContext> = None;
@@ -730,6 +752,7 @@ pub fn Chat() -> impl IntoView {
                         m.context.set(answering.clone());
                     }
                     m.reasoning.set(r.reasoning);
+                    m.voice.set(r.voice);
                     m.model.set(r.model);
                     m.answered_by.set(r.answered_by);
                     if !r.attachments.is_empty() {
@@ -764,8 +787,9 @@ pub fn Chat() -> impl IntoView {
                 })
                 .collect()
         });
-        msgs.set(mapped.unwrap_or_default());
+        mapped.unwrap_or_default()
     };
+    let load_msgs = move |rows: Vec<MsgRow>| msgs.set(msgs_of_rows(rows));
 
     // A message to reveal (search hit, `?m=`) that the open transcript does
     // not hold is dropped with a note, not waited for: a `focus` left set
@@ -1041,6 +1065,9 @@ pub fn Chat() -> impl IntoView {
                             {
                                 t.cont = Some(c);
                             }
+                            // The voice as the server took it, and what it
+                            // resolves to now.
+                            super::chat_voice::apply_answer(t, &answer);
                         }
                     });
                     if scope.alive() {
@@ -1070,6 +1097,9 @@ pub fn Chat() -> impl IntoView {
         }
         id
     });
+    // A seed "New voice" drew is pending until the thread holds it.
+    let held_seed = Memo::new(move |_| current.with(|c| c.as_ref().and_then(|t| t.voice.seed)));
+    Effect::new(move |_| settings.voice.settle_seed(held_seed.get()));
     let settings_unsaved =
         Memo::new(move |_| current.with(|c| c.as_ref().is_some_and(|t| settings.differs_from(t))));
     use_dirty_guard().watch_page("the thread settings", settings_unsaved.into());
@@ -1255,6 +1285,7 @@ pub fn Chat() -> impl IntoView {
         ctx_max,
         toasts,
         scope,
+        voice: page_voice,
     };
     let actions = ActionEnv {
         turn: turn_env,
@@ -1317,6 +1348,10 @@ pub fn Chat() -> impl IntoView {
             }
             return;
         }
+        // A dictation is finished or discarded first (chat-voice §5).
+        if !page_voice.dictation.before_send() {
+            return;
+        }
         let text = composer.get_untracked().trim().to_string();
         if draft_attachments.with_untracked(|v| v.iter().any(|c| c.uploading.get_untracked())) {
             toasts.warn("attachments are still uploading");
@@ -1350,6 +1385,8 @@ pub fn Chat() -> impl IntoView {
         let restore_chips = draft_attachments.get_untracked();
         let kb_refs = draft_kbs.get_untracked();
         let restore_kbs = kb_refs.clone();
+        // Dictated text goes as a spoken turn (chat-voice §5).
+        let spoken = page_voice.dictation.take_mark();
         composer.set(String::new());
         draft_attachments.set(Vec::new());
         draft_kbs.set(Vec::new());
@@ -1357,6 +1394,7 @@ pub fn Chat() -> impl IntoView {
             let u = new_msg(alloc_key(), "user", text.clone());
             u.attachments.set(att_meta);
             u.kb_refs.set(kb_refs.clone());
+            u.voice.set(spoken.as_ref().map(|m| m.as_msg_voice()));
             (u, new_msg(alloc_key(), "assistant", String::new()))
         }) else {
             return;
@@ -1371,14 +1409,18 @@ pub fn Chat() -> impl IntoView {
             m.push(assistant);
         });
         scroll_down(true);
+        let mut body = if kb_refs.is_empty() {
+            json!({ "content": text, "attachments": ids })
+        } else {
+            json!({ "content": text, "attachments": ids, "kb_refs": kb_refs })
+        };
+        page_voice
+            .dictation
+            .voice_for_send(spoken.as_ref(), &mut body);
         let turn = Turn {
             tid,
             url: format!("/chat/api/threads/{tid}/send"),
-            body: if kb_refs.is_empty() {
-                json!({ "content": text, "attachments": ids })
-            } else {
-                json!({ "content": text, "attachments": ids, "kb_refs": kb_refs })
-            },
+            body,
             target: reply,
             continuing: false,
             what: "send",
@@ -1396,6 +1438,7 @@ pub fn Chat() -> impl IntoView {
                 composer.set(restore_text.clone());
                 draft_attachments.set(restore_chips.clone());
                 draft_kbs.set(restore_kbs.clone());
+                page_voice.dictation.restore_mark(spoken.clone());
                 msgs.update(|m| m.retain(|msg| msg.key != user_key && msg.key != assistant_key));
             }
             refresh_threads();
@@ -1415,6 +1458,25 @@ pub fn Chat() -> impl IntoView {
         let s = streaming.get();
         s.is_some() && s != current_id.get()
     });
+    // Voice mode (chat-voice WP9): the realtime panel in the composer's
+    // place. It reads the thread back when a session ends (`load`).
+    let realtime = chat_voice::provide_realtime(
+        page_voice,
+        chat_voice::RealtimeParts {
+            msgs,
+            current,
+            owner,
+            next_key,
+            scope,
+            streaming,
+            model_sel,
+            draft: settings.voice,
+            refresh: Callback::new(move |()| refresh_threads()),
+            load: Callback::new(load_msgs),
+            make: Callback::new(msgs_of_rows),
+        },
+    );
+    let voice_mode = page_voice.voice_mode;
     let is_temporary =
         Memo::new(move |_| current.with(|c| c.as_ref().is_some_and(|t| t.temporary)));
     let is_admin =
@@ -1708,6 +1770,8 @@ pub fn Chat() -> impl IntoView {
                                 <TempBanner
                                     thread=current_id
                                     streaming=streaming_here
+                                    voice_mode=voice_mode
+                                    voice_closing=realtime.closing
                                     busy=keep_busy
                                     on_keep=Callback::new(move |()| {
                                         if let Some(id) = current_id.get_untracked() {
@@ -1745,6 +1809,10 @@ pub fn Chat() -> impl IntoView {
                                         }
                                     })
                             }}
+                            // The composer and what belongs to it, hidden (never
+                            // dropped: its text, chips and dictation mark wait)
+                            // while voice mode has its place.
+                            <div class="composer-area" style:display=move || if voice_mode.get() { "none" } else { "contents" }>
                             <DraftChips
                                 chips=draft_attachments
                                 vision_no=vision_no
@@ -1754,6 +1822,8 @@ pub fn Chat() -> impl IntoView {
                             />
                             <BlockerNote blockers=attach_blockers/>
                             <KbDraftChips chips=draft_kbs/>
+                            <chat_voice::VoiceStatusLine pv=page_voice/>
+                            <div class="composer-wrap">
                             <div class="composer" node_ref=composer_box>
                                 <KbPopover pick=kb_pick anchor=composer_box/>
                                 <input
@@ -1769,6 +1839,7 @@ pub fn Chat() -> impl IntoView {
                                         el.set_value("");
                                     }
                                 />
+                                <div class="composer-tools">
                                 <button
                                     type="button"
                                     class="btn ghost composer-attach"
@@ -1787,9 +1858,11 @@ pub fn Chat() -> impl IntoView {
                                     </svg>
                                 </button>
                                 <KbButton pick=kb_pick/>
+                                </div>
                                 <textarea
                                     class="input ta composer-input"
                                     node_ref=composer_ta
+                                    title=chat_voice::composer_title(Some(page_voice))
                                     placeholder="Message… (Enter sends, Shift+Enter for a newline, # adds knowledge)"
                                     prop:value=move || composer.get()
                                     on:input=move |ev| kb_pick.on_input(&ev)
@@ -1813,6 +1886,10 @@ pub fn Chat() -> impl IntoView {
                                         }
                                     }
                                 ></textarea>
+                                <chat_voice::VoiceControls
+                                    draft=settings.voice
+                                    on_saved=Callback::new(move |()| refresh_threads())
+                                />
                                 {move || {
                                     if streaming_here.get() {
                                         view! {
@@ -1836,6 +1913,11 @@ pub fn Chat() -> impl IntoView {
                                     }
                                 }}
                             </div>
+                            </div>
+                            </div>
+                            <Show when=move || voice_mode.get()>
+                                <chat_voice::RealtimePanel/>
+                            </Show>
                         </div>
                     </SplitPane>
                 </Show>
@@ -1990,6 +2072,8 @@ fn purge_text(purge_at: &str) -> String {
 
 /// One line of the thread list: a date heading with its count, or a thread.
 #[derive(Clone, PartialEq)]
+// Short-lived render rows; boxing `Row` would ripple through every match arm for no gain.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum ListItem {
     Head(String, usize),
     /// A folder's header (chat-complete §5); its threads follow as nested rows.
@@ -2517,6 +2601,9 @@ fn ThreadSettings(
             <SettingsFields
                 draft=draft
                 errors=errors
+                voice_resolved=Signal::derive(move || {
+                    thread.with(|t| t.as_ref().and_then(|t| t.voice_resolved.clone()))
+                })
                 model=Signal::derive(move || {
                     thread.with(|t| t.as_ref().map(|t| t.model_alias.clone()).unwrap_or_default())
                 })
@@ -2578,6 +2665,8 @@ fn MsgView(
     let kb_refs = m.kb_refs;
     let context = m.context;
     let (model, answered_by, unsaved) = (m.model, m.answered_by, m.unsaved);
+    let voice = m.voice;
+    let role = m.role.clone();
     let kbui = KbUi::use_ui();
     // The rendered markdown is written from an effect rather than through
     // `inner_html`, so highlighting and the toolbar always run on the DOM this
@@ -2593,6 +2682,7 @@ fn MsgView(
             Some(c) if !c.excerpts.is_empty() => cite_html(&html, &c.titles()),
             _ => html,
         });
+        let html = voice.with(|v| chat_voice::spoken_html(html, v.as_ref(), &role));
         el.set_inner_html(&html);
         decorate_code(&el, !streaming.get());
     });
@@ -2623,6 +2713,7 @@ fn MsgView(
                 <Show when=move || !editing.get() && !content.with(String::is_empty)>
                     <div class="msg-user-text">{move || content.get()}</div>
                 </Show>
+                <chat_voice::MicBadge voice=voice/>
                 <Show when=move || editing.get()>
                     <MsgEditor m=m_editor.clone() ops=ops editing=editing/>
                 </Show>
@@ -2665,6 +2756,7 @@ fn MsgView(
                 <Show when=move || streaming.get()>
                     <span class="caret"></span>
                 </Show>
+                <chat_voice::SpokenReply voice=voice/>
                 {move || {
                     tokens
                         .get()
@@ -2774,12 +2866,16 @@ fn StatsRow(#[prop(into)] stats: Signal<Option<Stats>>) -> impl IntoView {
                                 .map(|k| if k == "enabled" { "on/off" } else { k.as_str() })
                                 .collect::<Vec<_>>()
                                 .join(", ");
+                            let title = match &s.reasoning_note {
+                                Some(note) => format!("{note}. Reasoning off was not applied as asked ({names})."),
+                                None => format!(
+                                    "The route that answered has no field for this thread's reasoning or sampling override ({names}) — the model never saw it",
+                                ),
+                            };
                             view! {
                                 <span
                                     class="type-badge fallback-badge"
-                                    title=format!(
-                                        "The route that answered has no field for this thread's reasoning or sampling override ({names}) — the model never saw it",
-                                    )
+                                    title=title
                                 >
                                     {format!("not sent: {names}")}
                                 </span>

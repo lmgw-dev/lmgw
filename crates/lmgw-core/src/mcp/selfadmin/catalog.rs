@@ -4,6 +4,7 @@
 //! see each submodule for the tools it owns.
 
 mod agents;
+mod audio;
 mod bench;
 mod builds;
 mod docs;
@@ -21,6 +22,7 @@ pub(super) fn catalog() -> Vec<Builtin> {
     let mut all = reads::tools();
     all.extend(routing::tools());
     all.extend(models::tools());
+    all.extend(audio::tools());
     all.extend(sources::tools());
     all.extend(runtime::tools());
     all.extend(prices::tools());

@@ -1,0 +1,33 @@
+{
+ "file": "en_midsentence_pause.wav",
+ "text": "I need to finish this report because my boss wants it tomorrow.",
+ "voice": "en_US-ljspeech-medium",
+ "licence": {
+  "model_licence": "MIT (rhasspy/piper-voices repo metadata); trained from scratch",
+  "dataset_licence": "public domain (LJ Speech, https://keithito.com/LJ-Speech-Dataset/)"
+ },
+ "tts": "piper-tts 1.3, soxr VHQ 22.05k->24k, amplitude-trimmed (>2% of peak, 5 ms pad/fades), peak-normalised to 0.7",
+ "sample_rate": 24000,
+ "channels": 1,
+ "format": "PCM16 WAV",
+ "duration_ms": 5199,
+ "samples": 124779,
+ "speech_segments_ms": [
+  {
+   "start_ms": 300,
+   "end_ms": 2488,
+   "text": "I need to finish this report because"
+  },
+  {
+   "start_ms": 2888,
+   "end_ms": 4399,
+   "text": "my boss wants it tomorrow."
+  }
+ ],
+ "segments_note": "derived from generation (positions of inserted silence), not from a VAD",
+ "mid_pause_ms": 400,
+ "mid_pause_start_ms": 2488,
+ "mid_pause_end_ms": 2888,
+ "turn_end_ms": 4399,
+ "note": "whole sentence synthesised in one pass, cut at Piper phoneme-alignment word boundary, 400 ms digital silence inserted; speech segments are the halves of one utterance"
+}

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Usage: scripts/chat-drives.sh [--matrix] [--webkit] [--only NAME[,NAME…]] [--addr HOST:PORT] [--mock-port N]
-# Runs the 13 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
+# Runs the 14 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
 # mock upstream, leak listener), prints a PASS/FAIL table, exits non-zero on any FAIL. Everything
 # it starts is stopped by pid/process group on exit and its scratch dir (data, Chrome profiles) removed.
 # --matrix runs `ui-matrix.py --routes all`, --webkit runs webkit-check.py on the chat routes, after the drives.
+# The instance listens on 127.0.0.1:8898 when that is free (chat-voice-seed.py seeds only through a
+# dev port: 8898 or 8899), else on a free port, where chat-voice-render's seed is refused.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,7 +23,11 @@ while [ $# -gt 0 ]; do
 done
 
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])'; }
-[ -n "$ADDR" ] || ADDR="127.0.0.1:$(free_port)"
+port_free() { python3 -c 'import socket,sys;s=socket.socket();s.bind(("127.0.0.1",int(sys.argv[1])))' "$1" 2>/dev/null; }
+# 8898 is a dev port: chat-voice-seed.py writes spoken turns only through one.
+if [ -z "$ADDR" ]; then
+    if port_free 8898; then ADDR="127.0.0.1:8898"; else ADDR="127.0.0.1:$(free_port)"; fi
+fi
 [ -n "$MOCK_PORT" ] || MOCK_PORT="$(free_port)"
 LEAK_PORT=9299 # hard-wired into chat-drives' chat-security.json
 BASE="http://$ADDR"
@@ -81,7 +87,8 @@ op alias_set "{\"action\":\"create\",\"alias\":\"fake-vision\",\"upstream_id\":$
 op settings_set '{"chat_pdf_mode":"ask"}'
 
 DRIVES=(chat-render chat-actions chat-sampling chat-folders chat-search chat-knowledge knowledge
-    chat-attachments chat-export chat-security chat-leave-midstream key-scope-editor key-scope-create-deny)
+    chat-attachments chat-export chat-security chat-leave-midstream key-scope-editor key-scope-create-deny
+    chat-voice-render)
 declare -A RESULT
 FAILS=0
 for d in "${DRIVES[@]}"; do
@@ -89,6 +96,11 @@ for d in "${DRIVES[@]}"; do
     if [ "$d" = chat-leave-midstream ]; then # needs a slow stream: restart the mock on the same port
         stop_pid "$MOCK_PID"
         start_mock 4
+    fi
+    if [ "$d" = chat-voice-render ]; then # spoken turns, written into the scratch database
+        stop_pid "$MOCK_PID"
+        start_mock 0.02
+        python3 scripts/chat-voice-seed.py "$BASE" "$TOKEN" "$WORK/data/lmgw.sqlite" fake-echo >/dev/null
     fi
     if python3 scripts/ui-drive.py "scripts/drive/$d.json" --token "$TOKEN" --base "$BASE" \
         >"$WORK/drive-$d.log" 2>&1; then RESULT[$d]=PASS; else RESULT[$d]=FAIL; FAILS=$((FAILS + 1)); fi

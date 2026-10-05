@@ -86,6 +86,11 @@ pub struct RuntimeStatus {
     /// no new work on this model until it is over (§4.5). Absent = false.
     #[serde(default)]
     pub draining_for_owner: bool,
+    /// `"cpu"` for an audio container started on the CPU (the per-row CPU
+    /// switch): no VRAM, not stopped by the GPU hold. `None` — absent from
+    /// the frame — is the GPU, every other container.
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 /// Mirror of `runtime::registry::climb::RungStatus` (ladder design §6): the
@@ -361,6 +366,12 @@ pub struct VramResident {
     /// (image-generation §9). `None` for every other class, and for an image
     /// model that has not generated anything yet — `note` says which.
     pub peak_extra_bytes: Option<u64>,
+    /// What a `ready` audio container will still load on its first request,
+    /// kept free by admission on top of the measured use (realtime design
+    /// §9.4): its expected residency less what it was read holding at rest,
+    /// or all of it where that could not be read. `None` once loaded, and for
+    /// every other class.
+    pub pending_bytes: Option<u64>,
     pub note: Option<String>,
 }
 

@@ -37,6 +37,10 @@ variables:
   # GitHub on first use, and $HOME is not cached. Without this every pipeline
   # re-downloads them and a GitHub hiccup fails the build.
   XDG_CACHE_HOME: "$CI_PROJECT_DIR/.cache"
+  # ort's prebuilt ONNX Runtime (realtime design §13). Named explicitly:
+  # with XDG_CACHE_HOME set, ort-sys extracts straight into it (no
+  # ort.pyke.io subdirectory), next to Trunk's files.
+  ORT_CACHE_DIR: "$CI_PROJECT_DIR/.cache/ort.pyke.io"
 
 build:
   stage: build
@@ -51,6 +55,10 @@ build:
       - .cargo/registry/
       - .cargo/bin/
       - .cache/trunk/
+      # ort's prebuilt ONNX Runtime (realtime design §13): a 10 MB download
+      # from pyke's CDN, unpacked to a 105 MB static library. Cached so a
+      # pipeline neither re-downloads it nor fails on a CDN hiccup.
+      - .cache/ort.pyke.io/
       - target/
   before_script:
     - bash ci/install-build-deps.sh

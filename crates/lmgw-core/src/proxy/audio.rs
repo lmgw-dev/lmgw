@@ -23,6 +23,7 @@ use futures::StreamExt;
 use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::audio::rates::{wav_rate, HEADER_WINDOW};
 use crate::config::Route;
 use crate::egress::{apply_bearer_auth, for_protocol};
 use crate::error::GatewayError;
@@ -33,6 +34,13 @@ use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 
 use super::*;
+
+mod asr_language;
+mod speech;
+pub use speech::{handle_audio_speech, SPEECH_HEADER};
+pub(crate) use speech::{local_speech, remote_rules, rules_on, shape_on};
+mod voices;
+pub use voices::{handle_audio_voices, VoicesProbe, VOICES_SOURCE_HEADER};
 
 /// The route check of `/v1/audio/*` and `/v1/tasks/*`
 /// ([`crate::gate::RouteCheck::Audio`]).
@@ -64,7 +72,7 @@ pub(crate) fn require_openai_audio(route: &Route, alias: &str) -> Result<(), Gat
 /// minutes). A non-2xx is turned into a [`GatewayError`] carrying the
 /// upstream's own message; error bodies are small, so buffering one is worth
 /// it to avoid logging a bare "HTTP 500" and relaying a foreign error shape.
-async fn audio_send<F>(
+pub(super) async fn audio_send<F>(
     hold: Option<&crate::vram::LocalHold>,
     route: &Route,
     build: F,
@@ -101,6 +109,11 @@ pub(super) struct MediaOutcome {
     /// would tell the scheduler an actively generating model is idle. Same rule
     /// as the chat path, whose guard rides into `stream_chat`'s relay task.
     pub(super) admission: Option<crate::vram::LocalHold>,
+    /// The request asked for a chunked audio stream (`stream_format:
+    /// audio`): a 2xx answer is streamed although it is no event stream —
+    /// counted as streamed, and its model counted as having run only once
+    /// the relay ends whole, as for SSE (audio-class gap 8).
+    pub(super) chunked: bool,
 }
 
 /// Response headers worth carrying back from the upstream. `content-length`
@@ -147,6 +160,7 @@ pub(super) async fn finish_media(
         headers,
         ttfb_ms,
         admission,
+        chunked,
     } = match result {
         Ok(o) => o,
         Err((route, headers, e)) => {
@@ -160,7 +174,7 @@ pub(super) async fn finish_media(
                     proto: PROTO,
                     ctx,
                     alias,
-                    route: route.as_ref(),
+                    route: route.as_deref(),
                     started,
                     streamed: false,
                     class,
@@ -180,13 +194,15 @@ pub(super) async fn finish_media(
     };
 
     let status = resp.status();
-    // Streaming-mode audio models answer with SSE; everything else (audio/wav,
-    // a JSON transcript) is one buffered body.
-    let streamed = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.starts_with("text/event-stream"));
+    // Streaming-mode audio models answer with SSE, or with chunked PCM when
+    // the request asked for `stream_format: audio`; everything else
+    // (audio/wav, a JSON transcript) is one buffered body.
+    let streamed = is_event_stream(&resp) || (chunked && status.is_success());
+    // A local audio row's WAV teaches lmgw the row's sample rate, which a
+    // streamed answer of it then states (`crate::audio::rates`).
+    let learns_rate = crate::vram::classify(&route)
+        .filter(|t| t.class == crate::runtime::Class::Audio && is_wav(&resp))
+        .map(|t| t.model_id);
     let mut builder = Response::builder().status(status);
     for name in MEDIA_PASSTHROUGH_HEADERS {
         if let Some(value) = resp.headers().get(&name) {
@@ -201,9 +217,20 @@ pub(super) async fn finish_media(
     tokio::spawn(async move {
         let mut upstream = resp.bytes_stream();
         let mut error: Option<(String, String)> = None;
+        let mut head: Option<(String, Vec<u8>)> = learns_rate.map(|m| (m, Vec::new()));
         while let Some(chunk) = upstream.next().await {
             match chunk {
                 Ok(b) => {
+                    // The header is in the first bytes: read once they
+                    // name the rate, or the window is full.
+                    if let Some((model, buf)) = head.as_mut() {
+                        let room = HEADER_WINDOW.saturating_sub(buf.len());
+                        buf.extend_from_slice(&b[..b.len().min(room)]);
+                        if wav_rate(buf).is_some() || b.len() >= room {
+                            state2.audio_rates.learn(model, buf);
+                            head = None;
+                        }
+                    }
                     if tx.send(Ok(b)).await.is_err() {
                         error = Some(("canceled".into(), "client disconnected".into()));
                         break;
@@ -214,6 +241,9 @@ pub(super) async fn finish_media(
                     break;
                 }
             }
+        }
+        if let Some((model, buf)) = head {
+            state2.audio_rates.learn(&model, &buf);
         }
         record(
             LogParams {
@@ -236,6 +266,15 @@ pub(super) async fn finish_media(
             error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
         )
         .await;
+        // A streamed answer has run only once its relay ends whole (WP7
+        // review M1): at its headers audio.cpp may still be loading the
+        // weights, and a reading then would be a partial figure. A buffered
+        // one was noted at its headers ([`note_buffered_answer`]).
+        if streamed && error.is_none() {
+            if let Some(hold) = admission.as_ref() {
+                hold.note_inference();
+            }
+        }
         // The model stops counting as in use when the last byte of audio has
         // been relayed, not when its headers arrived.
         drop(admission);
@@ -246,6 +285,43 @@ pub(super) async fn finish_media(
             .body(Body::from_stream(ReceiverStream::new(rx)))
             .unwrap_or_else(|e| error_response(PROTO, &GatewayError::Internal(e.to_string()))),
     )
+}
+
+/// Whether an upstream answers with server-sent events rather than one
+/// buffered body.
+fn is_event_stream(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/event-stream"))
+}
+
+/// Whether an upstream answers with a WAV.
+fn is_wav(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| {
+            let ct = ct.to_ascii_lowercase();
+            ct.starts_with("audio/wav")
+                || ct.starts_with("audio/x-wav")
+                || ct.starts_with("audio/wave")
+        })
+}
+
+/// A 2xx from an audio container whose body is one buffered answer (a WAV,
+/// a JSON transcript): audio.cpp sends its headers once the work is done, so
+/// its model is loaded and has run (realtime design §9.4). A streamed answer
+/// — SSE, or the chunked PCM a `chunked` request asked for — is noted when
+/// its relay ends instead ([`finish_media`], WP7 review M1).
+fn note_buffered_answer(
+    hold: Option<&crate::vram::LocalHold>,
+    resp: &reqwest::Response,
+    chunked: bool,
+) {
+    if let Some(hold) = hold.filter(|_| !chunked && !is_event_stream(resp)) {
+        hold.note_inference();
+    }
 }
 
 /// Resolve the alias, rewrite `model` to the concrete upstream id, and send —
@@ -276,6 +352,9 @@ async fn audio_json_call(
         .map_err(|f| (f.route, f.headers, f.error))?;
     let mut out = body.clone();
     out["model"] = Value::String(route.upstream_model.clone());
+    if let Some(hold) = admission.as_ref() {
+        hold.note_sending();
+    }
     let sent = audio_send(admission.as_ref(), &route, |r| {
         let url = format!("{}{endpoint}", r.upstream.base());
         Ok(apply_bearer_auth(
@@ -285,14 +364,18 @@ async fn audio_json_call(
     })
     .await;
     match sent {
-        Ok(resp) => Ok(MediaOutcome {
-            ttfb_ms: started.elapsed().as_millis() as i64,
-            resp,
-            route,
-            headers,
-            admission,
-        }),
-        Err(e) => Err((Some(route), headers, e)),
+        Ok(resp) => {
+            note_buffered_answer(admission.as_ref(), &resp, false);
+            Ok(MediaOutcome {
+                ttfb_ms: started.elapsed().as_millis() as i64,
+                resp,
+                route,
+                headers,
+                admission,
+                chunked: false,
+            })
+        }
+        Err(e) => Err((Some(Box::new(route)), headers, e)),
     }
 }
 
@@ -302,27 +385,6 @@ pub(super) fn body_alias(body: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string()
-}
-
-/// `POST /v1/audio/speech` — OpenAI TTS shape (JSON in, audio/JSON/SSE out).
-pub async fn handle_audio_speech(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
-    let started = Instant::now();
-    state.telemetry.request_started();
-    let alias = body_alias(&body);
-    if let Some(r) = policy_or_refuse(
-        &state,
-        ClientProto::OpenaiChat,
-        &ctx,
-        &alias,
-        started,
-        RequestClass::Audio,
-    )
-    .await
-    {
-        return r;
-    }
-    let result = audio_json_call(&state, "/audio/speech", &body, started).await;
-    finish_audio(&state, &ctx, alias, started, result).await
 }
 
 /// `POST /v1/tasks/run` — audio.cpp's generic task route, the only way to
@@ -380,35 +442,6 @@ pub async fn handle_task_stream(state: SharedState, ctx: RequestCtx, body: Value
     finish_audio(&state, &ctx, alias, started, result).await
 }
 
-/// `GET /v1/audio/voices?model=<alias>` — the cached voice ids and configured
-/// server presets of a TTS model, so a client can populate a voice picker
-/// instead of guessing names like "alloy".
-///
-/// This is metadata about a model rather than an inference call, so — like
-/// `GET /v1/models`, which also fans out to upstreams — it resolves and
-/// forwards without opening a `request_logs` row.
-pub async fn handle_audio_voices(state: SharedState, alias: &str) -> Response {
-    const PROTO: ClientProto = ClientProto::OpenaiChat;
-    // Resolved exactly like the inference routes it describes — the same
-    // gate and the same protocol check, so "which model does `audio/x` mean"
-    // has one answer on this endpoint and the speech/task ones — plus the
-    // voices check ([`crate::gate::RouteCheck::AudioVoices`]). Metadata or
-    // not, the answer comes out of the model's own container, and with
-    // per-model containers there is no always-on port to read it from (§5).
-    // So this takes admission like everything else: the container is started
-    // if it is down, and the hold is held for the read.
-    let opened = match crate::gate::open(&state, alias, crate::gate::RouteCheck::AudioVoices).await
-    {
-        Ok(o) => o,
-        Err(f) => return f.headers.stamp(error_response(PROTO, &f.error)),
-    };
-    let resp = match read_voices(&state, opened.hold.as_ref(), &opened.route).await {
-        Ok(resp) => resp,
-        Err(e) => error_response(PROTO, &e),
-    };
-    opened.headers.stamp(resp)
-}
-
 /// [`handle_audio_voices`] for a reader that must not start anything — the
 /// dashboard's Audio lab, where opening the page is not asking for the model.
 /// `None` when the alias lands on a local model with no live container: none
@@ -426,11 +459,26 @@ pub async fn handle_audio_voices(state: SharedState, alias: &str) -> Response {
 /// running". A remote route has no container and is read as usual.
 pub async fn audio_voices_if_running(state: SharedState, alias: &str) -> Option<Response> {
     const PROTO: ClientProto = ClientProto::OpenaiChat;
+    let (headers, read) = voices_if_running(&state, alias).await?;
+    let resp = match read {
+        Ok(bytes) => voices_response(bytes),
+        Err(e) => error_response(PROTO, &e),
+    };
+    Some(headers.stamp(resp))
+}
+
+/// [`audio_voices_if_running`]'s read, as the upstream's body: `None` when
+/// the alias lands on a local model with no live container, otherwise the
+/// gate's headers and the body or why there is none.
+pub(crate) async fn voices_if_running(
+    state: &SharedState,
+    alias: &str,
+) -> Option<(GateHeaders, Result<Bytes, GatewayError>)> {
     // The gate's routing stages only — never admission, which is the point.
     let routed =
-        match crate::gate::resolve(&state, alias, crate::gate::RouteCheck::AudioVoices).await {
+        match crate::gate::resolve(state, alias, crate::gate::RouteCheck::AudioVoices).await {
             Ok(r) => r,
-            Err(f) => return Some(f.headers.stamp(error_response(PROTO, &f.error))),
+            Err(f) => return Some((f.headers, Err(f.error))),
         };
     let mut route = routed.resolved().clone();
     let local = crate::vram::classify(&route);
@@ -445,12 +493,10 @@ pub async fn audio_voices_if_running(state: SharedState, alias: &str) -> Option<
         })?;
         route.upstream.base_url = format!("http://127.0.0.1:{port}/v1");
     }
-    let resp = match read_voices(&state, None, &route).await {
-        Ok(resp) => resp,
-        Err(GatewayError::Transport(_)) if local.is_some() => return None,
-        Err(e) => error_response(PROTO, &e),
-    };
-    Some(routed.headers().stamp(resp))
+    match voices_body(state, None, &route).await {
+        Err(GatewayError::Transport(_)) if local.is_some() => None,
+        read => Some((routed.headers().clone(), read)),
+    }
 }
 
 /// A voice list is an audio model's to give. A chat or image model resolves
@@ -469,12 +515,12 @@ pub(crate) fn refuse_non_audio_voices(route: &Route, alias: &str) -> Result<(), 
     )))
 }
 
-/// The one GET both voice readers send, relayed as the upstream's JSON.
-async fn read_voices(
+/// The one GET every voice reader sends: the upstream's JSON body.
+pub(super) async fn voices_body(
     state: &SharedState,
     hold: Option<&crate::vram::LocalHold>,
     route: &Route,
-) -> Result<Response, GatewayError> {
+) -> Result<Bytes, GatewayError> {
     let resp = audio_send(hold, route, |r| {
         // `RequestBuilder::query` is behind a reqwest feature this build does
         // not enable, so the concrete model id is encoded with the shared
@@ -487,15 +533,18 @@ async fn read_voices(
         Ok(apply_bearer_auth(state.http.get(url), &r.upstream))
     })
     .await?;
-    let bytes = resp
-        .bytes()
+    resp.bytes()
         .await
-        .map_err(|e| GatewayError::Transport(e.to_string()))?;
-    Ok((
+        .map_err(|e| GatewayError::Transport(e.to_string()))
+}
+
+/// A voice list relayed as the upstream's JSON.
+fn voices_response(bytes: Bytes) -> Response {
+    (
         [(header::CONTENT_TYPE, "application/json")],
         Body::from(bytes),
     )
-        .into_response())
+        .into_response()
 }
 
 /// The three audio routes whose request is an *upload* rather than a JSON
@@ -665,7 +714,7 @@ pub async fn handle_audio_upload(
     {
         return r;
     }
-    let result = multipart_call(&state, &alias, &fields, which, started).await;
+    let result = multipart_call(&state, &alias, &fields, which, started, None).await;
     finish_audio(&state, &ctx, alias, started, result).await
 }
 
@@ -675,21 +724,53 @@ pub async fn handle_audio_upload(
 /// in-process caller. The claim is held until the response has finished
 /// streaming back, not just until the upload has been sent — see
 /// [`MediaOutcome::admission`].
+///
+/// `stop` (an in-process caller's, `None` for a client's request) ends the
+/// call at the gate or at the send, as a `canceled` error. Raced here rather
+/// than around the whole call, so a stop once the gate opened still names
+/// the route it opened on the row — as the chat path's does (package A
+/// review #4).
 pub(super) async fn multipart_call(
     state: &SharedState,
     alias: &str,
     fields: &[MultipartField],
     which: AudioUpload,
     started: Instant,
+    stop: Option<&StopSignal>,
 ) -> Result<MediaOutcome, Failed> {
+    let before_answer = || canceled("stopped by the caller before the upstream answered");
     // The gate, as in `audio_json_call`.
+    let opened = tokio::select! {
+        biased;
+        () = stopped(stop) => return Err((None, GateHeaders::default(), before_answer())),
+        o = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio) => o,
+    };
+    let opened = opened.map_err(|f| (f.route, f.headers, f.error))?;
+    multipart_send(state, opened, fields, which, started, stop).await
+}
+
+/// [`multipart_call`] past its gate: the re-encode and the send on the
+/// route `opened` holds — also what a caller that opened the gate its own
+/// way sends with ([`super::transcribe`]'s local-only transcription). A
+/// transcription's `language` goes up in the answering row's spelling
+/// ([`asr_language`]).
+pub(super) async fn multipart_send(
+    state: &SharedState,
+    opened: crate::gate::Opened,
+    fields: &[MultipartField],
+    which: AudioUpload,
+    started: Instant,
+    stop: Option<&StopSignal>,
+) -> Result<MediaOutcome, Failed> {
+    let before_answer = || canceled("stopped by the caller before the upstream answered");
     let crate::gate::Opened {
         route,
         hold: admission,
         headers,
-    } = crate::gate::open(state, alias, crate::gate::RouteCheck::Audio)
-        .await
-        .map_err(|f| (f.route, f.headers, f.error))?;
+    } = opened;
+    // A transcription's language in the answering row's spelling.
+    let respelled = asr_language::respelled(state, &route, which, fields).await;
+    let fields = respelled.as_deref().unwrap_or(fields);
     let encode = |r: &Route| {
         let url = format!("{}{}", r.upstream.base(), which.path());
         Ok(apply_bearer_auth(
@@ -700,14 +781,33 @@ pub(super) async fn multipart_call(
             &r.upstream,
         ))
     };
-    match audio_send(admission.as_ref(), &route, encode).await {
-        Ok(resp) => Ok(MediaOutcome {
-            ttfb_ms: started.elapsed().as_millis() as i64,
-            resp,
-            route,
+    if let Some(hold) = admission.as_ref() {
+        hold.note_sending();
+    }
+    let sent = tokio::select! {
+        biased;
+        () = stopped(stop) => None,
+        s = audio_send(admission.as_ref(), &route, encode) => Some(s),
+    };
+    let Some(sent) = sent else {
+        return Err((Some(Box::new(route)), headers, before_answer()));
+    };
+    match sent {
+        Ok(resp) => {
+            note_buffered_answer(admission.as_ref(), &resp, false);
+            Ok(MediaOutcome {
+                ttfb_ms: started.elapsed().as_millis() as i64,
+                resp,
+                route,
+                headers,
+                admission,
+                chunked: false,
+            })
+        }
+        Err(e) => Err((
+            Some(Box::new(route)),
             headers,
-            admission,
-        }),
-        Err(e) => Err((Some(route), headers, explain_missing_route(which, e))),
+            explain_missing_route(which, e),
+        )),
     }
 }

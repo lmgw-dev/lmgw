@@ -49,7 +49,7 @@ async fn the_registry_starts_nothing_under_the_lease_but_joins_what_is_up() {
     let err = g
         .state
         .runtime()
-        .acquire(&acquire_spec(&g.state.data_dir, &snap, &other))
+        .acquire(&acquire_spec(&g.state, &snap, &other))
         .await
         .map(|_| ())
         .unwrap_err();
@@ -64,7 +64,7 @@ async fn the_registry_starts_nothing_under_the_lease_but_joins_what_is_up() {
     let joined = g
         .state
         .runtime()
-        .acquire(&acquire_spec(&g.state.data_dir, &snap, &up))
+        .acquire(&acquire_spec(&g.state, &snap, &up))
         .await;
     assert!(joined.is_ok(), "a claim on a ready container is a join");
     drop(joined);
@@ -74,7 +74,7 @@ async fn the_registry_starts_nothing_under_the_lease_but_joins_what_is_up() {
     drop(
         g.state
             .runtime()
-            .acquire(&acquire_spec(&g.state.data_dir, &snap, &other))
+            .acquire(&acquire_spec(&g.state, &snap, &other))
             .await
             .unwrap(),
     );

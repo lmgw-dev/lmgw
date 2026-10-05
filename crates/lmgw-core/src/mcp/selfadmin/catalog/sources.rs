@@ -184,7 +184,9 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Manage tracked Hugging Face downloads: re-fetch one, cancel a running \
                  transfer, untrack and delete its file, or ETag-check every completed \
-                 download against the hub for updates.",
+                 download against the hub for updates. An audio catalog file is checked and \
+                 re-fetched at the revision audio.catalog_revision takes it at now: under \
+                 'pinned' the commit its audio.cpp spec pins today, else main.",
             props: vec![
                 (
                     "action",

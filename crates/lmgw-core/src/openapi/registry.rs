@@ -104,6 +104,16 @@ pub(crate) enum Resp {
         json: SchemaFn,
         events: &'static [(&'static str, SchemaFn)],
     },
+    /// A WebSocket upgrade (realtime design §12): the `101` that turns the
+    /// request into a socket, with the subprotocol it selects when the client
+    /// offers it, and the `426` a request without upgrade headers gets.
+    /// `frames` says what travels over the socket — prose, because OpenAPI
+    /// has no vocabulary for frames, and an event list typed out here would
+    /// be a second copy of the protocol types to drift.
+    WebSocket {
+        subprotocol: &'static str,
+        frames: &'static str,
+    },
     /// `POST /api/session/login`'s 302.
     Redirect,
     NoContent,

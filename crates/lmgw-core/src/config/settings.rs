@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use super::settings_classes::{default_agent_origin_suffix, default_agent_script_image};
 use super::*;
 
+mod dev_models_dir;
+pub use dev_models_dir::*;
+
 /// Gate for the built-in **self-admin tools** (`lmgw__*`) that the northbound
 /// `/mcp` endpoint exposes alongside the aggregated southbound catalog (§20).
 ///
@@ -144,6 +147,10 @@ pub struct Settings {
     /// generation, and video through the same server later).
     #[serde(default)]
     pub image: ImageSettings,
+    /// `GET /v1/realtime`, spoken conversations over a WebSocket (realtime
+    /// design §12).
+    #[serde(default)]
+    pub realtime: RealtimeSettings,
     /// Hugging Face access token for gated/private repos (empty = anonymous).
     pub hf_token: String,
     /// Poll the release feed for new app versions in the background (§12).
@@ -252,6 +259,56 @@ pub struct Settings {
     /// When set it must name an alias whose capability `task` is `asr`.
     #[serde(default)]
     pub chat_stt_alias: String,
+    /// The text-to-speech alias the Chat speaks with — read-aloud and
+    /// realtime mode (chat-voice design §2.1). Empty = `realtime.tts_alias`.
+    /// When set it must name an alias whose capability `task` is `tts` or
+    /// `vdes`. A thread can override it.
+    #[serde(default)]
+    pub chat_tts_alias: String,
+    /// The Chat's voice, a voice of its TTS model (`chat_tts_alias`, else
+    /// `realtime.tts_alias`). Empty = none named: realtime's own chain
+    /// decides (`realtime.default_voice`, then the row's default preset —
+    /// realtime design §5.3). A thread can override it; one that speaks with
+    /// another model does not take it (chat-voice design §2.3).
+    #[serde(default)]
+    pub chat_voice: String,
+    /// The speech instructions the Chat's TTS gets, as a realtime session's
+    /// `session.lmgw.speech_instructions`. Empty =
+    /// `realtime.speech_instructions`. A thread can override it, `""`
+    /// included (none for that thread).
+    #[serde(default)]
+    pub chat_speech_style: String,
+    /// The language the user speaks, an ISO 639-1 code: what the
+    /// speech-to-text model is told where it takes a language, and what the
+    /// prompt states the user speaks (chat-voice design §2.1, split
+    /// 2026-10-05). Empty = none: the ASR detects. A thread can override it.
+    #[serde(default)]
+    pub chat_voice_language: String,
+    /// The language replies are in, an ISO 639-1 code: what the model is
+    /// asked to answer in and the text-to-speech model speaks where it takes
+    /// a language (chat-voice design §2.1, added 2026-10-05). Empty =
+    /// [`Self::chat_voice_language`], resolved; with neither, the reply
+    /// follows the user. A thread can override it.
+    #[serde(default)]
+    pub chat_voice_reply_language: String,
+    /// Read every Chat reply aloud as it streams. A thread can override it.
+    #[serde(default)]
+    pub chat_read_aloud: bool,
+    /// How realtime mode in the Chat detects a turn: `semantic_vad` (Smart
+    /// Turn), `server_vad` (silence only) or `push_to_talk`. A thread can
+    /// override it. One of [`crate::store::TurnDetection::NAMES`].
+    #[serde(default = "default_chat_turn_detection")]
+    pub chat_turn_detection: String,
+    /// Whether a voice turn goes to the chat model as audio
+    /// (voice-audio-input design §2.1): `off` (the model reads the
+    /// transcript, as before) or `local` — a local model lmgw runs whose
+    /// input modalities include audio hears the turn, the ASR still
+    /// transcribes it. Experimental; a cloud chat model never gets audio (a
+    /// cloud speech-to-text model still transcribes each turn's audio, as
+    /// with `off`). A thread can override it. One of
+    /// [`crate::store::AudioInputMode::NAMES`].
+    #[serde(default = "default_chat_voice_audio_input")]
+    pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (design §9.3,
     /// §11); a thread can override it. Always above zero: `0` would attach a
     /// knowledge base and then never let it say anything.
@@ -394,6 +451,7 @@ impl Default for Settings {
             aux_router: RouterSettings::default_aux(),
             audio: AudioSettings::default(),
             image: ImageSettings::default(),
+            realtime: RealtimeSettings::default(),
             hf_token: String::new(),
             update_check_enabled: true,
             update_token: String::new(),
@@ -411,6 +469,14 @@ impl Default for Settings {
             chat_system_prompt: None,
             chat_pdf_mode: default_chat_pdf_mode(),
             chat_stt_alias: String::new(),
+            chat_tts_alias: String::new(),
+            chat_voice: String::new(),
+            chat_speech_style: String::new(),
+            chat_voice_language: String::new(),
+            chat_voice_reply_language: String::new(),
+            chat_read_aloud: false,
+            chat_turn_detection: default_chat_turn_detection(),
+            chat_voice_audio_input: default_chat_voice_audio_input(),
             chat_kb_budget_tokens: default_chat_kb_budget_tokens(),
             docs_ingest_reply_tokens: default_docs_ingest_reply_tokens(),
             docs_embed_batch: default_docs_embed_batch(),
@@ -483,6 +549,16 @@ pub const CHAT_PDF_MODES: [&str; 3] = ["text", "images", "ask"];
 fn default_chat_pdf_mode() -> String {
     "text".to_string()
 }
+/// Smart Turn: the owner's default for voice (chat-voice design §16); realtime's
+/// own A/B between it and silence windows is still open.
+fn default_chat_turn_detection() -> String {
+    "semantic_vad".to_string()
+}
+/// Off: llama.cpp marks audio input experimental, and real voices are
+/// untested (voice-audio-input design, decision 4).
+fn default_chat_voice_audio_input() -> String {
+    "off".to_string()
+}
 /// Enough for a few well-matched excerpts on any context window a chat model
 /// is run with; a thread that needs more overrides it.
 fn default_chat_kb_budget_tokens() -> u32 {
@@ -549,6 +625,32 @@ pub fn dev_instance_override(
     Some((dev_prefix, cli_bind_addr.map(str::to_string)))
 }
 
+/// Why a dev instance must not serve on `container_prefix`, when it must not:
+/// the production default is the installed app's, and `server::run` is what
+/// starts every pass that lists and removes containers by prefix (model,
+/// benchmark and agent reconciliation, the run-dir sweep) and every start
+/// that names one. The backstop behind each entry point's own step (the
+/// headless runner moves a fresh dir off the default, a debug shell refuses
+/// one): a dev instance that reaches `server::run` on the default prefix
+/// refuses to serve rather than treat the installed app's containers as its
+/// own (chat-voice WP5 review B1). The settings write asks it too, so a dev
+/// window cannot move its own instance onto the production prefix either
+/// (WP11 review m1).
+///
+/// The hint names only the two seeding scripts: both also move `bind_addr`
+/// off production's, where a hand-made copy keeps it (WP11 review m3).
+pub fn dev_prefix_refusal(dev: bool, container_prefix: &str) -> Option<String> {
+    (dev && container_prefix.trim() == default_container_prefix()).then(|| {
+        format!(
+            "this is a dev instance, and its container_prefix is the production default \
+             '{}': its boot would list and remove the installed app's containers as its \
+             own. Seed the data dir with scripts/dev-instance.sh or scripts/dev-copy.sh copy \
+             (prefix lmgw-dev, a dev bind address).",
+            container_prefix.trim()
+        )
+    })
+}
+
 #[cfg(test)]
 mod dev_instance_override_tests {
     use super::dev_instance_override;
@@ -595,5 +697,21 @@ mod dev_instance_override_tests {
             dev_instance_override("lmgw", None, None),
             Some(("lmgw-dev".to_string(), None))
         );
+    }
+
+    #[test]
+    fn a_dev_instance_never_serves_on_the_production_prefix() {
+        use super::dev_prefix_refusal;
+        assert!(dev_prefix_refusal(true, "lmgw").is_some());
+        assert!(dev_prefix_refusal(true, " lmgw ").is_some());
+        assert!(dev_prefix_refusal(true, "lmgw-dev").is_none());
+        assert!(dev_prefix_refusal(true, "my-box").is_none());
+        // Production on its own prefix is the normal case.
+        assert!(dev_prefix_refusal(false, "lmgw").is_none());
+        // The hint never invites a hand-made copy, which keeps production's
+        // bind_addr: only the scripts that move it are named.
+        let why = dev_prefix_refusal(true, " lmgw ").unwrap();
+        assert!(why.contains("'lmgw'"), "{why}");
+        assert!(!why.contains("set another container_prefix"), "{why}");
     }
 }

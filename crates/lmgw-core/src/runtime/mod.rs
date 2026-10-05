@@ -17,7 +17,10 @@
 //!   that model's container.
 //! - [`audio`][]: per-model audio.cpp `server.json` rendering + the atomic
 //!   config-dir writer (§3.6, "Audio config") — the audio-engine sibling of
-//!   `argv`'s llama-flag rendering.
+//!   `argv`'s llama-flag rendering — and a row's engine settings and run
+//!   args with its own backend and threads in effect (the CPU switch).
+//! - [`Placement`]: whether a container computes on the GPU or the CPU,
+//!   which every VRAM and GPU-hold decision reads.
 //! - [`image`][]: the sd-server engine's own sibling — the capabilities body
 //!   a started container answers with, and the two directories its argv
 //!   points at (image-generation design §3).
@@ -38,7 +41,10 @@ pub mod audio;
 pub mod descriptor;
 pub mod image;
 pub mod lifecycle;
+mod placement;
 pub mod registry;
+
+pub use placement::Placement;
 
 /// Which model table a runtime entry belongs to (§3.1).
 ///

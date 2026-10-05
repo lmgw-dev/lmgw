@@ -18,7 +18,7 @@ use crate::config::{AudioModel, AudioSettings, AuxModel, ImageModel, LocalModel,
 use crate::sdcpp_caps::SdcppCaps;
 
 use super::argv::{EngineArgs, ImageArgs, LlamaArgs, RenderSpec};
-use super::{audio as audio_cfg, container_name, image as image_cfg, Class};
+use super::{audio as audio_cfg, container_name, image as image_cfg, Class, Placement};
 
 /// The binary inside the stable-diffusion.cpp image (§2.5): its `ENTRYPOINT`
 /// is `/sd-cli`, so the server has to be named explicitly.
@@ -60,11 +60,12 @@ pub struct ModelRuntime {
     /// `None` for chat/aux.
     pub audio: Option<AudioModel>,
     /// `AudioSettings`' engine fields (`backend`/`device`/`threads`/
-    /// `lazy_load`, §3.6) that flow into this model's own `server.json`
-    /// exactly like they flow into the shared multi-model one today. A class
-    /// setting, not a per-model override, so it is captured whole here rather
-    /// than resolved field-by-field like `image`/`extra_run_args`. `None` for
-    /// chat/aux.
+    /// `lazy_load`, §3.6) that flow into this model's own `server.json`,
+    /// with the row's own `backend` and `threads` in effect
+    /// ([`audio_cfg::engine_settings`], the CPU switch) — the class settings
+    /// unchanged for a row that sets neither. Every render of the row's
+    /// `server.json` reads this, never the class settings: the start, boot
+    /// adoption's compare, `local_model_get`. `None` for chat/aux.
     pub audio_settings: Option<AudioSettings>,
     /// The full sd-server row, carried so the argv renderer can read its two
     /// JSON maps without a second lookup. `None` for every other class.
@@ -132,6 +133,24 @@ pub(crate) fn file_name(path: &str) -> &str {
 }
 
 impl ModelRuntime {
+    /// Where a container started from this descriptor computes: `Cpu` for an
+    /// audio row whose backend in effect is `cpu`, `Gpu` for every other row
+    /// and class.
+    pub fn placement(&self) -> Placement {
+        self.audio_settings
+            .as_ref()
+            .map_or(Placement::Gpu, |s| Placement::of_backend(&s.backend))
+    }
+
+    /// The configuration an audio container started from this descriptor
+    /// runs, as the residency it teaches is keyed
+    /// ([`crate::vram::residency::resident_key`]) — `None` for every other
+    /// class.
+    pub fn resident_key(&self) -> Option<String> {
+        let (m, s) = self.audio.as_ref().zip(self.audio_settings.as_ref())?;
+        Some(crate::vram::residency::resident_key(m, s))
+    }
+
     /// The ledger's charge for a start from this descriptor — `None` unless it
     /// renders a ladder rung ([`Self::rung`]).
     pub fn rung_charge(&self) -> Option<RungCharge> {
@@ -169,6 +188,25 @@ impl ModelRuntime {
         data_dir: &Path,
     ) -> std::io::Result<RenderSpec> {
         self.render_spec_inner(container_prefix, host_port, models_dir, data_dir, true)
+    }
+
+    /// [`Self::render_spec`] for a start that may not write into
+    /// `models_dir` (`AcquireSpec::may_write_models_dir`, a dev instance on a
+    /// models dir outside its data dir): the image class's LoRA and upscaler
+    /// dirs are not created, and the start goes ahead with a log line
+    /// ([`image_cfg::note_dirs_not_created`]). Audio's `server.json` lives
+    /// under the data dir and is written as on every start.
+    pub fn render_spec_sparing_models_dir(
+        &self,
+        container_prefix: &str,
+        host_port: u16,
+        models_dir: &str,
+        data_dir: &Path,
+    ) -> std::io::Result<RenderSpec> {
+        if let Some(model) = &self.image_model {
+            image_cfg::note_dirs_not_created(models_dir, model);
+        }
+        self.render_spec_inner(container_prefix, host_port, models_dir, data_dir, false)
     }
 
     /// [`Self::render_spec`] without the filesystem half — what a **read**
@@ -375,7 +413,7 @@ fn chat_runtime(snap: &Snapshot, m: &LocalModel, rung: usize) -> ModelRuntime {
         enabled: m.enabled,
         llama: Some(LlamaArgs::Chat {
             gguf_path,
-            params,
+            params: Box::new(params),
             args: m.args.clone(),
         }),
         audio: None,
@@ -436,17 +474,16 @@ fn audio_runtime(snap: &Snapshot, m: &AudioModel) -> ModelRuntime {
         class: Class::Audio,
         model_id: m.model_id.clone(),
         image: m.image.clone().unwrap_or_else(|| a.image.clone()),
-        extra_run_args: m
-            .extra_run_args
-            .clone()
-            .unwrap_or_else(|| a.extra_run_args.clone()),
+        // A CPU row inheriting the class's args runs without its GPU
+        // passthrough (`audio_cfg::run_args`).
+        extra_run_args: audio_cfg::run_args(m, a),
         // No per-model idle column yet — see the field doc on `idle_seconds`.
         idle_seconds: 0,
         warm_start: m.warm_start,
         enabled: m.enabled,
         llama: None,
         audio: Some(m.clone()),
-        audio_settings: Some(a.clone()),
+        audio_settings: Some(audio_cfg::engine_settings(m, a, crate::host::cpu())),
         image_model: None,
         sdcpp_caps: None,
         rung: None,

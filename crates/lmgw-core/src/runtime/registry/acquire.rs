@@ -162,6 +162,8 @@ impl Registry {
                                 capabilities: None,
                                 gate: None,
                                 charge: spec.runtime.rung_charge(),
+                                resident_key: spec.runtime.resident_key(),
+                                placement: spec.runtime.placement(),
                                 sends: watch::channel(0).0,
                                 climb: None,
                                 owner: origin,
@@ -308,22 +310,41 @@ impl Registry {
         // container really has (second review, finding 1). Once per start,
         // not per port attempt.
         let gate = GateFacts::of_start(runtime, spec.models_dir).await;
+        // A start on the CPU says so once: no VRAM figure will ever show for
+        // it, and the thread count is the one setting that matters there.
+        if let (Some(m), Some(engine)) = (&runtime.audio, &runtime.audio_settings) {
+            if !runtime.placement().is_gpu() {
+                tracing::info!(
+                    "{}",
+                    crate::runtime::audio::cpu_start_line(m, engine, crate::host::cpu())
+                );
+            }
+        }
 
         // At most two attempts, and the second only for a port conflict:
         // this is not a general retry loop, it is the §10.4 window between
         // releasing the probe listener and podman binding the port.
-        let mut retried = false;
+        let mut retry = PortRetry::default();
         loop {
             let port = (self.port)()
                 .map_err(|e| fail(format!("no free host port could be allocated: {e}"), vec![]))?;
-            let render = runtime
-                .render_spec(spec.container_prefix, port, spec.models_dir, spec.data_dir)
-                .map_err(|e| {
-                    fail(
-                        format!("rendering the container spec failed: {e}"),
-                        Vec::new(),
-                    )
-                })?;
+            let render = match spec.may_write_models_dir {
+                true => {
+                    runtime.render_spec(spec.container_prefix, port, spec.models_dir, spec.data_dir)
+                }
+                false => runtime.render_spec_sparing_models_dir(
+                    spec.container_prefix,
+                    port,
+                    spec.models_dir,
+                    spec.data_dir,
+                ),
+            };
+            let render = render.map_err(|e| {
+                fail(
+                    format!("rendering the container spec failed: {e}"),
+                    Vec::new(),
+                )
+            })?;
             // The image renderer is the one that can refuse (a row naming
             // neither `model` nor `diffusion_model`, a key this image has no
             // flag for). Asked here, before `podman run`, so the answer is the
@@ -386,13 +407,12 @@ impl Registry {
                 Err(e) => (String::from("n/a"), format!("podman could not be run: {e}")),
             };
 
-            if !retried && is_address_in_use(&stderr) {
+            if retry.again(&stderr) {
                 // Measured (§10.4): the run fails synchronously but leaves
                 // the container object behind in `created`. Collect the husk
                 // before rerunning — `--replace` would too, but only if the
                 // retry gets that far, and leaving `created` husks around is
                 // exactly what makes reconciliation (§3.4) ambiguous later.
-                retried = true;
                 let _ = self.podman(&["rm", "-f", name]).await;
                 continue;
             }
@@ -596,21 +616,4 @@ enum Decision {
     /// [`Registry::await_phase`].
     Wait(RuntimeState, watch::Receiver<Phase>),
     Start(StartClaim),
-}
-
-/// Detection is on stderr, never on an exit code: measured (§10.4), the
-/// container object podman leaves behind reads exit 0 because it never
-/// started, and `podman run` itself exits 126 for reasons other than a port
-/// clash. Several spellings because the message comes from whichever network
-/// backend is in play (pasta, slirp4netns, rootful CNI).
-fn is_address_in_use(stderr: &str) -> bool {
-    let low = stderr.to_ascii_lowercase();
-    [
-        "address already in use",
-        "address in use",
-        "port is already allocated",
-        "cannot listen on the tcp port",
-    ]
-    .iter()
-    .any(|needle| low.contains(needle))
 }

@@ -87,6 +87,24 @@ descriptor is derived at snapshot build:
   to class settings. The podman-level hook: per-model `CUDA_VISIBLE_DEVICES`
   via `-e`, memory limits, device placement.
 - `idle_seconds`, `warm_start` (new column: start at boot; still evictable).
+- *(2026-10-02, the per-row CPU switch)* An audio row may set `backend:
+  cpu` and `threads` (migration 0056; `None` inherits the class). The
+  descriptor's `audio_settings` are then the class's engine keys with the
+  row's in effect (`runtime::audio::engine_settings`), and a CPU row that
+  inherits the class's `extra_run_args` gets them without the GPU
+  passthrough (`label=disable` kept; an override is used verbatim, and
+  `local_model_get` and the editor warn when it still passes a GPU). The
+  strip covers CDI and `--device` nodes, `--gpus`, GPU-node volumes and
+  mounts, the NVIDIA runtime, CDI annotations and `NVIDIA_VISIBLE_DEVICES`,
+  and adds `NVIDIA_VISIBLE_DEVICES=void` against the legacy NVIDIA OCI hook
+  (the CUDA images set it to `all`); a passthrough configured some other way
+  on the host is not seen. The live check of 2026-10-02 (dev copy) served
+  real transcriptions from such a container with `HostConfig.Devices = []`
+  and no GPU process for it.
+  `ModelRuntime::placement()` (`Gpu | Cpu`) is recorded on the registry
+  entry, and every VRAM and hold decision reads it: a CPU container is
+  charged nothing, never evicted, and not stopped by the GPU hold. A row
+  that sets neither renders the `server.json` it rendered before.
 
 ### 3.2 Registry and the acquire primitive
 
@@ -125,15 +143,20 @@ and then do the same. The guard decrements in-flight on drop. Crucially:
   `[a-z0-9-]`, runs collapsed, trimmed, capped; `hash6` = short hash of the
   raw `model_id`, making the name injective even where the slug is lossy.
 - Labels on every managed container: `lmgw.instance=<prefix>`,
-  `lmgw.class=<class>`, `lmgw.model=<model_id>`, `lmgw.engine=<engine>`.
-  Reconciliation filters on the instance label, never on name patterns.
+  `lmgw.class=<class>`, `lmgw.model=<model_id>`, `lmgw.engine=<engine>`, and
+  `lmgw.run_args=<digest>` of the `extra_run_args` it was started with
+  (2026-10-02). Reconciliation filters on the instance label, never on name
+  patterns.
 
 ### 3.4 Reconciliation, deletion, shutdown
 
 Boot: `podman ps -a --filter label=lmgw.instance=<prefix>` →
 
 - Running container whose inspected `Cmd` matches the currently rendered
-  argv **and** whose model still exists and is enabled: adopt (recover host
+  argv, whose `lmgw.run_args` label matches the run args rendered now (podman
+  normalizes the flags themselves, so they are compared through the label; a
+  container without one is from an older lmgw and is not adopted), **and**
+  whose model still exists and is enabled: adopt (recover host
   port from the inspected port mapping; mark `ready` after a `/health`
   probe). This is the crash-recovery path — models stay warm across an lmgw
   crash.
@@ -162,7 +185,10 @@ port between release and `podman run`) is handled by treating a failed run as
 retry-with-fresh-port — measured (§10.4): `podman run -d` fails
 synchronously on a port conflict (exit 126, pasta names the port in
 stderr), but leaves the container object in `created` state, so the retry
-path removes the husk (or leans on `--replace`) before rerunning.
+path removes the husk (or leans on `--replace`) before rerunning. One
+retry, only for the port conflict (`registry::PortRetry`); since
+2026-10-02 an agent's service container and a benchmark's container take
+the same retry, as both publish an ephemeral port too.
 
 ### 3.6 Lifecycle verbs
 

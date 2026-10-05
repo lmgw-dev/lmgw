@@ -1,6 +1,7 @@
 # Public releases, one per pushed tag v<X.Y.Z>. Development happens on a
-# private GitLab; `main` and the tag are pushed here deliberately when a
-# version is ready. A push to main alone only runs ci.yml.
+# private GitLab; scripts/publish-github.sh brings it here as one squashed
+# commit per publish, and with --tag puts the tag on that public commit. A push
+# to main alone only runs ci.yml.
 #
 # The version is the tag's, and ci/build.sh refuses a tag that does not match
 # the version in Cargo.toml: scripts/release.sh bumps both and tags in one go.

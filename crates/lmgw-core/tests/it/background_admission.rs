@@ -42,7 +42,7 @@ async fn guest_start(g: &Gpu, model: &str, alias: &str) -> BackgroundStart {
 
 fn started(s: BackgroundStart) -> LocalHold {
     match s {
-        BackgroundStart::Started(hold) => hold,
+        BackgroundStart::Started(hold) => *hold,
         BackgroundStart::Blocked(why) => panic!("expected a start, blocked by: {why}"),
     }
 }
