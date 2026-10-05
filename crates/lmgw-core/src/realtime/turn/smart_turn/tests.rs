@@ -19,11 +19,35 @@ fn reference(name: &str) -> f32 {
     )
 }
 
+/// The output is int8: every logit lies on a lattice of [`LOGIT_STEP`], and
+/// which lattice point a clip lands on depends on the ORT build and the
+/// CPU's int8 kernels. `en_complete_short` (Python, onnxruntime 1.30:
+/// 0.978554) lands one step lower with ORT 1.28 on an AVX2 Ryzen and two
+/// steps higher on GitHub's runner (0.980147, 2026-10-05) — 8e-4 and 1.6e-3
+/// in p, where a bound on p would pass one machine and fail the other. So
+/// the check is in steps of the lattice: what a kernel's rounding moves, and
+/// far below the distance between a complete and an incomplete clip.
+const LOGIT_STEP: f32 = 0.0394;
+/// How many lattice steps a build or CPU may move a clip (one seen locally,
+/// two on GitHub's runner).
+const STEPS: f32 = 3.0;
+
+fn logit(p: f32) -> f32 {
+    (p / (1.0 - p)).ln()
+}
+
+/// `got` within [`STEPS`] lattice steps of `want` (both probabilities).
+fn assert_near(name: &str, got: f32, want: f32) {
+    let steps = (logit(got) - logit(want)).abs() / LOGIT_STEP;
+    assert!(
+        steps <= STEPS + 0.05,
+        "{name}: p {got} vs {want}, {steps:.2} logit steps apart"
+    );
+}
+
 /// The reference features through our ORT session reproduce the Python
-/// onnxruntime probability (realtime §22: onnxruntime 1.30). The output is
-/// int8: ORT 1.28 lands one logit step (0.0394) lower on
-/// `en_complete_short`, 8.4e-4 in p at 0.978. Near p 0.5 one step is
-/// ~0.01, so this tolerance only holds for confident clips.
+/// onnxruntime probability (realtime §22: onnxruntime 1.30), up to the int8
+/// output's rounding ([`assert_near`]).
 #[test]
 fn matches_reference_probability_on_reference_features() {
     let mut st = SmartTurn::from_bytes(SMART_TURN_ONNX, 1).unwrap();
@@ -31,7 +55,7 @@ fn matches_reference_probability_on_reference_features() {
         let features = f32le(&format!("smartturn_{name}.features_f32le.bin"));
         let (got, want) = (st.probability(&features).unwrap(), reference(name));
         eprintln!("{name}: reference features p {got:.6} (Python {want:.6})");
-        assert!((got - want).abs() <= 1e-3, "{name}: {got} vs {want}");
+        assert_near(name, got, want);
     }
 }
 
@@ -43,7 +67,7 @@ fn own_features_reproduce_the_probability() {
         let audio = f32le(&format!("smartturn_{name}.audio16k_f32le.bin"));
         let (got, want) = (st.score(&audio).unwrap(), reference(name));
         eprintln!("{name}: own features p {got:.6} (Python {want:.6})");
-        assert!((got - want).abs() <= 1e-3, "{name}: {got} vs {want}");
+        assert_near(name, got, want);
     }
 }
 
