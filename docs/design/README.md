@@ -31,6 +31,10 @@ is kept stable.
 | 2026-09-30 | [Chat, made complete](2026-09-30-chat-complete-design.md): rendering, parameters, folders, search, knowledge bases |
 | 2026-10-01 | [Realtime voice API](2026-10-01-realtime-voice-design.md): OpenAI Realtime over WebSocket, served as a cascade of ASR, chat and TTS aliases |
 | 2026-10-02 | [Audio catalog revisions](2026-10-02-audio-catalog-revisions-design.md): downloads at the commit an audio.cpp spec pins, and the commit every download came from |
+| 2026-10-05 | [Server-side MCP tools on `/v1/realtime`](2026-10-05-realtime-server-tools-design.md): `mcp` session tools resolved against lmgw's own servers, and the `/v1/mcp/servers` discovery routes |
+| 2026-10-06 | [The registry owns the start](2026-10-06-registry-owns-start.md): a request that goes away mid-load no longer leaves its model's container running unowned; reconciliation after boot; `499` rows |
+| 2026-10-06 | [llama.cpp egress](2026-10-06-llama-egress-design.md) (draft): llama-server and ik_llama.cpp as their own `llama_cpp` protocol, `/props` facts, tool-result images |
+| 2026-10-06 | [Client apps](2026-10-06-client-apps-design.md) (draft): device keys and a Chat capability, the Chat change feed, ongoing-conversation folders, device-hosted MCP, approvals, MCP resources |
 
 ## Dashboard rebuild (2026-08)
 

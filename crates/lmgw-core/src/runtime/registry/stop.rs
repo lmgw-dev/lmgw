@@ -1,7 +1,9 @@
 //! Stopping and removing containers (§3.6).
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use super::owned::Down;
 use super::*;
 use crate::runtime::{container_name, Class};
 
@@ -20,7 +22,7 @@ impl Registry {
     /// container (the reaper's idle age, eviction's LRU, a dead endpoint)
     /// uses [`Self::stop_generation`] instead.
     pub async fn stop(
-        &self,
+        self: &Arc<Self>,
         class: Class,
         model_id: &str,
         force: bool,
@@ -46,7 +48,7 @@ impl Registry {
     /// another container, or is being climbed, is [`RuntimeError::Moved`]
     /// and nothing is stopped.
     pub async fn stop_generation(
-        &self,
+        self: &Arc<Self>,
         class: Class,
         model_id: &str,
         generation: u64,
@@ -62,7 +64,7 @@ impl Registry {
     /// `only_background`: the judged container must still be
     /// `Background`-owned too ([`Self::stop_idle_background`]).
     pub(super) async fn stop_where(
-        &self,
+        self: &Arc<Self>,
         class: Class,
         model_id: &str,
         force: bool,
@@ -123,20 +125,13 @@ impl Registry {
             )
         };
 
-        let problem = self.stop_container(&name, stop_timeout).await;
-
-        // Drop the entry either way: after a failed stop lmgw's belief about
-        // this container is worthless, and the next start replaces it by name.
-        //
-        // The verdict goes out *after* the removal, never before: a terminal
-        // phase on an entry that is still in the map would spin every waiter
-        // (it would re-park on the same entry and re-read the same final
-        // value). Waiters that wanted this container's start get told it was
-        // stopped, so nobody silently brings back up what somebody just asked
-        // to be taken down; the claiming task learns the same fact its own
-        // way, from `ready()` finding the entry no longer `starting`.
-        self.forget(&key, &phase, false);
-        phase.send_replace(verdict);
+        // The registry's task from here (`owned.rs`): a caller dropped while
+        // podman stops the container — an eviction inside a request whose
+        // client hung up — must not leave the entry `stopping` for good, with
+        // every later acquirer parked on it.
+        let problem = self
+            .spawn_stop(key, name, Down::Stop(stop_timeout), phase, verdict)
+            .await;
 
         match problem {
             None => Ok(()),
@@ -190,7 +185,7 @@ impl Registry {
     /// "stop all"). Concurrent on purpose — a tray app quitting should not
     /// pay N × grace serially — and returns every refusal/failure rather than
     /// the first, so the caller can report exactly which models were busy.
-    pub async fn stop_all(&self, force: bool) -> Vec<RuntimeError> {
+    pub async fn stop_all(self: &Arc<Self>, force: bool) -> Vec<RuntimeError> {
         let keys: Vec<Key> = self.map().keys().cloned().collect();
         futures::future::join_all(
             keys.iter()
@@ -245,7 +240,7 @@ impl Registry {
     /// therefore also collects a container this lmgw never had an entry for
     /// (one orphaned by a crash, deleted before the next boot reconcile).
     pub async fn stop_and_remove(
-        &self,
+        self: &Arc<Self>,
         container_prefix: &str,
         class: Class,
         model_id: &str,

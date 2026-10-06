@@ -56,7 +56,8 @@ pub use voices::{handle_audio_voices, VoicesProbe, VOICES_SOURCE_HEADER};
 /// the fallback's upstream, which is the only order that keeps it honest
 /// (gpu-hold design §4).
 pub(crate) fn require_openai_audio(route: &Route, alias: &str) -> Result<(), GatewayError> {
-    if route.upstream.protocol != crate::config::Protocol::Openai {
+    // llama-server serves /v1/audio/transcriptions on the same surface.
+    if !route.upstream.protocol.speaks_openai_http() {
         return Err(GatewayError::Unsupported(format!(
             "/v1/audio/* requires an openai-protocol upstream; alias '{alias}' resolves to \
              '{}' ({})",
@@ -182,6 +183,7 @@ pub(super) async fn finish_media(
                     max_tokens_clamped: None,
                     fallback: headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 e.http_status().as_u16(),
                 None,
@@ -259,6 +261,7 @@ pub(super) async fn finish_media(
                 max_tokens_clamped: None,
                 fallback,
                 rung: None,
+                degraded: None,
             },
             status.as_u16(),
             Some(ttfb_ms),
@@ -491,7 +494,7 @@ pub(crate) async fn voices_if_running(
                 && e.state == crate::runtime::registry::RuntimeState::Ready)
                 .then_some(e.port)
         })?;
-        route.upstream.base_url = format!("http://127.0.0.1:{port}/v1");
+        crate::vram::LocalHold::point_at(&mut route, port);
     }
     match voices_body(state, None, &route).await {
         Err(GatewayError::Transport(_)) if local.is_some() => None,
@@ -751,7 +754,7 @@ pub(super) async fn multipart_call(
 
 /// [`multipart_call`] past its gate: the re-encode and the send on the
 /// route `opened` holds — also what a caller that opened the gate its own
-/// way sends with ([`super::transcribe`]'s local-only transcription). A
+/// way sends with ([`super::transcribe`]'s voice-clip transcription). A
 /// transcription's `language` goes up in the answering row's spelling
 /// ([`asr_language`]).
 pub(super) async fn multipart_send(

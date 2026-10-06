@@ -111,6 +111,11 @@ pub struct ChatMessageRow {
     /// GPU-hold or outside-VRAM fallback, a ladder climb's fallback, a
     /// candidate alias's pick. `None` when `model` itself answered.
     pub answered_by: Option<String>,
+    /// A reply a fallback that cannot see answered: who, for which model,
+    /// and what went to it in the images' place (`chat_turn::blind`).
+    /// `None` on every other row, and then left out of the JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images_note: Option<String>,
     /// How the turn was spoken (chat-voice design §3); `None` for a typed
     /// turn.
     pub voice: Option<MessageVoice>,
@@ -173,6 +178,7 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
         context: context_from_column(row.get("context")),
         model: row.get("model"),
         answered_by: row.get("answered_by"),
+        images_note: row.get("images_note"),
         voice: MessageVoice::from_stored(row.get("voice")),
         created_at: row.get("created_at"),
     }

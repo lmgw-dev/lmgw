@@ -22,6 +22,10 @@ use super::ids::Ids;
 use super::protocol::{ContentPart, ErrorObject, Item, ItemStatus, Role, ServerEvent, ITEM_OBJECT};
 
 mod audio;
+mod mcp;
+
+pub(in crate::realtime) use mcp::refusal_of_frame as mcp_item_refusal;
+use mcp::McpCallRecord;
 
 /// `previous_item_id: "root"` inserts at the start (OpenAI's own spelling).
 const ROOT: &str = "root";
@@ -34,6 +38,9 @@ pub(crate) struct Conversation {
     calls_seen: HashSet<String>,
     /// What the listener heard of each assistant audio item (§7.3, `audio`).
     heard: HashMap<String, HeardTable>,
+    /// What the session keeps beside each `mcp_call` item, by item id
+    /// (`mcp`).
+    mcp_calls: HashMap<String, McpCallRecord>,
 }
 
 impl Conversation {
@@ -158,6 +165,7 @@ impl Conversation {
         if let Item::FunctionCall(c) = &item {
             self.note_call_id(c.call_id.as_deref().unwrap_or_default());
         }
+        self.note_replayed(&item, ids);
         let previous = at
             .checked_sub(1)
             .and_then(|p| self.items[p].id())
@@ -196,8 +204,13 @@ impl Conversation {
             )
             .with_param("item_id"));
         }
+        // An `mcp_call` has no status to say so (realtime-server-tools §2.5).
+        if let Some(e) = self.mcp_delete_refusal(item_id) {
+            return Err(e);
+        }
         self.items.remove(at);
         self.heard.remove(item_id);
+        self.mcp_calls.remove(item_id);
         Ok(ServerEvent::ItemDeleted {
             item_id: item_id.to_string(),
         })
@@ -217,22 +230,26 @@ fn status_of(item: &Item) -> Option<ItemStatus> {
         Item::Message(m) => m.status,
         Item::FunctionCall(c) => c.status,
         Item::FunctionCallOutput(o) => o.status,
+        Item::McpCall(_) | Item::McpListTools(_) => None,
     }
 }
 
 /// A client item is complete as it arrives, and is echoed as a server item.
+/// An `mcp_call` has neither field (realtime-server-tools §2.2).
 fn mark_complete(item: &mut Item) {
     let (object, status) = match item {
         Item::Message(m) => (&mut m.object, &mut m.status),
         Item::FunctionCall(c) => (&mut c.object, &mut c.status),
         Item::FunctionCallOutput(o) => (&mut o.object, &mut o.status),
+        Item::McpCall(_) | Item::McpListTools(_) => return,
     };
     *object = Some(ITEM_OBJECT.into());
     *status = Some(ItemStatus::Completed);
 }
 
 /// What a client may create (§7.1): each role with the content types it
-/// speaks, and a function call that names its `call_id`.
+/// speaks, a function call that names its `call_id`, and an `mcp_call` as
+/// history (`mcp`).
 fn check_item(item: &Item) -> Result<(), ErrorObject> {
     match item {
         Item::Message(m) => {
@@ -285,7 +302,8 @@ fn check_item(item: &Item) -> Result<(), ErrorObject> {
             )
             .with_param("item.call_id")),
         },
-        Item::FunctionCallOutput(_) => Ok(()),
+        Item::FunctionCallOutput(_) | Item::McpCall(_) => Ok(()),
+        Item::McpListTools(_) => Err(mcp::list_tools_refusal()),
     }
 }
 

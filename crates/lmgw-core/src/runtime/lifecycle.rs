@@ -8,7 +8,8 @@
 //!   router-mode containers a pre-upgrade install left behind (by the names
 //!   the §6 settings migration preserved), then start the `warm_start` models.
 //! - [`reap_idle`]: one pass of the idle reaper (§3.7), driven by the server's
-//!   background tick.
+//!   background tick — beside a reconciliation pass ([`readopt`]) that makes
+//!   a running container the registry lost track of lmgw's again.
 //! - [`shutdown`]: stop everything, bounded, on the way out (§3.4).
 //! - [`drop_model`]: a deleted or disabled model's container goes now, not at
 //!   the next boot.
@@ -29,6 +30,9 @@ use crate::vram::Fit;
 use super::descriptor::{higher_rungs, model_runtimes, ModelRuntime};
 use super::registry::{AcquireSpec, Presence, RuntimeError, RuntimeState};
 use super::Class;
+
+mod readopt;
+pub use readopt::{readopt, readopt_in_background};
 
 /// How often the idle reaper looks (§3.7).
 ///
@@ -118,12 +122,7 @@ pub async fn boot(state: &SharedState) {
         .filter(|r| r.enabled)
         .map(|r| acquire_spec(state, &snap, r))
         .collect();
-    let candidates: Vec<AcquireSpec<'_>> = runtimes
-        .iter()
-        .chain(&rungs)
-        .filter(|r| r.enabled)
-        .map(|r| acquire_spec(state, &snap, r))
-        .collect();
+    let candidates = readopt::candidates(state, &snap, &runtimes, &rungs);
 
     let registry = state.runtime();
     // Until adoption and the legacy sweep are over, a container a previous
@@ -270,13 +269,15 @@ pub struct HoldSweep {
     /// that could not be run at all.
     ///
     /// Its own bucket rather than folded into [`Self::draining`] because the
-    /// two have opposite futures: a draining model is stopped by the next
+    /// two have different futures: a draining model is stopped by the next
     /// reaper tick, whereas a failed stop has already dropped the registry
     /// entry (runtime/registry/stop.rs: after a failed stop lmgw's belief about
-    /// the container is worthless), so **nothing retries it** — the container
-    /// keeps the card until somebody looks. The owner engaged the hold to get
-    /// their GPU back; a stop failure is the one thing here that cannot be
-    /// silent, so it is named in the op response and logged at warn.
+    /// the container is worthless), so no sweep sees it again unless a
+    /// reconciliation pass on a later tick ([`readopt`]) takes it up again —
+    /// one this lmgw started, and with a backoff while it keeps failing. The
+    /// owner engaged the hold to get their GPU back; a stop failure is the one
+    /// thing here that cannot be silent, so it is named in the op response and
+    /// logged at warn.
     pub failed: Vec<String>,
     /// Containers on the CPU, left running: they use no VRAM, so the hold
     /// has no claim on them (`runtime::Placement`).
@@ -478,6 +479,10 @@ async fn legacy_sweep(state: &SharedState, snap: &Snapshot, adopted: &[String]) 
 /// those, immediately and by name, and a second opinion here would only race
 /// it.
 pub async fn reap_idle(state: &SharedState) {
+    // Beside the reaping, never in its way: a container that lost its entry
+    // is adopted by a pass of its own, and judged from the next tick on like
+    // any other — reaped once idle, swept under the hold.
+    readopt_in_background(state);
     let snap = state.snapshot();
     // The GPU hold comes first and ignores `idle_seconds` entirely (gpu-hold
     // design §5). This tick is what actually drains a held GPU: a model that

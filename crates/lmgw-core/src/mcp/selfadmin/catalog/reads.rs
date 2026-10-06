@@ -73,7 +73,13 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "List configured upstream providers (OpenAI-compatible, Anthropic, Gemini, \
                  local llama.cpp) with their base URLs, protocols and enabled state. API \
-                 keys are never returned, only whether one is set.",
+                 keys are never returned, only whether one is set. A llama_cpp row also \
+                 carries llama_facts: what its server said in GET /props (build, slot \
+                 context, modalities), when (read_at, unix seconds), or why it is unknown — \
+                 one entry for the server (model empty) and, when it is a llama-server \
+                 router (router: true), one per model. lmgw asks in the background on a \
+                 row's first chat request or Test, and again after an edit, a transport \
+                 failure, a media refusal or a Test.",
             props: vec![],
             required: &[],
         },

@@ -23,11 +23,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lmgw_core::config::{HoldFallbackMode, LlamaParams, Protocol, Route, Settings, UpstreamKind};
+use lmgw_core::config::{
+    AuxKind, HoldFallbackMode, LlamaParams, Protocol, Route, Settings, UpstreamKind,
+};
 use lmgw_core::ladder::Rung;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry, HOST_PID_FORMAT};
 use lmgw_core::state::{AppState, SharedState};
-use lmgw_core::store::{self, NewAlias, NewCandidateAlias, NewLocalModel, NewUpstream};
+use lmgw_core::store::{
+    self, NewAlias, NewAuxModel, NewCandidateAlias, NewLocalModel, NewUpstream,
+};
 use lmgw_core::vram::{GpuMemory, GpuProbe, ProcessMemory};
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -130,12 +134,62 @@ pub struct World {
     pub transcript: String,
     /// And the `language` field each went up with, if any.
     pub transcription_languages: Vec<Option<String>>,
+    /// Model id -> the `/props` body its container answers. A container whose
+    /// model has none answers 404, as a server without the route would.
+    pub props: HashMap<String, serde_json::Value>,
+    /// Every `/props` read a container got, as the model it runs.
+    pub props_reads: Vec<String>,
+    /// Container name -> the argv of the `podman run` that made it.
+    pub run_argv: HashMap<String, Vec<String>>,
+    /// When set, `ps` lists every loaded container (its `--label`s, its
+    /// filters honoured) and `inspect --format json` gives its command and
+    /// port: what a later lmgw finds running and adopts ([`Gpu::restart`]).
+    /// Off, `ps` lists nothing, as before.
+    pub listed: bool,
 }
 
 /// The fake host PID of the process outside lmgw.
 const OUTSIDE_PID: u32 = 7_000_000;
 
 impl World {
+    fn is_loaded(&self, name: &str) -> bool {
+        self.names
+            .get(name)
+            .is_some_and(|m| self.loaded.contains(m))
+    }
+
+    /// `podman ps --format json` over the loaded containers, `--filter
+    /// label=k[=v]` honoured; `[]` unless [`Self::listed`].
+    fn ps(&self, args: &[String]) -> serde_json::Value {
+        if !self.listed {
+            return json!([]);
+        }
+        let filters: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--filter")
+            .filter_map(|w| w[1].strip_prefix("label="))
+            .collect();
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for (name, argv) in &self.run_argv {
+            if !self.is_loaded(name) {
+                continue;
+            }
+            let labels: HashMap<&str, &str> = argv
+                .windows(2)
+                .filter(|w| w[0] == "--label")
+                .filter_map(|w| w[1].split_once('='))
+                .collect();
+            let wanted = filters.iter().all(|f| match f.split_once('=') {
+                Some((k, v)) => labels.get(k) == Some(&v),
+                None => labels.contains_key(f),
+            });
+            if wanted {
+                rows.push(json!({"Names": [name], "Labels": labels, "State": "running"}));
+            }
+        }
+        json!(rows)
+    }
+
     fn used(&self) -> u64 {
         let own: u64 = self.loaded.iter().filter_map(|m| self.size.get(m)).sum();
         own + self.outside
@@ -197,6 +251,27 @@ impl GpuProbe for FakeGpu {
     }
 }
 
+/// `podman inspect --format json` of the container `argv` ran: its command
+/// (everything after the image, which follows the models mount and any config
+/// mount or entrypoint) and its published port.
+fn inspected(argv: &[String]) -> serde_json::Value {
+    let mut at = argv
+        .iter()
+        .position(|a| a.ends_with(":/models:ro"))
+        .expect("every managed container mounts its models dir")
+        + 1;
+    while matches!(argv[at].as_str(), "-v" | "--entrypoint") {
+        at += 2;
+    }
+    let port = flag(argv, "-p")
+        .and_then(|p| p.rsplit(':').nth(1))
+        .unwrap_or_default();
+    json!([{
+        "Config": {"Cmd": &argv[at + 1..]},
+        "NetworkSettings": {"Ports": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": port}]}},
+    }])
+}
+
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
         .position(|a| a == name)
@@ -220,9 +295,28 @@ impl CommandRunner for Podman {
         match args[0].as_str() {
             "ps" => Ok(CmdOutput {
                 status: 0,
-                stdout: "[]".into(),
+                stdout: self.world.lock().unwrap().ps(args).to_string(),
                 stderr: String::new(),
             }),
+            "inspect"
+                if args.get(2).map(String::as_str) == Some("json")
+                    && self.world.lock().unwrap().listed =>
+            {
+                let w = self.world.lock().unwrap();
+                let name = args.last().cloned().unwrap_or_default();
+                match w.run_argv.get(&name).filter(|_| w.is_loaded(&name)) {
+                    Some(argv) => Ok(CmdOutput {
+                        status: 0,
+                        stdout: inspected(argv).to_string(),
+                        stderr: String::new(),
+                    }),
+                    None => Ok(CmdOutput {
+                        status: 125,
+                        stdout: String::new(),
+                        stderr: format!("Error: no such container {name}\n"),
+                    }),
+                }
+            }
             "run" => {
                 let name = flag(args, "--name").unwrap_or_default().to_string();
                 let model = args
@@ -260,6 +354,7 @@ impl CommandRunner for Podman {
                 let pid = 5_000_000 + w.runs.len() as u32;
                 w.pids.insert(model.clone(), pid);
                 w.size.insert(model.clone(), bytes);
+                w.run_argv.insert(name.clone(), args.to_vec());
                 w.names.insert(name, model.clone());
                 w.ports.insert(port, model.clone());
                 if let Some(served) = audiocpp_options::served(args) {
@@ -327,6 +422,20 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
     Mock::given(method("GET"))
         .and(path("/health"))
         .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#))
+        .mount(&server)
+        .await;
+    let props_world = world.clone();
+    Mock::given(method("GET"))
+        .and(path("/props"))
+        .respond_with(move |_: &Request| {
+            let mut w = props_world.lock().unwrap();
+            let model = w.ports.get(&port).cloned().unwrap_or_default();
+            w.props_reads.push(model.clone());
+            match w.props.get(&model) {
+                Some(body) => ResponseTemplate::new(200).set_body_json(body),
+                None => ResponseTemplate::new(404).set_body_string("Not Found"),
+            }
+        })
         .mount(&server)
         .await;
     let slots_world = world.clone();
@@ -526,6 +635,60 @@ async fn container(world: Arc<Mutex<World>>) -> MockServer {
         })
         .mount(&server)
         .await;
+    // The aux routes and legacy completions (the egress route corpus,
+    // `route_golden.rs`): one vector per input, a descending score per
+    // document, and a text completion — or the context refusal, as the chat
+    // route gives it, for a model in [`World::refuse_context`].
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let n = body["input"].as_array().map_or(1, Vec::len);
+            let data: Vec<serde_json::Value> = (0..n)
+                .map(
+                    |i| json!({"object": "embedding", "index": i, "embedding": [0.5, 0.25, 0.125]}),
+                )
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list", "data": data,
+                "usage": {"prompt_tokens": 2, "total_tokens": 2},
+            }))
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/rerank"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            let n = body["documents"].as_array().map_or(0, Vec::len);
+            let results: Vec<serde_json::Value> = (0..n)
+                .map(|i| json!({"index": i, "relevance_score": 1.0 / (i as f64 + 1.0)}))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({"results": results}))
+        })
+        .mount(&server)
+        .await;
+    let completion_world = world.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/completions"))
+        .respond_with(move |_: &Request| {
+            let w = completion_world.lock().unwrap();
+            let model = w.ports.get(&port).cloned().unwrap_or_default();
+            if w.refuse_context.contains(&model) {
+                return ResponseTemplate::new(400).set_body_json(json!({"error": {
+                    "code": 400, "type": "exceed_context_size_error",
+                    "message": "request (5000 tokens) exceeds the available context size",
+                    "n_prompt_tokens": 5000, "n_ctx": 4096,
+                }}));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "c", "object": "text_completion", "created": 0, "model": model,
+                "choices": [{"index": 0, "text": " ok", "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }))
+        })
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/tokenize"))
         .respond_with(move |req: &Request| {
@@ -603,6 +766,26 @@ impl Gpu {
 
     pub fn world(&self) -> std::sync::MutexGuard<'_, World> {
         self.world.lock().unwrap()
+    }
+
+    /// What a new lmgw finds: a fresh registry that holds nothing, on a
+    /// podman that lists what runs ([`World::listed`]) and has no port to
+    /// start anything on. `lifecycle::boot` then adopts.
+    pub fn restart(&self) {
+        self.world().listed = true;
+        self.state
+            .set_runtime_for_tests(Arc::new(Registry::with_ports(
+                Arc::new(Podman {
+                    world: self.world.clone(),
+                }),
+                reqwest::Client::new(),
+                Arc::new(|| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrNotAvailable,
+                        "an adopting registry starts nothing",
+                    ))
+                }),
+            )));
     }
 
     /// The chat models dir the rows' files live in.
@@ -706,6 +889,59 @@ impl Gpu {
         .await
         .unwrap();
         self.state.reload_snapshot().await.unwrap();
+    }
+
+    /// An aux row of `kind` (an embedder or a reranker) on a weights file of
+    /// `bytes`, kept in the chat rows' models dir — which becomes the aux
+    /// class's too.
+    pub async fn aux(&self, id: &str, kind: AuxKind, bytes: u64) {
+        let file = format!("{id}.gguf");
+        self.file(&file, bytes);
+        let mut s = self.state.snapshot().settings.clone();
+        s.aux_router.models_dir = self.dir.path().display().to_string();
+        store::save_settings(&self.state.db, &s).await.unwrap();
+        store::insert_aux_model(
+            &self.state.db,
+            &NewAuxModel {
+                model_id: id.into(),
+                gguf_path: file,
+                kind,
+                pooling: None,
+                ctx_size: None,
+                args: vec![],
+                idle_seconds: 0,
+                enabled: true,
+                image: None,
+                extra_run_args: None,
+                warm_start: false,
+                hold_fallback_mode: Default::default(),
+                hold_fallback: None,
+            },
+        )
+        .await
+        .unwrap();
+        self.state.reload_snapshot().await.unwrap();
+    }
+
+    /// Every POST the live containers got: container by container, in the
+    /// order they were made, each in arrival order. Health and slot reads
+    /// are GETs and not in it.
+    pub async fn posted(&self) -> Vec<Request> {
+        // Taken out and put back: no lock is held across the reads.
+        let servers = std::mem::take(&mut *self.containers.lock().unwrap());
+        let mut out = Vec::new();
+        for s in &servers {
+            for r in s.received_requests().await.unwrap_or_default() {
+                if r.method.as_str() == "POST" {
+                    out.push(r);
+                }
+            }
+        }
+        let mut cs = self.containers.lock().unwrap();
+        let added = std::mem::take(&mut *cs);
+        cs.extend(servers);
+        cs.extend(added);
+        out
     }
 
     /// A background candidate alias, stored directly (the save-time rules are

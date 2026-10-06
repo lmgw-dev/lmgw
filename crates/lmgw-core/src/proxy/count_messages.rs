@@ -24,10 +24,13 @@ use serde_json::{json, Value};
 
 use crate::config::{Protocol, Route, UpstreamKind};
 use crate::error::GatewayError;
-use crate::gate::{MediaParts, OpenFailed, Opened, RouteCheck};
+use crate::gate::{GateHeaders, MediaParts, OpenFailed, Opened, RouteCheck};
 use crate::ingress::anthropic::{parse_messages_request, parse_reasoning};
 use crate::ingress::ClientProto;
-use crate::ir::{flatten_tool_result, ChatRequest, ContentPart, Params, Role};
+use crate::ir::{
+    flatten_tool_result, tool_image_placeholder, ChatRequest, ContentPart, Params, Role,
+    ToolResultBlock, TEXT_ONLY_SLOT,
+};
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::vram::LocalHold;
@@ -42,24 +45,29 @@ const PROTO: ClientProto = ClientProto::AnthropicMessages;
 /// candidate) and `x-lmgw-count-approximate` when the number is not the
 /// backend's exact count of this request.
 ///
-/// Like `/v1/count_tokens`, a count is not written to the request log; a key
-/// refused by its alias scope is (§5.4), and no budget applies (§12 entry
-/// 15). Nothing is reserved in a pool, nothing is clamped and no rung is
-/// stamped: a count is not a send.
+/// Like `/v1/count_tokens`, a cheap count is not written to the request log;
+/// a failed one is — a key refused by its alias scope included (§5.4) — and
+/// so is one that brought its model up, or whose client went away first
+/// (`Unanswered`). No budget applies (§12 entry 15). Nothing is reserved in
+/// a pool, nothing is clamped and no rung is stamped: a count is not a send.
 pub async fn handle_messages_count_tokens(
     state: SharedState,
     ctx: RequestCtx,
     body: Value,
 ) -> Response {
     let proto = PROTO;
+    let mut row = counter_row(&state, proto, &ctx, &body);
     let Some(alias) = body
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_string)
     else {
-        return error_response(proto, &GatewayError::BadRequest("missing 'model'".into()));
+        let e = GatewayError::BadRequest("missing 'model'".into());
+        row.failed(&e).await;
+        return error_response(proto, &e);
     };
-    if let Some(e) = counter_policy(&state, proto, &ctx, &alias).await {
+    if let Some(e) = counter_policy(&state, &ctx, &alias) {
+        row.failed(&e).await;
         return error_response(proto, &e);
     }
     let parsed = parse_messages_request(&body);
@@ -67,20 +75,29 @@ pub async fn handle_messages_count_tokens(
         route,
         hold,
         headers,
-    } = match open_for_count(&state, &ctx, &alias, parsed.as_ref()).await {
+    } = match open_for_count(&state, &ctx, &alias, parsed.as_ref(), &mut row).await {
         Ok(o) => o,
-        Err(refused) => return refused,
+        Err((headers, e)) => {
+            row.failed(&e).await;
+            return headers.stamp(error_response(proto, &e));
+        }
     };
     let counted = count_messages_route(&state, &ctx, &body, parsed, &route, hold.as_ref()).await;
     // The count is read: the container no longer has to stay up for it.
     drop(hold);
     match counted {
-        Ok(count) => stamp_count(
-            headers.stamp(axum::Json(json!({"input_tokens": count.tokens})).into_response()),
-            &count,
-        ),
+        Ok(count) => {
+            row.answered(200, None).await;
+            stamp_count(
+                headers.stamp(axum::Json(json!({"input_tokens": count.tokens})).into_response()),
+                &count,
+            )
+        }
         // A count that failed on the fallback still names it ([`Failed`]).
-        Err(e) => headers.stamp(error_response(proto, &e)),
+        Err(e) => {
+            row.failed(&e).await;
+            headers.stamp(error_response(proto, &e))
+        }
     }
 }
 
@@ -92,21 +109,22 @@ pub async fn handle_messages_count_tokens(
 ///
 /// `parsed` is the body read into the IR. When it reads, the request's facets
 /// go to [`crate::gate::Routed::using`] exactly as `/v1/messages`' do: a
-/// candidate alias refuses a facet it does not enable, and the outside-VRAM
-/// swap never picks a fallback that cannot see the images. When it does not
+/// candidate alias refuses a facet it does not enable. When it does not
 /// read (a server tool, a block the IR has no part for), only a route that
 /// resolved to the Anthropic protocol goes on — the provider reads the body
 /// itself, and lmgw, unable to read it, states no facets for it. Anything
 /// else is the parse error's 400, with whatever the resolve already settled
-/// (a hold's fallback) named on it. A refusal comes back finished: stamped,
-/// in Anthropic's dialect.
+/// (a hold's fallback) named on it. A refusal comes back with the headers to
+/// stamp on it; `row` learns the route and whether the count brought its
+/// model up, as [`admit_counter`]'s does.
 async fn open_for_count(
     state: &SharedState,
     ctx: &RequestCtx,
     alias: &str,
     parsed: Result<&ChatRequest, &GatewayError>,
-) -> Result<Opened, Response> {
-    let refused = |f: OpenFailed| f.headers.stamp(error_response(PROTO, &f.error));
+    row: &mut Unanswered,
+) -> Result<Opened, (GateHeaders, GatewayError)> {
+    let refused = |f: OpenFailed| (f.headers, f.error);
     let routed = crate::gate::resolve(state, alias, RouteCheck::Text("/v1/messages/count_tokens"))
         .await
         .map_err(refused)?;
@@ -118,11 +136,11 @@ async fn open_for_count(
             ))
             .map_err(refused)?,
         Err(e) if routed.resolved().upstream.protocol != Protocol::Anthropic => {
-            return Err(routed.headers().stamp(error_response(PROTO, e)));
+            return Err((routed.headers().clone(), e.clone()));
         }
         Err(_) => routed,
     };
-    routed.admit(state).await.map_err(refused)
+    admit_routed(state, routed, false, Some(row)).await
 }
 
 /// The count itself, on the route the gate settled on — the module doc's
@@ -130,7 +148,10 @@ async fn open_for_count(
 /// `parsed`; every other one counts the IR, and a body that did not parse is
 /// the client's 400 there — [`open_for_count`] already refused it before
 /// admission, unless admission swapped an Anthropic route for one of another
-/// protocol.
+/// protocol. What is counted is what the send would carry: on a fallback
+/// that cannot see, the IR with its images as placeholders
+/// (`gate::fallback_images`), and on an Anthropic route the client's body
+/// with the same placeholders in it ([`unseen`]).
 async fn count_messages_route(
     state: &SharedState,
     ctx: &RequestCtx,
@@ -143,6 +164,12 @@ async fn count_messages_route(
         Protocol::Anthropic => {
             let mut body = body.clone();
             with_lmgw_reasoning(&mut body, ctx, route);
+            let requested = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let requested = requested.to_string();
+            unseen::counted(state, route, &requested, &mut body).await;
             let n = send_count(route, hold, |r| {
                 crate::egress::anthropic::count_messages_request(
                     &state.http,
@@ -156,7 +183,8 @@ async fn count_messages_route(
             Ok(Count::exact(n))
         }
         Protocol::Gemini => {
-            let ir = parsed?;
+            let parsed = parsed?;
+            let ir = crate::gate::fallback_images::counted(state, route, &parsed).await;
             let params = resolve_params(&ir, ctx, route);
             let n = send_count(route, hold, |r| {
                 crate::egress::gemini::count_chat_request(
@@ -170,8 +198,9 @@ async fn count_messages_route(
             .await?;
             Ok(Count::exact(n))
         }
-        Protocol::Openai => {
-            let ir = parsed?;
+        Protocol::Openai | Protocol::LlamaCpp => {
+            let parsed = parsed?;
+            let ir = crate::gate::fallback_images::counted(state, route, &parsed).await;
             // Only a local chat container is counted on its template: a remote
             // llama-server may want the upstream's key, which the gate's
             // count does not send, and an aux row has no chat template
@@ -196,10 +225,15 @@ async fn count_messages_route(
     }
 }
 
-/// A local chat row: `/apply-template` on the exact body the OpenAI egress
+/// A local chat row: `/apply-template` on the exact body the llama.cpp egress
 /// would send, then `/tokenize` with the completion path's own flags — the
 /// request gate's count ([`crate::gate::count_chat_prompt`]), measured equal
 /// to a real completion's `usage.prompt_tokens`.
+///
+/// The body is the one the send would carry: the tool-image decision is made
+/// here as the fit makes it, by the same function on the same inputs (llama
+/// egress design §3.2, [`crate::gate::tool_images::decide`]), and where it
+/// lets tool images go they are media like the user's.
 ///
 /// The gate refuses media it cannot bound; a counter reports it instead. An
 /// image is added at the projector's per-image bound when the row has one
@@ -208,9 +242,9 @@ async fn count_messages_route(
 /// asked to render either ([`without_media`]): llama-server refuses an image
 /// on a row that loads no projector, and audio on one whose projector does
 /// not hear, with a 500, so a part the count only had to say it left out made
-/// the whole count a 502 (review R1 #1). A tool result's image is not media
-/// here: the OpenAI egress sends it as a text placeholder, which the template
-/// renders and the count includes.
+/// the whole count a 502 (review R1 #1). A tool image the decision keeps back
+/// is no media at all: it goes as its placeholder, which the template renders
+/// and the count includes.
 async fn count_on_template(
     state: &SharedState,
     ctx: &RequestCtx,
@@ -218,35 +252,58 @@ async fn count_on_template(
     route: &Route,
     hold: &LocalHold,
 ) -> Result<Count, GatewayError> {
-    let media = crate::gate::media_parts(ir);
-    let bound = match hold.gate_facts().filter(|_| media.images > 0) {
-        Some(facts) => crate::gate::image_token_bound(&facts.models_dir, facts.projector_row())
-            .await
-            .ok()
-            .flatten(),
-        None => None,
+    let guard = crate::gate::guard_facts(Some(hold));
+    let decided =
+        crate::gate::tool_images::decide(state, Some(hold), route, ir, guard.as_deref()).await;
+    let route = crate::gate::tool_images::on_route(route, decided.llama.as_ref());
+    let tool_images_go = decided
+        .llama
+        .as_ref()
+        .is_some_and(|l| l.tool_images.allowed());
+
+    let user = crate::gate::media_parts(ir);
+    let media = MediaParts {
+        images: user.images.saturating_add(decided.images),
+        ..user
+    };
+    let bound = match (media.images, decided.bound) {
+        (0, _) => None,
+        (_, Some(read)) => read.ok().flatten(),
+        (_, None) => match hold.gate_facts() {
+            Some(facts) => crate::gate::image_token_bound(&facts.models_dir, facts.projector_row())
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        },
     };
     let omit_images = media.images > 0 && bound.is_none();
     let stripped;
     let rendered = if omit_images || media.audio > 0 {
-        stripped = without_media(ir, omit_images);
+        stripped = without_media(ir, omit_images, tool_images_go);
         &stripped
     } else {
         ir
     };
 
-    let params = resolve_params(ir, ctx, route);
-    let body = crate::egress::openai::chat_body(
-        rendered,
-        &route.upstream_model,
-        &params,
-        false,
-        route.upstream.kind,
-    );
+    let params = resolve_params(ir, ctx, &route);
     let http = &state.http;
-    let body = &body;
-    let prompt = crate::gate::on_running_server(route, hold, move |root| async move {
-        crate::gate::count_chat_prompt(http, &root, body, MediaParts::default(), None).await
+    let (route, params) = (&route, &params);
+    // Rendered per attempt, as a send renders it: a count retried on a
+    // recovered container carries that container's tool-image verdict
+    // (`gate::tool_images::recheck`).
+    let prompt = crate::gate::on_running_server(route, hold, move |root| {
+        let attempt = hold.on_attempt(route);
+        let body = crate::egress::llama_cpp::chat_body(
+            rendered,
+            &route.upstream_model,
+            params,
+            false,
+            &attempt.upstream,
+        );
+        async move {
+            crate::gate::count_chat_prompt(http, &root, &body, MediaParts::default(), None).await
+        }
     })
     .await?;
 
@@ -266,8 +323,15 @@ async fn count_on_template(
 /// `ir` without the media [`count_on_template`] leaves out of its number:
 /// every audio part (no row has a per-audio bound), and every image too when
 /// `images` (the row gives no per-image bound). A turn left with no parts
-/// renders as empty text, as the OpenAI egress renders any text-only turn.
-fn without_media(ir: &ChatRequest, images: bool) -> ChatRequest {
+/// renders as empty text, as the llama.cpp egress renders any text-only turn.
+///
+/// A tool result's image is media only where the send's decision lets it go
+/// (`tool_images`, llama egress design §8.2); left out, it becomes today's
+/// placeholder text in place, so the template is never asked to render an
+/// image the number does not hold. One the decision keeps back stays as it
+/// is: the egress renders it as its own placeholder, as the send will. A tool
+/// result's audio is a placeholder on every rendering already.
+fn without_media(ir: &ChatRequest, images: bool, tool_images: bool) -> ChatRequest {
     let mut ir = ir.clone();
     for m in &mut ir.messages {
         m.content.retain(|p| match p {
@@ -275,6 +339,20 @@ fn without_media(ir: &ChatRequest, images: bool) -> ChatRequest {
             ContentPart::Image { .. } => !images,
             _ => true,
         });
+        if !(images && tool_images) {
+            continue;
+        }
+        for p in &mut m.content {
+            let ContentPart::ToolResult { content, .. } = p else {
+                continue;
+            };
+            for block in content.iter_mut() {
+                if let ToolResultBlock::Image { mime, data } = block {
+                    let text = tool_image_placeholder(mime, data, TEXT_ONLY_SLOT);
+                    *block = ToolResultBlock::text(text);
+                }
+            }
+        }
     }
     ir
 }
@@ -388,6 +466,8 @@ pub(crate) fn flatten_for_count(ir: &ChatRequest) -> String {
     blocks.join("\n\n")
 }
 
+mod unseen;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,7 +536,7 @@ mod tests {
             data: "UklGRg==".into(),
         });
 
-        let kept = without_media(&req, false);
+        let kept = without_media(&req, false, false);
         assert_eq!(
             crate::gate::media_parts(&kept),
             MediaParts {
@@ -466,21 +546,93 @@ mod tests {
         );
         assert_eq!(kept.messages[0].content.len(), 2);
 
-        let text_only = without_media(&req, true);
+        let text_only = without_media(&req, true, false);
         assert_eq!(crate::gate::media_parts(&text_only), MediaParts::default());
         assert_eq!(
             text_only.messages[0].content,
             vec![ContentPart::text("Listen and look.")]
         );
         // The rendered turn is plain text, as llama-server takes on any row.
-        let body = crate::egress::openai::chat_body(
+        let body = crate::egress::llama_cpp::chat_body(
             &text_only,
             "m",
             &Params::default(),
             false,
-            UpstreamKind::LlamaServer,
+            &crate::config::Snapshot::default().router_upstream(),
         );
         assert_eq!(body["messages"][0]["content"], "Listen and look.");
+    }
+
+    /// Leaving images out where the decision lets tool images go, a tool
+    /// result's image becomes today's placeholder in place: the body renders
+    /// as today's even on a route that sends images. Kept, or kept back by
+    /// the decision, it stays an image block for the renderer.
+    #[test]
+    fn without_media_leaves_tool_images_out_as_their_placeholder() {
+        // A whole PNG: one stb_image decodes, so the route sends it.
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        let req = ir(json!({
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "shot", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [
+                        {"type": "text", "text": "chart:"},
+                        {"type": "image", "source": {"type": "base64",
+                                                     "media_type": "image/png",
+                                                     "data": PNG}}
+                    ]}
+                ]}
+            ]
+        }));
+        let tool_blocks = |r: &ChatRequest| match &r.messages[1].content[0] {
+            ContentPart::ToolResult { content, .. } => content.clone(),
+            other => panic!("not a tool result: {other:?}"),
+        };
+
+        assert_eq!(
+            tool_blocks(&without_media(&req, false, true)),
+            tool_blocks(&req)
+        );
+        assert_eq!(
+            tool_blocks(&without_media(&req, true, false)),
+            tool_blocks(&req)
+        );
+
+        let stripped = without_media(&req, true, true);
+        assert_eq!(
+            tool_blocks(&stripped),
+            vec![
+                ToolResultBlock::text("chart:"),
+                ToolResultBlock::text(
+                    "[image/png image, 96 base64 bytes — omitted: this upstream's tool-result \
+                     slot is text-only]"
+                ),
+            ]
+        );
+        let mut up = crate::config::Snapshot::default().router_upstream();
+        let today = |r: &ChatRequest, up: &crate::config::Upstream| {
+            serde_json::to_string(&crate::egress::llama_cpp::chat_body(
+                r,
+                "m",
+                &Params::default(),
+                false,
+                up,
+            ))
+            .unwrap()
+        };
+        let todays = today(&req, &up);
+        up.llama = Some(std::sync::Arc::new(crate::config::LlamaRoute {
+            facts: std::sync::Arc::new(crate::egress::llama_cpp::props::LlamaFacts {
+                vision: Some(true),
+                ..Default::default()
+            }),
+            tool_images: crate::config::ToolImages::Allowed,
+        }));
+        assert_ne!(today(&req, &up), todays, "the route sends the image");
+        assert_eq!(today(&stripped, &up), todays);
     }
 
     #[test]

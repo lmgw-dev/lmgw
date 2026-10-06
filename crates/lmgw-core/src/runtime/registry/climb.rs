@@ -515,6 +515,7 @@ impl Registry {
             port,
             warnings,
             capabilities,
+            llama,
             gate,
         } = started;
         let ours = {
@@ -535,6 +536,7 @@ impl Registry {
                     e.last_used = now;
                     e.warnings = warnings;
                     e.capabilities = capabilities;
+                    e.llama = llama;
                     e.gate = gate;
                     e.climb = None;
                     true
@@ -542,9 +544,13 @@ impl Registry {
                 _ => false,
             }
         };
+        // Not when an entry holds the name again ([`Registry::holds_name`]):
+        // the container is that entry's then.
         if !ours {
-            if let Err(e) = self.rm_force(&name).await {
-                tracing::warn!(container = %name, "removing the container of an aborted climb: {e}");
+            if !self.holds_name(&name) {
+                if let Err(e) = self.rm_force(&name).await {
+                    tracing::warn!(container = %name, "removing the container of an aborted climb: {e}");
+                }
             }
             return Err(RuntimeError::Aborted { class, model_id });
         }
@@ -782,6 +788,7 @@ impl ClimbTicket {
             e.gate = None;
             e.warnings.clear();
             e.capabilities = None;
+            e.llama = None;
             e.charge = charge;
             e.started_at = Instant::now();
             e.stop_timeout = spec.stop_timeout;

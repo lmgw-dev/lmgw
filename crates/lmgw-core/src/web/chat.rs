@@ -992,9 +992,9 @@ pub(super) async fn run_send(
     // been relayed and persisted. A local route comes back on the port its
     // container answers on (§5).
     // Images the thread's model may see are image parts by now (`vision`
-    // turned the rest into placeholders): an outside-VRAM swap must not hand
-    // them to a fallback that cannot, and a candidate alias refuses a facet
-    // it does not enable (`Routed::using`).
+    // turned the rest into placeholders); a fallback that cannot see gets
+    // them as placeholders at the send (`gate::fallback_images`). A
+    // candidate alias refuses a facet it does not enable (`Routed::using`).
     let uses = crate::gate::request_facets(&ir, None);
     let admitted = match routed.using(uses) {
         Ok(routed) => {
@@ -1021,6 +1021,7 @@ pub(super) async fn run_send(
                     None,
                     None,
                     Some((e.kind(), e.to_string())),
+                    None,
                 )
                 .await;
             } else {
@@ -1074,8 +1075,27 @@ where
         headers,
     } = opened;
     let answered_by = chat_turn::answered_by(&state.snapshot(), &headers);
+    // A fallback that cannot see gets the turn's PDFs as their text and its
+    // other images as placeholders (`chat_turn::blind`): everything below
+    // fits and sends that, and a re-route starts again from the turn's own
+    // request. Raced against the stop: it may read a provider's catalog.
+    let mut blind = match turn
+        .or_stop(tx, turn.blind().on_route(state, &route, ir))
+        .await
+    {
+        Ok(blind) => blind,
+        Err(why) => {
+            state.telemetry.request_abandoned();
+            turn.report_stop(why, tx).await;
+            return None;
+        }
+    };
+    let ir: &mut ChatRequest = match blind.as_mut() {
+        Some(sent) => sent,
+        None => ir,
+    };
     // What a refusal below says the request went out as (`TurnFrame::sent`).
-    let sent_as = chat_turn::SentAs::of(answered_by.clone(), ir);
+    let sent_as = chat_turn::SentAs::of(answered_by.clone(), ir).on(&route);
 
     // Ask llama-server for per-token timings so the stats panel shows real
     // server-measured prefill/decode speeds live during generation (not client
@@ -1101,8 +1121,28 @@ where
     // was checked before the turn started; this is the route the gate
     // settled on — a GPU-hold or outside-VRAM fallback, a ladder climb, a
     // candidate — refused by name rather than answered with a fresh message
-    // appended to the reply being continued.
-    let fit = match chat_turn::fit_route(&route, ir, (turn.is_continue(), turn.local_only())) {
+    // appended to the reply being continued. A heard voice turn's audio goes
+    // there only when the model that answers takes it (`spoken::may_hear`).
+    // Raced against the stop: the capability check may read a provider's
+    // catalog (review V9).
+    let answering = chat_turn::answering(answered_by.as_deref(), &headers, &ir.model_alias);
+    let fit = chat_turn::fit_route(
+        state,
+        (&route, admission.as_ref()),
+        answering,
+        ir,
+        (turn.is_continue(), turn.hears()),
+    );
+    let fit = match turn.or_stop(tx, fit).await {
+        Ok(fit) => fit,
+        Err(why) => {
+            // Nothing was sent: the gauge opened at admission closes.
+            state.telemetry.request_abandoned();
+            turn.report_stop(why, tx).await;
+            return None;
+        }
+    };
+    let fit = match fit {
         Ok(fit) => fit,
         Err(e) => {
             record_chat_call(
@@ -1118,6 +1158,7 @@ where
                 None,
                 None,
                 Some((e.kind(), e.to_string())),
+                None,
             )
             .await;
             chat_turn::refuse_sent(tx, &e, sent_as).await;
@@ -1140,6 +1181,11 @@ where
     // drained) and the send itself, both given up the moment the turn is
     // stopped: dropping them drops the reservation and the request.
     let prompt_sent = std::sync::atomic::AtomicBool::new(false);
+    // What the turn's content lost to a model that lacks a capability, for
+    // its row (`request_logs.degraded`): to the thread's own model, and to
+    // the route this send takes (`chat_turn::blind`); the gate's own send
+    // adds what it left out.
+    let route_degraded = crate::degraded::join([turn.degraded(), turn.blind().marker()]);
     let sent = turn
         .or_stop(tx, async {
             let (mut lease, gated) = crate::gate::fit_chat(
@@ -1187,6 +1233,7 @@ where
                 f.max_tokens_clamped,
                 f.rung.as_ref().map(crate::gate::RungTag::log),
                 Some((f.error.kind(), f.error.to_string())),
+                None,
             )
             .await;
             chat_turn::refuse_sent(tx, &f.error, sent_as).await;
@@ -1210,6 +1257,7 @@ where
                     None,
                     None,
                     Some(("canceled", note)),
+                    route_degraded.clone(),
                 )
                 .await;
             } else {
@@ -1221,6 +1269,7 @@ where
     };
     let max_tokens_clamped = lease.max_tokens_clamped();
     let rung = lease.rung_log();
+    let degraded = crate::degraded::join([route_degraded.clone(), lease.degraded()]);
     fitted.report(&mut reasoning_ignored);
     let resp = match opened {
         Ok(crate::gate::Sent::Upstream(r)) => r,
@@ -1255,6 +1304,7 @@ where
                 None,
                 None,
                 Some((e.kind(), e.to_string())),
+                None,
             )
             .await;
             chat_turn::refuse_sent(tx, &e, sent_as).await;
@@ -1274,6 +1324,7 @@ where
                 max_tokens_clamped,
                 rung,
                 Some((e.kind(), e.to_string())),
+                degraded.clone(),
             )
             .await;
             chat_turn::refuse_sent(tx, &e, sent_as).await;
@@ -1383,6 +1434,7 @@ where
         max_tokens_clamped,
         rung,
         row_error,
+        degraded,
     )
     .await;
 
@@ -1412,33 +1464,35 @@ where
         )
         .await;
     }
-    let _ = emit(
-        "done",
-        json!({
-            "message_id": saved.id,
-            // False: nothing of this reply is stored (its bubble is not a
-            // row, and no action on it can work).
-            "saved": saved.saved(),
-            // What answered: the thread's model, and the alias that took
-            // its place (a fallback, a candidate's pick), when one did.
-            "model": turn.model(),
-            "answered_by": answered_by,
-            "prompt_tokens": outcome.usage.prompt_tokens,
-            "completion_tokens": outcome.usage.completion_tokens,
-            "ttfb_ms": outcome.ttfb_ms,
-            "total_ms": total_ms,
-            "aborted": outcome.aborted,
-            // Authoritative final timings (llama.cpp); null for cloud upstreams.
-            "timings": outcome.timings,
-            // The thread's reasoning and sampling overrides this route did
-            // not send.
-            "reasoning_ignored": reasoning_ignored,
-            // The model reasoned although off was asked, in a sentence.
-            "reasoning_note": reasoning_note,
-        })
-        .to_string(),
-    )
-    .await;
+    let mut done = json!({
+        "message_id": saved.id,
+        // False: nothing of this reply is stored (its bubble is not a
+        // row, and no action on it can work).
+        "saved": saved.saved(),
+        // What answered: the thread's model, and the alias that took
+        // its place (a fallback, a candidate's pick), when one did.
+        "model": turn.model(),
+        "answered_by": answered_by,
+        "prompt_tokens": outcome.usage.prompt_tokens,
+        "completion_tokens": outcome.usage.completion_tokens,
+        "ttfb_ms": outcome.ttfb_ms,
+        "total_ms": total_ms,
+        "aborted": outcome.aborted,
+        // Authoritative final timings (llama.cpp); null for cloud upstreams.
+        "timings": outcome.timings,
+        // The thread's reasoning and sampling overrides this route did
+        // not send.
+        "reasoning_ignored": reasoning_ignored,
+        // The model reasoned although off was asked, in a sentence.
+        "reasoning_note": reasoning_note,
+    });
+    // A fallback that cannot see answered, and got the images as
+    // placeholders: who, in a sentence (`gate::fallback_images`). Only when
+    // it did, so every other turn's frame is what it was.
+    if let Some(note) = turn.blind().note() {
+        done["images_note"] = json!(note);
+    }
+    let _ = emit("done", done.to_string()).await;
     None
 }
 
@@ -1479,6 +1533,7 @@ async fn record_chat_call(
     max_tokens_clamped: Option<u32>,
     rung: Option<i64>,
     error: Option<(&str, String)>,
+    degraded: Option<String>,
 ) {
     // The chat *stream* itself can't yet share `proxy::sample_once` (that helper
     // is non-streaming; chat is SSE) — but its **log row** routes through the
@@ -1498,6 +1553,7 @@ async fn record_chat_call(
             max_tokens_clamped,
             fallback,
             rung,
+            degraded,
         },
         status,
         ttfb_ms,

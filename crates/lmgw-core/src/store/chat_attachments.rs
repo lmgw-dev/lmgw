@@ -32,6 +32,12 @@ pub struct ChatAttachmentMeta {
     /// by the handlers for drafts, absent on the store's own rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blockers: Option<Vec<String>>,
+    /// What this draft becomes on the way, sent all the same: under a GPU
+    /// block whose fallback cannot see, an image goes as a placeholder and
+    /// a PDF's pages as its text (`chat_attach_gate::annotate_drafts`).
+    /// Filled in for drafts only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hints: Option<Vec<String>>,
 }
 
 /// One attachment with its bytes — never serialized (the bytes go out as a
@@ -72,6 +78,7 @@ fn chat_attachment_meta_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatAttachmen
         meta,
         mode: row.get("mode"),
         blockers: None,
+        hints: None,
         id: row.get("id"),
         thread_id: row.get("thread_id"),
         message_id: row.get("message_id"),

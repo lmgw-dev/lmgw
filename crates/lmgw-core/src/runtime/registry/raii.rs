@@ -11,12 +11,13 @@ use crate::gate::facts::GateFacts;
 use super::*;
 use crate::runtime::Class;
 
-/// The right to start one model, held by exactly one task.
+/// The right to start one model, held by exactly one task — the registry's
+/// own ([`Registry::spawn_start`]), never the request that asked for it.
 ///
 /// Exists so the `starting` entry can never outlive the task that inserted
-/// it. Every exit — success, failure, or the acquiring future being dropped
-/// mid-start — either settles the entry or takes it back out of the map and
-/// wakes the waiters.
+/// it. Every exit — success, failure, or the task being torn down mid-start —
+/// either settles the entry or takes it back out of the map and wakes the
+/// waiters.
 pub(super) struct StartClaim {
     pub(super) reg: Arc<Registry>,
     pub(super) key: Key,
@@ -28,25 +29,31 @@ pub(super) struct StartClaim {
 }
 
 impl StartClaim {
-    /// Flip the entry to `ready` and take the caller's in-flight claim in the
-    /// same lock hold (§3.2), so the model cannot be reaped between "it is
-    /// up" and "this request owns a slot on it".
+    /// Flip the entry to `ready` and take the requester's in-flight claim in
+    /// the same lock hold (§3.2), so the model cannot be reaped between "it
+    /// is up" and "this request owns a slot on it". `None` when the requester
+    /// is gone already: no claim is taken, and the model settles idle.
     ///
     /// Async because of the abort path: when the entry is gone (or is no
     /// longer ours), the container this claim just started is healthy,
     /// unregistered and holding VRAM nothing will ever account for, so it is
     /// removed here rather than left for the next boot to find.
-    pub(super) async fn ready(mut self, started: Started) -> Result<AcquireGuard, RuntimeError> {
+    pub(super) async fn ready<T>(
+        mut self,
+        started: Started,
+        requester: &tokio::sync::oneshot::Sender<T>,
+    ) -> Result<Option<AcquireGuard>, RuntimeError> {
         self.settled = true;
         let Started {
             port,
             warnings,
             capabilities,
+            llama,
             gate,
         } = started;
         // Decided under the lock, acted on outside it — the map lock is never
         // held across an await, including on this path.
-        let ours = {
+        let (ours, claimed) = {
             let mut map = self.reg.map();
             match map.get_mut(&self.key) {
                 Some(e)
@@ -54,17 +61,24 @@ impl StartClaim {
                         && e.generation == self.generation
                         && e.state == RuntimeState::Starting =>
                 {
+                    // A requester that goes away after this answer still gets
+                    // its claim, and gives it back by dropping the guard it is
+                    // sent (`owned.rs`).
+                    let claimed = !requester.is_closed();
                     e.state = RuntimeState::Ready;
                     e.host_port = port;
                     e.started_at = Instant::now();
-                    e.in_flight += 1;
+                    if claimed {
+                        e.in_flight += 1;
+                    }
                     e.last_used = Instant::now();
                     e.warnings = warnings.clone();
                     e.capabilities = capabilities.clone();
+                    e.llama = llama.clone();
                     e.gate = gate.clone();
-                    true
+                    (true, claimed)
                 }
-                _ => false,
+                _ => (false, false),
             }
         };
         // A stop claimed the entry while the container was coming up, or the
@@ -75,10 +89,17 @@ impl StartClaim {
         //
         // `stop`'s own `podman stop` may or may not have raced ours: it runs
         // against the same *name*, and `podman run --replace` means the object
-        // under that name at this instant is the one this claim created. Best
-        // effort, because the entry is already settled and the caller is being
-        // told the truth (`Aborted`) regardless of what podman answers.
+        // under that name at this instant is the one this claim created —
+        // unless an entry holds the name again by now ([`Registry::holds_name`]).
+        // Best effort, because the entry is already settled and the caller is
+        // being told the truth (`Aborted`) regardless of what podman answers.
         if !ours {
+            if self.reg.holds_name(&self.container_name) {
+                return Err(RuntimeError::Aborted {
+                    class: self.key.0,
+                    model_id: self.key.1.clone(),
+                });
+            }
             if let Err(e) = self.reg.rm_force(&self.container_name).await {
                 tracing::warn!(
                     container = %self.container_name,
@@ -91,7 +112,7 @@ impl StartClaim {
             });
         }
         self.phase.send_replace(Phase::Ready);
-        Ok(AcquireGuard {
+        Ok(claimed.then(|| AcquireGuard {
             reg: Arc::clone(&self.reg),
             key: self.key.clone(),
             port,
@@ -99,7 +120,7 @@ impl StartClaim {
             generation: self.generation,
             failed: AtomicBool::new(false),
             gate,
-        })
+        }))
     }
 
     /// Unclaim after a failed start and hand every waiter the same error, so
@@ -117,16 +138,22 @@ impl Drop for StartClaim {
         if self.settled {
             return;
         }
-        // The acquiring future was dropped mid-start (client hung up, task
-        // aborted). The container may well be coming up regardless — that is
-        // a job for boot reconciliation (§3.4), not for leaving the model
-        // wedged in `starting` with a task behind it that no longer exists.
-        tracing::debug!(
+        // The start task itself ended mid-start — a panic, or the runtime
+        // going down: a request's future never holds this claim
+        // (`owned.rs`). The container may well be coming up regardless; the
+        // reconciliation pass on the reaper tick adopts it if it does
+        // (`unheld.rs`). The waiters fail with the start rather than start
+        // the model again: what ended this one would end theirs.
+        tracing::warn!(
             container = %self.container_name,
-            "start claim dropped before it settled; unclaiming"
+            "the start of {} model '{}' ended before it settled; unclaiming — a container \
+             that comes up regardless is adopted by the next reconciliation pass",
+            self.key.0,
+            self.key.1
         );
         self.reg.forget(&self.key, &self.phase, true);
-        self.phase.send_replace(Phase::Gone(None));
+        self.phase
+            .send_replace(Phase::Gone(Some(super::owned::UNSETTLED.to_string())));
     }
 }
 

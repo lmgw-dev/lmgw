@@ -1,0 +1,23 @@
+{
+  "requests": [
+    {
+      "body": "{\"input\":[\"alpha\",\"beta\"],\"model\":\"embed-gguf\"}",
+      "body_json": {
+        "input": [
+          "alpha",
+          "beta"
+        ],
+        "model": "embed-gguf"
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/embeddings"
+    }
+  ],
+  "status": 200
+}

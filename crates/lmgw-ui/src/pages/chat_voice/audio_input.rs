@@ -4,7 +4,10 @@
 //! the select show. The gateway's verdict is shown as it came, with one
 //! exception the page sees before the gateway is asked again: the live GPU
 //! block ([`AudioInputResolved::blocked`]), which keeps every chat model
-//! lmgw runs from serving, as the STT and TTS chips read it.
+//! lmgw runs from serving, as the STT and TTS chips read it. Under it the
+//! page shows the gateway's own forecast: the verdict of the fallback the
+//! block hands the turn to, which hears it when it takes audio, wherever it
+//! runs (changed 2026-10-06, decision D3).
 
 use lmgw_api_types::chat_voice::{audio_input_label, AUDIO_INPUTS};
 use serde::Deserialize;
@@ -12,9 +15,10 @@ use serde::Deserialize;
 use super::source_label;
 use super::state::Block;
 
-/// `voice_resolved.audio_input`: `value` (`off` | `local`) from `source`,
-/// and the verdict — `path` (`audio` | `transcript`), the `model` the turn
-/// goes to, and `why` the transcript.
+/// `voice_resolved.audio_input`: `value` (`off` | `on`) from `source`, and
+/// the verdict — `path` (`audio` | `transcript`), the `model` the turn goes
+/// to, `why` the transcript, the swap that handed it there (`lead`), and the
+/// verdict a block would bring (`blocked`).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct AudioInputResolved {
@@ -23,8 +27,16 @@ pub struct AudioInputResolved {
     pub path: String,
     pub model: String,
     pub why: Option<String>,
-    /// What blocks the model now, when the live block turned an audio
-    /// verdict into the transcript ([`Self::blocked`]); never sent.
+    /// The gateway judged the verdict under a swap: the words for it
+    /// ("under the GPU hold"). The verdict is the block's already.
+    pub lead: Option<String>,
+    /// The gateway's forecast for a GPU block (`blocked` on the wire): the
+    /// fallback's own verdict, or the refusal when there is none — its
+    /// `why` reads after the block's words ("this goes to …, which …").
+    #[serde(rename = "blocked")]
+    pub forecast: Option<Box<AudioInputResolved>>,
+    /// What blocks the model now, when the live block put the forecast in
+    /// the verdict's place ([`Self::blocked`]); never sent.
     #[serde(skip)]
     pub block: Option<&'static str>,
 }
@@ -35,22 +47,24 @@ impl AudioInputResolved {
         self.path == "audio"
     }
 
-    /// The verdict as the live block leaves it (WP1 review M2): the GPU
-    /// hold or a benchmark run keeps every chat model lmgw runs from serving
-    /// — the gateway hands the turn to the model's fallback or refuses it —
-    /// so an audio verdict goes as the transcript until the block ends.
-    /// `None` when the block changes nothing.
+    /// The verdict as the live block leaves it (WP1 review M2, changed
+    /// 2026-10-06): the GPU hold or a benchmark run keeps every chat model
+    /// lmgw runs from serving, and the gateway hands the turn to the model's
+    /// fallback or refuses it — so the page shows the gateway's forecast
+    /// for that ([`Self::forecast`]), amber, until the gateway is asked
+    /// again. `None` when the block changes nothing: none is live, the
+    /// verdict was judged under it already, or no block touches the model.
     pub fn blocked(&self, b: Block) -> Option<Self> {
-        let phrase = b.chat_phrase().filter(|_| self.hears())?;
+        let phrase = b.chat_phrase()?;
+        if self.lead.is_some() {
+            return None;
+        }
+        let f = self.forecast.as_deref()?;
         Some(Self {
-            path: "transcript".into(),
-            why: Some(format!(
-                "{phrase} it goes to {}'s fallback, or is refused, as its transcript: your \
-                 voice goes only to models lmgw runs",
-                self.model
-            )),
+            value: self.value.clone(),
+            source: self.source.clone(),
             block: Some(phrase),
-            ..self.clone()
+            ..f.clone()
         })
     }
 
@@ -63,16 +77,31 @@ impl AudioInputResolved {
         )
     }
 
+    /// What handed the turn to `model`: the live block's words, else the
+    /// gateway's for the swap it judged under.
+    fn handed(&self) -> Option<&str> {
+        match self.block {
+            Some(phrase) => Some(phrase),
+            None => self.lead.as_deref(),
+        }
+    }
+
     /// Where the next voice turn goes: "your voice goes to … as audio", or
-    /// "… gets the transcript: <why>" — under a block, the fallback does.
+    /// "… gets the transcript: <why>" — under a block, after its words, the
+    /// fallback's verdict.
     pub fn verdict_line(&self) -> String {
         if self.hears() {
-            return format!("your voice goes to {} as audio", self.model);
+            return match self.handed() {
+                Some(h) => format!("{h} your voice goes to {} as audio", self.model),
+                None => format!("your voice goes to {} as audio", self.model),
+            };
         }
-        match (self.block, self.why.as_deref()) {
-            (Some(_), Some(why)) => format!("the next voice turn: {why}"),
-            (None, Some(why)) => format!("{} gets the transcript: {why}", self.model),
-            (_, None) => format!("{} gets the transcript", self.model),
+        match (self.block, self.lead.is_some(), self.why.as_deref()) {
+            (Some(phrase), _, Some(why)) => format!("the next voice turn: {phrase} {why}"),
+            // The gateway's `why` starts with the swap's words.
+            (None, true, Some(why)) => format!("the next voice turn: {why}"),
+            (_, _, Some(why)) => format!("{} gets the transcript: {why}", self.model),
+            (_, _, None) => format!("{} gets the transcript", self.model),
         }
     }
 
@@ -89,11 +118,15 @@ impl AudioInputResolved {
     /// path.
     pub fn chip_title(&self) -> String {
         if self.hears() {
+            let line = self.verdict_line();
+            let mut chars = line.chars();
+            let line = match chars.next() {
+                Some(c) => c.to_uppercase().chain(chars).collect::<String>(),
+                None => line,
+            };
             format!(
-                "Your voice goes to {} as audio (experimental). The speech-to-text model still \
-                 transcribes each turn: the transcript is what is saved, and the reply waits \
-                 for it.",
-                self.model
+                "{line} (experimental). The speech-to-text model still transcribes each turn: \
+                 the transcript is what is saved, and the reply waits for it."
             )
         } else {
             let mut t = format!("Input: {}", self.verdict_line());
@@ -119,12 +152,12 @@ pub(super) fn options() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn the_verdict_reads_the_servers_shape_and_says_where_the_voice_goes() {
         let hears: AudioInputResolved = serde_json::from_value(json!({
-            "value": "local", "source": "chat", "path": "audio", "model": "gemma4-12b",
+            "value": "on", "source": "chat", "path": "audio", "model": "gemma4-12b",
             "why": null
         }))
         .unwrap();
@@ -134,7 +167,13 @@ mod tests {
             "your voice goes to gemma4-12b as audio"
         );
         assert_eq!(hears.chip_text(), "hears you");
-        assert!(hears.effect_line().ends_with("· Settings → Chat"));
+        assert!(hears
+            .chip_title()
+            .starts_with("Your voice goes to gemma4-12b as audio (experimental)."));
+        assert_eq!(
+            hears.effect_line(),
+            "in effect: on: models that take audio (experimental) · Settings → Chat"
+        );
 
         let off: AudioInputResolved = serde_json::from_value(json!({
             "value": "off", "source": "thread", "path": "transcript", "model": "gemma4-12b",
@@ -155,51 +194,107 @@ mod tests {
         assert_eq!(options().len(), 3);
     }
 
-    /// The live block turns an audio verdict into the transcript before the
-    /// gateway is asked again (WP1 review M2); not known is not blocked, and
-    /// a transcript verdict keeps its own words.
+    /// A verdict the gateway judged under the hold names the swap, and a
+    /// live block changes nothing more.
     #[test]
-    fn under_a_block_the_model_reads_the_transcript() {
+    fn a_verdict_judged_under_the_hold_names_the_fallback() {
         let hears: AudioInputResolved = serde_json::from_value(json!({
-            "value": "local", "source": "chat", "path": "audio", "model": "gemma4-12b",
-            "why": null
+            "value": "on", "source": "chat", "path": "audio", "model": "openai/gpt",
+            "why": null, "lead": "under the GPU hold"
         }))
         .unwrap();
+        assert_eq!(
+            hears.verdict_line(),
+            "under the GPU hold your voice goes to openai/gpt as audio"
+        );
+        assert!(hears
+            .chip_title()
+            .starts_with("Under the GPU hold your voice goes to openai/gpt as audio"));
         let hold = Block {
             hold: true,
             ..Default::default()
         };
-        let b = hears.blocked(hold).expect("blocked");
-        assert_eq!(b.chip_text(), "reads the transcript");
+        assert_eq!(hears.blocked(hold), None, "the verdict is the block's");
+        let texty = AudioInputResolved {
+            path: "transcript".into(),
+            why: Some(
+                "under the GPU hold this goes to openai/gpt, which does not take audio input"
+                    .into(),
+            ),
+            ..hears
+        };
+        assert_eq!(
+            texty.verdict_line(),
+            "the next voice turn: under the GPU hold this goes to openai/gpt, which does not \
+             take audio input"
+        );
+    }
+
+    /// Under a live block the page shows the gateway's forecast (decision
+    /// D3): the fallback hears (amber "hears you"), reads the transcript, or
+    /// the turn is refused; not known is not blocked, and a model no block
+    /// touches keeps its verdict.
+    #[test]
+    fn under_a_block_the_page_shows_the_fallbacks_own_verdict() {
+        let with = |forecast: Value| -> AudioInputResolved {
+            serde_json::from_value(json!({
+                "value": "on", "source": "chat", "path": "transcript", "model": "texty",
+                "why": "texty does not take audio input", "blocked": forecast
+            }))
+            .unwrap()
+        };
+        let hold = Block {
+            hold: true,
+            ..Default::default()
+        };
+        let a = with(json!({ "path": "audio", "model": "openai/gpt", "why": null }));
+        let b = a.blocked(hold).expect("blocked");
+        assert_eq!(b.chip_text(), "hears you");
         assert_eq!(b.block, Some("under the GPU hold"));
         assert_eq!(
             b.verdict_line(),
-            "the next voice turn: under the GPU hold it goes to gemma4-12b's fallback, or is \
-             refused, as its transcript: your voice goes only to models lmgw runs"
+            "under the GPU hold your voice goes to openai/gpt as audio"
         );
-        assert!(b
-            .chip_title()
-            .starts_with("Input: the next voice turn: under the GPU hold"));
+        assert_eq!(
+            (b.value.as_str(), b.source.as_deref()),
+            ("on", Some("chat"))
+        );
+
+        let a = with(json!({ "path": "transcript", "model": "openai/gpt",
+                             "why": "this goes to openai/gpt, which does not take audio input" }));
         let bench = Block {
             benchmark: true,
             ..Default::default()
         };
-        assert!(hears
-            .blocked(bench)
-            .unwrap()
-            .verdict_line()
-            .contains("while a benchmark run holds the GPU it goes to"));
+        let b = a.blocked(bench).unwrap();
+        assert_eq!(b.chip_text(), "reads the transcript");
+        assert_eq!(
+            b.verdict_line(),
+            "the next voice turn: while a benchmark run holds the GPU this goes to openai/gpt, \
+             which does not take audio input"
+        );
+        assert!(b
+            .chip_title()
+            .starts_with("Input: the next voice turn: while a benchmark run"));
+
+        let a = with(json!({ "path": "transcript", "model": "texty",
+                             "why": "texty has no fallback, so the turn is refused" }));
+        assert_eq!(
+            a.blocked(hold).unwrap().verdict_line(),
+            "the next voice turn: under the GPU hold texty has no fallback, so the turn is \
+             refused"
+        );
+
         let unknown = Block {
             unknown: true,
             ..Default::default()
         };
-        assert_eq!(hears.blocked(unknown), None, "not known is not amber");
-        assert_eq!(hears.blocked(Block::default()), None);
-        let off = AudioInputResolved {
-            path: "transcript".into(),
-            why: Some("audio input is off (this thread)".into()),
-            ..hears
-        };
-        assert_eq!(off.blocked(hold), None);
+        assert_eq!(a.blocked(unknown), None, "not known is not amber");
+        assert_eq!(a.blocked(Block::default()), None);
+        let cloud: AudioInputResolved = serde_json::from_value(json!({
+            "value": "on", "source": "chat", "path": "audio", "model": "openai/gpt", "why": null
+        }))
+        .unwrap();
+        assert_eq!(cloud.blocked(hold), None, "no block touches it");
     }
 }

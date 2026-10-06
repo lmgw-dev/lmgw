@@ -62,6 +62,7 @@ use crate::telemetry::{ADMIN_PROTO, CHAT_TOOL_PROTO};
 mod claim;
 mod heard;
 mod refused;
+mod unheard;
 
 /// `chat_threads.kind` for an Admin Chat thread.
 pub const ADMIN_KIND: &str = "admin";
@@ -158,10 +159,21 @@ struct ChatRunner {
     /// ends with it, and says so ([`chat_turn::mark_continuation`]).
     continuing: bool,
     /// Every model call carries the user's speech as audio: each goes only
-    /// to a route this lmgw runs (voice-audio-input design §3.4).
-    local_only: bool,
-    /// Who the admitted route answers as ([`chat_turn::answered_by`]).
-    admitted_as: Option<String>,
+    /// to a model that takes it (voice-audio-input design §3.4,
+    /// `spoken::may_hear`).
+    hears: bool,
+    /// A heard turn's spoken parts, which a later call to a model that
+    /// cannot hear sends as the user row's words ([`unheard`], review V2).
+    unheard: Option<unheard::Spoken>,
+    /// The gate's headers for the admitted route: who answers on it
+    /// ([`chat_turn::answered_by`], [`chat_turn::answering`]).
+    admitted: crate::gate::GateHeaders,
+    /// What the turn sends a fallback that cannot see (`chat_turn::blind`):
+    /// asked on every route a model call goes out on.
+    blind: std::sync::Arc<chat_turn::Blind>,
+    /// What the turn's content lost to the thread's own model before any
+    /// route was taken (`Turn::degraded`), for every call's row.
+    turn_degraded: Option<String>,
     /// What the last model call went out as: the overrides its route
     /// dropped, and who answered — for the `done` event and the saved reply.
     answering: Mutex<Answering>,
@@ -171,9 +183,14 @@ struct ChatRunner {
 struct Answering {
     ignored: Vec<&'static str>,
     answered_by: Option<String>,
+    /// The last model call went to a llama-server (`SentAs::llama_server`).
+    llama_server: bool,
     /// How the last model call's reasoning off went out, and whether it
     /// reasoned anyway (model-capabilities design §5.6).
     fitted: Option<proxy::reasoning_fit::Fitted>,
+    /// What the last model call's content lost to a model that lacks a
+    /// capability, for its row ([`PerRoute::degraded`]).
+    degraded: Option<String>,
 }
 
 /// The loop's request as each route takes it — the admitted one, and every
@@ -182,13 +199,20 @@ struct Answering {
 /// there is no prefill, and the continuation fields only where llama-server
 /// answers. Always from the loop's own request (the thread's own params),
 /// never from what another route was sent.
+#[async_trait]
 impl PerRoute for ChatRunner {
-    fn request(
+    async fn request(
         &self,
         route: &Route,
+        hold: Option<&crate::vram::LocalHold>,
         rerouted: Option<&crate::gate::GateHeaders>,
         ir: &ChatRequest,
     ) -> Result<Option<ChatRequest>, GatewayError> {
+        // A fallback that cannot see gets the turn's PDFs as their text and
+        // its other images as placeholders, first: everything below fits
+        // that (`chat_turn::blind`).
+        let blind = self.blind.on_route(&self.state, route, ir).await;
+        let ir = blind.as_ref().unwrap_or(ir);
         // Only the first request of a continue ends with the reply; every
         // later one ends with tool results and goes out as it is.
         let continuing = self.continuing
@@ -196,22 +220,66 @@ impl PerRoute for ChatRunner {
                 .messages
                 .last()
                 .is_some_and(|m| m.role == Role::Assistant);
-        let fit = chat_turn::fit_route(route, ir, (continuing, self.local_only))?;
-        let answered_by = match rerouted {
-            Some(h) => chat_turn::answered_by(&self.state.snapshot(), h),
-            None => self.admitted_as.clone(),
+        let headers = rerouted.unwrap_or(&self.admitted);
+        let answered_by = chat_turn::answered_by(&self.state.snapshot(), headers);
+        let answering = chat_turn::answering(answered_by.as_deref(), headers, &ir.model_alias);
+        let fitted = chat_turn::fit_route(
+            &self.state,
+            (route, hold),
+            answering,
+            ir,
+            (continuing, self.hears),
+        )
+        .await;
+        // A model that cannot take the audio, once the user row is settled:
+        // this call goes with the row's words (`unheard`, review V2).
+        let (fit, as_text) = match fitted {
+            Err(e) if e.code() == chat_turn::AUDIO_NOT_HEARD => {
+                let text = match &self.unheard {
+                    Some(spoken) => spoken.as_transcript(&self.state, ir).await?,
+                    None => None,
+                };
+                let Some(text) = text else {
+                    return Err(e);
+                };
+                tracing::info!(
+                    "chat: {} cannot take this heard turn's audio ({e}); the call goes with the \
+                     turn's transcript",
+                    answering.name()
+                );
+                let fit = chat_turn::fit_route(
+                    &self.state,
+                    (route, hold),
+                    answering,
+                    &text,
+                    (continuing, false),
+                )
+                .await?;
+                (fit, Some(text))
+            }
+            other => (other?, None),
         };
+        // The call's row says what its content lost: to the thread's own
+        // model, to this route (`blind`), and a heard turn's audio going as
+        // its transcript.
+        let unheard = as_text
+            .is_some()
+            .then(|| crate::degraded::lacks(answering.name(), false, "audio", "transcript sent"));
+        let degraded =
+            crate::degraded::join([self.turn_degraded.clone(), self.blind.marker(), unheard]);
         *self.answering.lock().unwrap_or_else(|e| e.into_inner()) = Answering {
             ignored: fit.ignored,
             answered_by,
+            llama_server: route.upstream.kind == crate::config::UpstreamKind::LlamaServer,
             fitted: None,
+            degraded,
         };
-        if !continuing && !fit.params_changed {
+        if blind.is_none() && as_text.is_none() && !continuing && !fit.params_changed {
             // The request as the loop built it is what this route takes —
             // no copy of the whole history for nothing.
             return Ok(None);
         }
-        let mut req = ir.clone();
+        let mut req = as_text.unwrap_or_else(|| ir.clone());
         req.params = fit.params;
         if continuing {
             chat_turn::mark_continuation(route, &mut req);
@@ -224,6 +292,14 @@ impl PerRoute for ChatRunner {
         let mut answering = self.answering.lock().unwrap_or_else(|e| e.into_inner());
         fitted.report(&mut answering.ignored);
         answering.fitted = Some(fitted.clone());
+    }
+
+    fn degraded(&self) -> Option<String> {
+        self.answering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .degraded
+            .clone()
     }
 }
 
@@ -238,6 +314,43 @@ impl TurnRunner for ChatRunner {
         let started = Instant::now();
         let hold = match self.claim.for_call().await {
             Ok(hold) => hold,
+            // A block came on while the claim was let go: the call goes
+            // where the gate sends any request under it (`claim`'s module
+            // doc, review V12).
+            Err(_) if self.state.snapshot().gpu_block().is_some() => {
+                let opened = match claim::under_block(&self.state, ir).await {
+                    Ok(opened) => opened,
+                    Err(f) => {
+                        let route = f.route.as_deref().unwrap_or(&self.route);
+                        let fallback = f.headers.fallback_reason();
+                        let (alias, proto) = (&ir.model_alias, self.proto);
+                        refused::record(
+                            &self.state,
+                            alias,
+                            proto,
+                            route,
+                            fallback,
+                            started,
+                            &f.error,
+                        )
+                        .await;
+                        return Err(f.error);
+                    }
+                };
+                return proxy::stream_once_on(
+                    &self.state,
+                    opened.hold.as_ref(),
+                    &opened.route,
+                    opened.headers.fallback_reason(),
+                    ir,
+                    self.proto,
+                    proxy::KeyRef::default(),
+                    deadline.saturating_sub(started.elapsed()),
+                    sink,
+                    Some((self, Some(&opened.headers))),
+                )
+                .await;
+            }
             Err(e) => {
                 // A claim let go and refused again: its request row, as any
                 // refusal of the loop's (`refused`).
@@ -531,10 +644,9 @@ pub(super) async fn run_send(
     // back on the port its container answers on (§5), and the runner carries
     // it, so every turn of the loop forwards to the same held container. Each
     // turn still takes its own per-send lease (`proxy::stream_once`).
-    // As in the plain chat: an outside-VRAM swap must not hand the thread's
-    // images to a fallback that cannot see them, and a candidate alias
-    // refuses a facet it does not enable — tool calls among them, since this
-    // loop always gives the model tools (`Routed::using`).
+    // As in the plain chat: a candidate alias refuses a facet it does not
+    // enable — tool calls among them, since this loop always gives the model
+    // tools (`Routed::using`).
     let uses = crate::gate::request_facets(&ir, None).insert(crate::candidates::Facet::ToolCalls);
     // The loop's request rows' protocol, a refusal's below too.
     let proto = if plan.admin { ADMIN_PROTO } else { "chat" };
@@ -566,7 +678,20 @@ pub(super) async fn run_send(
     // A continue on the route admission settled on — see the plain path's
     // twin of this check in `chat::relay`; every re-route inside the loop is
     // checked again by the runner ([`PerRoute`]).
-    let first = chat_turn::fit_route(&route, &ir, (turn.is_continue(), turn.local_only()));
+    let admitted_as = chat_turn::answered_by(&snap, &headers);
+    // Raced against the stop: the capability check may read a provider's
+    // catalog (review V9).
+    let first = chat_turn::fit_route(
+        &state,
+        (&route, admission.as_ref()),
+        chat_turn::answering(admitted_as.as_deref(), &headers, &ir.model_alias),
+        &ir,
+        (turn.is_continue(), turn.hears()),
+    );
+    let first = match turn.or_stop(&tx, first).await {
+        Ok(fit) => fit,
+        Err(why) => return turn.report_stop(why, &tx).await,
+    };
     let first = match first {
         Ok(fit) => fit,
         Err(e) => {
@@ -585,6 +710,7 @@ pub(super) async fn run_send(
             return chat_turn::refuse_sent(&tx, &e, sent).await;
         }
     };
+    let llama_server = route.upstream.kind == crate::config::UpstreamKind::LlamaServer;
     let runner = ChatRunner {
         state: state.clone(),
         route,
@@ -592,13 +718,27 @@ pub(super) async fn run_send(
         proto,
         claim: claim::LoopClaim::new(admission),
         continuing: turn.is_continue(),
-        local_only: turn.local_only(),
-        admitted_as: chat_turn::answered_by(&snap, &headers),
+        hears: turn.hears(),
+        // The spoken parts are the request's last message: the loop's
+        // record follows it.
+        unheard: turn.user_row().filter(|_| turn.hears()).map(|row| {
+            unheard::Spoken::new(
+                ir.messages.len().saturating_sub(1),
+                turn.spoken_texts().to_vec(),
+                turn.thread_id,
+                row,
+            )
+        }),
         answering: Mutex::new(Answering {
             ignored: first.ignored,
-            answered_by: chat_turn::answered_by(&snap, &headers),
+            answered_by: admitted_as,
+            llama_server,
             fitted: None,
+            degraded: None,
         }),
+        admitted: headers.clone(),
+        blind: std::sync::Arc::clone(turn.blind()),
+        turn_degraded: turn.degraded(),
     };
     // One executor for both planes, always: with no `lmgw__*` tools attached
     // the admin half simply never matches, which is cheaper than two code
@@ -692,6 +832,7 @@ pub(super) async fn run_send(
         let sent = chat_turn::SentAs {
             answered_by: answering.answered_by.clone(),
             images,
+            llama_server: answering.llama_server,
         };
         let _ = sink.tx.send(TurnFrame::error_sent(e, sent)).await;
     }
@@ -766,29 +907,30 @@ pub(super) async fn run_send(
         )
         .await;
     }
-    sink.say(
-        "done",
-        json!({
-            "message_id": saved.id,
-            "saved": saved.saved(),
-            "model": turn.model(),
-            "answered_by": answering.answered_by,
-            "prompt_tokens": sink.usage.prompt_tokens,
-            "completion_tokens": sink.usage.completion_tokens,
-            "ttfb_ms": ttfb,
-            "total_ms": started.elapsed().as_millis() as i64,
-            "aborted": err.is_some() || stopped.is_some() || held_off,
-            "timings": serde_json::Value::Null,
-            "reasoning_ignored": answering.ignored,
-            // The model reasoned although off was asked, in a sentence.
-            "reasoning_note": answering
-                .fitted
-                .as_ref()
-                .and_then(|f| f.note(answering.answered_by.as_deref().unwrap_or(turn.model()))),
-        })
-        .to_string(),
-    )
-    .await;
+    let mut done = json!({
+        "message_id": saved.id,
+        "saved": saved.saved(),
+        "model": turn.model(),
+        "answered_by": answering.answered_by,
+        "prompt_tokens": sink.usage.prompt_tokens,
+        "completion_tokens": sink.usage.completion_tokens,
+        "ttfb_ms": ttfb,
+        "total_ms": started.elapsed().as_millis() as i64,
+        "aborted": err.is_some() || stopped.is_some() || held_off,
+        "timings": serde_json::Value::Null,
+        "reasoning_ignored": answering.ignored,
+        // The model reasoned although off was asked, in a sentence.
+        "reasoning_note": answering
+            .fitted
+            .as_ref()
+            .and_then(|f| f.note(answering.answered_by.as_deref().unwrap_or(turn.model()))),
+    });
+    // A fallback that cannot see got the images as placeholders: said only
+    // when it did, as on the plain path.
+    if let Some(note) = turn.blind().note() {
+        done["images_note"] = json!(note);
+    }
+    sink.say("done", done.to_string()).await;
 }
 
 /// Put a continue's prefill `prefix` in front of the record's first assistant

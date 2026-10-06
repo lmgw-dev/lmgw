@@ -1,0 +1,25 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"the-model\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

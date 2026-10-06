@@ -14,7 +14,9 @@ use super::chat_turn;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Caps {
     pub vision: Option<bool>,
-    /// `input_modalities` contains `audio`.
+    /// The model takes an audio part: the voice turn's predicate
+    /// (`capabilities::hears`) — its egress has one, its capabilities list
+    /// audio, its llama-server did not say otherwise.
     pub audio: Option<bool>,
 }
 
@@ -113,7 +115,9 @@ pub fn blockers(att: &ChatAttachmentMeta, model: &str, caps: Caps, stt_set: bool
     out
 }
 
-/// Fill `blockers` on the drafts of `atts` for the thread's current model.
+/// Fill `blockers` on the drafts of `atts` for the thread's current model,
+/// and `hints` where a draft that goes would reach a fallback that cannot
+/// see ([`blind_hint`]).
 pub(super) async fn annotate_drafts(
     state: &SharedState,
     thread: &ChatThread,
@@ -124,7 +128,54 @@ pub(super) async fn annotate_drafts(
     }
     let caps = caps_for(state, thread, atts).await;
     let stt_set = super::chat_voice::asr_alias(&state.snapshot(), thread).is_some();
+    let seen = |a: &ChatAttachmentMeta| a.kind == "image" || paged(a);
+    let blind = match atts.iter().any(|a| a.message_id.is_none() && seen(a)) {
+        true => blind_hint(state, thread).await,
+        false => None,
+    };
     for a in atts.iter_mut().filter(|a| a.message_id.is_none()) {
-        a.blockers = Some(blockers(a, &thread.model_alias, caps, stt_set));
+        let blocked = blockers(a, &thread.model_alias, caps, stt_set);
+        a.hints = match &blind {
+            Some(lead) if blocked.is_empty() && a.kind == "image" => {
+                Some(vec![format!("{lead}: it gets a placeholder instead")])
+            }
+            Some(lead) if blocked.is_empty() && paged(a) => Some(vec![format!(
+                "{lead}: it gets the PDF's text instead of its page images"
+            )]),
+            _ => None,
+        };
+        a.blockers = Some(blocked);
     }
+}
+
+/// A PDF that goes as page images to a model that sees: one sent as Pages,
+/// or one with pages without text.
+fn paged(a: &ChatAttachmentMeta) -> bool {
+    let textless = a
+        .meta
+        .get("textless")
+        .and_then(|t| t.as_array())
+        .is_some_and(|t| !t.is_empty());
+    a.kind == "pdf" && (a.mode.as_deref() == Some("images") || textless)
+}
+
+/// The lead of a draft's hint (review I2) when the GPU hold or a benchmark
+/// run hands the thread's turns to a fallback that cannot see — "under the
+/// GPU hold this goes to openai/gpt, which cannot see images", worded as the
+/// voice turn's hint is — and `None` otherwise. Nothing is refused for it:
+/// the fallback answers, with the images as placeholders and a PDF's pages
+/// as its text (`chat_turn::blind`, the owner's ruling of 2026-10-06).
+async fn blind_hint(state: &SharedState, thread: &ChatThread) -> Option<String> {
+    let snap = state.snapshot();
+    let resolved = snap.resolve_for_request(&thread.model_alias).ok()?;
+    let fallback = resolved.fallback?;
+    let route = &resolved.route;
+    crate::gate::fallback_images::blind_fallback(state, route, &thread.model_alias).await?;
+    let lead = match snap.gpu_block() {
+        Some(crate::bench::lease::GpuBlock::Benchmark(_)) => "while a benchmark run holds the GPU",
+        _ => "under the GPU hold",
+    };
+    Some(format!(
+        "{lead} this goes to {fallback}, which cannot see images"
+    ))
 }

@@ -23,7 +23,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::config::{Protocol, UpstreamKind};
+use crate::config::Protocol;
 use crate::egress::with_timeout;
 use crate::error::GatewayError;
 use crate::gate::{Opened, RouteCheck};
@@ -51,9 +51,11 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
         .route_layer(crate::server::require(state, Cap::Inference))
 }
 
-/// The handler (module doc). Like the other counters a success writes no
-/// request-log row, a key refused by its alias scope writes one (api-docs
-/// design §5.4), and no budget applies (§12 entry 15).
+/// The handler (module doc). Like the other counters a cheap success writes
+/// no request-log row; a failure — a key refused by its alias scope included
+/// (api-docs design §5.4) — and a count that had to bring its model up write
+/// one, and so does a client that went away first ([`Unanswered`]). No budget
+/// applies (§12 entry 15).
 ///
 /// The body is read whatever its `Content-Type` says, as llama-server reads
 /// it (review R1 #6): clients that post JSON without the header, or with
@@ -63,33 +65,51 @@ async fn tokenize(
     axum::Extension(ctx): axum::Extension<RequestCtx>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    // The log row's `ingress_proto` has no llama.cpp spelling; `/tokenize` is
+    // an OpenAI-family route like the rest of lmgw's own counters.
+    let mut row = counter_row(&state, ClientProto::OpenaiChat, &ctx, &Value::Null);
     let body = match read_body(&state, body) {
         Ok(b) => b,
-        Err(e) => return llama_error_of(&e),
+        Err(e) => {
+            row.failed(&e).await;
+            return llama_error_of(&e);
+        }
     };
     let Some(alias) = body
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_string)
     else {
+        row.failed(&GatewayError::BadRequest(MODEL_REQUIRED.into()))
+            .await;
         return llama_error(StatusCode::BAD_REQUEST, MODEL_REQUIRED, "bad_request");
     };
-    // The log row's `ingress_proto` has no llama.cpp spelling; `/tokenize` is
-    // an OpenAI-family route like the rest of lmgw's own counters.
-    if let Some(e) = counter_policy(&state, ClientProto::OpenaiChat, &ctx, &alias).await {
+    row.alias(&alias);
+    if let Some(e) = counter_policy(&state, &ctx, &alias) {
+        row.failed(&e).await;
         return llama_error_of(&e);
     }
     let Opened {
         route,
         hold,
         headers,
-    } = match crate::gate::open(&state, &alias, RouteCheck::Text("/tokenize")).await {
-        Ok(o) => o,
-        Err(f) => return f.headers.stamp(llama_error_of(&f.error)),
-    };
-    if route.upstream.protocol != Protocol::Openai
-        || route.upstream.kind != UpstreamKind::LlamaServer
+    } = match admit_counter(
+        &state,
+        &alias,
+        RouteCheck::Text("/tokenize"),
+        false,
+        Some(&mut row),
+    )
+    .await
     {
+        Ok(o) => o,
+        Err((headers, e)) => {
+            row.failed(&e).await;
+            return headers.stamp(llama_error_of(&e));
+        }
+    };
+    // llama_cpp implies kind llama_server (llama.cpp egress design, decision 11).
+    if route.upstream.protocol != Protocol::LlamaCpp {
         let message = format!(
             "model '{alias}' is served by {}/{} upstream '{}', which cannot return token ids; \
              POST /v1/count_tokens counts tokens on every backend",
@@ -97,6 +117,8 @@ async fn tokenize(
             route.upstream.kind.as_str(),
             route.upstream.name,
         );
+        row.answered(501, Some(("unsupported", message.clone())))
+            .await;
         return headers.stamp(llama_error(
             StatusCode::NOT_IMPLEMENTED,
             &message,
@@ -109,14 +131,17 @@ async fn tokenize(
         let mut forwarded = body.clone();
         forwarded["model"] = json!(r.upstream_model);
         Ok(with_timeout(
-            crate::egress::openai::tokenize_request(&state.http, &r.upstream, &forwarded),
+            crate::egress::llama_cpp::count::tokenize_request(&state.http, &r.upstream, &forwarded),
             timeout,
         ))
     })
     .await;
     let resp = match sent {
         Ok(r) => r,
-        Err(e) => return headers.stamp(llama_error_of(&e)),
+        Err(e) => {
+            row.failed(&e).await;
+            return headers.stamp(llama_error_of(&e));
+        }
     };
     // Relayed as the backend answered — its ids, and its own errors too: a
     // llama.cpp client reads llama.cpp's refusals already.
@@ -127,7 +152,11 @@ async fn tokenize(
     drop(hold);
     let bytes = match bytes {
         Ok(b) => b,
-        Err(e) => return headers.stamp(llama_error_of(&GatewayError::from(e))),
+        Err(e) => {
+            let e = GatewayError::from(e);
+            row.failed(&e).await;
+            return headers.stamp(llama_error_of(&e));
+        }
     };
     // Except the upstream refusing lmgw's own credential (review R1 #4): that
     // is the gateway's configuration, not the client's request, and every
@@ -135,7 +164,18 @@ async fn tokenize(
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
         let e =
             crate::egress::for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes);
+        row.failed(&e).await;
         return headers.stamp(llama_error_of(&e));
+    }
+    // The backend's own refusal, relayed as it is, is a failed count all the
+    // same: its row says what the backend said.
+    if !status.is_success() {
+        let e =
+            crate::egress::for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes);
+        row.answered(status.as_u16(), Some((e.kind(), e.to_string())))
+            .await;
+    } else {
+        row.answered(status.as_u16(), None).await;
     }
     let mut out = Response::builder().status(status.as_u16());
     if let Some(ct) = content_type {

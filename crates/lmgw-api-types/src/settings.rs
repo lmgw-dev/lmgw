@@ -61,9 +61,9 @@ pub struct SettingsFull {
     pub chat_read_aloud: bool,
     /// `semantic_vad | server_vad | push_to_talk`.
     pub chat_turn_detection: String,
-    /// `off | local`: whether a voice turn goes to the chat model as audio
-    /// when it is a local model lmgw runs that takes audio input
-    /// (experimental; a cloud model never gets audio).
+    /// `off | on`: whether a voice turn goes to the chat model as audio
+    /// when the model that answers it takes audio input, wherever it runs
+    /// (experimental).
     pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (> 0).
     pub chat_kb_budget_tokens: u32,
@@ -245,8 +245,9 @@ pub struct AudioSettings {
     pub public_prefix: String,
     /// See [`RouterSettings::request_timeout_seconds`].
     pub request_timeout_seconds: u64,
-    /// The local speech-to-text model that writes voice-library clip
-    /// transcripts. Empty = none: nothing is transcribed automatically.
+    /// The speech-to-text model that writes voice-library clip transcripts
+    /// (its configured fallback answers as for any request). Empty = none:
+    /// nothing is transcribed automatically.
     pub voice_transcribe_alias: String,
     /// What an audio catalog download takes: `pinned` (the commit the spec
     /// pins, `main` where it pins none — the default) or `latest` (`main`).

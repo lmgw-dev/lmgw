@@ -92,6 +92,17 @@ Rendering into the model request, in `build_messages` (both the plain and the ag
 - `image` for a model with `vision == Some(false)`: a new message carrying one is refused with
   400 `model_no_vision` naming the model. An image already in history is replaced by the text
   part `[image "NAME" not sent: MODEL does not accept images]`, and the UI says so (below).
+  *Changed 2026-10-06* (the owner's ruling: a configured fallback is always used, with no
+  exception by content): under the GPU hold "the resolved model" is the hold's fallback only
+  when that fallback sees, or its vision is unknown. A fallback that cannot see no longer refuses
+  a new image or turns history images into this note: the thread's own model decides, as without
+  the hold, and the fallback answers the turn with the images as placeholders
+  (`gate::fallback_images`) and a PDF's pages as its text (`chat_turn::blind`), at an
+  outside-VRAM swap or a climb's fallback too. The reply says so in `images_note` ("'X' answered
+  in place of 'Y' and cannot see images: the images went to it as placeholders"), stored with it
+  (`chat_messages.images_note`) and shown under its answered-by line. A draft image under such a
+  hold carries a hint that it goes as a placeholder ("under the GPU hold this goes to X, which
+  cannot see images: it gets a placeholder instead"), amber, never blocking Send.
 - Attachment bytes are never copied into `ir_messages` or the request log.
 
 Size: the upload route reads its body against the existing `max_body_mb` limit (declared or

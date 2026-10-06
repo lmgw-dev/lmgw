@@ -282,9 +282,6 @@ enum Ctl {
     /// A model alias: (the tasks it is for, why a local model is refused —
     /// `None` when one is fine, what empty means).
     Model(&'static [&'static str], Option<&'static str>, &'static str),
-    /// A model alias that must be local: (the tasks, why a cloud model is
-    /// refused, what empty means).
-    LocalModel(&'static [&'static str], &'static str, &'static str),
     // Acts at once; never in the draft.
     Hold,
     Apply(&'static str),
@@ -312,8 +309,7 @@ impl Ctl {
             | Ctl::Voice(_)
             | Ctl::SpeechStyle(_)
             | Ctl::VoiceLanguage
-            | Ctl::Model(..)
-            | Ctl::LocalModel(..) => Kind::Text,
+            | Ctl::Model(..) => Kind::Text,
             Ctl::ForgeTokens => Kind::Raw,
             Ctl::Int(_) | Ctl::IntRange(..) => Kind::Int,
             Ctl::Float(..) => Kind::Float,
@@ -816,14 +812,18 @@ const AUDIO: &[Def] = &[
         "audio",
         "audio.voice_transcribe_alias",
         "Clip transcripts",
-        Ctl::LocalModel(
+        Ctl::Model(
             &["asr"],
-            "only a local model may hear your voice clips",
+            None,
             "none — a clip is transcribed only when you ask",
         ),
     )
     .l()
-    .hint("writes an uploaded clip's transcript, which cloning models need")
+    .hint(
+        "writes an uploaded clip's transcript, which cloning models need; its configured \
+         fallback is used as for any request, so pick a local model without one to keep your \
+         clips on this machine",
+    )
     .terms("voice clip transcript reference text asr transcribe library"),
     f(
         "runtimes",
@@ -2387,29 +2387,6 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
                     hidden=hidden
                 >
                     {picker}
-                </Field>
-            }
-            .into_any()
-        }
-        Ctl::LocalModel(tasks, reason, empty) => {
-            let value = bridge(form, k);
-            view! {
-                <Field
-                    label=d.label
-                    unit=d.unit
-                    hint=d.hint
-                    dirty=dirty
-                    error=Signal::derive(move || form.error(k))
-                    id=id
-                    hidden=hidden
-                >
-                    <ModelPicker
-                        value=value
-                        tasks=tasks
-                        empty_label=empty
-                        recent_key="settings"
-                        disallow=(Callback::new(|e: CatalogEntry| !e.local), reason)
-                    />
                 </Field>
             }
             .into_any()

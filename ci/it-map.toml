@@ -86,6 +86,30 @@ modules = ["ops_container", "openapi_ops", "mcp_selfadmin", "mcp_admin_plane", "
 why = "the /api/op plane and the MCP tools on it"
 
 [[map]]
+paths = ["crates/lmgw-core/src/ops/routing.rs", "crates/lmgw-core/src/ops/upstream_settle.rs",
+         "crates/lmgw-core/src/ops/upstream_settle/*", "crates/lmgw-core/src/web/api.rs",
+         "crates/lmgw-core/src/store/upstreams.rs", "crates/lmgw-core/migrations/*"]
+modules = ["upstream_settle"]
+why = "both upstream write paths settle protocol and kind against the table's CHECKs (llama.cpp egress design §5)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/proxy/reasoning_fit/send.rs", "crates/lmgw-core/src/web/admin.rs",
+         "crates/lmgw-core/src/ops/routing.rs", "crates/lmgw-core/src/ops/reads.rs",
+         "crates/lmgw-core/src/web/api.rs", "crates/lmgw-core/src/config/llama_route.rs",
+         "crates/lmgw-core/src/egress/llama_cpp/props.rs", "crates/lmgw-core/src/vram/local_hold.rs",
+         "crates/lmgw-api-types/src/upstreams.rs"]
+modules = ["llama_facts"]
+why = "the external rows' /props cache: its invalidations, the resolver and the surfaces (llama egress design §4.2)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/gate/*", "crates/lmgw-core/src/egress/llama_cpp.rs",
+         "crates/lmgw-core/src/egress/llama_cpp/*", "crates/lmgw-core/src/config/llama_route.rs",
+         "crates/lmgw-core/src/proxy/count_messages.rs", "crates/lmgw-core/src/llama_facts/*",
+         "crates/lmgw-core/src/ir.rs"]
+modules = ["tool_images", "egress_golden", "route_golden"]
+why = "tool-result images on llama.cpp: the frozen decision, its renderer, its count and the corpora that pin their bytes (llama egress design §8)"
+
+[[map]]
 paths = ["crates/lmgw-core/src/web/api_docs.rs"]
 modules = ["openapi_"]
 why = "serves the OpenAPI document"
@@ -138,8 +162,9 @@ why = "the inference proxy"
 [[map]]
 paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
          "crates/lmgw-core/src/ir.rs", "crates/lmgw-core/src/responses.rs"]
-modules = ["egress_adapters", "ingress_roundtrip", "e2e_proxy", "count_compat",
-           "responses_api", "responses_key_ref", "anthropic_beta", "chat_replay_shapes"]
+modules = ["egress_adapters", "ingress_roundtrip", "ingress_tool_results", "e2e_proxy",
+           "count_compat", "responses_api", "responses_key_ref", "anthropic_beta",
+           "chat_replay_shapes"]
 why = "the protocol adapters"
 
 [[map]]
@@ -152,7 +177,7 @@ paths = ["crates/lmgw-core/src/gguf.rs", "crates/lmgw-core/src/gguf/*",
          "crates/lmgw-core/src/modelinfo.rs", "crates/lmgw-core/src/llama_caps.rs",
          "crates/lmgw-core/src/sdcpp_caps.rs"]
 modules = ["modelinfo_real_files", "capabilities_local", "model_runtime_overrides",
-           "runtime_argv", "image_backend"]
+           "runtime_argv", "image_backend", "runtime_llama_props"]
 why = "model metadata"
 
 [[map]]

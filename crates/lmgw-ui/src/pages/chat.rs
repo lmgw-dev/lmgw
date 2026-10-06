@@ -15,8 +15,8 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use super::chat_actions::{ActionEnv, ContinueState, EditReq, MsgActions, MsgEditor, MsgOps};
 use super::chat_attach::{
-    draft_blockers, draft_from_attachment, new_draft, refresh_drafts, BlockerNote, DraftChip,
-    DraftChips, SentChip, ViewerMeta,
+    draft_blockers, draft_from_attachment, draft_hints, new_draft, refresh_drafts, BlockerNote,
+    DraftChip, DraftChips, HintNote, SentChip, ViewerMeta,
 };
 use super::chat_folders::{
     self, FolderDialogs, FolderEnv, FolderHeader, FolderInfo, FolderRow, NoFolderZone,
@@ -124,6 +124,9 @@ pub(super) struct Attachment {
     /// Drafts only: why this cannot be sent to the thread's current model.
     /// `None` = the server has not said (a sent file, or a fresh upload).
     pub(super) blockers: Option<Vec<String>>,
+    /// Drafts only: what this becomes on the way, sent all the same (an
+    /// image as a placeholder for a fallback that cannot see).
+    pub(super) hints: Option<Vec<String>>,
 }
 
 /// `GET /chat/api/threads[?archived=1]`: the list plus how many threads sit
@@ -313,6 +316,9 @@ pub(super) struct MsgRow {
     /// alias.
     pub(super) model: Option<String>,
     pub(super) answered_by: Option<String>,
+    /// A reply a fallback that cannot see answered: what it got in the
+    /// images' place, in a sentence.
+    pub(super) images_note: Option<String>,
     pub(super) attachments: Vec<Attachment>,
     /// A user message's own knowledge bases and what they retrieved.
     pub(super) kb_refs: Vec<i64>,
@@ -366,6 +372,9 @@ pub(super) struct Msg {
     /// (`chat_reply::answer_label`).
     pub(super) model: RwSignal<Option<String>>,
     pub(super) answered_by: RwSignal<Option<String>>,
+    /// A fallback that cannot see answered: what it got in the images'
+    /// place (`done.images_note`, stored with the reply).
+    pub(super) images_note: RwSignal<Option<String>>,
     /// The reply was not stored (`done.saved` false): dimmed, Copy only.
     pub(super) unsaved: RwSignal<bool>,
     /// How the turn was spoken (chat-voice §3).
@@ -387,6 +396,7 @@ pub(super) fn new_msg(key: u64, role: &str, content: String) -> Msg {
         context: RwSignal::new(None),
         model: RwSignal::new(None),
         answered_by: RwSignal::new(None),
+        images_note: RwSignal::new(None),
         unsaved: RwSignal::new(false),
         voice: RwSignal::new(None),
     }
@@ -755,6 +765,7 @@ pub fn Chat() -> impl IntoView {
                     m.voice.set(r.voice);
                     m.model.set(r.model);
                     m.answered_by.set(r.answered_by);
+                    m.images_note.set(r.images_note);
                     if !r.attachments.is_empty() {
                         m.attachments.set(r.attachments);
                     }
@@ -1135,6 +1146,9 @@ pub fn Chat() -> impl IntoView {
     // The one Send gate: the server's blockers on the drafts (images, PDF
     // modes, audio), with the local vision check as the fallback for a draft
     // it has not answered for yet (chat_attach::select_blockers).
+    // What the drafts become on the way, sent all the same (a GPU block's
+    // fallback that cannot see): said, never blocking.
+    let attach_hints = Signal::derive(move || draft_attachments.with(|v| draft_hints(v)));
     let attach_blockers = Signal::derive(move || {
         draft_attachments.with(|v| draft_blockers(v, vision_no.get(), &model_sel.get()))
     });
@@ -1821,6 +1835,7 @@ pub fn Chat() -> impl IntoView {
                                 on_refresh=on_refresh_drafts
                             />
                             <BlockerNote blockers=attach_blockers/>
+                            <HintNote hints=attach_hints/>
                             <KbDraftChips chips=draft_kbs/>
                             <chat_voice::VoiceStatusLine pv=page_voice/>
                             <div class="composer-wrap">
@@ -2665,6 +2680,7 @@ fn MsgView(
     let kb_refs = m.kb_refs;
     let context = m.context;
     let (model, answered_by, unsaved) = (m.model, m.answered_by, m.unsaved);
+    let images_note = m.images_note;
     let voice = m.voice;
     let role = m.role.clone();
     let kbui = KbUi::use_ui();
@@ -2769,6 +2785,11 @@ fn MsgView(
                 {move || {
                     answer_label(model.get().as_deref(), answered_by.get().as_deref())
                         .map(|l| view! { <div class="dim mini-note msg-answered-by">{l}</div> })
+                }}
+                {move || {
+                    images_note
+                        .get()
+                        .map(|n| view! { <div class="mini-note msg-images-note">{n}</div> })
                 }}
                 <Show when=move || unsaved.get()>
                     <div class="mini-note msg-unsaved-note">{UNSAVED_NOTE}</div>

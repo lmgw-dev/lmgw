@@ -107,6 +107,7 @@ fn entry(model: &str, state: RuntimeState) -> RuntimeView {
         last_used_age_seconds: 0,
         warnings: vec![],
         image_capabilities: None,
+        llama_props: None,
         rung: None,
         climbing: None,
         sends: 0,

@@ -77,7 +77,8 @@ pub fn validate_chat_voice_audio_input(v: &str) -> Result<String, String> {
 /// added, falls back (logged) rather than reaching a session — turn
 /// detection to `semantic_vad`, a language that is no ISO 639-1 code to no
 /// hint, audio input to `off`. What reads is normalised as a save would
-/// store it.
+/// store it: an audio input of `local`, the value's name before 2026-10-06,
+/// reads as `on`, and the next save of any setting stores that.
 pub fn normalise_loaded_chat_voice(s: &mut Settings) {
     match TurnDetection::parse(&s.chat_turn_detection) {
         Some(t) => s.chat_turn_detection = t.as_str().to_string(),
@@ -113,8 +114,23 @@ pub fn normalise_loaded_chat_voice(s: &mut Settings) {
             s.chat_voice_reply_language = String::new();
         }
     }
-    match AudioInputMode::parse(&s.chat_voice_audio_input) {
-        Some(m) => s.chat_voice_audio_input = m.as_str().to_string(),
+    match AudioInputMode::parse_stored(&s.chat_voice_audio_input) {
+        Some(m) => {
+            // Said once per process: every snapshot reload reads it again
+            // until a settings save stores the new name.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            if AudioInputMode::parse(&s.chat_voice_audio_input).is_none() {
+                SAID.call_once(|| {
+                    tracing::info!(
+                        "stored setting chat_voice_audio_input = {:?} reads as '{}' (renamed \
+                     2026-10-06); the next settings save stores it",
+                        s.chat_voice_audio_input,
+                        m.as_str()
+                    )
+                });
+            }
+            s.chat_voice_audio_input = m.as_str().to_string();
+        }
         None => {
             tracing::warn!(
                 "stored setting chat_voice_audio_input = {:?} is not one of {}; using off until \
@@ -200,9 +216,12 @@ mod tests {
         );
         let e = validate_chat_turn_detection("auto").unwrap_err();
         assert!(e.contains("semantic_vad, server_vad, push_to_talk"), "{e}");
-        assert_eq!(validate_chat_voice_audio_input(" Local ").unwrap(), "local");
+        assert_eq!(validate_chat_voice_audio_input(" On ").unwrap(), "on");
         let e = validate_chat_voice_audio_input("any").unwrap_err();
-        assert!(e.contains("off, local"), "{e}");
+        assert!(e.contains("off, on"), "{e}");
+        // The value's name before 2026-10-06 is refused on input.
+        let e = validate_chat_voice_audio_input("local").unwrap_err();
+        assert!(e.contains("'local' is not one of off, on"), "{e}");
     }
 
     #[test]
@@ -227,6 +246,8 @@ mod tests {
         s.chat_turn_detection = " Server_VAD ".into();
         s.chat_voice_language = " DE ".into();
         s.chat_voice_reply_language = " En ".into();
+        // A stored `local`, the value's name before 2026-10-06, reads as
+        // `on`.
         s.chat_voice_audio_input = " LOCAL ".into();
         normalise_loaded_chat_voice(&mut s);
         assert_eq!(
@@ -235,7 +256,7 @@ mod tests {
                 s.chat_voice_language.as_str(),
                 s.chat_voice_audio_input.as_str()
             ),
-            ("server_vad", "de", "local")
+            ("server_vad", "de", "on")
         );
         assert_eq!(s.chat_voice_reply_language, "en");
     }

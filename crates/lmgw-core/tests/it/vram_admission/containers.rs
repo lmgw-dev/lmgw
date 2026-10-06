@@ -38,9 +38,17 @@ pub(super) async fn container(world: Arc<Mutex<World>>) -> MockServer {
         .await;
     let port = server.address().port();
 
+    let w = world.clone();
     Mock::given(method("GET"))
         .and(path("/health"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#))
+        .respond_with(move |_: &Request| {
+            // Still loading while the test holds it (`World::health_held`).
+            if w.lock().unwrap().health_held {
+                return ResponseTemplate::new(503)
+                    .set_body_string(r#"{"error":{"message":"Loading model"}}"#);
+            }
+            ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#)
+        })
         .mount(&server)
         .await;
 

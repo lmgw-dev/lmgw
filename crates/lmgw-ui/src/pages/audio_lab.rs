@@ -99,9 +99,12 @@ struct RefsResp {
     clips: Vec<Clip>,
     error: Option<String>,
     /// An upload's clips the settings' transcription model wrote a
-    /// transcript for — `{clip, transcript_source}` or `{clip,
-    /// transcribe_error}` each (audio-class gap 5).
+    /// transcript for — `{clip, transcript_source, answered_by, by}` or
+    /// `{clip, transcribe_error}` each (audio-class gap 5).
     transcribed: Vec<Value>,
+    /// One clip transcribed: which model wrote it, in a sentence — a
+    /// fallback that answered named as one.
+    message: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,9 +2296,15 @@ fn VoiceLibrary(
                             .iter()
                             .filter_map(|t| t["transcribe_error"].as_str().map(str::to_string))
                             .collect();
+                        let by = r
+                            .transcribed
+                            .first()
+                            .and_then(|t| t["by"].as_str())
+                            .map(|by| format!(" by {by}"))
+                            .unwrap_or_default();
                         match (r.transcribed.len(), failed.first()) {
                             (0, _) => toasts.ok("clip uploaded"),
-                            (_, None) => toasts.ok("clip uploaded and transcribed"),
+                            (_, None) => toasts.ok(format!("clip uploaded and transcribed{by}")),
                             (_, Some(why)) => {
                                 toasts.warn(format!("clip uploaded, not transcribed: {why}"))
                             }
@@ -2326,7 +2335,7 @@ fn VoiceLibrary(
         });
     };
 
-    // A local speech-to-text model writes the transcript (audio-class gap
+    // A speech-to-text model writes the transcript (audio-class gap
     // 5): the setting's, `Settings → Runtimes → Audio → Clip transcripts`.
     // One at a time — the clip being transcribed, or `*` for all missing.
     let transcribing = RwSignal::new(None::<String>);
@@ -2338,7 +2347,8 @@ fn VoiceLibrary(
                 Ok(r) => {
                     lab.clips.set(r.clips);
                     lab.clips_err.set(String::new());
-                    toasts.ok(format!("{name} transcribed"));
+                    // Who wrote it, a fallback named as one (review V1).
+                    toasts.ok(r.message.unwrap_or_else(|| format!("{name} transcribed")));
                 }
                 Err(e) => lab.clips_err.set(e),
             }
@@ -2472,7 +2482,7 @@ fn VoiceLibrary(
                                     </button>
                                     <button
                                         class="btn ghost sm"
-                                        title="Write the transcript with the local speech-to-text \
+                                        title="Write the transcript with the speech-to-text \
                                                model of Settings → Runtimes → Audio → Clip \
                                                transcripts (replaces this one)"
                                         disabled=move || transcribing.get().is_some()
@@ -2530,9 +2540,8 @@ fn VoiceLibrary(
                 </button>
                 <button
                     class="btn ghost"
-                    title="Transcribe every clip without a transcript, with the local \
-                           speech-to-text model of Settings → Runtimes → Audio → Clip transcripts \
-                           — the clips never leave this machine"
+                    title="Transcribe every clip without a transcript, with the speech-to-text \
+                           model of Settings → Runtimes → Audio → Clip transcripts"
                     disabled=move || transcribing.get().is_some()
                     on:click=transcribe_missing
                 >

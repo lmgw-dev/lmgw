@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::watch;
 
+use crate::egress::llama_cpp::props::LlamaFacts;
 use crate::gate::facts::GateFacts;
 
 use super::*;
@@ -120,6 +121,12 @@ pub(super) struct Entry {
     /// for image models that got a 200. Not persisted: it describes the
     /// process, so it is re-read on every start and dropped with the entry.
     pub(super) capabilities: Option<ImageCapabilities>,
+    /// What a llama-server container said about itself (`GET /props`) and
+    /// what its start row says about its projector (llama egress design
+    /// §4.2, §8.2; `llama_props.rs`). `None` for every other engine, and
+    /// while the entry is `starting` or climbing. Re-read on every start,
+    /// climb and adoption, and dropped with the entry.
+    pub(super) llama: Option<LlamaEntry>,
     /// What the request gate reads about this container — the row it was
     /// **started** with, never the row as it has been edited since (see
     /// [`GateFacts`]'s module doc for why that difference aborts requests).
@@ -199,6 +206,17 @@ pub struct RuntimeView {
     /// answered anything but a 200.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_capabilities: Option<ImageCapabilities>,
+    /// What a llama-server container said about itself in `GET /props` (llama
+    /// egress design §4): its modalities, slot context, template caps and
+    /// build. Absent for every other engine, and when the read failed — the
+    /// warnings above say why — so a frame without llama containers is byte
+    /// for byte what it was.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "llama_props::serialize_facts"
+    )]
+    pub llama_props: Option<Arc<LlamaFacts>>,
     /// The ladder rung this container runs, 1-based like every outside
     /// surface (ladder design §6, §12 entry 11). Absent without a ladder, so
     /// such a row's frame is byte-for-byte what it was.

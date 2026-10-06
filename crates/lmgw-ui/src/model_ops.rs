@@ -13,7 +13,7 @@ use crate::ops_state::{model_key, use_ops, OpsState};
 use crate::widgets::{use_toasts, Modal, ModalSize, Toasts};
 
 /// Engage or release the GPU hold (gpu-hold design §3.1, §6) through
-/// `ops::hold_set` — the op the tray, the titlebar's GPU pill and Settings →
+/// `ops::hold_set` — the op the tray, the sidebar's GPU pill and Settings →
 /// GPU → Hold all call. Engaging stops every local container, so it is never
 /// part of a draft: it applies on the click. `busy` covers the round trip;
 /// the live `vram` frame carries the new state back to every surface.

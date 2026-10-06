@@ -1,0 +1,23 @@
+{
+  "request": {
+    "body": "{\"max_tokens\":32,\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"the-model\",\"n_predict\":64}",
+    "body_json": {
+      "max_tokens": 32,
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "n_predict": 64
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

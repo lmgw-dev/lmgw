@@ -1,0 +1,53 @@
+{
+  "requests": [
+    {
+      "body": "{\"messages\":[{\"content\":\"Be brief.\",\"role\":\"system\"},{\"content\":\"Hello, world!\",\"role\":\"user\"}],\"model\":\"chat-model\",\"tools\":[{\"function\":{\"description\":\"A weather chart.\",\"name\":\"chart\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"}]}",
+      "body_json": {
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "Hello, world!",
+            "role": "user"
+          }
+        ],
+        "model": "chat-model",
+        "tools": [
+          {
+            "function": {
+              "description": "A weather chart.",
+              "name": "chart",
+              "parameters": {
+                "properties": {},
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/apply-template"
+    },
+    {
+      "body": "{\"add_special\":true,\"content\":\"p\"}",
+      "body_json": {
+        "add_special": true,
+        "content": "p"
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/tokenize"
+    }
+  ],
+  "status": 200
+}

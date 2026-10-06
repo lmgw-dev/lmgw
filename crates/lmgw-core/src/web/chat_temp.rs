@@ -127,6 +127,7 @@ impl TempAttachment {
             extracted_tokens: store::attachment_tokens(&self.meta),
             meta: self.meta.clone(),
             blockers: None,
+            hints: None,
         }
     }
 
@@ -362,6 +363,7 @@ impl TempChats {
             ir_messages: r.ir_messages.clone(),
             model: r.model.clone(),
             answered_by: r.answered_by.clone(),
+            images_note: r.images_note.clone(),
             voice: r.voice.clone(),
             created_at: now(),
             ..Default::default()
@@ -397,6 +399,7 @@ impl TempChats {
             row.ir_messages = r.ir_messages.clone();
             row.model = r.model.clone();
             row.answered_by = r.answered_by.clone();
+            row.images_note = r.images_note.clone();
             row.voice = row.voice.take().map(MessageVoice::continued);
             t.touch();
             ContinueSave::Saved

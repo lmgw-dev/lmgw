@@ -55,8 +55,9 @@ pub struct CandidateDerived {
     /// owner's idle conversation cache when background traffic shares it
     /// (§4.5).
     pub advisories: Vec<String>,
-    /// The alias fallback resolves, is not local, and supports every facet
-    /// in `enabled`.
+    /// The alias fallback resolves and is not local. Whether it supports
+    /// every facet in `enabled` no longer matters (changed 2026-10-06): one
+    /// that does not is named in `advisories`.
     pub fallback_usable: bool,
     /// Minimum across `routable` candidates (a ladder candidate counts at
     /// its top rung, `capabilities::exposed`'s own rule); absent if any
@@ -216,8 +217,10 @@ pub async fn derive(
     }
 
     // The fallback: resolved through the one lookup every fallback goes
-    // through (`Snapshot::alias_fallback`), then held to the same
-    // every-enabled-facet rule as a candidate.
+    // through (`Snapshot::alias_fallback`). One that lacks a facet the alias
+    // enables is used all the same (changed 2026-10-06, the owner's ruling:
+    // a configured fallback is always used): what it cannot take goes to it
+    // degraded, and the editor says so beforehand.
     match snap.alias_fallback(alias) {
         FallbackRoute::None => out.fallback_usable = false,
         FallbackRoute::Unusable { alias: fb, why } => {
@@ -226,15 +229,14 @@ pub async fn derive(
             out.fallback_usable = false;
         }
         FallbackRoute::Usable { alias: fb, .. } => {
-            match fallback_supports(state, &fb, out.enabled).await {
-                Ok(()) => out.fallback_usable = true,
-                Err(f) => {
-                    out.problems.push(format!(
-                        "fallback '{fb}' lacks {}: treated as none",
-                        f.as_str()
-                    ));
-                    out.fallback_usable = false;
-                }
+            out.fallback_usable = true;
+            if let Err(f) = fallback_supports(state, &fb, out.enabled).await {
+                out.advisories.push(format!(
+                    "fallback '{fb}' lacks {}: it answers all the same, and what it cannot take \
+                     goes to it degraded (images as placeholders, a Chat PDF's pages as text, a \
+                     voice turn as its transcript), marked on its request rows",
+                    f.as_str()
+                ));
             }
         }
     }
@@ -287,9 +289,10 @@ pub async fn derive(
 }
 
 /// Whether the fallback named `fallback_alias` supports every facet in
-/// `enabled` — `Err(f)` names the first one it does not. Shared by
-/// [`derive`] (candidates) and `ops::candidate_alias` (save-time validation),
-/// so the same rule judges both places.
+/// `enabled` — `Err(f)` names the first one it does not: what [`derive`]'s
+/// advisory names. Nothing refuses or skips a fallback for it any more
+/// (changed 2026-10-06, the owner's ruling: a configured fallback is always
+/// used).
 pub async fn fallback_supports(
     state: &SharedState,
     fallback_alias: &str,
@@ -308,6 +311,17 @@ pub async fn fallback_supports(
         if !caps.as_ref().is_some_and(|c| supports(c, f)) {
             return Err(f);
         }
+    }
+    // Audio is a capability of the egress too: the Anthropic API has no
+    // audio part, whatever an override claims, so such a fallback counts as
+    // none for an alias that enables audio — the walk and the heard turn's
+    // check (`capabilities::hears`) agree (voice-audio-input review V2).
+    let anthropic = state
+        .snapshot()
+        .resolve(fallback_alias)
+        .is_ok_and(|r| r.upstream.protocol == crate::config::Protocol::Anthropic);
+    if enabled.contains(Facet::Audio) && anthropic {
+        return Err(Facet::Audio);
     }
     Ok(())
 }

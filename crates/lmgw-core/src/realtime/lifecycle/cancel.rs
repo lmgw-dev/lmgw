@@ -18,12 +18,15 @@
 //! `output_audio.done`); and `response.done {cancelled, reason: client_cancelled}`
 //! goes out, with the usage the upstream reported so far.
 //!
-//! **After generation has ended, in text mode**, every item is already
-//! closed `completed` — the client may have run its tool — so a cancel
-//! changes nothing: the response finishes as `completed` when its call
-//! returns and its output has drained. A cancel with nothing active, or for
-//! a response that is not the active one, is `error {code:
-//! "response_cancel_not_active"}`, as with OpenAI.
+//! **After generation has ended, in text mode**, its message and function
+//! call items are closed `completed` — the client may have run its tool —
+//! and stay so. With nothing else open a cancel changes nothing: the
+//! response finishes as `completed` when its call returns and its output has
+//! drained. A server-side call still open keeps the response cancellable
+//! (realtime-server-tools §2.5): the cancel closes it as abandoned — as never
+//! made, if it was not sent yet — and the response ends `cancelled`. A
+//! cancel with nothing active, or for a response that is not the active one,
+//! is `error {code: "response_cancel_not_active"}`, as with OpenAI.
 
 use super::super::output;
 use super::super::protocol::{ErrorObject, ResponseStatus, StatusDetails};
@@ -87,9 +90,9 @@ impl Core {
         if let Some(stop) = active.call.take() {
             stop.stop();
         }
-        let (conv, ob) = (&mut self.conversation, &mut self.ob);
+        let (conv, ids, ob) = (&mut self.conversation, &self.ids, &mut self.ob);
         active.output.keep_sent(conv, &sent.audio);
-        active.output.abandon(conv, ob);
+        active.output.abandon(conv, ids, ob);
         active.output.done(
             conv,
             ob,

@@ -135,6 +135,7 @@ pub(super) async fn run_turn(
     let a_db_id = target.db_id;
     let a_context = target.context;
     let (a_model, a_answered_by, a_unsaved) = (target.model, target.answered_by, target.unsaved);
+    let a_images_note = target.images_note;
 
     let t0 = js_sys::Date::now();
     let first_at = Rc::new(Cell::new(None::<f64>));
@@ -264,6 +265,7 @@ pub(super) async fn run_turn(
                 if fin.model.is_some() {
                     a_model.set(fin.model);
                     a_answered_by.set(fin.answered_by);
+                    a_images_note.set(fin.images_note);
                 }
                 let (up, uc) = usage_seen2.get();
                 let total_ms = done["total_ms"]

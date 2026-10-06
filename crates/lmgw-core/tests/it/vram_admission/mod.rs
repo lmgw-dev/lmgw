@@ -44,6 +44,7 @@ mod fixture;
 mod podman;
 mod world;
 
+mod abandoned_requests;
 mod admission;
 mod audio_cpu;
 mod audio_cpu_verbs;
@@ -53,6 +54,8 @@ mod audio_sampling;
 mod audio_stale_render;
 mod audio_voices;
 mod background_starts;
+mod blind_fallback;
+mod blind_fallback_chat;
 mod chat_tool_reroute;
 mod dead_container;
 mod degradation;
@@ -71,6 +74,8 @@ mod outside_vram_fallback;
 mod pool_mock;
 mod release_after_llama_server;
 mod request_gate;
+mod unheld_containers;
+mod unheld_pass;
 
 use containers::*;
 use fixture::*;

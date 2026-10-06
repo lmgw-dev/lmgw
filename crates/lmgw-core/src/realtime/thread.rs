@@ -111,7 +111,7 @@ pub(crate) struct Bound {
     /// or failed on it, and why (voice-audio-input design §3.5): the
     /// verdict's session row, so later turns to them go as their transcript
     /// until voice mode is entered again. lmgw's own refusals
-    /// (`audio_not_local`, a context guard) never enter it.
+    /// (`audio_input_unsupported`, a context guard) never enter it.
     pub refused: crate::web::chat_voice::bound::Refusals,
     /// Whether the next turn goes to the chat model as audio, and why not
     /// (voice-audio-input design §2.2): the thread's verdict as last judged

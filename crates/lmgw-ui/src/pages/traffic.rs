@@ -1070,6 +1070,18 @@ fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
             </span>
         }
     });
+    // `request_logs.degraded` (the owner's requirement, 2026-10-06): the
+    // request's content was cut to what the model that answered can take —
+    // images as placeholders, a PDF's pages as text, a voice turn as its
+    // transcript. The badge sits beside the fallback's, the marker in its
+    // tooltip and the detail row.
+    let degraded_badge = r.degraded.clone().map(|marker| {
+        view! {
+            <span class="type-badge fallback-badge" title=marker>
+                "degraded"
+            </span>
+        }
+    });
     // `request_logs.rung` (ladder design §6, §12 entry 36): the rung this
     // request was judged on, 1-based, empty for a row without a ladder and
     // for one a fallback answered (`GateHeaders::fall_back` clears it, same
@@ -1102,6 +1114,7 @@ fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
                     {(!up_model.is_empty()).then(|| format!(" · {up_model}"))}
                 </span>
                 {fallback_badge}
+                {degraded_badge}
             </td>
             <td class="dim mono-sm col-p2">{route}</td>
             <td>
@@ -1162,6 +1175,15 @@ fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
                                 view! {
                                     <span class="dim">"Fallback"</span>
                                     <span class="mono-sm">{fallback_label(&reason)}</span>
+                                }
+                            })}
+                        {detail
+                            .degraded
+                            .clone()
+                            .map(|marker| {
+                                view! {
+                                    <span class="dim">"Degraded"</span>
+                                    <span class="mono-sm">{marker}</span>
                                 }
                             })}
                         {detail

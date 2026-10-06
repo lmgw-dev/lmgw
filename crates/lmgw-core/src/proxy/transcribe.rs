@@ -58,7 +58,7 @@ pub async fn transcribe_as(
         mime,
         stop: None,
         language: None,
-        local_only: false,
+        clip: false,
     };
     transcribe_labelled(state, ctx, ClientProto::OpenaiChat, upload)
         .await
@@ -85,7 +85,7 @@ pub(crate) async fn transcribe_for(
         mime,
         stop: None,
         language: None,
-        local_only: false,
+        clip: false,
     };
     transcribe_labelled(state, &RequestCtx::default(), proto, upload)
         .await
@@ -158,7 +158,7 @@ pub(crate) async fn transcribe_dictation(
         mime,
         stop: Some(stop),
         language,
-        local_only: false,
+        clip: false,
     };
     transcribe_labelled(state, &RequestCtx::default(), proto, upload).await
 }
@@ -193,7 +193,7 @@ pub(crate) async fn transcribe_turn(
         mime: "audio/wav",
         stop: Some(stop),
         language,
-        local_only: false,
+        clip: false,
     };
     transcribe_labelled(state, ctx, ClientProto::Realtime, upload)
         .await
@@ -209,8 +209,9 @@ struct Upload<'a> {
     stop: Option<&'a StopSignal>,
     /// The spoken language, an ISO-639-1 code, when the caller knows it.
     language: Option<&'a str>,
-    /// Only a local speech-to-text row may hear it ([`local`]).
-    local_only: bool,
+    /// A voice-library clip: its answering model must transcribe
+    /// ([`clip`]).
+    clip: bool,
 }
 
 async fn transcribe_labelled(
@@ -226,7 +227,7 @@ async fn transcribe_labelled(
         mime,
         stop,
         language,
-        local_only,
+        clip,
     } = upload;
     let started = Instant::now();
     // Dropped unfinished (the caller went away mid-call), the guard abandons the
@@ -249,8 +250,8 @@ async fn transcribe_labelled(
     }
     // The stop is raced inside, so a call stopped once the gate opened keeps
     // its route on the row (`multipart_call`).
-    let called = if local_only {
-        match local::open(state, alias).await {
+    let called = if clip {
+        match clip::open(state, alias).await {
             Ok(opened) => {
                 multipart_send(
                     state,
@@ -337,8 +338,9 @@ async fn transcribe_labelled(
     })
 }
 
-mod local;
-pub use local::{local_asr_row, transcribe_local_only};
+mod clip;
+pub(crate) use clip::ASR_REQUIRED;
+pub use clip::{answered_line, transcribe_voice_clip, ClipTranscript};
 pub(crate) mod warm;
 
 /// The log row's parameters: the audio route's own, minus everything that only
@@ -365,6 +367,7 @@ fn log<'a>(
         max_tokens_clamped: None,
         fallback,
         rung: None,
+        degraded: None,
     }
 }
 

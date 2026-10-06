@@ -40,6 +40,15 @@
 //! - [`facts`] — what the gate reads about a container: the row it was
 //!   *started* with, captured on the registry entry and read through the
 //!   hold, never the row as it has been edited since (second review, finding 1).
+//! - [`tool_images`](crate::gate::tool_images) — whether a send's
+//!   tool-result images may go to a llama.cpp server as images (llama egress
+//!   design §8.2's predicate), decided once per send in
+//!   [`fit`](crate::gate::fit) and carried on its lease, and how many would
+//!   ([`tool_media`](crate::gate::tool_media)).
+//! - [`fallback_images`] — a request's images on a fallback that cannot see
+//!   them: placeholders, decided once per send at the top of
+//!   [`fit`](crate::gate::fit) (the owner's ruling, 2026-10-06: a configured
+//!   fallback is always used).
 //!
 //! Rows the gate does not apply to — not guarded, not (later) a ladder, or
 //! not local at all — pass through both halves exactly as they did before it
@@ -50,11 +59,13 @@ pub mod candidate;
 pub mod clamp;
 pub mod count;
 pub mod facts;
+pub mod fallback_images;
 pub mod fit;
 pub mod ladder;
 pub mod open;
 pub mod pool;
 pub mod send;
+pub mod tool_images;
 
 pub use candidate::{legacy_facets, request_facets, CandidateCtx};
 pub use clamp::clamp_max_tokens;
@@ -63,8 +74,8 @@ pub use count::{
     ProjectorRow, PromptCount,
 };
 pub use facts::GateFacts;
-pub(crate) use fit::on_running_server;
 pub use fit::{attribute, fit_chat, fit_text, planned_clamp, planned_rung, FitRefusal, TurnLease};
+pub(crate) use fit::{guard_facts, on_running_server};
 pub use ladder::{RungTag, RUNG_HEADER};
 pub use open::{
     open, open_pinned, resolve, usable_fallback, AdmissionPolicy, FallbackReason, GateHeaders,
@@ -72,3 +83,4 @@ pub use open::{
 };
 pub(crate) use send::rebuild;
 pub use send::{send_gated, send_gated_marked, CountInput, Sent};
+pub use tool_images::{tool_image_predicate, tool_media, ToolImageInputs};

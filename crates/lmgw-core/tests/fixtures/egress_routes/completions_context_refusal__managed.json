@@ -1,0 +1,27 @@
+{
+  "requests": [
+    {
+      "body": "{\"max_tokens\":16,\"model\":\"chat-model\",\"prompt\":\"Once upon a time\"}",
+      "body_json": {
+        "max_tokens": 16,
+        "model": "chat-model",
+        "prompt": "Once upon a time"
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/completions"
+    }
+  ],
+  "response": {
+    "error": {
+      "code": "context_length_exceeded",
+      "message": "'chat-model': prompt 5000 tokens exceeds the per-request context of 4096 tokens — shorten the conversation",
+      "param": null,
+      "type": "invalid_request_error"
+    }
+  },
+  "status": 400
+}

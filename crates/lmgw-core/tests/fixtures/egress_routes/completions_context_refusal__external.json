@@ -1,0 +1,29 @@
+{
+  "requests": [
+    {
+      "body": "{\"max_tokens\":16,\"model\":\"chat-gguf\",\"prompt\":\"Once upon a time\"}",
+      "body_json": {
+        "max_tokens": 16,
+        "model": "chat-gguf",
+        "prompt": "Once upon a time"
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/completions"
+    }
+  ],
+  "response": {
+    "error": {
+      "code": "context_length_exceeded",
+      "message": "'chat-gguf': prompt 5000 tokens exceeds the per-request context of 4096 tokens — shorten the conversation",
+      "param": null,
+      "type": "invalid_request_error"
+    }
+  },
+  "status": 400
+}

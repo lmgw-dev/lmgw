@@ -14,6 +14,17 @@ impl Registry {
         self.map().contains_key(&(class, model_id.to_string()))
     }
 
+    /// Does an entry, in any state, name the container `name`?
+    ///
+    /// What a start or a climb whose entry was taken from it asks before it
+    /// removes the container it started: when an entry holds that name again —
+    /// a later start's (its `--replace` takes the name over, or already has),
+    /// or the reconciliation pass's adoption (`unheld.rs`) — the container is
+    /// that entry's, and removing it by name would strand it.
+    pub(super) fn holds_name(&self, name: &str) -> bool {
+        self.map().values().any(|e| e.container_name == name)
+    }
+
     /// Where this model's running container computes ([`Entry::placement`]),
     /// `None` when none is in the map. The truth for that container: its row
     /// may have been switched since it started.

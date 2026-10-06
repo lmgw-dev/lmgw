@@ -415,7 +415,7 @@ async fn gateway() -> Gateway {
         &state.db,
         &NewUpstream {
             name: "local-router".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::LlamaCpp,
             kind: UpstreamKind::LlamaServer,
             base_url: format!("{}/v1", mock.uri()),
             api_key: None,

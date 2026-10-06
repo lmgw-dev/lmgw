@@ -94,6 +94,7 @@ pub(crate) use beside::Crowded;
 mod on_cpu;
 pub(crate) use on_cpu::held_container_fallback;
 mod queue;
+mod stall;
 mod verdict;
 pub(crate) use queue::*;
 

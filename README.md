@@ -256,9 +256,33 @@ them), unless its alias's `capabilities.speech` override declares
 `instructions: "style"`.
 
 Implemented are conversation sessions with audio or text output, PCM16 at
-24 kHz, `server_vad`, `semantic_vad` and manual turns, barge-in, and
-client-side function tools. WebRTC, SIP, ephemeral keys, transcription-only
-sessions and G.711 are not, and the API reference lists the details.
+24 kHz, `server_vad`, `semantic_vad` and manual turns, barge-in, client-side
+function tools, and MCP tools that lmgw runs itself. WebRTC, SIP, ephemeral
+keys, transcription-only sessions and G.711 are not, and the API reference
+lists the details.
+
+**MCP tools on `/v1/realtime`.** A session can use the tools of the MCP
+servers lmgw serves on `/mcp`, and of the built-in `docs` and `kb` toolsets.
+Name them by label in `session.update`:
+
+```json
+{"type": "session.update", "session": {"type": "realtime", "tools": [
+  {"type": "mcp", "server_label": "docs"}
+]}}
+```
+
+`GET /v1/mcp/servers` lists the labels a key may use, and
+`GET /v1/mcp/servers/{label}` the tools behind one, so a client can offer a
+picker. A label is resolved against lmgw's own servers under the key's tool
+scope; a `server_url` in the tool is ignored, so lmgw never connects where a
+client points it. The session announces each label's tools as an
+`mcp_list_tools` item. When the model calls one, lmgw runs it before the
+response ends and reports it as an `mcp_call` item with its output. As in
+OpenAI's Realtime API, the call ends the response, and the client sends
+`response.create` to get the answer; the OpenAI Agents SDK
+(`hostedMcpTool`) does that by itself. Tools behind an approval
+(`require_approval`) are not supported yet. Voice mode in the Chat uses the
+thread's own MCP tools instead.
 
 ### Voice in the Chat
 
@@ -325,14 +349,20 @@ a fallback that answered is named on the message.
   text whenever you like. Voice mode is not available in Admin Chat threads,
   though dictation and read-aloud are.
 - **Models that hear (experimental).** Set **Audio input in voice mode** to
-  *local* in Settings → Chat → Voice or in a thread's drawer, and a local
-  model lmgw runs that takes audio input (Gemma 4 with its audio projector,
-  say) gets each spoken turn as audio while the speech-to-text model
-  transcribes it beside. The reply starts at once but plays only when the
-  transcript is in: the transcript is what the thread keeps, and a turn that
-  turns out to be noise ends quietly. The voice panel's INPUT chip says
-  whether the model hears you or reads the transcript, and why. Cloud models
-  and servers lmgw does not run never get the audio, and no audio is stored.
+  *on* in Settings → Chat → Voice or in a thread's drawer, and a chat model
+  that takes audio input (Gemma 4 with its audio projector, say, or a cloud
+  model whose capabilities list audio) gets each spoken turn as audio while
+  the speech-to-text model transcribes it beside. The reply starts at once
+  but plays only when the transcript is in: the transcript is what the thread
+  keeps, and a turn that turns out to be noise ends quietly. When the GPU
+  hold or a busy card hands the turn to a fallback, that fallback hears it if
+  it takes audio and reads the transcript otherwise (a busy card is noticed
+  only at the send, so a fallback that reads text answers a moment later,
+  from the transcript). A model whose capabilities lmgw cannot read reads the
+  transcript until you give its alias a capabilities override with task chat
+  and input modalities text and audio (a passthrough model needs an alias for
+  that). The voice panel's INPUT chip says whether the
+  model hears you or reads the transcript, and why. No audio is stored.
 - **Audio devices.** The voice menu holds the microphone, the output and the
   echo mode, kept per window. The default expects an input that cancels echo
   itself, such as a USB mic array with echo cancellation or a PipeWire

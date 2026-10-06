@@ -22,6 +22,7 @@ fn upstream(id: i64, enabled: bool) -> Upstream {
         expose_all: false,
         expose_prefix: String::new(),
         supports_responses: false,
+        llama: None,
     }
 }
 

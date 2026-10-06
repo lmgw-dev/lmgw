@@ -60,6 +60,10 @@ pub struct RequestLogRow {
     /// surface (ladder design §6, §12 entry 11). `NULL` for a row without a
     /// ladder — migration 0043.
     pub rung: Option<i64>,
+    /// What the request's content lost on its way to a model that lacks a
+    /// capability ([`crate::degraded`]): "fallback 'x' lacks vision: 3
+    /// images sent as placeholders". `NULL` = nothing — migration 0060.
+    pub degraded: Option<String>,
 }
 
 fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
@@ -102,6 +106,7 @@ fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
         max_tokens_clamped: row.get("max_tokens_clamped"),
         fallback_reason: row.get("fallback_reason"),
         rung: row.get("rung"),
+        degraded: row.get("degraded"),
     }
 }
 
@@ -151,6 +156,9 @@ pub struct NewRequestLog {
     /// for a refusal, the rung it was judged on. `None` for a row without a
     /// ladder, and for a request its fallback answered.
     pub rung: Option<i64>,
+    /// What the request's content lost on its way to a model that lacks a
+    /// capability ([`crate::degraded`]); `None` = nothing.
+    pub degraded: Option<String>,
 }
 
 impl Default for NewRequestLog {
@@ -182,6 +190,7 @@ impl Default for NewRequestLog {
             max_tokens_clamped: None,
             fallback_reason: None,
             rung: None,
+            degraded: None,
         }
     }
 }
@@ -237,10 +246,10 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
             price_in, price_out, price_cache_read, price_cache_write, price_source,
             cached_in_tokens, cache_write_tokens, reasoning_tokens,
             prefill_ms, decode_ms, decode_tok_s, prompt_n, cache_n, draft_n, draft_accepted,
-            predicted_n, fallback_reason, rung)
+            predicted_n, fallback_reason, rung, degraded)
          VALUES (?39,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,
-                 ?38,?40,?41)",
+                 ?38,?40,?41,?42)",
     )
     .bind(&l.client_key)
     .bind(&l.ingress_proto)
@@ -285,6 +294,7 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(&ts)
     .bind(&l.fallback_reason)
     .bind(l.rung)
+    .bind(&l.degraded)
     .execute(&mut *tx)
     .await?;
     let id = res.last_insert_rowid();

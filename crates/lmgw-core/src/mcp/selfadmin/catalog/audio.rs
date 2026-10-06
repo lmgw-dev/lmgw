@@ -333,17 +333,19 @@ pub(super) fn tools() -> Vec<Builtin> {
             name: "lmgw__voice_transcribe",
             writes: true,
             description:
-                "Write voice-library clip transcripts with a LOCAL speech-to-text model. A \
+                "Write voice-library clip transcripts with a speech-to-text model. A \
                  cloning text-to-speech model that takes reference_text (Fish, CosyVoice3) \
                  clones a library clip well only with its transcript, which audio.cpp hands it \
                  when a request's voice names the clip; GET /v1/audio/voices shows which clips \
                  have one (transcript: true|false). Without clip, every clip lacking a \
                  transcript is transcribed; with clip, that one (its transcript is replaced). \
-                 The model is alias, else the setting audio.voice_transcribe_alias. The clips \
-                 are the owner's voice, so only a local speech-to-text (asr) audio model may \
-                 hear them: a cloud alias is refused, and under the GPU hold the call is \
-                 refused rather than sent to a fallback. The answer names the clips \
-                 transcribed and their lengths, never the text (the Audio lab shows it).",
+                 The model is alias, else the setting audio.voice_transcribe_alias. It must \
+                 be a speech-to-text (asr) model, local or not; a configured fallback is \
+                 always used (the GPU hold's, an outside-VRAM verdict's) and must be one too. \
+                 To keep the clips on this machine, pick a local speech-to-text model with no \
+                 fallback. The answer names the clips transcribed, their lengths and the \
+                 model that wrote each (a fallback named as one), never the text (the Audio \
+                 lab shows it).",
             props: vec![
                 (
                     "clip",
@@ -355,8 +357,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "alias",
                     str_p(
-                        "The local speech-to-text model, e.g. 'audio/qwen3-asr'. Empty: the \
-                         setting audio.voice_transcribe_alias.",
+                        "The speech-to-text model, e.g. 'audio/qwen3-asr'. Empty: the setting \
+                         audio.voice_transcribe_alias.",
                     ),
                 ),
             ],

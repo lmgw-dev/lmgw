@@ -113,6 +113,10 @@ pub struct AppState {
     /// own redirect, which reqwest would follow past.
     pub proxy_http: reqwest::Client,
     pub catalog: CatalogCache,
+    /// What external `llama_cpp` rows said about themselves in `GET /props`
+    /// (llama egress design §4.2): probed in the background, kept until an
+    /// edit, a transport failure, a media refusal or the row's Test drops it.
+    pub llama_facts: crate::llama_facts::ExternalFacts,
     /// How a reasoning "off" goes out on the cloud models whose provider
     /// refused the protocol's own off form (model-capabilities design §5.6):
     /// learned from the refusal, kept per route for the process's life.
@@ -214,6 +218,9 @@ pub struct AppState {
     /// only onto the history it answered. In-process, like the workers it
     /// governs.
     pub(crate) chat_live: crate::web::chat_live::LiveTurns,
+    /// This state's own `Weak`, set once the `Arc` exists: what a registry's
+    /// hooks reach the state through ([`Self::wire_runtime`]) without a cycle.
+    me: std::sync::OnceLock<std::sync::Weak<AppState>>,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -425,6 +432,7 @@ impl AppState {
             http,
             proxy_http,
             catalog: CatalogCache::default(),
+            llama_facts: Default::default(),
             reasoning_learned: Default::default(),
             gguf_cache: GgufSummaryCache::default(),
             vram: VramScheduler::with_probe(probe),
@@ -443,8 +451,11 @@ impl AppState {
             bench: Default::default(),
             chat_temp: Default::default(),
             chat_live: Default::default(),
+            me: Default::default(),
         });
         app.builds.set_instance_id(instance);
+        let _ = app.me.set(Arc::downgrade(&app));
+        app.wire_runtime(&app.runtime());
         // Break the handler↔AppState cycle now that the `Arc` exists: the
         // `McpManager` holds a `Weak<AppState>` it hands to each sampling
         // handler, upgraded per call (§9/§19).
@@ -565,6 +576,7 @@ impl AppState {
                 .build()
                 .expect("a client with no redirect policy always builds"),
             catalog: CatalogCache::default(),
+            llama_facts: Default::default(),
             reasoning_learned: Default::default(),
             gguf_cache: GgufSummaryCache::default(),
             // Deliberately never the real NVML: a test must not read the
@@ -615,8 +627,11 @@ impl AppState {
             bench: Default::default(),
             chat_temp: Default::default(),
             chat_live: Default::default(),
+            me: Default::default(),
         });
         app.builds.set_instance_id(instance);
+        let _ = app.me.set(Arc::downgrade(&app));
+        app.wire_runtime(&app.runtime());
         app.mcp.set_state(&app);
         // No boot runs in a test state (`server::run` is what spawns it), so
         // there is no reconciliation to wait for; a test of the boot window
@@ -710,7 +725,25 @@ impl AppState {
     #[doc(hidden)]
     pub fn set_runtime_for_tests(&self, registry: Arc<runtime::registry::Registry>) {
         registry.set_gpu_lease(self.snapshot().gpu_lease.clone());
+        self.wire_runtime(&registry);
         self.runtime.store(registry);
+    }
+
+    /// What a registry learns from the state around it: whose containers it
+    /// starts — this data dir's instance id, the `lmgw.owner` label the
+    /// reconciliation pass after boot keys on (`registry/unheld.rs`) — and
+    /// what a settled start tells the rest of lmgw: the new container's PID
+    /// (§4.7) and the dashboard's VRAM frame, whether or not its requester is
+    /// still there (`registry/owned.rs`).
+    fn wire_runtime(&self, registry: &runtime::registry::Registry) {
+        registry.set_owner(self.builds.instance_id().to_string());
+        let me = self.me.get().cloned();
+        registry.set_on_started(Box::new(move || {
+            if let Some(state) = me.as_ref().and_then(std::sync::Weak::upgrade) {
+                state.vram.cache_pids(&state);
+                crate::vram::broadcast(&state);
+            }
+        }));
     }
 
     /// How a container agent reaches `podman` (container-runtime §6.1).

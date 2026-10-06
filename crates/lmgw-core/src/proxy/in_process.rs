@@ -58,6 +58,9 @@ pub(crate) struct InProcessLog<'a> {
     pub fallback: Option<FallbackReason>,
     /// See [`LogParams::rung`]: the turn's own lease's rung.
     pub rung: Option<i64>,
+    /// See [`LogParams::degraded`]: what this call's content lost to a model
+    /// that lacks a capability.
+    pub degraded: Option<String>,
 }
 
 /// Write one `request_logs` row for an in-process model call and broadcast it on
@@ -112,6 +115,7 @@ pub(crate) async fn record_in_process(
         max_tokens_clamped: p.max_tokens_clamped,
         fallback_reason: p.fallback.map(|r| r.as_str().to_string()),
         rung: p.rung,
+        degraded: p.degraded,
     };
     let log_id = store::insert_request_log(&state.db, &row)
         .await
@@ -143,6 +147,7 @@ pub(crate) async fn record_in_process(
         key_id: row.key_id,
         fallback_reason: row.fallback_reason,
         rung: row.rung,
+        degraded: row.degraded,
     });
 }
 
@@ -204,6 +209,7 @@ pub(crate) async fn sample_once(
         KeyRef::named(client_key),
         deadline,
         None,
+        None,
     )
     .await
 }
@@ -231,7 +237,8 @@ impl FallbackNote {
 /// [`sample_once`], telling `note` when the turn was handed to the fallback.
 /// `key` is the caller's key — with its id when the caller has one, so a
 /// loop that outlives a rename of its key records each turn against the key
-/// it is (A2 review 4).
+/// it is (A2 review 4). `per_route` decides what goes out on each route, as
+/// for [`stream_once_on`]: `ir` is always the caller's own request.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sample_once_noting(
     state: &SharedState,
@@ -243,9 +250,11 @@ pub(crate) async fn sample_once_noting(
     key: KeyRef,
     deadline: Duration,
     note: Option<&FallbackNote>,
+    per_route: Option<(&dyn PerRoute, Option<&crate::gate::GateHeaders>)>,
 ) -> Result<Completion, GatewayError> {
     let started = Instant::now();
     state.telemetry.request_started();
+    let own = ir;
 
     // Budget and scope for work the gateway does on its own behalf (§4.4).
     // Before the call, so an unattended loop stops rather than discovering the
@@ -272,6 +281,7 @@ pub(crate) async fn sample_once_noting(
                 max_tokens_clamped: None,
                 fallback,
                 rung: None,
+                degraded: None,
             },
             e.http_status().as_u16(),
             None,
@@ -283,6 +293,18 @@ pub(crate) async fn sample_once_noting(
         return Err(e);
     }
 
+    // What the caller sends on this route (`per_route`); a refusal of it is
+    // this call's row, like any other.
+    let prepared = match per_route {
+        Some((p, rerouted)) => p.request(route, hold, rerouted, own).await,
+        None => Ok(None),
+    };
+    let (ir, mut refused) = match prepared {
+        Ok(Some(r)) => (std::borrow::Cow::Owned(r), None),
+        Ok(None) => (std::borrow::Cow::Borrowed(own), None),
+        Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
+    };
+    let ir: &ChatRequest = &ir;
     let egress = for_protocol(route.upstream.protocol);
     let mut params = ir.params.clone().with_defaults(&route.param_defaults);
     // An off this cloud model cannot take as asked goes out in the form it
@@ -299,7 +321,11 @@ pub(crate) async fn sample_once_noting(
 
     let mut max_tokens_clamped = None;
     let mut rung = None;
+    let mut lease_degraded = None;
     let result: Result<Turn<Completion>, GatewayError> = async {
+        if let Some(e) = refused.take() {
+            return Err(e);
+        }
         // The gate's per-send half (unified-KV design §3.3): this turn's own
         // clamp, count and pool reservation. Per turn, not per hold — the
         // caller's hold may span a whole tool loop, and the lease must not.
@@ -317,6 +343,7 @@ pub(crate) async fn sample_once_noting(
             }
         };
         max_tokens_clamped = lease.max_tokens_clamped();
+        lease_degraded = lease.degraded();
         // The send's effective timeout is the smaller of the upstream's own
         // timeout and what is left of the caller's `deadline` after the gate —
         // so the self-starvation guard can fail faster than a generous
@@ -408,16 +435,20 @@ pub(crate) async fn sample_once_noting(
                 opened.hold.as_ref(),
                 &opened.route,
                 opened.headers.fallback_reason(),
-                ir,
+                own,
                 ingress_proto,
                 key,
                 left,
                 note,
+                per_route.map(|(p, _)| (p, Some(&opened.headers))),
             ))
             .await;
         }
     };
 
+    if let Some((p, _)) = per_route {
+        p.fitted(&fitted);
+    }
     // One shared log row either way — the §8 "logs like any request" guarantee.
     let (status, usage, error): (u16, Usage, Option<(&str, String)>) = match &result {
         Ok(c) => (StatusCode::OK.as_u16(), c.usage, None),
@@ -440,6 +471,10 @@ pub(crate) async fn sample_once_noting(
             max_tokens_clamped,
             fallback,
             rung,
+            degraded: crate::degraded::join([
+                per_route.and_then(|(p, _)| p.degraded()),
+                lease_degraded,
+            ]),
         },
         status,
         Some(started.elapsed().as_millis() as i64),
@@ -552,14 +587,19 @@ pub(crate) async fn stream_once(
 /// which sampling fields a route takes, whether it can continue a reply, the
 /// llama-server-only continuation fields — and must not decide it once for
 /// the first route and send that to whichever answers (review R1 finding 2).
+#[async_trait::async_trait]
 pub(crate) trait PerRoute: Send + Sync {
     /// The request to send on `route` — `None`: `ir` as it is — or why the
     /// call cannot go there, which fails it like an upstream refusal would.
+    /// `hold` is the claim the send goes out on (a local container's);
     /// `rerouted` is the gate's headers when the gate chose `route` for this
-    /// send; `None` for the route the caller handed in.
-    fn request(
+    /// send; `None` for the route the caller handed in. Async: whether a
+    /// heard turn's model takes its audio is a capability lookup
+    /// (`spoken::may_hear`).
+    async fn request(
         &self,
         route: &Route,
+        hold: Option<&crate::vram::LocalHold>,
         rerouted: Option<&crate::gate::GateHeaders>,
         ir: &ChatRequest,
     ) -> Result<Option<ChatRequest>, GatewayError>;
@@ -569,6 +609,15 @@ pub(crate) trait PerRoute: Send + Sync {
     /// send is over, a retry included, so a caller that reports the controls
     /// a route did not send can add it ([`super::reasoning_fit::Fitted::report`]).
     fn fitted(&self, _fitted: &super::reasoning_fit::Fitted) {}
+
+    /// What the request [`Self::request`] last gave lost to a model that
+    /// lacks a capability (images as placeholders, a turn's audio as its
+    /// transcript), as the call's row says it (`request_logs.degraded`,
+    /// [`crate::degraded`]); joined there with what the gate's own send left
+    /// out. `None`: nothing.
+    fn degraded(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The error of a call its consumer stopped before the upstream answered
@@ -609,7 +658,13 @@ pub(crate) async fn stream_once_on(
 
     let own = ir;
     let prepared = match per_route {
-        Some((p, rerouted)) => p.request(route, rerouted, own),
+        // Raced against the consumer's stop: the caller's check may read a
+        // provider's catalog (voice-audio-input review V9).
+        Some((p, rerouted)) => tokio::select! {
+            biased;
+            () = super::stopped(stop) => Err(before_answer()),
+            r = p.request(route, hold, rerouted, own) => r,
+        },
         None => Ok(None),
     };
     let (ir, mut refused) = match prepared {
@@ -623,7 +678,7 @@ pub(crate) async fn stream_once_on(
     // As in `sample_once`: an off fitted to the model (§5.6) — not for a
     // route the caller refused, which gets nothing, not even a catalog read
     // (voice-audio-input WP2 review #8: a heard turn's audio refused on a
-    // cloud route).
+    // route whose model cannot take it).
     let mut fitted = match refused {
         Some(_) => super::reasoning_fit::Fitted::default(),
         None => super::reasoning_fit::fit(state, route, &mut params).await,
@@ -646,6 +701,7 @@ pub(crate) async fn stream_once_on(
     let mut outcome = StreamOutcome::default();
     let mut max_tokens_clamped = None;
     let mut rung = None;
+    let mut lease_degraded = None;
     // The request went out and no answer has begun: a stop now still costs
     // the prompt the upstream may be working on (`stop::unanswered_usage`).
     // Set by the request's build, as each attempt goes out — not when the
@@ -678,6 +734,7 @@ pub(crate) async fn stream_once_on(
             }
         };
         max_tokens_clamped = lease.max_tokens_clamped();
+        lease_degraded = lease.degraded();
         let left = deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
         if left.is_zero() {
             return Err(GatewayError::Timeout);
@@ -856,6 +913,10 @@ pub(crate) async fn stream_once_on(
             max_tokens_clamped,
             fallback,
             rung,
+            degraded: crate::degraded::join([
+                per_route.and_then(|(p, _)| p.degraded()),
+                lease_degraded,
+            ]),
         },
         status,
         outcome.ttfb_ms,

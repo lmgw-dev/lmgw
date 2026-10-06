@@ -148,7 +148,7 @@ fn a_fallback_s_engine_is_its_protocol_and_kind() {
         Engine::OpenAi
     );
     for (p, k) in [
-        (Protocol::Openai, UpstreamKind::LlamaServer),
+        (Protocol::LlamaCpp, UpstreamKind::LlamaServer),
         (Protocol::Openai, UpstreamKind::SdCpp),
         (Protocol::Gemini, UpstreamKind::Generic),
     ] {

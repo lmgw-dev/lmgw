@@ -7,7 +7,7 @@ members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-ui", "crate
 default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "FSL-1.1-MIT"
 

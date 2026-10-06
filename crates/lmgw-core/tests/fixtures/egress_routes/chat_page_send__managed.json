@@ -1,0 +1,32 @@
+{
+  "requests": [
+    {
+      "body": "{\"messages\":[{\"content\":\"You are chat-model. Be brief.\",\"role\":\"system\"},{\"content\":\"hi there\",\"role\":\"user\"}],\"model\":\"chat-model\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"timings_per_token\":true}",
+      "body_json": {
+        "messages": [
+          {
+            "content": "You are chat-model. Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "hi there",
+            "role": "user"
+          }
+        ],
+        "model": "chat-model",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "timings_per_token": true
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

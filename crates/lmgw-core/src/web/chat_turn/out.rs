@@ -52,6 +52,10 @@ pub(crate) struct SentAs {
     pub answered_by: Option<String>,
     /// It carried an image.
     pub images: bool,
+    /// It went to a llama-server (`UpstreamKind::LlamaServer`): one that
+    /// drops the connection under a heard turn is evidence about the audio
+    /// (`refusal::crashed`, voice-audio-input decision D5).
+    pub llama_server: bool,
 }
 
 impl SentAs {
@@ -60,6 +64,15 @@ impl SentAs {
         Self {
             answered_by,
             images: crate::gate::media_parts(ir).images > 0,
+            llama_server: false,
+        }
+    }
+
+    /// The same, sent on `route`.
+    pub fn on(self, route: &crate::config::Route) -> Self {
+        Self {
+            llama_server: route.upstream.kind == crate::config::UpstreamKind::LlamaServer,
+            ..self
         }
     }
 }
@@ -132,12 +145,16 @@ pub(crate) struct TurnOpts {
     /// (voice-audio-input design §3.4): an audio turn as its
     /// `ContentPart::Audio`, any other as its transcript. They follow the
     /// history as a user message; a turn whose parts carry audio goes only
-    /// to a route this lmgw runs (`spoken::local_only`). Never stored.
+    /// to a model that takes it (`spoken::may_hear`). Never stored.
     pub spoken: Option<Vec<crate::ir::ContentPart>>,
     /// The pre-save barrier (§3.3, §3.4): the journal's answer about the
     /// user row the reply follows. The reply is saved once it said, and
     /// never on a veto.
     pub user_row: Option<super::RowWatch>,
+    /// What the turn's content already lost to a model that lacks a
+    /// capability before it began — a heard turn going again as its
+    /// transcript — for its request rows (`request_logs.degraded`).
+    pub degraded: Option<String>,
 }
 
 /// What makes a turn a voice turn (chat-voice design §8.5): its system

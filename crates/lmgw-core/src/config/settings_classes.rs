@@ -328,12 +328,14 @@ pub struct AudioSettings {
     /// when the container ends it. Bounds the request only; the container
     /// start in front of it has `vram.load_timeout_seconds`.
     pub request_timeout_seconds: u64,
-    /// The local speech-to-text model that writes a voice-library clip's
+    /// The speech-to-text model that writes a voice-library clip's
     /// transcript (audio-class gap 5) — on upload without a typed one, and
     /// for the Audio lab's "transcribe" actions when they name none. Must be
-    /// a local `asr` audio row: the clips are the owner's voice and never go
-    /// to a cloud route. **Empty (the default): nothing is transcribed
-    /// unless asked with a model named.**
+    /// a speech-to-text (`asr`) model, wherever it runs; its configured
+    /// fallback answers as for any request (changed 2026-10-06, the owner's
+    /// ruling), so a local model with no fallback keeps the clips on this
+    /// machine. **Empty (the default): nothing is transcribed unless asked
+    /// with a model named.**
     #[serde(default)]
     pub voice_transcribe_alias: String,
     /// Which revision an audio catalog download takes. **`pinned` (the

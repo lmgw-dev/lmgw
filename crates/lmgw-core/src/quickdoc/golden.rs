@@ -315,7 +315,7 @@ async fn one_chunk(
     // carries the swapped route, so it holds for every turn of the chunk's
     // loop.
     if let Some(hold) = &hold {
-        route.upstream.base_url = hold.endpoint();
+        hold.point(&mut route);
     }
     let runner = GoldenRunner {
         state: state.clone(),

@@ -1,0 +1,24 @@
+{
+  "requests": [
+    {
+      "body": "{\"documents\":[\"Paris\",\"Berlin\",\"Rome\"],\"model\":\"rr\",\"query\":\"capital of France\",\"top_n\":2}",
+      "body_json": {
+        "documents": [
+          "Paris",
+          "Berlin",
+          "Rome"
+        ],
+        "model": "rr",
+        "query": "capital of France",
+        "top_n": 2
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/rerank"
+    }
+  ],
+  "status": 200
+}

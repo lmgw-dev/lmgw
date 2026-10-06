@@ -596,7 +596,9 @@ The mic's audio goes wherever the ASR alias's route goes, its GPU-hold and outsi
 included, like any request; so does the barge-in word check of a bound session.
 - What served is always visible: before recording (§2.3), in `asr_answered_by`, and in the
   models event and badge.
-- `transcribe_local_only` stays what it is: the rule for voice-library clips only.
+- `transcribe_local_only` stays what it is: the rule for voice-library clips only. *Superseded
+  2026-10-06 (the owner's ruling):* voice-library clips take the fallbacks as configured too
+  (`transcribe_voice_clip`, a capability check only: the answering model must transcribe).
 
 ## 5. Dictation
 

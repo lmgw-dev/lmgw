@@ -584,6 +584,7 @@ pub struct LmgwHeader { pub name: &'static str /* the const where it lives */, p
 | `x-lmgw-reasoning-ignored`, `-max-tokens-defaulted`, `-max-tokens-raised` | resp | client | chat/completions, messages, responses |
 | `x-lmgw-max-tokens-clamped`, `x-lmgw-rung` | resp | client | chat/completions, messages, responses, completions |
 | `x-lmgw-count-approximate` (new) | resp | client | count_tokens, messages/count_tokens |
+| `x-lmgw-images-omitted` (added 2026-10-06: how many images a fallback that cannot see got as placeholders) | resp | client | chat/completions, messages, responses |
 | `x-lmgw-speech` (audio-class AC1) | resp | client | audio/speech |
 | `x-lmgw-voices-source` (audio-class AC1) | resp | client | audio/voices |
 | `x-lmgw-sample-rate` (audio-class AC2) | resp | client | audio/speech (streamed) |

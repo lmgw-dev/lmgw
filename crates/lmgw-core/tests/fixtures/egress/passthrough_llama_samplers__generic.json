@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "{\"cache_prompt\":true,\"dry_multiplier\":0.8,\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"mirostat\":2,\"model\":\"the-model\",\"n_probs\":3,\"typical_p\":0.9}",
+    "body_json": {
+      "cache_prompt": true,
+      "dry_multiplier": 0.8,
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "mirostat": 2,
+      "model": "the-model",
+      "n_probs": 3,
+      "typical_p": 0.9
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

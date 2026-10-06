@@ -4,7 +4,7 @@ use leptos_router::path;
 
 use crate::charts::TipLayer;
 use crate::pages;
-use crate::shell::{Sidebar, Titlebar};
+use crate::shell::Sidebar;
 use crate::ui_scale::ZoomHud;
 use crate::widgets::{DirtyGuardHost, ToastHost};
 
@@ -43,14 +43,11 @@ pub fn App() -> impl IntoView {
             <ZoomHud/>
             <TipLayer/>
             <div class="app" class:rail=move || sidebar.rail.get()>
-                <Titlebar/>
                 <Sidebar/>
-                // The titlebar and the sidebar stay while the gate is up: in
-                // the Tauri shell the titlebar *is* the drag region and the
-                // window controls, and a login card you cannot move or close
-                // is not an improvement. Only the page is swapped — and it is
-                // swapped, not hidden, so signing in re-mounts the routes and
-                // every resource on them fetches again (principals §8).
+                // The sidebar stays while the gate is up; only the page is
+                // swapped — and it is swapped, not hidden, so signing in
+                // re-mounts the routes and every resource on them fetches
+                // again (principals §8).
                 <main class="content">
                     <Show
                         when=move || locked.get()

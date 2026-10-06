@@ -36,18 +36,24 @@ impl Core {
             .get("type")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // An item type a client may not create, refused by name rather than
+        // as a shape error (realtime-server-tools §2.6).
+        let refused = super::super::conversation::mcp_item_refusal(&value);
         match serde_json::from_value::<ClientEvent>(value) {
             Ok(ev) => self.on_event(ev, arrived).await,
             Err(e) => {
-                let err = match kind {
-                    None => ErrorObject::invalid("invalid_event", "the event has no `type`")
-                        .with_param("type"),
-                    Some(k) if !is_client_type(&k) => ErrorObject::invalid(
+                let err = match (refused, kind) {
+                    (Some(refused), _) => refused,
+                    (None, None) => {
+                        ErrorObject::invalid("invalid_event", "the event has no `type`")
+                            .with_param("type")
+                    }
+                    (None, Some(k)) if !is_client_type(&k) => ErrorObject::invalid(
                         "invalid_event",
                         format!("'{k}' is not a client event of the GA Realtime protocol"),
                     )
                     .with_param("type"),
-                    Some(k) => ErrorObject::invalid("invalid_event", format!("{k}: {e}")),
+                    (None, Some(k)) => ErrorObject::invalid("invalid_event", format!("{k}: {e}")),
                 };
                 self.error(err.for_event(event_id.as_deref()));
             }
@@ -153,6 +159,19 @@ impl Core {
                 return self.error(e.for_event(event_id));
             }
         }
+        // The `mcp` labels it keeps, lists and drops — listed once the update
+        // is in effect, a failed one again when the update names it — and no
+        // function named like a tool of one it keeps (realtime-server-tools
+        // §1.1, §1.2).
+        let next_tools = next.tools.as_deref().unwrap_or_default();
+        let plan = self
+            .mcp
+            .table
+            .plan(next_tools, update.contains_key("tools"));
+        let kept = |label: &str| plan.keep.iter().any(|k| k == label);
+        if let Err(e) = self.mcp.table.clash(next_tools, "session.tools", kept) {
+            return self.error(e.for_event(event_id));
+        }
         let asr = match self.update_asr(&next).await {
             Ok(a) => a,
             Err(e) => return self.error(e.for_event(event_id)),
@@ -249,6 +268,7 @@ impl Core {
         self.ob.send(ServerEvent::SessionUpdated {
             session: Box::new(self.session.clone()),
         });
+        self.mcp_apply(plan);
         self.warn_check_scripts();
         // Turn detection off: an open turn ends here — its audio is the
         // manual buffer now, for the client to commit (§6.6) — and what it

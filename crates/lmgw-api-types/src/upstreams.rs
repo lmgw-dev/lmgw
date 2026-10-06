@@ -17,9 +17,12 @@ pub struct UpstreamsResponse {
 pub struct UpstreamView {
     pub id: i64,
     pub name: String,
-    /// `openai | anthropic | gemini`.
+    /// `openai | anthropic | gemini | llama_cpp`. `llama_cpp` is llama.cpp's
+    /// own server (llama-server, ik_llama.cpp) and is always kind
+    /// `llama_server`.
     pub protocol: String,
-    /// `generic | llama_server | audio_cpp`.
+    /// `generic | llama_server | audio_cpp`. `llama_server` goes with
+    /// protocol `llama_cpp` or `anthropic`.
     pub kind: String,
     pub base_url: String,
     pub has_api_key: bool,
@@ -30,6 +33,48 @@ pub struct UpstreamView {
     pub expose_all: bool,
     pub expose_prefix: String,
     pub supports_responses: bool,
+    /// A `llama_cpp` row's server: what `GET /props` said, when, or why it
+    /// is unknown — one entry for the server, and for a router one more per
+    /// model ([`UpstreamLlamaFacts::model`]). Empty on every other protocol,
+    /// and on a `llama_cpp` row until a chat request or its Test makes lmgw
+    /// ask in the background.
+    pub llama_facts: Vec<UpstreamLlamaFacts>,
+}
+
+/// What an external llama.cpp server said about itself, or a router about
+/// one model (`GET /props`, llama egress design §4.2). Asked in the
+/// background, one probe per row at a time, and kept until the row is
+/// edited, unreachable, refuses a medium or is tested.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UpstreamLlamaFacts {
+    /// Empty for the server itself: a llama-server that is no router serves
+    /// one model whatever a request names, so its facts hold for every model
+    /// of the row. Under a router, the upstream model this entry is about,
+    /// as the row's aliases (or an `expose_all` request) name it.
+    pub model: String,
+    /// The base URL it was asked at.
+    pub base_url: String,
+    /// The server is a llama-server router (only on the entry with an empty
+    /// `model`): it states its build and nothing about a model, so `props`
+    /// carries the build alone, and the facts are on the per-model entries.
+    /// Defaulted, so a gateway older than the field still parses.
+    pub router: bool,
+    /// The facts, when the server stated them: its build, one slot's
+    /// context and its modalities. `None` is unknown; `unknown` says why.
+    pub props: Option<crate::LlamaProps>,
+    /// Why the facts are unknown: the server's own answer (an old build's
+    /// 404, a 401), or why the last probe found nothing.
+    pub unknown: Option<String>,
+    /// The answer stands until an event drops it. `false` for a probe that
+    /// found nothing worth keeping (a router that has not loaded the model,
+    /// a server that did not answer): it is asked again on the next use.
+    pub cached: bool,
+    /// Unix seconds of the answer shown; `None` while the first is on its way.
+    pub read_at: Option<i64>,
+    /// Being asked now, or waiting for the row's probe.
+    pub probing: bool,
 }
 
 /// `GET /api/upstream-models?id=` — live catalog of one upstream.

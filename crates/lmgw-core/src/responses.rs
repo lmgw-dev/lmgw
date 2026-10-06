@@ -63,6 +63,8 @@ use crate::state::SharedState;
 use crate::store::{self, StoredResponse};
 use crate::telemetry::RESPONSES_PROTO;
 
+mod unseen;
+
 /// `POST /v1/responses`.
 pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
     let started = Instant::now();
@@ -134,12 +136,25 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
         let route = routed.resolved();
         let control = proxy::resolve_params(&req.ir, &ctx, route).reasoning_control();
         let fallback = routed.headers().fallback_reason();
-        let resp =
-            native_passthrough(&state, &ctx, route, fallback, &body, started, &control).await;
-        return proxy::with_annotations(
-            routed.headers().stamp(resp),
-            &native_annotations(&control),
-        );
+        // A fallback that cannot see gets the body's images as placeholders,
+        // as every other send gets the IR's (`gate::fallback_images`).
+        let mut body = body;
+        let omitted = unseen::fit(&state, route, &req.ir.model_alias, &mut body).await;
+        let resp = native_passthrough(
+            &state,
+            &ctx,
+            (route, fallback),
+            &body,
+            started,
+            &control,
+            omitted.as_ref().map(|o| o.marker.clone()),
+        )
+        .await;
+        let annotations = proxy::Annotations {
+            images_omitted: omitted.map(|o| o.count),
+            ..native_annotations(&control)
+        };
+        return proxy::with_annotations(routed.headers().stamp(resp), &annotations);
     }
 
     // Continue a stored conversation, if asked. This both prepends its history
@@ -196,7 +211,6 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
     let mut annotations = proxy::Annotations {
         ignored: proxy::reasoning_ignored(
             route.upstream.protocol,
-            route.upstream.kind,
             &resolved.reasoning_control(),
             crate::egress::openai::has_reasoning_object(&req.ir),
         ),
@@ -206,6 +220,11 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
         // turn's own per-send clamp will be — they all send these `params`.
         // Each turn logs its own value as it runs.
         max_tokens_clamped: crate::gate::planned_clamp(admission.as_ref(), &req.ir, &resolved),
+        // Likewise the images the run opened with that go to a fallback
+        // that cannot see as placeholders (`gate::fallback_images`).
+        images_omitted: crate::gate::fallback_images::decide(&state, &route, &req.ir)
+            .await
+            .map(|_| crate::gate::fallback_images::count_images(&req.ir)),
     };
     // Likewise `x-lmgw-rung`: the rung the model runs as the run opens
     // (ladder design §6). A turn that climbs logs the rung it climbed to; a
@@ -269,9 +288,7 @@ fn native_annotations(c: &crate::ir::ReasoningControl) -> proxy::Annotations {
     }
     proxy::Annotations {
         ignored,
-        max_tokens_defaulted: None,
-        max_tokens_raised: None,
-        max_tokens_clamped: None,
+        ..Default::default()
     }
 }
 
@@ -442,14 +459,16 @@ fn decide(
 /// rewriting only the model name. Streams the response through untouched, so
 /// reasoning items, hosted-tool events and anything the provider adds later
 /// reach the client intact — the whole reason for not synthesizing here.
+/// `degraded`: what the body's content lost to a fallback that cannot see,
+/// for its row (`request_logs.degraded`).
 async fn native_passthrough(
     state: &SharedState,
     ctx: &RequestCtx,
-    route: &Route,
-    fallback: Option<FallbackReason>,
+    (route, fallback): (&Route, Option<FallbackReason>),
     body: &Value,
     started: Instant,
     control: &crate::ir::ReasoningControl,
+    degraded: Option<String>,
 ) -> Response {
     let alias = body
         .get("model")
@@ -492,10 +511,10 @@ async fn native_passthrough(
                 state,
                 ctx,
                 &alias,
-                route,
-                fallback,
+                (route, fallback),
                 started,
                 GatewayError::Timeout,
+                degraded,
             )
             .await
         }
@@ -504,10 +523,10 @@ async fn native_passthrough(
                 state,
                 ctx,
                 &alias,
-                route,
-                fallback,
+                (route, fallback),
                 started,
                 GatewayError::from(e),
+                degraded,
             )
             .await
         }
@@ -525,7 +544,8 @@ async fn native_passthrough(
             for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes),
             route,
         );
-        return passthrough_error(state, ctx, &alias, route, fallback, started, e).await;
+        return passthrough_error(state, ctx, &alias, (route, fallback), started, e, degraded)
+            .await;
     }
 
     let content_type = resp
@@ -555,6 +575,7 @@ async fn native_passthrough(
         streamed,
         StatusCode::OK.as_u16(),
         None,
+        degraded,
     )
     .await;
 
@@ -571,22 +592,26 @@ async fn passthrough_error(
     state: &SharedState,
     ctx: &RequestCtx,
     alias: &str,
-    route: &Route,
-    fallback: Option<FallbackReason>,
+    (route, fallback): (&Route, Option<FallbackReason>),
     started: Instant,
     e: GatewayError,
+    degraded: Option<String>,
 ) -> Response {
     let status = e.http_status();
     let payload = wire::serialize_error(&e);
-    proxy::record_request_failure(
+    proxy::record_passthrough(
         state,
         ctx,
         RESPONSES_PROTO,
         alias,
-        Some(route),
+        route,
         fallback,
         started,
-        &e,
+        None,
+        false,
+        status.as_u16(),
+        Some((e.kind().to_string(), e.to_string())),
+        degraded,
     )
     .await;
     (status, axum::Json(payload)).into_response()
@@ -615,6 +640,46 @@ struct GatewayRunner {
     /// the unary answer's headers say so. A stream's headers left before its
     /// first turn, so they keep the rung stamped at open.
     fell_back: proxy::FallbackNote,
+    /// The run's images that went to a fallback that cannot see as
+    /// placeholders: the WARN names each once per run, not once per turn
+    /// (`gate::fallback_images::Announced`).
+    announced: crate::gate::fallback_images::Announced,
+    /// What the turn [`PerRoute::request`] last gave left out, for its row
+    /// (`request_logs.degraded`).
+    marker: std::sync::Mutex<Option<String>>,
+}
+
+/// A fallback that cannot see — the run's route, or one the gate re-routes
+/// a turn to — gets the conversation's images as placeholders, put in here
+/// so the WARN names each image once per run; the send's own check
+/// (`gate::fit_chat`) then finds none left, and the turn's row is marked
+/// from here ([`PerRoute::degraded`]).
+#[async_trait]
+impl proxy::PerRoute for GatewayRunner {
+    async fn request(
+        &self,
+        route: &Route,
+        _hold: Option<&crate::vram::LocalHold>,
+        _rerouted: Option<&crate::gate::GateHeaders>,
+        ir: &ChatRequest,
+    ) -> Result<Option<ChatRequest>, GatewayError> {
+        let unseen = crate::gate::fallback_images::decide(&self.state, route, ir).await;
+        let mut marker = self.marker.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(u) = unseen else {
+            *marker = None;
+            return Ok(None);
+        };
+        let (sent, n) = self.announced.without_images(ir, &u);
+        *marker = Some(u.marker(n));
+        Ok(Some(sent))
+    }
+
+    fn degraded(&self) -> Option<String> {
+        self.marker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -626,7 +691,7 @@ impl TurnRunner for GatewayRunner {
         sink: &mut dyn DeltaSink,
     ) -> Result<Completion, GatewayError> {
         if self.stream {
-            proxy::stream_once(
+            proxy::stream_once_on(
                 &self.state,
                 self._admission.as_ref(),
                 &self.route,
@@ -636,6 +701,7 @@ impl TurnRunner for GatewayRunner {
                 self.key.clone(),
                 deadline,
                 sink,
+                Some((self, None)),
             )
             .await
         } else {
@@ -649,6 +715,7 @@ impl TurnRunner for GatewayRunner {
                 self.key.clone(),
                 deadline,
                 Some(&self.fell_back),
+                Some((self, None)),
             )
             .await
         }
@@ -757,6 +824,8 @@ async fn run_loop(
         stream,
         _admission: admission,
         fell_back: proxy::FallbackNote::default(),
+        announced: Default::default(),
+        marker: Default::default(),
     };
     // One executor across all three planes. The built-in half only ever fires
     // for names this request's own `{"type":"mcp"}` blocks resolved (nothing is
@@ -776,7 +845,8 @@ async fn run_loop(
             SelfAdminExecutor::new(state.clone(), ctx.clone()),
             docs_exec,
             resolved.builtin.clone(),
-            McpExecutor::new(state.clone(), ctx.clone()),
+            // A name runs where this request listed it from, or not at all.
+            McpExecutor::new(state.clone(), ctx.clone()).with_listed(resolved.servers),
         ),
         state.clone(),
         ctx.clone(),

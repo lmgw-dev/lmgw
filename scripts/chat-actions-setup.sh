@@ -4,7 +4,7 @@
 #   ECHO=1 STREAM_DELAY=0.02 scripts/mock-openai.py 9291 &
 # ) and the alias `fake-echo` on a dev instance, so the Chat streams replies
 # without a GPU. Idempotent: an existing upstream/alias is left as it is.
-# The upstream is a `llama_server` one, because only that (or Anthropic) route
+# The upstream is a `llama_cpp` one, because only that (or Anthropic) route
 # takes the assistant prefill the Chat's Continue sends. Used by
 # scripts/drive/chat-actions.json.
 set -euo pipefail
@@ -24,5 +24,5 @@ op() { # op NAME JSON -> prints the answer; "already there" is fine
     esac
 }
 
-op upstream_set "{\"action\":\"create\",\"name\":\"fake\",\"protocol\":\"openai\",\"kind\":\"llama_server\",\"base_url\":\"http://127.0.0.1:$PORT/v1\"}"
+op upstream_set "{\"action\":\"create\",\"name\":\"fake\",\"protocol\":\"llama_cpp\",\"base_url\":\"http://127.0.0.1:$PORT/v1\"}"
 op model_set '{"action":"create","alias":"fake-echo","upstream":"fake","upstream_model":"triage"}'

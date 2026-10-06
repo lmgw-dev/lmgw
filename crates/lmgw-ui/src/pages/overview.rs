@@ -536,9 +536,18 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
             parts.push(format!("{} in flight", rt.in_flight));
             parts.push(format!("up {}", age(rt.started_at_age_seconds)));
             parts.push(format!("last used {} ago", age(rt.last_used_age_seconds)));
+            if let Some(p) = rt.llama_props.as_ref() {
+                parts.push(llama_props_line(p));
+            }
         }
         parts.join("\n")
     };
+    // What a llama-server said about itself (llama egress design §4.2), or
+    // why it could not: a start's warnings are this container's own.
+    let warnings =
+        r.rt.as_ref()
+            .map(|rt| rt.warnings.clone())
+            .unwrap_or_default();
     // Direct-endpoint link: llama-server (chat/aux) serves its own web UI on
     // its published port, and so does sd-server (image-generation §2.2);
     // audio.cpp does not (§8: "mark audio rows link-less"). BackendInfo (the
@@ -583,6 +592,24 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
                         view! {
                             <span class="type-badge" title=rung.gguf>
                                 {format!("rung {}/{}", rung.rung, rung.of)}
+                            </span>
+                        }
+                    })}
+                {r.rt
+                    .as_ref()
+                    .and_then(|rt| rt.llama_props.as_ref())
+                    .map(|p| {
+                        view! {
+                            <span class="type-badge" title=llama_props_line(p)>
+                                {llama_props_badge(p)}
+                            </span>
+                        }
+                    })}
+                {(!warnings.is_empty())
+                    .then(|| {
+                        view! {
+                            <span class="chip warn" title=warnings.join("\n")>
+                                {format!("{} warning{}", warnings.len(), if warnings.len() == 1 { "" } else { "s" })}
                             </span>
                         }
                     })}
@@ -654,6 +681,41 @@ fn RunningRow(r: ModelRow) -> impl IntoView {
             </td>
         </tr>
     }
+}
+
+/// What a llama-server said about itself in `GET /props`, in one line: its
+/// build, one slot's context and what it takes in besides text. "unknown"
+/// where it did not say — never a guess.
+pub(crate) fn llama_props_line(p: &lmgw_api_types::LlamaProps) -> String {
+    let yes_no = |v: Option<bool>| match v {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    format!(
+        "llama-server {} · slot context {} · vision {}, audio {}, video {}",
+        p.build_info.as_deref().unwrap_or("build unknown"),
+        p.n_ctx_slot
+            .map_or("unknown".to_string(), |n| format!("{} tokens", grouped(n))),
+        yes_no(p.vision),
+        yes_no(p.audio),
+        yes_no(p.video),
+    )
+}
+
+/// [`llama_props_line`] as a badge: one slot's context, and the media the
+/// server takes.
+pub(crate) fn llama_props_badge(p: &lmgw_api_types::LlamaProps) -> String {
+    let mut out = p
+        .n_ctx_slot
+        .map_or("ctx ?".to_string(), |n| format!("{} ctx", grouped(n)));
+    for (name, on) in [("vision", p.vision), ("audio", p.audio), ("video", p.video)] {
+        if on == Some(true) {
+            out.push_str(" · ");
+            out.push_str(name);
+        }
+    }
+    out
 }
 
 /// The models list did not load: said where the model rows would be.

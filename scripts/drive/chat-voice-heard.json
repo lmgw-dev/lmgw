@@ -1,12 +1,12 @@
 [
  {
-  "js": "'Voice turns the model hears, WP3 (voice-audio-input design §5, §7), live: voice mode on a dev copy (scripts/dev-copy.sh) with its Gemma 4 12B row (gemma4-12b, audio projector) as the chat model and the speech models the copy\\'s Settings name (Parakeet on the CPU for speech-to-text). The thread sets audio input to local. The microphone is a fake one saying TTS clips on cue (scripts/drive/fake-voice.js; the clips from scripts/drive/make-voice-fixtures.py, the copy\\'s own TTS, into target/voice-audio-in/fixtures/voice-de.js). Checks: the drawer\\'s verdict and the INPUT chip say the model hears you; a spoken question is answered; its user bubble sits before its reply bubble (the row is written once the turn is transcribed, racing the release); the mic badge names the path; the reply\\'s timing line says heard as audio, held N ms; its regenerate tooltip says it answers from the transcript; the stored rows hold the transcript and input audio. It starts the copy\\'s model containers. Run: scripts/ui-drive.py scripts/drive/chat-voice-heard.json --token-file <dir>.token --base http://127.0.0.1:8896 --mute-audio --podman-guard \"\" (nothing is audible).'"
+  "js": "'Voice turns the model hears, WP3 (voice-audio-input design §5, §7), live: voice mode on a dev copy (scripts/dev-copy.sh) with its Gemma 4 12B row (gemma4-12b, audio projector) as the chat model and the speech models the copy\\'s Settings name (e.g. a CPU speech-to-text row). The thread sets audio input to on. The microphone is a fake one saying TTS clips on cue (scripts/drive/fake-voice.js; the clips from scripts/drive/make-voice-fixtures.py, the copy\\'s own TTS, into target/voice-audio-in/fixtures/voice-de.js). Checks: the drawer\\'s verdict and the INPUT chip say the model hears you; a spoken question is answered; its user bubble sits before its reply bubble (the row is written once the turn is transcribed, racing the release); the mic badge names the path; the reply\\'s timing line says heard as audio, held N ms; its regenerate tooltip says it answers from the transcript; the stored rows hold the transcript and input audio. It starts the copy\\'s model containers. Run: scripts/ui-drive.py scripts/drive/chat-voice-heard.json --token-file <dir>.token --base http://127.0.0.1:8896 --mute-audio --podman-guard \"\" (nothing is audible).'"
  },
  {
   "nav": "/chat"
  },
  {
-  "js": "(async()=>{const j={'content-type':'application/json'};const t=await (await fetch('/chat/api/threads',{method:'POST',headers:j,body:JSON.stringify({model_alias:'gemma4-12b',kind:'chat'})})).json();const s=await fetch('/chat/api/threads/'+t.id+'/settings',{method:'POST',headers:j,body:JSON.stringify({temperature:0,system_prompt:'Du bist ein hilfreicher Assistent. Antworte auf Deutsch in einem kurzen Satz.',voice:{language:'de',turn_detection:'server_vad',audio_input:'local'}})});localStorage.setItem('cvHeard',t.id);location.href='/chat?t='+t.id;return [t.id,s.status]})()"
+  "js": "(async()=>{const j={'content-type':'application/json'};const t=await (await fetch('/chat/api/threads',{method:'POST',headers:j,body:JSON.stringify({model_alias:'gemma4-12b',kind:'chat'})})).json();const s=await fetch('/chat/api/threads/'+t.id+'/settings',{method:'POST',headers:j,body:JSON.stringify({temperature:0,system_prompt:'Du bist ein hilfreicher Assistent. Antworte auf Deutsch in einem kurzen Satz.',voice:{language:'de',turn_detection:'server_vad',audio_input:'on'}})});localStorage.setItem('cvHeard',t.id);location.href='/chat?t='+t.id;return [t.id,s.status]})()"
  },
  {
   "wait": 3
@@ -17,7 +17,7 @@
   "label": "the voice-mode button is enabled on the 12B thread"
  },
  {
-  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')).then(r => r.json()).then(v => { const a = v.thread.voice_resolved.audio_input; return a.value === 'local' && a.source === 'thread' && a.path === 'audio' && a.model === 'gemma4-12b'; })",
+  "expect": "fetch('/chat/api/threads/'+localStorage.getItem('cvHeard')).then(r => r.json()).then(v => { const a = v.thread.voice_resolved.audio_input; return a.value === 'on' && a.source === 'thread' && a.path === 'audio' && a.model === 'gemma4-12b'; })",
   "label": "the thread's verdict: gemma4-12b hears the turn"
  },
  {

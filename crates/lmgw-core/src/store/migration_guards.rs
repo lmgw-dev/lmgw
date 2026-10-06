@@ -1,10 +1,18 @@
 //! Pre-migration guard (migration 0023), pre-migration repair (migration
-//! 0018) and pre-migration notice (migration 0055, [`empty_run_args`])
+//! 0018), pre-migration notices (migration 0055, [`empty_run_args`];
+//! migration 0058, [`llama_cpp`]) and the post-migration foreign-key check
+//! ([`foreign_keys`])
 
 use sqlx::{Row, SqlitePool};
 
 mod empty_run_args;
 pub(super) use empty_run_args::empty_run_args_notice;
+
+mod llama_cpp;
+pub(super) use llama_cpp::llama_cpp_notice;
+
+mod foreign_keys;
+pub(super) use foreign_keys::{check_after_migrations, mark_before_migrations};
 
 /// Version of `0023_managed_upstreams_go_synthetic.sql`, the migration this
 /// guard stands in front of.
@@ -334,6 +342,18 @@ async fn table_exists(pool: &SqlitePool, name: &str) -> anyhow::Result<bool> {
             .fetch_optional(pool)
             .await?;
     Ok(found.is_some())
+}
+
+/// `table` exists and has `column`.
+async fn has_column(pool: &SqlitePool, table: &str, column: &str) -> anyhow::Result<bool> {
+    if !table_exists(pool, table).await? {
+        return Ok(false);
+    }
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?1)")
+        .bind(table)
+        .fetch_all(pool)
+        .await?;
+    Ok(names.iter().any(|n| n == column))
 }
 
 /// Whether 0018's second statement — the `kind` discriminant — already landed.

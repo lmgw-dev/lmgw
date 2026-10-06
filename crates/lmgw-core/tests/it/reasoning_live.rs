@@ -64,7 +64,7 @@ async fn replayed_reasoning_grows_the_prompt_through_the_gateway() {
         &state.db,
         &NewUpstream {
             name: "live".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::LlamaCpp,
             kind: UpstreamKind::LlamaServer,
             base_url: upstream.trim_end_matches('/').to_string(),
             api_key: None,

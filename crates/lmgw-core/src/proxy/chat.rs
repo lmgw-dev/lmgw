@@ -26,13 +26,21 @@ pub async fn handle_chat(
     body: Value,
 ) -> Response {
     let started = Instant::now();
-    state.telemetry.request_started();
-
     let alias_hint = body
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
+    // Opens the in-flight gauge, and writes the `499` row should the client
+    // go away before any row is written (`unanswered.rs`).
+    let mut unanswered = Unanswered::open(
+        &state,
+        proto,
+        &ctx,
+        &alias_hint,
+        started,
+        RequestClass::Chat,
+    );
 
     let parsed = match proto {
         // `Realtime`, `Chat` and `AdminChat` never reach this handler (their
@@ -47,6 +55,7 @@ pub async fn handle_chat(
         Ok(ir) => ir,
         Err(e) => {
             let resp = error_response(proto, &e);
+            unanswered.logging();
             record(
                 LogParams {
                     state: &state,
@@ -61,6 +70,7 @@ pub async fn handle_chat(
                     max_tokens_clamped: None,
                     fallback: None,
                     rung: None,
+                    degraded: None,
                 },
                 e.http_status().as_u16(),
                 None,
@@ -72,18 +82,23 @@ pub async fn handle_chat(
         }
     };
     ir.anthropic_beta = ctx.anthropic_beta.clone();
+    unanswered.alias(&ir.model_alias);
+    unanswered.streamed(ir.stream);
 
-    if let Some(r) = policy_or_refuse(
-        &state,
-        proto,
-        &ctx,
-        &ir.model_alias,
-        started,
-        RequestClass::Chat,
-    )
-    .await
-    {
-        return r;
+    unanswered.stage("checking the key's policy");
+    if let Some(e) = policy_refusal(&state, &ctx, &ir.model_alias).await {
+        unanswered.logging();
+        record_refusal(
+            &state,
+            proto,
+            &ctx,
+            &ir.model_alias,
+            started,
+            RequestClass::Chat,
+            &e,
+        )
+        .await;
+        return error_response(proto, &e);
     }
 
     // The gate's per-request half: the hold swap (not `resolve` — a local
@@ -93,13 +108,12 @@ pub async fn handle_chat(
     // a local model that is not resident before a single byte goes upstream,
     // or it is refused by name. A cloud route or a model already loaded
     // passes straight through, and a local route comes back on the port its
-    // container answers on (§5). A request says which facets it uses, so an
-    // outside-VRAM swap never sends images to a fallback that cannot see them,
-    // and a candidate alias refuses a facet it does not enable
+    // container answers on (§5). A fallback that cannot see gets the images
+    // as placeholders at the send (`gate::fallback_images`). A candidate
+    // alias refuses a facet it does not enable here, before anything starts
     // (`Routed::using`).
-    // A candidate alias refuses a facet it does not enable here, before
-    // anything starts (`Routed::using`).
     let uses = crate::gate::request_facets(&ir, ctx.reasoning_control().as_ref());
+    unanswered.stage("waiting for admission (GPU room, or the model's container starting)");
     let opened = match async {
         crate::gate::resolve(
             &state,
@@ -116,6 +130,7 @@ pub async fn handle_chat(
         Ok(o) => o,
         Err(f) => {
             let resp = error_response(proto, &f.error);
+            unanswered.logging();
             record(
                 LogParams {
                     state: &state,
@@ -130,6 +145,7 @@ pub async fn handle_chat(
                     max_tokens_clamped: None,
                     fallback: f.headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 f.error.http_status().as_u16(),
                 None,
@@ -140,7 +156,7 @@ pub async fn handle_chat(
             return f.headers.stamp(resp);
         }
     };
-    serve_opened(&state, proto, &ctx, &ir, opened, started).await
+    serve_opened(&state, proto, &ctx, &ir, opened, started, &mut unanswered).await
 }
 
 /// The post-admission half of [`handle_chat`]: the route's own defaults, the
@@ -148,6 +164,9 @@ pub async fn handle_chat(
 /// climb hands the request to its fallback before anything was sent (ladder
 /// design §12 entry 8): the fallback's route is then served exactly as if the
 /// admission had swapped to it, with no hold, so it cannot climb again.
+///
+/// `unanswered` holds the request's row until a row is written: it is handed
+/// over right before each write here, and to the relay task with a stream.
 async fn serve_opened(
     state: &SharedState,
     proto: ClientProto,
@@ -155,12 +174,15 @@ async fn serve_opened(
     ir: &ChatRequest,
     opened: crate::gate::Opened,
     started: Instant,
+    unanswered: &mut Unanswered,
 ) -> Response {
     let crate::gate::Opened {
         mut route,
         hold: admission,
         mut headers,
     } = opened;
+    unanswered.routed_to(&route, headers.fallback_reason());
+    unanswered.stage("waiting for the model's answer");
 
     // §5.4: the cap lmgw picks when nobody else did, before the egress' own
     // hidden default can apply.
@@ -172,17 +194,20 @@ async fn serve_opened(
     let mut annotations = Annotations {
         ignored: reasoning_ignored(
             route.upstream.protocol,
-            route.upstream.kind,
             &params.reasoning_control(),
             crate::egress::openai::has_reasoning_object(ir),
         ),
         max_tokens_defaulted,
         max_tokens_raised: anthropic_max_tokens_raised(&route, &params),
         max_tokens_clamped: None,
+        images_omitted: None,
     };
     // An off this cloud model cannot take as asked goes out in the form it
     // can (§5.6); reported below with the other ignored controls.
     let mut fitted = super::reasoning_fit::fit(state, &route, &mut params).await;
+    // What the send's content lost to a model that lacks a capability, for
+    // an error row written below (`request_logs.degraded`).
+    let mut degraded = None;
 
     // The gate's per-send half, on the final params: a guarded row's clamp,
     // count and pool reservation, a ladder's clamp. Its lease goes wherever
@@ -209,11 +234,15 @@ async fn serve_opened(
         }
         Ok((lease, gated)) => {
             annotations.max_tokens_clamped = lease.max_tokens_clamped();
+            // A fallback that cannot see got the images as placeholders: how
+            // many, next to `x-lmgw-fallback` (`gate::fallback_images`).
+            annotations.images_omitted = lease.images_omitted();
+            degraded = lease.degraded();
             if ir.stream {
                 // The guard and the lease travel into the stream: a streaming
                 // response outlives this function, and the model is in use
                 // until the last token.
-                stream_chat(
+                let r = stream_chat(
                     state,
                     proto,
                     ctx,
@@ -227,7 +256,13 @@ async fn serve_opened(
                     admission,
                     lease,
                 )
-                .await
+                .await;
+                // The relay task writes the stream's row from here on, a
+                // client that goes away mid-stream included (`canceled`).
+                if matches!(r, Ok(Turn::Answered(_))) {
+                    unanswered.logging();
+                }
+                r
             } else {
                 let r = unary_chat(
                     state,
@@ -242,6 +277,7 @@ async fn serve_opened(
                     &params,
                     &mut fitted,
                     started,
+                    unanswered,
                 )
                 .await;
                 drop(admission);
@@ -255,13 +291,18 @@ async fn serve_opened(
         // Served again on what the gate picked (ladder design §12 entry 8,
         // candidate-aliases §12 entry 45) — nothing was sent on this one.
         Ok(Turn::Rerouted(Ok(opened))) => {
-            return Box::pin(serve_opened(state, proto, ctx, ir, opened, started)).await;
+            return Box::pin(serve_opened(
+                state, proto, ctx, ir, opened, started, unanswered,
+            ))
+            .await;
         }
         // A refusal instead (a candidate alias's deferral) answers under its
         // own headers: nothing the first route said applies to it.
         Ok(Turn::Rerouted(Err(f))) => {
             headers = f.headers;
             annotations.max_tokens_clamped = None;
+            annotations.images_omitted = None;
+            degraded = None;
             Err(f.error)
         }
         Err(e) => Err(e),
@@ -271,6 +312,7 @@ async fn serve_opened(
         Ok(resp) => resp,
         Err(e) => {
             let resp = error_response(proto, &e);
+            unanswered.logging();
             record(
                 LogParams {
                     state,
@@ -285,6 +327,7 @@ async fn serve_opened(
                     max_tokens_clamped: annotations.max_tokens_clamped,
                     fallback: headers.fallback_reason(),
                     rung: headers.rung().map(crate::gate::RungTag::log),
+                    degraded,
                 },
                 e.http_status().as_u16(),
                 None,
@@ -314,8 +357,10 @@ async fn unary_chat(
     params: &crate::ir::Params,
     fitted: &mut super::reasoning_fit::Fitted,
     started: Instant,
+    unanswered: &mut Unanswered,
 ) -> Result<Turn<Response>, GatewayError> {
     let max_tokens_clamped = lease.max_tokens_clamped();
+    let degraded = lease.degraded();
     let timeout = route.upstream.request_timeout();
     let sent = super::reasoning_fit::send_chat(
         state,
@@ -365,6 +410,7 @@ async fn unary_chat(
     }
     let completion = egress.parse_completion(&bytes)?;
     let body = proto.serialize_completion(&ir.model_alias, &completion);
+    unanswered.logging();
     record(
         LogParams {
             state,
@@ -379,6 +425,7 @@ async fn unary_chat(
             max_tokens_clamped,
             fallback: headers.fallback_reason(),
             rung,
+            degraded,
         },
         StatusCode::OK.as_u16(),
         Some(ttfb),

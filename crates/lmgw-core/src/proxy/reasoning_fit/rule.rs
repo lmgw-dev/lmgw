@@ -44,7 +44,7 @@ pub(super) fn decide(
     }
     let off = match protocol {
         Protocol::Gemini => Off::Lowest(GEMINI_LOWEST.to_string()),
-        Protocol::Openai | Protocol::Anthropic => Off::Control,
+        Protocol::Openai | Protocol::Anthropic | Protocol::LlamaCpp => Off::Control,
     };
     (off, Basis::Default)
 }
@@ -57,7 +57,9 @@ pub(super) fn default_reason(protocol: Protocol) -> &'static str {
             "Gemini's catalog does not say whether this model can stop thinking, and current \
              Gemini models cannot — minimal is the least they take"
         }
-        Protocol::Openai | Protocol::Anthropic => "nothing is known about the model",
+        Protocol::Openai | Protocol::Anthropic | Protocol::LlamaCpp => {
+            "nothing is known about the model"
+        }
     }
 }
 

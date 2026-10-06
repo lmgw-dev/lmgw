@@ -10,7 +10,9 @@ use crate::config::Route;
 use crate::error::GatewayError;
 use crate::gate::AdmissionPolicy;
 use crate::runtime::descriptor::{model_runtime, RungPos};
-use crate::runtime::registry::{AcquireGuard, ClaimStatus, Origin, RuntimeError, SendGuard};
+use crate::runtime::registry::{
+    AcquireGuard, ClaimStatus, LlamaEntry, Origin, RuntimeError, SendGuard,
+};
 use crate::runtime::Class;
 use crate::state::SharedState;
 
@@ -96,7 +98,65 @@ impl LocalHold {
     /// `{base}/embeddings`, …), and the registry's endpoint is the container
     /// root. One suffix, applied in one place.
     pub fn endpoint(&self) -> String {
-        format!("http://127.0.0.1:{}/v1", self.port())
+        api_root(self.port())
+    }
+
+    /// Point `route` at the container this hold is on now
+    /// ([`Self::point_at`] its port).
+    pub fn point(&self, route: &mut Route) {
+        Self::point_at(route, self.port());
+    }
+
+    /// **The one writer of a held endpoint** (llama egress design §3.2):
+    /// `route` pointed at the local container published on `port`. Its
+    /// `upstream.base_url` becomes that container's API root
+    /// ([`Self::endpoint`]'s), and nothing else on the route changes — what
+    /// was decided for the request before it was pointed travels with it.
+    ///
+    /// Every place a route is pointed at a container comes here: the
+    /// admission ([`crate::gate`]'s open and candidate walk), the ladder's
+    /// send, the dead-container retry ([`send_local`]), the in-process
+    /// runners, the warm load and the voice list. So a climb or a retry that
+    /// re-points a request sends what was counted, and a field added to the
+    /// route later is carried, not refilled, in one place. The one exception
+    /// is deliberate and only ever takes away: a send's attempt rechecks its
+    /// tool-image decision against the container it goes to
+    /// (`Self::on_attempt`, `gate::tool_images::recheck`).
+    pub fn point_at(route: &mut Route, port: u16) {
+        route.upstream.base_url = api_root(port);
+    }
+
+    /// `route` as one attempt sends it to the container this hold is on now:
+    /// pointed at it ([`Self::point_at`]), and its tool-image decision
+    /// rechecked against that container (`gate::tool_images::recheck`, llama
+    /// egress design §8.2). A dead-container retry lands on a container
+    /// re-admitted from the row as it is now, which may not see, or may
+    /// carry a projector advisory; the decision made on the container that
+    /// died must not send it an image it cannot take.
+    pub(crate) fn on_attempt(&self, route: &Route) -> Route {
+        let ((port, generation), started) = self.attempt_with_facts();
+        let mut r = route.clone();
+        Self::point_at(&mut r, port);
+        crate::gate::tool_images::recheck(&mut r, self, generation, started.as_deref());
+        r
+    }
+
+    /// What the container this hold is on said about itself (`GET /props`)
+    /// and what its start row says about its projector (llama egress design
+    /// §4.2, §8.2) — read from the registry entry of exactly that container,
+    /// by its generation, so a hold that moved reads the container it is on
+    /// now. `None` off llama-server, and once that container's entry is gone.
+    pub fn llama(&self) -> Option<LlamaEntry> {
+        self.llama_at(self.attempt().1)
+    }
+
+    /// [`Self::llama`] of container `generation` of this hold's model: what
+    /// an attempt judged on that container reads, even if the claim moved
+    /// since. `None` once that container's entry is gone.
+    pub fn llama_at(&self, generation: u64) -> Option<LlamaEntry> {
+        self.state
+            .runtime()
+            .llama_entry(self.target.class, &self.target.model_id, generation)
     }
 
     /// The container's host port, for callers that need the origin rather than
@@ -561,11 +621,15 @@ where
     retried
 }
 
-/// The route as it looks against the container this hold is on (§5).
+/// The route as it looks against the container this hold is on (§5), its
+/// tool-image decision rechecked there ([`LocalHold::on_attempt`]).
 fn on_hold(route: &Route, hold: &LocalHold) -> Route {
-    let mut r = route.clone();
-    r.upstream.base_url = hold.endpoint();
-    r
+    hold.on_attempt(route)
+}
+
+/// The API root of the local container published on `port`.
+fn api_root(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/v1")
 }
 
 /// One send, its wait for response headers bounded by `timeout` — the

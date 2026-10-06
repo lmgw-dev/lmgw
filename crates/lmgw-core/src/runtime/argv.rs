@@ -47,6 +47,27 @@ const CONTAINER_PORT: u16 = 8080;
 /// normalizes the flags themselves, so the flags cannot be compared as text.
 pub const RUN_ARGS_LABEL: &str = "lmgw.run_args";
 
+/// The label naming the lmgw that started a container: its data dir's
+/// instance id (`backends::run::load_instance_id`). Two instances can share a
+/// `container_prefix` — every dev copy is `lmgw-dev` — and so the instance
+/// label; the reconciliation pass after boot (`registry/unheld.rs`) acts only
+/// on containers carrying its own owner, never on another instance's.
+pub const OWNER_LABEL: &str = "lmgw.owner";
+
+/// `argv` (a [`podman_run_argv`]) with [`OWNER_LABEL`]`=<owner>` after its
+/// other labels.
+pub fn stamp_owner(mut argv: Vec<String>, owner: &str) -> Vec<String> {
+    let at = argv
+        .iter()
+        .rposition(|a| a == "--label")
+        .map_or(argv.len().min(1), |i| i + 2);
+    argv.splice(
+        at..at,
+        ["--label".to_string(), format!("{OWNER_LABEL}={owner}")],
+    );
+    argv
+}
+
 /// A digest of `podman run` flags, for [`RUN_ARGS_LABEL`]: the first eight
 /// bytes of the SHA-256 of their JSON list, in hex.
 pub fn run_args_digest(args: &[String]) -> String {

@@ -29,7 +29,7 @@ async fn serve(state: SharedState) -> String {
 }
 
 /// A gateway with `my-model` pointing at `upstream_base`.
-async fn setup(upstream_base: &str) -> (SharedState, String) {
+pub(crate) async fn setup(upstream_base: &str) -> (SharedState, String) {
     setup_native(upstream_base, false).await
 }
 
@@ -71,7 +71,7 @@ async fn setup_native(upstream_base: &str, supports_responses: bool) -> (SharedS
     (state, base)
 }
 
-async fn register_mcp(state: &SharedState, name: &str, prefix: &str, url: &str) {
+pub(crate) async fn register_mcp(state: &SharedState, name: &str, prefix: &str, url: &str) {
     store::insert_mcp_server(
         &state.db,
         &NewMcpServer {
@@ -104,7 +104,7 @@ async fn register_mcp(state: &SharedState, name: &str, prefix: &str, url: &str) 
 /// A minimal MCP Streamable-HTTP server: `initialize` / `tools/list` /
 /// `tools/call`, JSON responses (spec-legal), one tool that echoes its
 /// arguments. Enough to exercise the real `rmcp` client path without Podman.
-async fn mcp_stub() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+pub(crate) async fn mcp_stub() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     use axum::response::IntoResponse;
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls2 = calls.clone();
@@ -167,7 +167,7 @@ async fn mcp_stub() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
 }
 
 /// An upstream chat/completions reply carrying plain text.
-fn text_reply(text: &str) -> Value {
+pub(crate) fn text_reply(text: &str) -> Value {
     json!({
         "id": "chatcmpl-1", "object": "chat.completion", "model": "tgt-model",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
@@ -177,7 +177,7 @@ fn text_reply(text: &str) -> Value {
 }
 
 /// An upstream reply asking for one tool call.
-fn call_reply(id: &str, name: &str, args: Value) -> Value {
+pub(crate) fn call_reply(id: &str, name: &str, args: Value) -> Value {
     json!({
         "id": "chatcmpl-1", "object": "chat.completion", "model": "tgt-model",
         "choices": [{"index": 0, "message": {
@@ -190,7 +190,7 @@ fn call_reply(id: &str, name: &str, args: Value) -> Value {
     })
 }
 
-async fn post(base: &str, body: Value) -> (StatusCode, Value) {
+pub(crate) async fn post(base: &str, body: Value) -> (StatusCode, Value) {
     let r = reqwest::Client::new()
         .post(format!("{base}/v1/responses"))
         .json(&body)
@@ -202,7 +202,7 @@ async fn post(base: &str, body: Value) -> (StatusCode, Value) {
 }
 
 /// Mount a sequence of replies, one per successive upstream call.
-async fn mount_sequence(mock: &MockServer, replies: Vec<Value>) {
+pub(crate) async fn mount_sequence(mock: &MockServer, replies: Vec<Value>) {
     for (i, reply) in replies.into_iter().enumerate() {
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -215,7 +215,7 @@ async fn mount_sequence(mock: &MockServer, replies: Vec<Value>) {
     }
 }
 
-fn output_types(resp: &Value) -> Vec<&str> {
+pub(crate) fn output_types(resp: &Value) -> Vec<&str> {
     resp["output"]
         .as_array()
         .map(|a| {
@@ -678,7 +678,7 @@ async fn a_request_cannot_raise_the_gateway_tool_call_ceiling() {
 // Refusals — surfaced, never silently approximated
 // ---------------------------------------------------------------------------
 
-async fn refusal_message(body: Value) -> String {
+pub(crate) async fn refusal_message(body: Value) -> String {
     let mock = MockServer::start().await;
     mount_sequence(&mock, vec![text_reply("unused")]).await;
     let (_state, base) = setup(&mock.uri()).await;

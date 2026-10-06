@@ -1,0 +1,22 @@
+{
+  "requests": [
+    {
+      "body": "{\"add_special\":false,\"content\":\"Hello, world!\",\"model\":\"chat-gguf\",\"with_pieces\":true}",
+      "body_json": {
+        "add_special": false,
+        "content": "Hello, world!",
+        "model": "chat-gguf",
+        "with_pieces": true
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/tokenize"
+    }
+  ],
+  "status": 200
+}

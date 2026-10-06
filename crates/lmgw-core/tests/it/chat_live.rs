@@ -222,7 +222,7 @@ async fn slow_continue() -> (
         Duration::from_millis(800),
     )
     .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw).await;
     store::append_chat_message(&state.db, tid, "user", "q", "", None, None, None)
         .await

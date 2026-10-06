@@ -1,0 +1,94 @@
+{
+  "keyless": {
+    "request": {
+      "body": "{\"content\":\"hi\",\"model\":\"the-model\"}",
+      "body_json": {
+        "content": "hi",
+        "model": "the-model"
+      },
+      "headers": {
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "url": "http://llama.test/tokenize"
+    }
+  },
+  "plans": [
+    {
+      "base_url": "http://llama.test",
+      "plan": {
+        "request": {
+          "body": "{\"content\":\"hi\",\"model\":\"the-model\"}",
+          "body_json": {
+            "content": "hi",
+            "model": "the-model"
+          },
+          "headers": {
+            "authorization": "<set>",
+            "content-type": "application/json",
+            "x-extra": "one"
+          },
+          "method": "POST",
+          "url": "http://llama.test/tokenize"
+        }
+      }
+    },
+    {
+      "base_url": "http://llama.test/v1/",
+      "plan": {
+        "request": {
+          "body": "{\"content\":\"hi\",\"model\":\"the-model\"}",
+          "body_json": {
+            "content": "hi",
+            "model": "the-model"
+          },
+          "headers": {
+            "authorization": "<set>",
+            "content-type": "application/json",
+            "x-extra": "one"
+          },
+          "method": "POST",
+          "url": "http://llama.test/tokenize"
+        }
+      }
+    },
+    {
+      "base_url": "http://llama.test/llama/v1",
+      "plan": {
+        "request": {
+          "body": "{\"content\":\"hi\",\"model\":\"the-model\"}",
+          "body_json": {
+            "content": "hi",
+            "model": "the-model"
+          },
+          "headers": {
+            "authorization": "<set>",
+            "content-type": "application/json",
+            "x-extra": "one"
+          },
+          "method": "POST",
+          "url": "http://llama.test/llama/tokenize"
+        }
+      }
+    },
+    {
+      "base_url": "http://llama.test/v1/v1",
+      "plan": {
+        "request": {
+          "body": "{\"content\":\"hi\",\"model\":\"the-model\"}",
+          "body_json": {
+            "content": "hi",
+            "model": "the-model"
+          },
+          "headers": {
+            "authorization": "<set>",
+            "content-type": "application/json",
+            "x-extra": "one"
+          },
+          "method": "POST",
+          "url": "http://llama.test/tokenize"
+        }
+      }
+    }
+  ]
+}

@@ -437,7 +437,7 @@ async fn extract_and_store(
     // class-wide router port the route was resolved against (§5). The runner
     // carries the swapped route, so it holds for every window and every turn.
     if let Some(hold) = &hold {
-        route.upstream.base_url = hold.endpoint();
+        hold.point(&mut route);
     }
     let runner = IngestRunner {
         state: state.clone(),

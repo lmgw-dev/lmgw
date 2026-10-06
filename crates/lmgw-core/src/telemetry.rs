@@ -56,6 +56,10 @@ pub struct RequestSummary {
     /// `rung` (ladder design §6, migration 0043). `None` for a row without a
     /// ladder, and for a request its fallback answered.
     pub rung: Option<i64>,
+    /// What the request's content lost on its way to a model that lacks a
+    /// capability — the stored row's `degraded` ([`crate::degraded`]).
+    /// `None` = nothing.
+    pub degraded: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +208,12 @@ impl Default for TelemetryBus {
 pub fn counts_in_token_stats(ingress_proto: &str) -> bool {
     !matches!(
         ingress_proto,
-        "mcp" | RESPONSES_TOOL_PROTO | ADMIN_TOOL_PROTO | CHAT_TOOL_PROTO | AGENT_TOOL_PROTO
+        "mcp"
+            | RESPONSES_TOOL_PROTO
+            | ADMIN_TOOL_PROTO
+            | CHAT_TOOL_PROTO
+            | AGENT_TOOL_PROTO
+            | REALTIME_TOOL_PROTO
     )
 }
 
@@ -231,7 +240,11 @@ pub enum RequestClass {
     /// averaging a two-second 1024² render into "tokens per request" would
     /// make that number mean even less than an embed call already does.
     Image,
-    /// A tool *execution* row, not a model call — no tokens, synthesized status.
+    /// A row that is not a model call — no tokens, a synthesized or metadata
+    /// status: a tool *execution*, or a token count (`proxy/count_admit.rs`),
+    /// which writes a row only when it failed or loaded its model. Kept out
+    /// of the model classes' token averages, the unpriced counts and an agent
+    /// run's model calls.
     Tool,
 }
 
@@ -357,6 +370,13 @@ pub const AGENT_PROTO: &str = "agent";
 /// call: NULL tokens, synthesized status, excluded from the aggregates, and
 /// named apart from the model turns so Logs shows which half the time went to.
 pub const AGENT_TOOL_PROTO: &str = "agent-tool";
+
+/// `ingress_proto` for a server-side MCP call a `/v1/realtime` session made
+/// for its model (realtime-server-tools design §2.4), as opposed to
+/// `"realtime"` for the session's model calls. A tool call: NULL tokens,
+/// synthesized status, excluded from the aggregates. Its rows carry the
+/// session's own key, so it has no internal identity.
+pub const REALTIME_TOOL_PROTO: &str = "realtime-tool";
 
 /// The synthetic `internal:*` identity a gateway-internal consumer logs under
 /// (usage-analytics design §4.4).
@@ -675,6 +695,7 @@ mod tests {
             key_id: None,
             fallback_reason: None,
             rung: None,
+            degraded: None,
         });
         let s = bus.stats_at(t0 + ms(500));
         assert_eq!(s.completion_tokens, 400);

@@ -233,13 +233,14 @@ fn parse_message(m: &Value) -> Result<Message, GatewayError> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // OpenAI's tool-message content is text (string or text parts), so
+        // one Text block is the faithful reading — no JSON sniffing here,
+        // a client that sent a string gets a string back out (§7).
+        let text = tool_message_text(m.get("content"), &id);
         content.push(ContentPart::ToolResult {
             id,
             name: m.get("name").and_then(Value::as_str).map(String::from),
-            // OpenAI's tool-message content is text (string or text parts), so
-            // one Text block is the faithful reading — no JSON sniffing here,
-            // a client that sent a string gets a string back out (§7).
-            content: ToolResultBlock::one(content_to_text(m.get("content"))),
+            content: ToolResultBlock::one(text),
             is_error: false,
         });
         return Ok(Message { role, content });
@@ -318,15 +319,53 @@ fn parse_message(m: &Value) -> Result<Message, GatewayError> {
     Ok(Message { role, content })
 }
 
-fn content_to_text(v: Option<&Value>) -> String {
+/// A tool message's text: the string, or its text parts joined by newlines.
+///
+/// OpenAI's tool message carries text only, so that is all lmgw reads from
+/// it (§7) — but every part it drops is named in a WARN (llama-egress design
+/// §8.3), so a client that put an image there can see why the model never
+/// saw it. A tool image belongs in the Anthropic or Responses shape, which
+/// carry one.
+fn tool_message_text(v: Option<&Value>, tool_call_id: &str) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
+        Some(Value::Array(parts)) => {
+            let mut texts: Vec<&str> = Vec::with_capacity(parts.len());
+            let mut dropped: Vec<String> = Vec::new();
+            for (i, p) in parts.iter().enumerate() {
+                match p.get("text").and_then(Value::as_str) {
+                    Some(t) => texts.push(t),
+                    None => dropped.push(format!("#{i} {}", part_type(p))),
+                }
+            }
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    tool_call_id,
+                    "tool message parts dropped (an OpenAI tool message carries text only): {}",
+                    dropped.join(", ")
+                );
+            }
+            texts.join("\n")
+        }
+        None | Some(Value::Null) => String::new(),
+        Some(other) => {
+            tracing::warn!(
+                tool_call_id,
+                "tool message content dropped: a {} is neither a string nor an array of parts",
+                crate::mcp::spec::kind_of(other)
+            );
+            String::new()
+        }
+    }
+}
+
+/// A content part's `type` for a log line, or the JSON kind of a part that
+/// has none.
+fn part_type(p: &Value) -> &str {
+    match p.get("type").and_then(Value::as_str) {
+        Some(t) => t,
+        None if p.is_object() => "untyped object",
+        None => crate::mcp::spec::kind_of(p),
     }
 }
 

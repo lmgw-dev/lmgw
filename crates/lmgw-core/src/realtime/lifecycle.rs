@@ -18,7 +18,9 @@
 //!   has been synthesized), and the call is still reading its last chunks.
 //!   A `response.create` now is **queued** and starts right after this
 //!   response's `response.done`: the stock client sends its post-tool
-//!   follow-up exactly then (§2.3).
+//!   follow-up exactly then (§2.3). Server-side calls keep a response here
+//!   while they run; once nothing of it plays, speech is a turn, not a
+//!   barge-in (`producing`, realtime-server-tools §2.5).
 //! - **Playing** — the call has returned, and the writer is draining the
 //!   response's last output (paced audio, §8.2). The writer's drained
 //!   acknowledgement for this generation ends it: only then do the closing
@@ -68,6 +70,8 @@ mod hearing;
 mod held;
 mod interrupt;
 mod pending;
+mod producing;
+mod refusal;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -123,6 +127,12 @@ pub(crate) struct Active {
     /// Its output is held for the transcript of a turn it heard as audio
     /// (`held`); `None` for a response that heard none.
     held: Option<held::Held>,
+    /// Its speaker handed the last clause: what it says is all with the
+    /// writer (`producing`, realtime-server-tools §2.5).
+    spoken: bool,
+    /// The automatic response that started first after server-side calls'
+    /// results were in: it answers with them (`refusal`).
+    answers_tools: bool,
 }
 
 /// Why a response failed: what the client is told, and what the log says.
@@ -203,9 +213,11 @@ impl Core {
         self.refresh_voice();
         // One is already held for the user's turn: it answers that turn, so
         // a second would be a second response (`pending`, §4.3) — whether
-        // the turn is still open or its transcript is still being made.
+        // the turn is still open or its transcript is still being made —
+        // unless it is absorbed into a cut response's own create, held again
+        // (realtime-server-tools §2.5).
         if self.pending_carries() {
-            return self.pending_refuse(create);
+            return self.pending_second(create);
         }
         let Some(active) = &self.active else {
             if self.turn.is_some() {
@@ -232,17 +244,7 @@ impl Core {
             }
             return;
         }
-        let id = active.output.id.clone();
-        self.error(
-            ErrorObject::invalid(
-                "conversation_already_has_active_response",
-                format!(
-                    "response {id} is still in progress; wait for its response.done, or send \
-                     response.cancel"
-                ),
-            )
-            .for_event(create.event_id.as_deref()),
-        );
+        self.refuse_second(create.event_id.as_deref());
     }
 
     fn start_response(&mut self, create: Create) {
@@ -286,6 +288,8 @@ impl Core {
             .speaking
             .as_ref()
             .map_or("session.audio.output.voice", |s| s.voice_param);
+        // Whichever response starts first renders the calls' results.
+        let answers_tools = std::mem::take(&mut self.mcp.results_in) && create.auto;
         self.active = Some(Active {
             output,
             phase: Phase::AwaitingTranscripts,
@@ -315,10 +319,16 @@ impl Core {
             timing: Timing::new(self.last_turn.take(), speaks),
             voice_param,
             held: None,
+            spoken: false,
+            answers_tools,
         });
+        if self.mcp.table.listing() {
+            self.timing_tools_waiting();
+        }
         if self.busy_for_launch() {
             tracing::debug!(
-                "realtime {}: the response waits for the transcripts still being made",
+                "realtime {}: the response waits for the transcripts or MCP listings still being \
+                 made",
                 self.id()
             );
         } else {
@@ -375,6 +385,18 @@ impl Core {
             }
             return;
         }
+        // What it offers of the session's MCP tools is decided now that the
+        // listings it waited for are in, and the calls of them are the
+        // gateway's to run (realtime-server-tools §1.1, §2.1).
+        let offer = match snap.mcp_offer(&self.mcp.table) {
+            Ok(o) => o,
+            Err(error) => {
+                let log = format!("its MCP tools: {}", error.message);
+                return self.end_call(Err(Failure { error, log }));
+            }
+        };
+        let served = self.mcp.table.served(&offer, snap.parallel_tool_calls);
+        active.output.serve_mcp(served.owners);
         let ir = render::render(&render::Input {
             alias: &snap.alias,
             instructions: &snap.instructions,
@@ -386,6 +408,12 @@ impl Core {
             reasoning: snap.reasoning.as_ref(),
             speech_hint: snap.speaking.as_ref().and_then(|s| s.hint.as_deref()),
             written: &|id| self.conversation.written(id),
+            mcp: render::McpInput {
+                tools: &offer.tools,
+                choice: offer.choice.as_ref(),
+                only: offer.only.is_some(),
+                call: &|c| render::mcp_of_session(c, &self.conversation, &self.mcp.table),
+            },
         });
         let (stop, signal) = crate::proxy::stop_pair();
         // Detached: a cancel stops it through `stop`, never by aborting it.
@@ -418,6 +446,7 @@ impl Core {
             tx: self.responder_tx.clone(),
             stop: signal,
             speech,
+            tools: served.tools,
         }));
         self.launched(stop);
     }

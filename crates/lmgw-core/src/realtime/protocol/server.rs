@@ -92,6 +92,17 @@ pub enum ServerEvent {
     #[serde(rename = "conversation.item.deleted")]
     ItemDeleted { item_id: String },
 
+    // -- MCP listing (realtime-server-tools §1.2) -------------------------
+    /// The `mcp_list_tools` item a label's listing fills in.
+    #[serde(rename = "mcp_list_tools.in_progress")]
+    McpListToolsInProgress { item_id: String },
+    #[serde(rename = "mcp_list_tools.completed")]
+    McpListToolsCompleted { item_id: String },
+    /// Carries only the item: the reason goes out as an `error` with code
+    /// `mcp_list_tools_failed` beside it.
+    #[serde(rename = "mcp_list_tools.failed")]
+    McpListToolsFailed { item_id: String },
+
     // -- Input transcription ---------------------------------------------
     #[serde(rename = "conversation.item.input_audio_transcription.delta")]
     TranscriptionDelta {
@@ -181,6 +192,31 @@ pub enum ServerEvent {
         name: String,
         arguments: String,
     },
+    /// A server-side call's arguments (realtime-server-tools §2.2). No
+    /// `obfuscation`: `@openai/agents` files the event as a generic one,
+    /// which it ignores anyway, as it does `function_call_arguments.delta`.
+    #[serde(rename = "response.mcp_call_arguments.delta")]
+    McpCallArgumentsDelta {
+        response_id: String,
+        item_id: String,
+        output_index: u32,
+        delta: String,
+    },
+    #[serde(rename = "response.mcp_call_arguments.done")]
+    McpCallArgumentsDone {
+        response_id: String,
+        item_id: String,
+        output_index: u32,
+        arguments: String,
+    },
+    /// A server-side call runs, and how it ended (realtime-server-tools
+    /// §2.4). The GA reference gives these no `response_id`.
+    #[serde(rename = "response.mcp_call.in_progress")]
+    McpCallInProgress { item_id: String, output_index: u32 },
+    #[serde(rename = "response.mcp_call.completed")]
+    McpCallCompleted { item_id: String, output_index: u32 },
+    #[serde(rename = "response.mcp_call.failed")]
+    McpCallFailed { item_id: String, output_index: u32 },
     #[serde(rename = "response.content_part.done")]
     ContentPartDone {
         #[serde(flatten)]

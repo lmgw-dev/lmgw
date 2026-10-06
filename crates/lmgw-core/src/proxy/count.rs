@@ -11,8 +11,6 @@
 //! says so in `x-lmgw-count-approximate` ([`COUNT_APPROXIMATE_HEADER`]) —
 //! there are no silent approximations.
 
-use std::time::Instant;
-
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
@@ -23,7 +21,7 @@ use crate::error::GatewayError;
 use crate::gate::GateHeaders;
 use crate::ingress::ClientProto;
 use crate::state::SharedState;
-use crate::telemetry::{RequestClass, TelemetryBus};
+use crate::telemetry::TelemetryBus;
 use crate::vram::LocalHold;
 
 use super::*;
@@ -122,44 +120,25 @@ pub(crate) fn stamp_count(mut resp: Response, count: &Count) -> Response {
 }
 
 /// The key's alias scope, for a counter (api-docs design §5.1, §5.4; finding
-/// F3): the refusal is logged, a success is not. No budget, the key's or the
-/// gateway's: a count costs nothing ([`crate::policy::check_scope`], §12
-/// entry 15).
+/// F3). No budget, the key's or the gateway's: a count costs nothing
+/// ([`crate::policy::check_scope`], §12 entry 15). The refusal is a row, as
+/// every failed count is — written through the counter's [`Unanswered`].
 ///
 /// Before this, a key scoped to other aliases could count on any alias — and
 /// cold-load a local model doing so, since counting on one starts its
-/// container. The row a refusal writes closes a `request_started`, which a
-/// counter never makes for its unlogged successes; so it is opened only once
-/// there is a refusal to log, and a client that hangs up while the row is
-/// being written abandons it ([`InFlight`]) — the live gauge of requests in
-/// flight never ends up one over (review R1 #7).
-pub(super) async fn counter_policy(
+/// container.
+pub(super) fn counter_policy(
     state: &SharedState,
-    proto: ClientProto,
     ctx: &RequestCtx,
     alias: &str,
 ) -> Option<GatewayError> {
-    let e =
-        crate::policy::check_scope(&state.snapshot(), ctx.client_key.as_deref(), alias).err()?;
-    let in_flight = InFlight::start(&state.telemetry);
-    record_refusal(
-        state,
-        proto,
-        ctx,
-        alias,
-        Instant::now(),
-        RequestClass::Chat,
-        &e,
-    )
-    .await;
-    in_flight.finished();
-    Some(e)
+    crate::policy::check_scope(&state.snapshot(), ctx.client_key.as_deref(), alias).err()
 }
 
-/// One `request_started` that a refusal row is about to close. Dropped
-/// before [`Self::finished`] — the handler's future dropped mid-write, when
-/// the client hung up — it abandons the request instead, since no row will
-/// close it now.
+/// One `request_started` that a row is about to close. Dropped before
+/// [`Self::finished`] — the handler's future dropped mid-write, when the
+/// client hung up — it abandons the request instead, since no row will close
+/// it now.
 pub(super) struct InFlight<'a> {
     telemetry: &'a TelemetryBus,
     finished: bool,
@@ -197,40 +176,52 @@ impl Drop for InFlight<'_> {
 /// `x-lmgw-count-approximate` when the number is not the backend's own exact
 /// count of `input` (api-docs design §5.1, §10 choice 3).
 ///
-/// This is a lightweight metadata utility, so a count is not written to the
-/// request log or live feed — but a key refused by its alias scope is
-/// (api-docs design §5.4). No budget applies to a count (§12 entry 15).
+/// This is a lightweight metadata utility, so a cheap count is not written to
+/// the request log or live feed — but one that fails, a key refused by its
+/// alias scope included (api-docs design §5.4), or that had to bring its
+/// model up is, and so is one whose client went away first (`Unanswered`).
+/// No budget applies to a count (§12 entry 15).
 pub async fn handle_count_tokens(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
     // Errors are reported in OpenAI shape (this is lmgw's own endpoint).
     let proto = ClientProto::OpenaiChat;
+    let mut row = counter_row(&state, proto, &ctx, &body);
     let alias = match body.get("model").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None => {
-            return error_response(proto, &GatewayError::BadRequest("missing 'model'".into()));
+            let e = GatewayError::BadRequest("missing 'model'".into());
+            row.failed(&e).await;
+            return error_response(proto, &e);
         }
     };
     let input = match body.get("input") {
         Some(Value::String(s)) => s.clone(),
         _ => {
-            return error_response(
-                proto,
-                &GatewayError::BadRequest("missing 'input' (must be a string)".into()),
-            );
+            let e = GatewayError::BadRequest("missing 'input' (must be a string)".into());
+            row.failed(&e).await;
+            return error_response(proto, &e);
         }
     };
-    if let Some(e) = counter_policy(&state, proto, &ctx, &alias).await {
+    if let Some(e) = counter_policy(&state, &ctx, &alias) {
+        row.failed(&e).await;
         return error_response(proto, &e);
     }
 
-    match count_alias(&state, &alias, &input, false).await {
-        Ok((count, headers)) => stamp_count(
-            headers
-                .stamp(axum::Json(json!({"model": alias, "tokens": count.tokens})).into_response()),
-            &count,
-        ),
+    match count_alias(&state, &alias, &input, false, Some(&mut row)).await {
+        Ok((count, headers)) => {
+            row.answered(200, None).await;
+            stamp_count(
+                headers.stamp(
+                    axum::Json(json!({"model": alias, "tokens": count.tokens})).into_response(),
+                ),
+                &count,
+            )
+        }
         // Same reasoning as [`Failed`]: a count that failed *on the fallback*
         // is still attributed to it, so the header is on the error too.
-        Err((headers, e)) => headers.stamp(error_response(proto, &e)),
+        Err((headers, e)) => {
+            row.failed(&e).await;
+            headers.stamp(error_response(proto, &e))
+        }
     }
 }
 
@@ -257,18 +248,20 @@ pub(crate) async fn count_tokens_inner(
     input: &str,
     pinned: bool,
 ) -> Result<(u64, GateHeaders), (GateHeaders, GatewayError)> {
-    count_alias(state, alias, input, pinned)
+    count_alias(state, alias, input, pinned, None)
         .await
         .map(|(count, headers)| (count.tokens, headers))
 }
 
 /// [`count_tokens_inner`] with the count's [`Approx`] flags kept, for the
-/// HTTP handler that reports them.
+/// HTTP handler that reports them — and that keeps its row in `row`: the
+/// route, the stage, and whether this count brought its model up.
 async fn count_alias(
     state: &SharedState,
     alias: &str,
     input: &str,
     pinned: bool,
+    row: Option<&mut Unanswered>,
 ) -> Result<(Count, GateHeaders), (GateHeaders, GatewayError)> {
     // The gate's per-request half, and only that half: a count is not a chat
     // send, so it reserves nothing in a guarded model's pool. llama.cpp's
@@ -276,12 +269,7 @@ async fn count_alias(
     // tokens on a cold local model loads it — metadata call or not, that is a
     // load, and it goes through admission like any other (§9b).
     let check = crate::gate::RouteCheck::Text("/v1/count_tokens");
-    let opened = if pinned {
-        crate::gate::open_pinned(state, alias, check).await
-    } else {
-        crate::gate::open(state, alias, check).await
-    }
-    .map_err(|f| (f.headers, f.error))?;
+    let opened = admit_counter(state, alias, check, pinned, row).await?;
     // Everything past the resolve can fail *on the fallback*, so the count and
     // its failure both leave through one place that names it — see [`Failed`].
     match count_text_route(state, input, &opened.route, opened.hold.as_ref()).await {
@@ -337,7 +325,7 @@ pub(crate) async fn count_text_route(
             // framing is in the number.
             Ok(match route.upstream.protocol {
                 Protocol::Anthropic | Protocol::Gemini => count.flagged(Approx::MessageFraming),
-                Protocol::Openai => count,
+                Protocol::Openai | Protocol::LlamaCpp => count,
             })
         }
     }

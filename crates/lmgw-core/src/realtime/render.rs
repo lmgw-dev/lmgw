@@ -11,7 +11,10 @@
 //!   the voice left out included, where the transcript has only what was
 //!   said (B2 review 2);
 //! - function calls and their outputs become assistant tool calls and tool
-//!   results.
+//!   results, and so do server-side MCP calls with their results (`mcp`,
+//!   realtime-server-tools §2.6); an `mcp_list_tools` item is never
+//!   rendered — its tools go as tool definitions, after the client's
+//!   functions (§2.1).
 //!
 //! **Normalized for strict templates.** Gemma- and Qwen-class templates (via
 //! llama-server) and OpenAI-style upstreams refuse sequences a conversation
@@ -62,6 +65,11 @@ use crate::ir::{
     self, ChatRequest, Message, Params, ReasoningControl, Role, ToolDef, ToolResultBlock,
 };
 
+mod mcp;
+
+pub(crate) use mcp::of_session as mcp_of_session;
+pub use mcp::{McpInput, McpRendered};
+
 /// The synthetic result of a call whose output has not arrived (§7.2).
 pub const NO_RESULT_YET: &str = "(no result yet)";
 
@@ -92,6 +100,9 @@ pub struct Input<'a> {
     /// what was heard (§7.3); `None` renders the item's transcript — an
     /// item the client made, which has no other text.
     pub written: &'a dyn Fn(&str) -> Option<String>,
+    /// The session's MCP tools this response offers, and how its
+    /// `mcp_call` items render (`mcp`).
+    pub mcp: McpInput<'a>,
 }
 
 /// Render one response's request.
@@ -147,6 +158,11 @@ pub fn render(input: &Input<'_>) -> ChatRequest {
                     _ => b.orphan(&o.call_id, &o.output),
                 }
             }
+            // A server-side call and its result (`mcp`).
+            Item::McpCall(c) => b.mcp_call((input.mcp.call)(c), &c.arguments),
+            // A listing is never rendered: its tools go as tool definitions
+            // (realtime-server-tools §1.2).
+            Item::McpListTools(_) => {}
         }
     }
     b.flush();
@@ -174,7 +190,8 @@ pub fn render(input: &Input<'_>) -> ChatRequest {
     }
     messages.extend(turns);
 
-    let tools: Vec<ToolDef> = input.tools.iter().map(tool_def).collect();
+    let functions: Vec<ToolDef> = input.tools.iter().filter_map(tool_def).collect();
+    let tools = mcp::offered(functions, &input.mcp);
     let mut passthrough = Map::new();
     if let (Some(p), false) = (input.parallel_tool_calls, tools.is_empty()) {
         passthrough.insert("parallel_tool_calls".into(), Value::Bool(p));
@@ -192,7 +209,10 @@ pub fn render(input: &Input<'_>) -> ChatRequest {
         },
         // A tool choice with no tools is refused by some upstreams.
         tool_choice: (!tools.is_empty())
-            .then(|| input.tool_choice.map(tool_choice))
+            .then(|| {
+                let choice = input.mcp.choice.cloned();
+                choice.or_else(|| input.tool_choice.and_then(tool_choice))
+            })
             .flatten(),
         tools,
         stream: true,
@@ -276,32 +296,42 @@ pub fn strip_schema_keys(schema: &mut Value) {
     }
 }
 
-fn tool_def(t: &Tool) -> ToolDef {
+/// A function tool as the model is offered it. An `mcp` entry is not a tool
+/// of its own: it names a label whose listed tools are offered
+/// (realtime-server-tools §2.1).
+fn tool_def(t: &Tool) -> Option<ToolDef> {
     let Tool::Function {
         name,
         description,
         parameters,
-    } = t;
+    } = t
+    else {
+        return None;
+    };
     let mut parameters = parameters
         .clone()
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
     strip_schema_keys(&mut parameters);
-    ToolDef {
+    Some(ToolDef {
         name: name.clone(),
         description: description.clone(),
         parameters,
-    }
+    })
 }
 
-fn tool_choice(c: &ToolChoice) -> ir::ToolChoice {
-    match c {
+/// An `mcp` choice is looked up in the session's tool table when the
+/// response is created and launched (`mcp_tools::McpTable::offer`), and
+/// comes as [`McpInput::choice`]; here it says nothing.
+fn tool_choice(c: &ToolChoice) -> Option<ir::ToolChoice> {
+    Some(match c {
         ToolChoice::Mode(ToolChoiceMode::Auto) => ir::ToolChoice::Auto,
         ToolChoice::Mode(ToolChoiceMode::None) => ir::ToolChoice::None,
         ToolChoice::Mode(ToolChoiceMode::Required) => ir::ToolChoice::Required,
         ToolChoice::Function(f) => ir::ToolChoice::Tool {
             name: f.name.clone(),
         },
-    }
+        ToolChoice::Mcp(_) => return None,
+    })
 }
 
 /// A message item's text: typed text, or an audio part's transcript.
@@ -357,6 +387,8 @@ struct Builder<'a> {
     names: HashMap<String, String>,
     /// Output items already rendered as some call's result.
     consumed: HashSet<usize>,
+    /// The results of the server-side calls rendered so far (`mcp`).
+    mcp: mcp::McpResults,
 }
 
 impl<'a> Builder<'a> {
@@ -368,6 +400,7 @@ impl<'a> Builder<'a> {
             pending: Vec::new(),
             names: HashMap::new(),
             consumed: HashSet::new(),
+            mcp: mcp::McpResults::default(),
         }
     }
 
@@ -411,12 +444,24 @@ impl<'a> Builder<'a> {
         self.names.insert(call_id.to_string(), name.to_string());
     }
 
-    /// Give every pending call its result, in call order: the first output
-    /// for it anywhere in the conversation not yet used, or the synthetic
-    /// one.
+    /// Give every pending call its result, in call order: a server-side
+    /// call's own, or the first output for it anywhere in the conversation
+    /// not yet used, or the synthetic one.
     fn flush(&mut self) {
         for call_id in std::mem::take(&mut self.pending) {
-            debug_assert!(self.calls.contains_key(call_id.as_str()));
+            debug_assert!(self.calls.contains_key(call_id.as_str()) || self.mcp.has(&call_id));
+            if let Some((content, is_error)) = self.mcp.take(&call_id) {
+                self.messages.push(Message {
+                    role: Role::Tool,
+                    content: vec![ir::ContentPart::ToolResult {
+                        name: self.names.get(&call_id).cloned(),
+                        id: call_id,
+                        content,
+                        is_error,
+                    }],
+                });
+                continue;
+            }
             let found = self
                 .items
                 .iter()

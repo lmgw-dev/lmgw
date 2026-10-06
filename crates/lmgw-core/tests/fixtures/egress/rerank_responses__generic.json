@@ -1,0 +1,56 @@
+{
+  "parsed": [
+    {
+      "body": "{\"model\":\"gguf\",\"object\":\"list\",\"usage\":{\"prompt_tokens\":9,\"total_tokens\":9},\"results\":[{\"index\":2,\"relevance_score\":-3.5},{\"index\":0,\"relevance_score\":7.25}]}",
+      "parsed": {
+        "model": "gguf",
+        "results": [
+          {
+            "index": 2,
+            "score": -3.5
+          },
+          {
+            "index": 0,
+            "score": 7.25
+          }
+        ],
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": 9
+        }
+      }
+    },
+    {
+      "body": "[{\"index\":1,\"score\":0.75},{\"index\":0,\"score\":0.5}]",
+      "parsed": {
+        "model": "",
+        "results": [
+          {
+            "index": 1,
+            "score": 0.75
+          },
+          {
+            "index": 0,
+            "score": 0.5
+          }
+        ],
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": null
+        }
+      }
+    },
+    {
+      "body": "{\"data\":[]}",
+      "parsed": {
+        "error": "Transport(\"rerank response has neither a 'results' array nor a top-level array\")"
+      }
+    },
+    {
+      "body": "not json",
+      "parsed": {
+        "error": "Transport(\"invalid upstream JSON: expected ident at line 1 column 2\")"
+      }
+    }
+  ]
+}

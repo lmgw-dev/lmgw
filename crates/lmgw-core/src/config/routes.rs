@@ -16,6 +16,12 @@ pub enum Protocol {
     Openai,
     Anthropic,
     Gemini,
+    /// llama.cpp's `llama-server` and ik_llama.cpp's: OpenAI-shaped HTTP
+    /// with a dialect of its own (llama.cpp egress design, decision 10).
+    /// Always kind [`UpstreamKind::LlamaServer`] (decision 11). Spelled
+    /// `llama_cpp`, which `rename_all = "lowercase"` would not produce.
+    #[serde(rename = "llama_cpp")]
+    LlamaCpp,
 }
 
 impl Protocol {
@@ -24,6 +30,7 @@ impl Protocol {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
+            Self::LlamaCpp => "llama_cpp",
         }
     }
 
@@ -32,8 +39,17 @@ impl Protocol {
             "openai" => Some(Self::Openai),
             "anthropic" => Some(Self::Anthropic),
             "gemini" => Some(Self::Gemini),
+            "llama_cpp" => Some(Self::LlamaCpp),
             _ => None,
         }
+    }
+
+    /// The upstream answers OpenAI's HTTP surface: its paths
+    /// (`/chat/completions`, `/completions`, `/models`, `/audio/*`), its
+    /// bearer auth and its error shape. True for `openai` and `llama_cpp`;
+    /// what is said on that surface is the egress's business.
+    pub fn speaks_openai_http(&self) -> bool {
+        matches!(self, Self::Openai | Self::LlamaCpp)
     }
 }
 
@@ -115,6 +131,14 @@ pub struct Upstream {
     /// local servers do without implementing Responses at all. Guessing would
     /// turn every request into a 404.
     pub supports_responses: bool,
+    /// What the llama-server this route goes to said about itself, and the
+    /// tool-image decision made on it (llama egress design §3.2) — decided
+    /// once per chat send by `gate::fit_chat`, carried unchanged by
+    /// `LocalHold::point_at`. Runtime only, never stored or serialized.
+    /// `None` on every non-llama route and while nothing is known, which
+    /// means today's bytes (decision 14).
+    #[serde(skip)]
+    pub llama: Option<std::sync::Arc<LlamaRoute>>,
 }
 
 impl Upstream {
@@ -241,6 +265,15 @@ pub struct Route {
     pub upstream_model: String,
     /// Alias-level parameter defaults (client params win on conflict).
     pub param_defaults: Params,
+    /// The fallback alias this route stands in as, when it is a configured
+    /// fallback answering for a local model (the GPU hold's or a benchmark
+    /// lease's swap, §4.7's outside-VRAM swap, a ladder climb's, a candidate
+    /// alias's): its name, as `x-lmgw-fallback` says it. Set where every
+    /// fallback's route is born ([`Snapshot::usable_fallback`]), so every
+    /// send on it knows, in-process turns included — what
+    /// `gate::fallback_images` reads. `None` on a route the client named.
+    /// Runtime only.
+    pub fallback: Option<std::sync::Arc<str>>,
 }
 
 /// A routed request's destination, and how it got there — the answer of

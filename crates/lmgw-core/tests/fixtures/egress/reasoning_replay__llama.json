@@ -1,0 +1,30 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"2+2?\",\"role\":\"user\"},{\"content\":\"4\",\"reasoning_content\":\"Simple sum.\\nIt is four.\",\"role\":\"assistant\"},{\"content\":\"And 3+3?\",\"role\":\"user\"}],\"model\":\"the-model\"}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "2+2?",
+          "role": "user"
+        },
+        {
+          "content": "4",
+          "reasoning_content": "Simple sum.\nIt is four.",
+          "role": "assistant"
+        },
+        {
+          "content": "And 3+3?",
+          "role": "user"
+        }
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/chat/completions"
+  }
+}

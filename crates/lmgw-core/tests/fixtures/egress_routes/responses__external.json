@@ -1,0 +1,47 @@
+{
+  "requests": [
+    {
+      "body": "{\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":64,\"messages\":[{\"content\":\"Be brief.\",\"role\":\"system\"},{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"chat-gguf\",\"reasoning_effort\":\"low\",\"tools\":[{\"function\":{\"description\":null,\"name\":\"get_weather\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"}]}",
+      "body_json": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        },
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "chat-gguf",
+        "reasoning_effort": "low",
+        "tools": [
+          {
+            "function": {
+              "description": null,
+              "name": "get_weather",
+              "parameters": {
+                "properties": {},
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

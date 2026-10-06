@@ -45,6 +45,9 @@ pub struct ChatReply {
     pub model: Option<String>,
     /// The alias that answered instead ([`ChatMessageRow::answered_by`]).
     pub answered_by: Option<String>,
+    /// What a fallback that cannot see was sent instead of the images
+    /// ([`ChatMessageRow::images_note`]).
+    pub images_note: Option<String>,
     /// A spoken reply's voice ([`ChatMessageRow::voice`]). A continue never
     /// writes it: the continued row keeps its own, less the unheard rest
     /// ([`continue_chat_reply`]).
@@ -69,8 +72,8 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
     let id = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages,
-            model, answered_by, voice)
-         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            model, answered_by, voice, images_note)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(thread_id)
     .bind(&r.content)
@@ -81,6 +84,7 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
     .bind(&r.model)
     .bind(&r.answered_by)
     .bind(super::chat_voice::message_voice_json(r.voice.as_ref()))
+    .bind(&r.images_note)
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
@@ -121,7 +125,8 @@ pub async fn continue_chat_reply(
     let voice = MessageVoice::from_stored(voice).map(MessageVoice::continued);
     sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
-           completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, voice=?10
+           completion_tokens=?6, ir_messages=?7, model=?8, answered_by=?9, voice=?10,
+           images_note=?11
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -134,6 +139,7 @@ pub async fn continue_chat_reply(
     .bind(&r.model)
     .bind(&r.answered_by)
     .bind(super::chat_voice::message_voice_json(voice.as_ref()))
+    .bind(&r.images_note)
     .execute(&mut *tx)
     .await?;
     touch_thread(&mut tx, thread_id).await?;

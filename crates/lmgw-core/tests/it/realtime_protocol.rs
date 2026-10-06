@@ -77,11 +77,16 @@ fn an_item_without_an_id_parses_and_takes_one() {
 }
 
 #[test]
-fn server_side_tools_and_unknown_events_do_not_parse() {
-    // `mcp` tools are §19: refused by name rather than silently dropped.
+fn server_side_tools_parse_and_unknown_events_do_not() {
+    // `mcp` tools are realtime-server-tools §1: a tool like a function's.
     let mcp = json!({"type": "response.create", "response": {
         "tools": [{"type": "mcp", "server_label": "x"}]}});
-    assert!(serde_json::from_value::<ClientEvent>(mcp).is_err());
+    let ev = serde_json::from_value::<ClientEvent>(mcp.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&ev).unwrap(), mcp);
+    // A hosted tool OpenAI runs is not one lmgw has.
+    let hosted = json!({"type": "response.create", "response": {
+        "tools": [{"type": "web_search"}]}});
+    assert!(serde_json::from_value::<ClientEvent>(hosted).is_err());
     // A beta name is not a GA event.
     let beta = json!({"type": "conversation.item.created"});
     assert!(serde_json::from_value::<ClientEvent>(beta).is_err());
@@ -495,7 +500,12 @@ fn unions_parse_in_every_spelling() {
         (json!("required"), true),
         (json!({"type": "function", "name": "f"}), true),
         (json!("sometimes"), false),
-        (json!({"type": "mcp", "server_label": "x"}), false),
+        (json!({"type": "mcp", "server_label": "x"}), true),
+        (
+            json!({"type": "mcp", "server_label": "x", "name": "t"}),
+            true,
+        ),
+        (json!({"type": "mcp"}), false),
     ] {
         let r = apply_update(
             &fresh(),
@@ -674,11 +684,14 @@ fn a_missing_type_takes_the_ga_default() {
         serde_json::to_value(&t).unwrap(),
         json!({"type": "function", "name": "f", "parameters": {"type": "object"}})
     );
-    // A server-side tool still does not parse, and says which variant.
-    let e = serde_json::from_value::<Tool>(json!({"type": "mcp", "server_label": "x"}))
+    // A server-side tool parses as one; a type lmgw has no tool for does
+    // not, and says which variant.
+    let t: Tool = serde_json::from_value(json!({"type": "mcp", "server_label": "x"})).unwrap();
+    assert_eq!(t.as_mcp().map(|m| m.server_label.as_str()), Some("x"));
+    let e = serde_json::from_value::<Tool>(json!({"type": "web_search"}))
         .unwrap_err()
         .to_string();
-    assert!(e.contains("mcp"), "{e}");
+    assert!(e.contains("web_search"), "{e}");
 
     // And in a session.update: `{rate}` alone merges as a format.
     let next = apply_update(

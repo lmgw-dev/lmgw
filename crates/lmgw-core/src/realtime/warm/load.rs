@@ -123,7 +123,7 @@ pub(super) async fn send(
     hold: &LocalHold,
 ) -> Result<u64, GatewayError> {
     let mut route = route.clone();
-    route.upstream.base_url = hold.endpoint();
+    hold.point(&mut route);
     let model_id = hold.model_id().to_string();
     let started = Instant::now();
     let loaded = match job {

@@ -792,7 +792,7 @@ async fn audio_derived(state: &SharedState, model: &AudioModel) -> Derived {
         };
         notes.push(format!(
             "{how}: {} — transcribe them in the Audio lab or with lmgw__voice_transcribe (a \
-             local speech-to-text model; the clips never leave this machine).",
+             speech-to-text model).",
             untranscribed.join(", ")
         ));
     }
@@ -929,7 +929,7 @@ async fn local_derived(
         derived,
         model.capabilities_override.as_ref(),
         "model",
-        Protocol::Openai,
+        Protocol::LlamaCpp,
     )
 }
 

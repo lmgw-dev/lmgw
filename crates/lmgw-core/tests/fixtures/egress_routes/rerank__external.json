@@ -1,0 +1,26 @@
+{
+  "requests": [
+    {
+      "body": "{\"documents\":[\"Paris\",\"Berlin\",\"Rome\"],\"model\":\"rerank-gguf\",\"query\":\"capital of France\",\"top_n\":2}",
+      "body_json": {
+        "documents": [
+          "Paris",
+          "Berlin",
+          "Rome"
+        ],
+        "model": "rerank-gguf",
+        "query": "capital of France",
+        "top_n": 2
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/rerank"
+    }
+  ],
+  "status": 200
+}

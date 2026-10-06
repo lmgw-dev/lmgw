@@ -14,9 +14,9 @@
 //!
 //! **Retried once with the transcript** ([`refusal`]): a refusal of the
 //! attempt before its first `delta`, `reasoning` or `tool` frame — lmgw's
-//! own about the audio (`audio_not_local`, a context guard's) or the
-//! managed server's (an audio part it cannot take, a body too large, a
-//! context exceeded). The attempt's frames from its first `error` frame
+//! own about the audio (`audio_input_unsupported`: the model that answers
+//! cannot take it; a context guard's) or the model's server's (an audio
+//! part it cannot take, a body too large, a context exceeded). The attempt's frames from its first `error` frame
 //! with no gateway error behind it (an MCP server that did not answer,
 //! before any model call) are held back with it, and only a frame carrying
 //! a gateway error decides: a refusal drops them (the retry says them
@@ -44,11 +44,15 @@
 //! model that refused, as the turn names who answered: a server's refusal
 //! of the audio once its message names the audio, else only once the
 //! transcript retry answered — a refusal the transcript meets as well says
-//! nothing about the audio; and a server that went away under the audio
-//! (a crash, a dropped connection: not retried, the response's error) at
-//! once, with a note, so later turns do not pay its restarts again.
-//! `audio_not_local` and the context guard concern the route, not the
-//! model, and a skipped attempt the thread: never kept.
+//! nothing about the audio; and a llama-server that went away under the
+//! audio (a crash, a dropped connection: not retried, the response's error)
+//! at once, with a note, so later turns do not pay its restarts again
+//! (`refusal::crashed`). Elsewhere a dropped connection says nothing about
+//! the audio: that turn goes again as its transcript, and nothing is kept
+//! (`refusal::dropped`, review V4). `audio_input_unsupported` and the
+//! context guard concern the
+//! route the gate took this time, which the next verdict judges itself, and
+//! a skipped attempt the thread: never kept.
 
 use tokio::sync::mpsc;
 
@@ -71,7 +75,7 @@ mod tests;
 pub(crate) use launch::{Heard, Launch, Spoken};
 pub(crate) use memory::Refused;
 use refusal::names_audio;
-pub(crate) use refusal::{crashed, refusal, Refusal};
+pub(crate) use refusal::{crashed, dropped, refusal, Refusal};
 pub use seam::{heard_response_for_tests, HeardForTests};
 use settled::{said, settled};
 
@@ -84,6 +88,9 @@ pub(super) struct Starter<'a> {
     pub voice: Option<VoiceTurn>,
     pub language: Option<TurnLanguage>,
     pub stop: StopSignal,
+    /// The response's turns go as their transcripts because the model lacks
+    /// audio input (the verdict's): what the first turn's request rows say.
+    pub degraded: Option<String>,
 }
 
 /// A started turn: its frames, and the generation it began at.
@@ -92,10 +99,13 @@ pub(super) type Started = (mpsc::Receiver<TurnFrame>, Option<u64>);
 impl Starter<'_> {
     /// Start a turn answering `user_message_id` (`None`: the history as it
     /// stands, no `turn` frame), with `heard`'s spoken parts and barrier.
+    /// `degraded`: what the turn lost before it began (a heard turn going
+    /// again as its transcript), for its request rows.
     pub async fn start(
         &self,
         user_message_id: Option<i64>,
         heard: Option<Heard>,
+        degraded: Option<String>,
     ) -> Result<Started, GatewayError> {
         let (frames_tx, frames) = mpsc::channel::<TurnFrame>(64);
         let (began_tx, mut began) = tokio::sync::oneshot::channel();
@@ -109,6 +119,7 @@ impl Starter<'_> {
             began: Some(began_tx),
             spoken,
             user_row,
+            degraded,
         };
         bound::start_turn(self.state, self.thread, user_message_id, frames_tx, opts)
             .await
@@ -198,7 +209,9 @@ impl Attempt {
         stop: &StopSignal,
     ) -> Result<Started, GatewayError> {
         let Some(launch) = self.launch.take() else {
-            return starter.start(user_message_id, None).await;
+            return starter
+                .start(user_message_id, None, starter.degraded.clone())
+                .await;
         };
         let (heard, unprepared) = launch.prepare().await;
         self.row = Some(heard.user_row.clone());
@@ -207,7 +220,7 @@ impl Attempt {
         let skip = bound::audio_input_rows(&snap, starter.thread).or(unprepared);
         let Some(why) = skip else {
             self.armed = true;
-            let started = starter.start(user_message_id, Some(heard)).await;
+            let started = starter.start(user_message_id, Some(heard), None).await;
             match &started {
                 // Whether it carries the audio is said once it is known
                 // (module doc).
@@ -224,7 +237,7 @@ impl Attempt {
         self.note(why);
         // How the row ended the response is relayed as a retry relays it.
         match settled(self.row.clone(), stop).await.frames() {
-            None => starter.start(None, None).await,
+            None => starter.start(None, None, None).await,
             Some(frames) => Ok(said(frames)),
         }
     }
@@ -261,7 +274,9 @@ impl Attempt {
                 };
                 let sent = f.sent.clone().unwrap_or_default();
                 let model = sent.answered_by.unwrap_or_else(|| self.model.clone());
-                if let Some(kind) = refusal(&e, sent.images) {
+                let kind = refusal(&e, sent.images)
+                    .or_else(|| dropped(&e, sent.llama_server).then_some(Refusal::Dropped));
+                if let Some(kind) = kind {
                     self.refused = Some(HeldRefusal {
                         kind,
                         error: e,
@@ -269,7 +284,7 @@ impl Attempt {
                     });
                     return Vec::new();
                 }
-                if crashed(&e) {
+                if crashed(&e, sent.llama_server) {
                     let note = format!(
                         "{model}'s server failed on the audio ({e}): later turns of this \
                          session go to it as their transcript"
@@ -309,6 +324,13 @@ impl Attempt {
         // The retry says them again.
         self.held_back.clear();
         self.note(kind.why(&error));
+        // The model could not take the audio: the retry's request rows say
+        // its transcript went instead (`request_logs.degraded`). A guard, a
+        // dropped connection or a refusal that names something else is no
+        // capability it lacks.
+        let lacked = kind == Refusal::Unheard || (kind == Refusal::Server && names_audio(&error));
+        let degraded =
+            lacked.then(|| crate::degraded::lacks(&model, false, "audio", "transcript sent"));
         if kind == Refusal::Server {
             let why = format!("it refused the audio this session: {error}");
             let kept = Refused { model, why };
@@ -319,7 +341,7 @@ impl Attempt {
             }
         }
         match settled(self.row.clone(), stop).await.frames() {
-            None => match starter.start(None, None).await {
+            None => match starter.start(None, None, degraded).await {
                 Ok(started) => Next::Again(started),
                 Err(e) => Next::End(settled::refused(&e)),
             },

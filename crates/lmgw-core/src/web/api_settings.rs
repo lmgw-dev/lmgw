@@ -434,10 +434,9 @@ pub struct SettingsFullPatch {
     /// How voice mode detects the end of a turn: `semantic_vad` |
     /// `server_vad` | `push_to_talk`.
     chat_turn_detection: Option<String>,
-    /// `off` | `local`: whether a voice turn goes to the chat model as audio
-    /// when it is a local model lmgw runs that takes audio input
-    /// (experimental; a cloud chat model never gets audio); a thread can
-    /// override it.
+    /// `off` | `on`: whether a voice turn goes to the chat model as audio
+    /// when the model that answers it takes audio input, wherever it runs
+    /// (experimental); a thread can override it.
     chat_voice_audio_input: Option<String>,
     /// Tokens of knowledge-base excerpts one Chat turn may carry; above 0.
     chat_kb_budget_tokens: Option<i64>,
@@ -1030,12 +1029,14 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     }
     if let Some(mut a) = p.audio {
         // Not part of the class's container definition: checked here (a
-        // local speech-to-text row — the clips are the owner's voice), and no
+        // speech-to-text model, wherever it runs — changed 2026-10-06, the
+        // owner's ruling: its configured fallback is used too), and no
         // restart note when it is all that changed.
         if let Some(v) = a.voice_transcribe_alias.take() {
             let v = v.trim().to_string();
             if !v.is_empty() {
-                crate::proxy::local_asr_row(&st.snapshot(), &v)
+                crate::ops::validate_stt_alias(st, &v)
+                    .await
                     .map_err(|e| format!("audio.voice_transcribe_alias: {e}"))?;
             }
             s.audio.voice_transcribe_alias = v;

@@ -756,6 +756,11 @@ fn markdown(b: &Bundle) -> String {
             who
         };
         o.push_str(&format!("## {who}\n\n*{}*\n\n", m.created_at));
+        // A reply a fallback that cannot see answered says what it got in
+        // the images' place, as the page does.
+        if let Some(note) = &m.images_note {
+            o.push_str(&format!("*{}*\n\n", one_line(note)));
+        }
         let atts: Vec<&ChatAttachmentFull> = b
             .attachments
             .iter()

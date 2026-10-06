@@ -25,7 +25,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                  additionally reports the same pre-flight lmgw__local_model_check runs (missing \
                  files, spec_type mismatches) for every enabled model in scope, not only the \
                  running ones. 'logs' (model only) returns the container's recent output — \
-                 with one container per model this is the only place a failed start is visible.",
+                 with one container per model this is the only place a failed start is visible. \
+                 'status' shows, for a llama-server container, what it said about itself in \
+                 GET /props at its start (llama_props: build_info, modalities, n_ctx_slot — \
+                 null where the server did not say), or among its warnings why it could not.",
             props: vec![
                 (
                     "target",
@@ -248,14 +251,22 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "chat_voice_audio_input",
                     enum_p(
                         "Whether a voice-mode turn goes to the chat model as audio: 'off' \
-                         (default: the model reads the speech-to-text transcript) or 'local' \
-                         — experimental; local models only, a cloud chat model never gets \
-                         audio. Under 'local' a turn goes as audio when the thread's model \
-                         resolves (GPU hold and benchmark swaps included) to a model this lmgw \
-                         runs whose input_modalities include audio, without a context guard (a \
-                         ladder or a guarded shared KV pool), and the thread's knowledge bases \
-                         are not in auto mode; otherwise it goes as the transcript, and the \
-                         thread's voice_resolved.audio_input says why. The speech-to-text \
+                         (default: the model reads the speech-to-text transcript) or 'on' \
+                         (experimental). Under 'on' a turn goes as audio when the model that \
+                         answers it — the thread's model, or the fallback a GPU hold, a \
+                         benchmark run, an outside-VRAM verdict or a candidate alias's walk \
+                         hands it to — is a chat model whose input_modalities include audio \
+                         and lmgw can send it audio (OpenAI-compatible, llama.cpp and Gemini \
+                         upstreams; not Anthropic), without a context guard (a ladder or a \
+                         guarded shared KV pool), and the thread's knowledge bases are not in \
+                         auto mode; otherwise it goes as the transcript, and the thread's \
+                         voice_resolved.audio_input says why. A model whose capabilities lmgw \
+                         cannot read counts as not taking audio: to make it hear, give its \
+                         alias (or local row) a capabilities override with task chat and \
+                         input_modalities text and audio — a passthrough model needs an alias \
+                         for that. A configured fallback is \
+                         always used, wherever it runs, and hears the turn when it takes \
+                         audio. The speech-to-text \
                          model still transcribes every turn — with either value, so a cloud \
                          speech-to-text model still receives each turn's audio: the transcript \
                          is what is stored (no audio is), and the reply is held until it is \

@@ -97,10 +97,12 @@ async fn an_edit_and_a_regenerate_read_their_answer_aloud() {
 async fn a_continue_is_read_from_the_clause_it_finishes() {
     let w = world(|_| {}).await;
     // A route that takes a prefill: llama-server.
-    sqlx::query("UPDATE upstreams SET kind = 'llama_server' WHERE name = 'fake'")
-        .execute(&w.state.db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE upstreams SET protocol = 'llama_cpp', kind = 'llama_server' WHERE name = 'fake'",
+    )
+    .execute(&w.state.db)
+    .await
+    .unwrap();
     w.state.reload_snapshot().await.unwrap();
     let tid = thread(&w.gw, "chatty").await;
     store::append_chat_message(&w.state.db, tid, "user", "Was nun?", "", None, None, None)
@@ -151,10 +153,12 @@ async fn a_continue_is_read_from_the_clause_it_finishes() {
 #[tokio::test]
 async fn regenerate_and_continue_take_an_empty_body_and_refuse_one_that_is_no_json() {
     let w = world(|_| {}).await;
-    sqlx::query("UPDATE upstreams SET kind = 'llama_server' WHERE name = 'fake'")
-        .execute(&w.state.db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE upstreams SET protocol = 'llama_cpp', kind = 'llama_server' WHERE name = 'fake'",
+    )
+    .execute(&w.state.db)
+    .await
+    .unwrap();
     w.state.reload_snapshot().await.unwrap();
     let tid = thread(&w.gw, "chatty").await;
     w.chat.push(Turn::text(&["Antwort."]));

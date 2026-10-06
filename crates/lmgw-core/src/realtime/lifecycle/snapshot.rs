@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::super::expressive::{self, Asked, Style};
+use super::super::mcp_tools::{McpOffer, McpTable, Moment};
 use super::super::protocol::{
     AudioConfig, AudioFormat, AudioOutput, ErrorObject, Inf, MaxOutputTokens, Modality,
     ResponseCreateParams, Tool, ToolChoice, Voice, PCM_RATE,
@@ -63,6 +64,10 @@ pub(super) struct Snapshot {
     pub instructions: String,
     pub tools: Vec<Tool>,
     pub tool_choice: Option<ToolChoice>,
+    /// Where `tools` and `tool_choice` came from — `response.*` or
+    /// `session.*` — for an error about them at the launch.
+    pub tools_param: &'static str,
+    pub choice_param: &'static str,
     pub parallel_tool_calls: Option<bool>,
     /// The session's `reasoning` object, as the client sent it (§7.6).
     pub reasoning: Option<Value>,
@@ -71,6 +76,20 @@ pub(super) struct Snapshot {
     pub metadata: Option<Value>,
     /// `None` for text output (§8.3).
     pub speaking: Option<Speaking>,
+}
+
+impl Snapshot {
+    /// What this response offers of the session's MCP tools (`table`), at
+    /// its launch: the listings it waited for are in, so every label it
+    /// names is decided (realtime-server-tools §1.1).
+    pub fn mcp_offer(&self, table: &McpTable) -> Result<McpOffer, ErrorObject> {
+        table.offer(
+            &self.tools,
+            self.tool_choice.as_ref(),
+            (self.tools_param, self.choice_param),
+            Moment::Launched,
+        )
+    }
 }
 
 impl Core {
@@ -120,6 +139,26 @@ impl Core {
                 .with_param("response.output_modalities"))
             }
         };
+        // A response's own `mcp` tools follow the session's rules, its
+        // functions may not take a listed tool's name, and what it names of
+        // the session's labels must be listed (realtime-server-tools §1.1) —
+        // a label still being listed is decided at the launch, after the
+        // response waited for it (`mcp_offer`).
+        let (tools, tools_param) = match p.and_then(|p| p.tools.as_deref()) {
+            Some(t) => (t, "response.tools"),
+            None => (s.tools.as_deref().unwrap_or_default(), "session.tools"),
+        };
+        if tools_param == "response.tools" {
+            super::super::mcp_tools::check(tools, tools_param)?;
+            self.mcp.table.clash(tools, tools_param, |_| true)?;
+        }
+        let (choice, choice_param) = match p.and_then(|p| p.tool_choice.as_ref()) {
+            Some(c) => (Some(c), "response.tool_choice"),
+            None => (s.tool_choice.as_ref(), "session.tool_choice"),
+        };
+        self.mcp
+            .table
+            .offer(tools, choice, (tools_param, choice_param), Moment::Created)?;
         let Some(alias) = self.chat.alias.clone() else {
             return Err(ErrorObject::invalid(
                 "chat_not_configured",
@@ -141,6 +180,8 @@ impl Core {
             tool_choice: p
                 .and_then(|p| p.tool_choice.clone())
                 .or_else(|| s.tool_choice.clone()),
+            tools_param,
+            choice_param,
             parallel_tool_calls: s.parallel_tool_calls,
             reasoning: s.reasoning.clone(),
             modalities,

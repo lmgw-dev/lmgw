@@ -19,6 +19,7 @@
 //! the builders call with the same facts they published.
 
 pub mod exposed;
+pub mod hears;
 pub mod notes;
 pub mod speech;
 pub mod task;
@@ -878,9 +879,10 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
     // §2.1: `task` drives `endpoints`. An embedding entry in a chat catalog is
     // reachable on `/v1/embeddings` and nowhere else, so the protocol only
     // decides *which* chat routes a chat model gets. A catalog that states
-    // nothing (OpenAI's own) leaves the name to say it (`task::by_name`).
+    // nothing (OpenAI's own) leaves the name to say it (`task::by_name`), on
+    // either protocol that lists models the OpenAI way.
     let by_name = match (&info.task, protocol) {
-        (None, Protocol::Openai) => task::by_name(&info.id),
+        (None, p) if p.speaks_openai_http() => task::by_name(&info.id),
         _ => None,
     };
     let task = info
@@ -918,7 +920,7 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
             Vec::new()
         } else {
             match protocol {
-                Protocol::Openai => strings(&OPENAI_REASONING_CONTROL),
+                Protocol::Openai | Protocol::LlamaCpp => strings(&OPENAI_REASONING_CONTROL),
                 Protocol::Anthropic => strings(&ANTHROPIC_REASONING_CONTROL),
                 Protocol::Gemini => strings(&GEMINI_REASONING_CONTROL),
             }

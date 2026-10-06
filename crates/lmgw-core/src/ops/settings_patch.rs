@@ -70,9 +70,9 @@ pub struct SettingsPatch {
     pub chat_read_aloud: Option<bool>,
     /// `semantic_vad` | `server_vad` | `push_to_talk`.
     pub chat_turn_detection: Option<String>,
-    /// `off` | `local`: whether a voice turn goes to the chat model as audio
-    /// when it is a local model lmgw runs that takes audio input
-    /// (experimental; a cloud chat model never gets audio).
+    /// `off` | `on`: whether a voice turn goes to the chat model as audio
+    /// when the model that answers it takes audio input, wherever it runs
+    /// (experimental).
     pub chat_voice_audio_input: Option<String>,
     /// Tokens of knowledge-base excerpts one Chat turn may carry. Must be
     /// above zero.

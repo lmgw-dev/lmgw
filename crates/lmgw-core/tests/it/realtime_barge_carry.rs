@@ -4,12 +4,15 @@
 //! after the turn; a tool call the client already ran is never marked
 //! cancelled; `interrupt_response: false` leaves the cut to the client
 //! (`@openai/agents` sends `response.cancel` itself); `create_response:
-//! false` commits the turn and answers nothing by itself. Real time, as in
-//! `realtime_barge`.
+//! false` commits the turn and answers nothing by itself; a create sent
+//! while a cut nobody heard is carried joins it, tools or none. Real time,
+//! as in `realtime_barge`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 
 use crate::support::realtime_audio::{fixture, Asr};
 use crate::support::realtime_fakes::{
@@ -290,4 +293,62 @@ async fn with_create_response_off_the_turn_commits_and_waits_for_the_client() {
         .unwrap()
         .clone();
     assert_eq!(last["content"], QUESTION);
+}
+
+/// The absorb rule (realtime-server-tools §2.5) belongs to the re-carry, not
+/// to the tools (final review #7): a client's response cut before anything
+/// of it was heard has its `response.create` held again for after the turn,
+/// and a bare create the client sends meanwhile joins it — no tool, no
+/// `error`, one response after the turn. The held create has not rendered
+/// yet, so it answers the newer request too.
+#[tokio::test]
+async fn a_create_sent_while_an_unheard_cut_s_create_is_carried_joins_it() {
+    let (_s, addr, chat, _tts, asr) = barge_gateway().await;
+    let never = Arc::new(Notify::new());
+    chat.push(Turn::Stream(vec![
+        Step::Wait(never.clone()),
+        Step::Text("Too late."),
+        Step::Finish("stop"),
+    ]));
+    chat.push(Turn::text(&["Two ", "blocks."]));
+    asr.push(Asr::Text(QUESTION));
+    let (ws, _) = barge_session(&addr, json!({"type": "server_vad"}), json!({})).await;
+    let (mic, mut ear) = live_mic(ws);
+    mic.send(hallo());
+    ear.until("conversation.item.done").await;
+    mic.send(json!({"type": "response.create", "event_id": "first"}));
+    ear.until("response.created").await;
+
+    mic.say(fixture("en_complete_short.wav")).await;
+    ear.until("input_audio_buffer.speech_started").await;
+    let cut = ear.until("response.done").await;
+    assert_eq!(
+        cut.last().unwrap()["response"]["status_details"]["reason"],
+        "turn_detected"
+    );
+    mic.send(json!({"type": "response.create", "event_id": "second"}));
+    let rest = ear.until("response.done").await;
+    let t = types(&rest);
+    assert!(!t.contains(&"error"), "{t:?}");
+    assert_eq!(count(&rest, "response.created"), 1, "{t:?}");
+    let created = t.iter().position(|t| *t == "response.created").unwrap();
+    let transcribed = t
+        .iter()
+        .position(|t| *t == "conversation.item.input_audio_transcription.completed")
+        .unwrap();
+    assert!(transcribed < created, "{t:?}");
+    assert_eq!(rest.last().unwrap()["response"]["status"], "completed");
+    let later = ear.quiet_for(Duration::from_millis(600)).await;
+    assert_eq!(count(&later, "response.created"), 0, "{:?}", types(&later));
+    assert_eq!(count(&later, "error"), 0, "{:?}", types(&later));
+    assert_eq!(chat.seen.chat_count(), 2);
+    // The cut said nothing: the two user turns are adjacent, rendered as one
+    // (§7.2), and the one response answers both.
+    let last = chat.seen.chat(1)["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["content"], format!("Hallo\n{QUESTION}"));
 }

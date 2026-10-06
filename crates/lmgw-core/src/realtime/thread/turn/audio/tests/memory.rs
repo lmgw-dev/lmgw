@@ -68,7 +68,10 @@ fn hears(model: &str, via: &[&str]) -> AudioInput {
         path: InputPath::Audio,
         model: model.into(),
         why: None,
+        lead: None,
+        blocked: None,
         via: via.iter().map(|m| m.to_string()).collect(),
+        lacks: false,
     }
 }
 
@@ -87,7 +90,10 @@ async fn a_refusal_is_kept_by_the_model_that_refused() {
         note: None,
     };
     // Notes alone keep nothing: lmgw's own refusals, a skipped attempt.
-    core.on_responder(1, note("its route is a model lmgw does not run"));
+    core.on_responder(
+        1,
+        note("gpt does not take audio input, so nothing was sent"),
+    );
     core.on_responder(2, note("audio input is off (this thread)"));
     assert!(core.bound.as_ref().unwrap().refused.is_empty());
     core.on_responder(

@@ -2,19 +2,19 @@
 //! user's audio starts at the commit, before the turn's transcript is in,
 //! and its output is held until the transcript says the turn had words.
 //!
-//! **What is held.** The response's output, in arrival order: its chat
-//! frames other than `state`, its deltas but the usage, its synthesized
-//! clauses, the unspoken tail and its end ([`Msg::Finished`]). Neither a
-//! reply nor its end reaches the client before the verdict. **What
-//! passes:** the marks, the plan, the speaker's TTS reports, the voice
-//! list, the note that a turn went as its transcript, whether the attempt
-//! carried the audio, the usage so far (a veto's or a cut's
-//! `response.done` carries it, WP3 review #5) and `state` frames — timings
-//! and model states stay live. A held message takes its arrival mark when
-//! it arrives (a delta's first token, a clause's synthesis); what reached
-//! the client counts from the release (`timing`). Generation, clause
-//! cutting and synthesis go on: the writer's progress does not move, so
-//! synthesis stops at its lead.
+//! **What is held.** The response's output, in arrival order: its chat frames
+//! other than `state`, its deltas but the usage, its synthesized clauses, the
+//! unspoken tail and its end ([`Msg::Finished`]). Neither a reply nor its end
+//! reaches the client before the verdict. **What passes:** the marks, the
+//! plan, the speaker's TTS reports, the voice list, the note that a turn went
+//! as its transcript, whether the attempt carried the audio, the usage so far
+//! (a veto's or a cut's `response.done` carries it, WP3 review #5), that a
+//! server-side call was sent (a cut abandons it, realtime-server-tools §2.5)
+//! and `state` frames — timings and model states stay live. A held message
+//! takes its arrival mark when it arrives (a delta's first token, a clause's
+//! synthesis); what reached the client counts from the release (`timing`).
+//! Generation, clause cutting and synthesis go on: the writer's progress does
+//! not move, so synthesis stops at its lead.
 //!
 //! **The verdict** comes once the response's last audio turn is
 //! transcribed (`hearing`):
@@ -79,9 +79,16 @@ fn passes(msg: &Msg) -> bool {
         | Msg::Input { .. }
         | Msg::Refused { .. }
         | Msg::Carried(_)
+        | Msg::ToolSent(_)
         | Msg::Delta(StreamDelta::Usage(_)) => true,
         Msg::ChatFrame { event, .. } => *event == "state",
-        Msg::Delta(_) | Msg::Clause { .. } | Msg::Unspoken(_) | Msg::Finished(_) => false,
+        Msg::Delta(_)
+        | Msg::Clause { .. }
+        | Msg::Unspoken(_)
+        | Msg::SpeakerDone
+        | Msg::ToolRunning { .. }
+        | Msg::ToolDone { .. }
+        | Msg::Finished(_) => false,
     }
 }
 

@@ -1,0 +1,27 @@
+{
+  "request": {
+    "body": "{\"add_generation_prompt\":false,\"continue_final_message\":true,\"messages\":[{\"content\":\"Tell me a story.\",\"role\":\"user\"},{\"content\":\"Once upon a\",\"role\":\"assistant\"}],\"model\":\"the-model\"}",
+    "body_json": {
+      "add_generation_prompt": false,
+      "continue_final_message": true,
+      "messages": [
+        {
+          "content": "Tell me a story.",
+          "role": "user"
+        },
+        {
+          "content": "Once upon a",
+          "role": "assistant"
+        }
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

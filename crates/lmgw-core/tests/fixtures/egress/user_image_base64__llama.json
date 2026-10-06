@@ -1,0 +1,32 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":[{\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgo=\"},\"type\":\"image_url\"},{\"text\":\"What is this?\",\"type\":\"text\"}],\"role\":\"user\"}],\"model\":\"the-model\"}",
+    "body_json": {
+      "messages": [
+        {
+          "content": [
+            {
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgo="
+              },
+              "type": "image_url"
+            },
+            {
+              "text": "What is this?",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/chat/completions"
+  }
+}

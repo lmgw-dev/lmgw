@@ -526,7 +526,7 @@ pub fn nav_badge(live: crate::live::LiveBus) -> (Signal<u64>, Signal<String>) {
     (badge, title)
 }
 
-/// The titlebar GPU pop's line while a run holds the card (§3.2): which run,
+/// The sidebar GPU pop's line while a run holds the card (§3.2): which run,
 /// what that means for local models, and the way to it.
 #[component]
 pub fn GpuBenchRow(open: RwSignal<bool>) -> impl IntoView {

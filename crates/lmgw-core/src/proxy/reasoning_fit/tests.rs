@@ -21,7 +21,7 @@ fn local_route() -> Route {
         upstream: Upstream {
             id: 1,
             name: "local".into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::LlamaCpp,
             kind: UpstreamKind::LlamaServer,
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: None,
@@ -31,9 +31,11 @@ fn local_route() -> Route {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            llama: None,
         },
         upstream_model: "talk".into(),
         param_defaults: Default::default(),
+        fallback: None,
     }
 }
 

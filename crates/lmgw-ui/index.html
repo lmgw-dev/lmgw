@@ -12,22 +12,23 @@
     } catch (_) {}
     // Interface scale, likewise before the app renders anything: real webview
     // zoom, so a restart comes up scaled instead of snapping when WASM mounts.
-    // Browsers have their own zoom and no __TAURI_INTERNALS__ — see ui_scale.rs.
+    // Browsers have their own zoom and no __TAURI_INTERNALS__ — see ui_scale.rs,
+    // whose DEFAULT (125) is the fallback here too.
     try {
       var api = window.__TAURI_INTERNALS__;
       var s = parseInt(localStorage.getItem("lmgw-ui-scale"), 10);
-      if (api && s >= 50 && s <= 300)
-        api.invoke("plugin:webview|set_webview_zoom", { value: s / 100 });
+      if (!(s >= 50 && s <= 300)) s = 125;
+      if (api) api.invoke("plugin:webview|set_webview_zoom", { value: s / 100 });
     } catch (_) {}
   </script>
   <link data-trunk rel="icon" href="assets/favicon.svg">
   <link data-trunk rel="css" href="assets/app.css">
   <link data-trunk rel="css" href="assets/voice.css">
   <link data-trunk rel="copy-dir" href="assets/fonts">
-  <script data-trunk src="assets/titlebar.js" defer data-no-minify></script>
+  <script data-trunk src="assets/desktop.js" defer data-no-minify></script>
   <!-- Chat code blocks: highlight.js + the copy/preview toolbar. ES module, so
        it imports its own vendored highlight.js from assets/vendor/. The src
-       matches Trunk's public_url (same as titlebar.js above). -->
+       matches Trunk's public_url (same as desktop.js above). -->
   <link data-trunk rel="copy-dir" href="assets/vendor">
   <script data-trunk src="assets/codeblocks.js" type="module" data-no-minify></script>
   <!-- Chat voice: the capture and player AudioWorklets (and later the

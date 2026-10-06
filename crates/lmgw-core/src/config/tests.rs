@@ -615,3 +615,65 @@ fn per_request_ctx_split_is_unchanged_ctx_size_over_parallel() {
         None
     );
 }
+
+/// Every `Protocol` round-trips through `as_str`, `parse` and serde, and the
+/// three agree: `parse` is a string match the compiler does not check, and
+/// serde's spelling comes from `rename_all` unless a variant overrides it —
+/// `llama_cpp` does (llama.cpp egress design, decision 10).
+#[test]
+fn every_protocol_round_trips_through_as_str_parse_and_serde() {
+    // Exhaustive on purpose: a new variant fails to compile here until it is
+    // listed below as well.
+    let index = |p: Protocol| match p {
+        Protocol::Openai => 0,
+        Protocol::Anthropic => 1,
+        Protocol::Gemini => 2,
+        Protocol::LlamaCpp => 3,
+    };
+    let all = [
+        Protocol::Openai,
+        Protocol::Anthropic,
+        Protocol::Gemini,
+        Protocol::LlamaCpp,
+    ];
+    assert_eq!(all.map(index), [0, 1, 2, 3], "every variant is listed once");
+    for p in all {
+        assert_eq!(Protocol::parse(p.as_str()), Some(p), "{p:?}");
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(json, format!("\"{}\"", p.as_str()), "{p:?}");
+        assert_eq!(serde_json::from_str::<Protocol>(&json).unwrap(), p);
+    }
+    assert_eq!(Protocol::LlamaCpp.as_str(), "llama_cpp");
+    assert_eq!(Protocol::parse("llamacpp"), None);
+    assert_eq!(
+        Protocol::parse("llama_server"),
+        None,
+        "a kind, not a protocol"
+    );
+}
+
+/// The OpenAI-shaped HTTP surface: OpenAI's own and llama.cpp's.
+#[test]
+fn openai_http_is_spoken_by_openai_and_llama_cpp_only() {
+    assert!(Protocol::Openai.speaks_openai_http());
+    assert!(Protocol::LlamaCpp.speaks_openai_http());
+    assert!(!Protocol::Anthropic.speaks_openai_http());
+    assert!(!Protocol::Gemini.speaks_openai_http());
+}
+
+/// The synthetic upstreams of the two llama.cpp classes speak `llama_cpp`;
+/// audio.cpp and sd-server stay on `openai` (design §5).
+#[test]
+fn the_llama_cpp_classes_synthetic_upstreams_speak_llama_cpp() {
+    let snap = Snapshot::default();
+    for u in [snap.router_upstream(), snap.aux_upstream()] {
+        assert_eq!(
+            (u.protocol, u.kind),
+            (Protocol::LlamaCpp, UpstreamKind::LlamaServer),
+            "{}",
+            u.name
+        );
+    }
+    assert_eq!(snap.audio_upstream().protocol, Protocol::Openai);
+    assert_eq!(snap.image_upstream().protocol, Protocol::Openai);
+}

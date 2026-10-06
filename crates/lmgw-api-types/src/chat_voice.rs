@@ -48,7 +48,7 @@ pub fn turn_detection_label(name: &str) -> &str {
 /// tests keep the two in step).
 pub const AUDIO_INPUTS: &[(&str, &str)] = &[
     ("off", "off: the model reads the transcript"),
-    ("local", "local models that take audio (experimental)"),
+    ("on", "on: models that take audio (experimental)"),
 ];
 
 /// The label of an audio-input name ([`AUDIO_INPUTS`]); an unknown name is

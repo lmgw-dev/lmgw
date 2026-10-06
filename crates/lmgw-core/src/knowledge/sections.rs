@@ -304,7 +304,7 @@ impl VisionReader {
             .await
             .map_err(|e| Stop::Failed(format!("admitting the vision model '{alias}': {e}")))?;
         if let Some(h) = &hold {
-            route.upstream.base_url = h.endpoint();
+            h.point(&mut route);
         }
         Ok(Self {
             alias: alias.to_string(),

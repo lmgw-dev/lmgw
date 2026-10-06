@@ -63,8 +63,7 @@ pub fn message(model: &str, clip: &str) -> String {
     format!(
         "the voice clip '{clip}' has no transcript, and the text-to-speech model '{model}' \
          cannot clone a clip without one — transcribe it in the Audio lab (Voice library → \
-         Transcribe, with a local speech-to-text model; the clip never leaves this machine), \
-         or pick another voice"
+         Transcribe, with a speech-to-text model), or pick another voice"
     )
 }
 

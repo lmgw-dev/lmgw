@@ -3,22 +3,10 @@
 //! part, since "neither counts media" (ladder design §2.1 fact 5) and a
 //! ceiling has to come from somewhere else.
 //!
-//! Measured on this machine's llama-server image: `/tokenize`
-//! with `parse_special` left at its default (`true`) equalled a real
-//! completion's `usage.prompt_tokens` exactly; `parse_special: false`
-//! overcounted by nearly double. So neither helper here ever sets it.
-//!
-//! Both helpers **do** set `add_special: true`, which `/tokenize` defaults to
-//! `false`: the completion path itself tokenizes every prompt with
-//! `tokenize_input_prompts(vocab, mctx, prompt, /*add_special*/ true,
-//! /*parse_special*/ true)` (`server-context.cpp` — read in the b062ba735
-//! checkout on this machine, and the same `true, true` arguments in 171e884's
-//! own copy), while `/tokenize` reads `json_value(body, "add_special", false)`.
-//! So a model whose vocab adds a BOS token gets one on the completion path and
-//! must be counted with it. On a vocab that adds nothing the flag changes nothing — which is why
-//! the measurement above, taken on such a model, could not tell the two
-//! apart. An off-by-one under the pool's arithmetic is exactly the overflow
-//! the ledger exists to prevent.
+//! The requests and their readers are the llama.cpp egress's
+//! (`egress::llama_cpp::count`, with the measured `/tokenize` flags); this
+//! module is the policy around them: what a failure means, what media adds,
+//! and when a request is refused before anything is sent.
 //!
 //! **What counts as a transport failure.** Only a failure to reach the
 //! container or read its answer is [`GatewayError::Transport`] — the shape the
@@ -28,9 +16,12 @@
 //! [`GatewayError::Upstream`] and never makes lmgw stop and restart a live
 //! container.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::config::{LlamaParams, LocalModel};
+use crate::egress::llama_cpp::count::{
+    apply_template_request, prompt_tokenize_request, rendered_prompt, token_count,
+};
 use crate::error::GatewayError;
 use crate::modelinfo::{self, ImageAttention, ImageTokens};
 
@@ -88,13 +79,8 @@ pub struct ImageBound {
 
 /// One step of [`count_chat_prompt`], named so a transport failure or a
 /// malformed response says which call it was that failed.
-async fn post_json(
-    http: &reqwest::Client,
-    url: &str,
-    body: &Value,
-    step: &str,
-) -> Result<Value, GatewayError> {
-    let resp = http.post(url).json(body).send().await.map_err(|e| {
+async fn post_json(rb: reqwest::RequestBuilder, step: &str) -> Result<Value, GatewayError> {
+    let resp = rb.send().await.map_err(|e| {
         if e.is_timeout() {
             GatewayError::Timeout
         } else {
@@ -141,8 +127,8 @@ fn answered(status: u16, message: String) -> GatewayError {
 /// Count a chat-shaped prompt on the running server (ladder design §3.3 steps
 /// 1–3): `POST /apply-template` with the exact body egress is about to send,
 /// then `POST /tokenize` on the rendered prompt, at the llama-server *root*
-/// (not under `/v1` — the same root `build_count_tokens`
-/// (`egress/openai.rs`) already derives for its native `/tokenize` call).
+/// (not under `/v1` — the same root the llama.cpp egress's
+/// `build_count_tokens` derives for its native `/tokenize` call).
 ///
 /// **Decision (the owner's, binding): audio cannot be bounded in v1.** A
 /// request with any audio part on a counted route is refused before either
@@ -162,21 +148,16 @@ pub async fn count_chat_prompt(
     let per_image_bound = media_bound(media, image_bound.as_ref())?;
 
     let template = post_json(
-        http,
-        &format!("{server_root}/apply-template"),
-        body,
+        apply_template_request(http, server_root, body),
         "counting the prompt: apply-template",
     )
     .await?;
-    let prompt = template
-        .get("prompt")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            answered(
-                502,
-                "counting the prompt: apply-template response carried no 'prompt'".into(),
-            )
-        })?;
+    let prompt = rendered_prompt(&template).ok_or_else(|| {
+        answered(
+            502,
+            "counting the prompt: apply-template response carried no 'prompt'".into(),
+        )
+    })?;
 
     let text_tokens = tokenize(http, server_root, &Value::String(prompt.to_string())).await?;
 
@@ -238,30 +219,24 @@ pub async fn count_text_prompt(
     tokenize(http, server_root, content).await
 }
 
-/// `POST /tokenize` with the completion path's own flags (module doc): the
-/// server's `parse_special` default, and `add_special: true`.
+/// `POST /tokenize` with the completion path's own flags
+/// ([`prompt_tokenize_request`]), and the number of ids it returned.
 async fn tokenize(
     http: &reqwest::Client,
     server_root: &str,
     content: &Value,
 ) -> Result<u64, GatewayError> {
     let tokenized = post_json(
-        http,
-        &format!("{server_root}/tokenize"),
-        &json!({"content": content, "add_special": true}),
+        prompt_tokenize_request(http, server_root, content),
         "counting the prompt: tokenize",
     )
     .await?;
-    tokenized
-        .get("tokens")
-        .and_then(Value::as_array)
-        .map(|a| a.len() as u64)
-        .ok_or_else(|| {
-            answered(
-                502,
-                "counting the prompt: tokenize response carried no 'tokens'".into(),
-            )
-        })
+    token_count(&tokenized).ok_or_else(|| {
+        answered(
+            502,
+            "counting the prompt: tokenize response carried no 'tokens'".into(),
+        )
+    })
 }
 
 /// The parts of a chat row the per-image bound is read from, borrowed.

@@ -3,7 +3,6 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{Protocol, UpstreamKind};
 use crate::ir::Params;
 use crate::state::SharedState;
 use crate::store::{self, NewAlias, NewUpstream};
@@ -41,23 +40,25 @@ pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value
             require_all(&[
                 ("name", p.name.is_some()),
                 ("base_url", p.base_url.is_some()),
-                ("protocol (openai|anthropic|gemini)", p.protocol.is_some()),
+                (
+                    "protocol (openai|anthropic|gemini|llama_cpp)",
+                    p.protocol.is_some(),
+                ),
             ])?;
             let name = opt(&p.name).ok_or("name must not be empty")?;
             let base_url = opt(&p.base_url).ok_or("base_url must not be empty")?;
-            let protocol = {
-                let s = opt(&p.protocol).ok_or("protocol must not be empty")?;
-                Protocol::parse(&s)
-                    .ok_or_else(|| format!("invalid protocol '{s}' (openai|anthropic|gemini)"))?
-            };
-            let kind = match opt(&p.kind) {
-                Some(s) => parse_upstream_kind(&s)?,
-                None => UpstreamKind::Generic,
-            };
+            let protocol =
+                sent_protocol(p.protocol.as_deref())?.ok_or("protocol must not be empty")?;
+            let settled = settle(
+                Some(protocol),
+                sent_kind(p.kind.as_deref())?,
+                p.supports_responses,
+                UpstreamShape::NEW_ROW,
+            )?;
             let new = NewUpstream {
                 name: name.clone(),
-                protocol,
-                kind,
+                protocol: settled.shape.protocol,
+                kind: settled.shape.kind,
                 base_url,
                 api_key: opt(&p.api_key),
                 extra_headers: vec![],
@@ -65,14 +66,16 @@ pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value
                 enabled: p.enabled.unwrap_or(true),
                 expose_all: p.expose_all.unwrap_or(false),
                 expose_prefix: opt(&p.expose_prefix).unwrap_or_default(),
-                supports_responses: p.supports_responses.unwrap_or(false),
+                supports_responses: settled.shape.supports_responses,
             };
             let id = store::insert_upstream(&state.db, &new)
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
             state.catalog.invalidate(id).await;
-            Ok(json!({ "ok": true, "id": id, "message": format!("upstream '{name}' created") }))
+            state.llama_facts.invalidate(id);
+            let message = settled.message(format!("upstream '{name}' created"));
+            Ok(json!({ "ok": true, "id": id, "message": message }))
         }
         "update" | "enable" | "disable" => {
             let id = id_of(&p)?;
@@ -85,22 +88,21 @@ pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value
                 "disable" => false,
                 _ => p.enabled.unwrap_or(cur.enabled),
             };
-            let protocol = match opt(&p.protocol) {
-                Some(s) => Protocol::parse(&s).ok_or_else(|| format!("invalid protocol '{s}'"))?,
-                None => cur.protocol,
-            };
-            let kind = match opt(&p.kind) {
-                Some(s) => parse_upstream_kind(&s)?,
-                None => cur.kind,
-            };
+            // From what was sent, not from the merged row (design §5).
+            let settled = settle(
+                sent_protocol(p.protocol.as_deref())?,
+                sent_kind(p.kind.as_deref())?,
+                p.supports_responses,
+                UpstreamShape::of(&cur),
+            )?;
             // Only rewrite the key when one was actually supplied — otherwise a
             // partial update would wipe it (or persist the `<set>` placeholder).
             let new_key = opt(&p.api_key);
             let update_key = new_key.is_some();
             let new = NewUpstream {
                 name: opt(&p.name).unwrap_or(cur.name),
-                protocol,
-                kind,
+                protocol: settled.shape.protocol,
+                kind: settled.shape.kind,
                 base_url: opt(&p.base_url).unwrap_or(cur.base_url),
                 api_key: new_key,
                 extra_headers: cur.extra_headers,
@@ -108,14 +110,16 @@ pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value
                 enabled,
                 expose_all: p.expose_all.unwrap_or(cur.expose_all),
                 expose_prefix: opt(&p.expose_prefix).unwrap_or(cur.expose_prefix),
-                supports_responses: p.supports_responses.unwrap_or(cur.supports_responses),
+                supports_responses: settled.shape.supports_responses,
             };
             store::update_upstream(&state.db, id, &new, update_key)
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
             state.catalog.invalidate(id).await;
-            Ok(json!({ "ok": true, "id": id, "message": format!("upstream {id} updated") }))
+            state.llama_facts.invalidate(id);
+            let message = settled.message(format!("upstream {id} updated"));
+            Ok(json!({ "ok": true, "id": id, "message": message }))
         }
         "delete" => {
             let id = id_of(&p)?;
@@ -132,6 +136,7 @@ pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
             state.catalog.invalidate(id).await;
+            state.llama_facts.invalidate(id);
             Ok(json!({
                 "ok": true, "id": id,
                 "message": format!("upstream '{}' deleted", cur.name),

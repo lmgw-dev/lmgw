@@ -476,7 +476,8 @@ TTS) are HTTP calls, and the only in-process compute is the small detector.
   - Only queued *audio* is purged; text already produced stays in the item.
   - A cancel that lands after generation finished, in text mode, finishes the
     response as `completed`, because the client may already have run its
-    tool.
+    tool. Server-side MCP calls keep a response cancellable while a call
+    runs (see 2026-10-05-realtime-server-tools-design.md §2.5).
   - `response.cancel` with nothing active gets `error {code:
     "response_cancel_not_active"}`, as with OpenAI.
 - **One response at a time.** `response.create` while a response is
@@ -503,6 +504,11 @@ TTS) are HTTP calls, and the only in-process compute is the small detector.
     started, so also after the turn's commit while its transcript is still
     being made: it answers that turn, and a second would be a second
     response (B3 review 6).
+  - Except while the held create is a barge-in's re-carry of a response
+    nobody heard: a create that asks for nothing it would not give is
+    absorbed into it, once, with no error — with or without tools, since
+    the held create has not rendered and answers the newer request too
+    (2026-10-05-realtime-server-tools-design.md §2.5).
   - A held create is answered even when the turn has no words: the client
     asked. It is checked when it arrives, so one that can never start gets
     its error at once.
@@ -1125,7 +1131,17 @@ edit of the three audio profiles) so Kokoro loads; see
   `lmgw__voice_transcribe`, which answer lengths, never the words), and on
   upload when `audio.voice_transcribe_alias` names a model (empty by
   default: nothing automatic). A cloning model's notes name the clips that
-  lack one.
+  lack one. *Superseded 2026-10-06 (the owner's ruling: a configured
+  fallback is always used, with no exception by content):* the function is
+  `proxy::transcribe_voice_clip`, and the clip goes through the gate as any
+  transcription: the hold's and admission's outside-VRAM fallbacks answer as
+  configured, admission is not pinned, and a cloud speech-to-text alias may
+  transcribe. What stays is capability: the model that answers, the
+  fallback included, must be a speech-to-text (`asr`) model, else
+  `asr_required` before anything is sent. `audio.voice_transcribe_alias`
+  takes any alias that passes `ops::validate_stt_alias`, wherever it runs.
+  Keeping clips on the machine is the owner's choice of a local
+  speech-to-text model with no fallback.
 - *Streaming rows* (gap 8): the catalog suggests `streaming` wherever the
   family lists it (a streaming row answers a plain request with one WAV
   too). `stream_format: audio`'s chunked PCM counts as streamed, its model
@@ -1658,9 +1674,13 @@ How the check runs:
   `conversation_already_has_active_response`, as any create during a
   generating response is. Nothing is lost: the response that runs renders
   the whole conversation, the tool's output included, and a cut re-carries
-  a client's create nobody heard yet (§4.3). The client sees one `error`
-  event. Holding creates for a turn nobody announced would put every
-  follow-up behind a "mhm"'s check.
+  a client's create nobody heard yet (§4.3); a create sent while it is
+  carried joins it. The client sees one `error` event. Holding creates for
+  a turn nobody announced would put every follow-up behind a "mhm"'s
+  check. The same refusal meets a server-side tool's follow-up when the
+  user's turn ended while the call ran; its message then says the running
+  response answers with the tool results
+  (2026-10-05-realtime-server-tools-design.md §2.5).
 - **A mute ends it.** A wall-clock gap of more than 0.8 s between two
   frames — a muted client sends nothing — discards an unconfirmed turn:
   what its checks heard did not interrupt, and what follows the mute is a
@@ -2004,7 +2024,8 @@ The client-visible transcript, `truncate` and `retrieve` are unchanged.
 
 ### 7.4 Tools
 
-**Client-side function tools** are the whole v1 story:
+**Client-side function tools** were the whole v1 story; server-side `mcp`
+tools came later (below). Function tools:
 - Session or response `tools` of type `function` go to the chat model as
   tools.
 - A tool call in the stream ends the response. The server emits the
@@ -2020,9 +2041,23 @@ The client-visible transcript, `truncate` and `retrieve` are unchanged.
   the upstream id is kept for rendering.
 
 There is **no spoken filler** while a tool runs; the client knows its own
-tool latency. **Server-side tools** (`type: "mcp"` session tools, or the
-gateway's own MCP toolsets as the Chat runs them) are §19, and would bring
-`agent::run` back (§3.2).
+tool latency.
+
+**Server-side `mcp` tools** are built (2026-10-05) for sessions not bound
+to a thread, without `agent::run`:
+[2026-10-05-realtime-server-tools-design.md](2026-10-05-realtime-server-tools-design.md).
+In short: a session tool `{type: "mcp", server_label}` names one of lmgw's
+own MCP servers or the built-in toolsets `docs`, `kb` and (owner only)
+`lmgw`, by the resolver `/v1/responses` uses, under the key's tool scope;
+`server_url` and the other URL-side fields are accepted and never dialled.
+The session lists the label's tools as an `mcp_list_tools` item. A call
+the model makes is run by the gateway before `response.done`, as an
+`mcp_call` item with its `output` or `error`, and **ends the response**:
+the client sends `response.create` for the answer, as OpenAI's protocol has
+it and `@openai/agents` does by itself. Gating `require_approval` is
+refused for now; a cancel or barge-in abandons a running call. A bound
+session keeps refusing `mcp` tools (`owned_by_thread`): its thread's own
+MCP tools run in the Chat's turn.
 
 ### 7.5 Context length
 
@@ -3266,8 +3301,13 @@ follow it; WP6 and WP7 are independent. Work happens on branch
   language.
 - **Audio-native chat models** (`input_audio` straight to a model that
   hears; Hugging Face's `--stt none`).
-- **Server-side tools**: `mcp` session tools, or the gateway's MCP toolsets
-  via a live-relaying `agent::run`.
+- ~~**Server-side tools**: `mcp` session tools, or the gateway's MCP toolsets
+  via a live-relaying `agent::run`.~~ Built 2026-10-05 as `mcp` session
+  tools on unbound sessions, with no `agent::run`: the client asks for the
+  answer after a call (§7.4,
+  [2026-10-05-realtime-server-tools-design.md](2026-10-05-realtime-server-tools-design.md)).
+  Still later there: approvals, a gateway-sent answer after tools, a
+  server-side default toolset.
 - **Spoken filler** while a client tool runs.
 - **Usage columns** for characters and audio seconds, and **a session
   parent row** in `request_logs`.

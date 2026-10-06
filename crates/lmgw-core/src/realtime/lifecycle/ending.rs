@@ -20,12 +20,18 @@
 //! by the responder after the last clause is synthesized, as the chat hold
 //! is after the stream (§9.1).
 //!
+//! **Server-side calls** (realtime-server-tools §2.2–§2.4) stay open past
+//! the finish: the responder runs them and reports each one's start and
+//! result before its call returns, so `response.done` follows them all.
+//! What closes when is `Output`'s rule (`output::closing`); this only calls
+//! it.
+//!
 //! [`Output::speaks`]: super::super::output::Output::speaks
 
 use serde_json::json;
 
 use super::super::output;
-use super::super::protocol::{ItemStatus, ResponseStatus, ServerEvent, StatusDetails};
+use super::super::protocol::{ResponseStatus, ServerEvent, StatusDetails};
 use super::super::responder::Msg;
 use super::{Active, Core, Failure, Phase};
 use crate::ir::{Completion, FinishReason, StreamDelta};
@@ -65,8 +71,8 @@ impl Core {
                 active.output.text(conv, ids, ob, &t)
             }
             Msg::Delta(StreamDelta::ToolCallStart { index, id, name }) => {
-                active.timing.call();
-                active.output.call_start(conv, ids, ob, index, &id, &name)
+                let mcp = active.output.call_start(conv, ids, ob, index, &id, &name);
+                active.timing.call(mcp);
             }
             Msg::Delta(StreamDelta::ToolCallArgsDelta { index, fragment }) => {
                 active.output.call_args(conv, ob, index, &fragment)
@@ -80,14 +86,21 @@ impl Core {
             Msg::Delta(StreamDelta::Usage(u)) => active.usage.merge(&u),
             Msg::Delta(StreamDelta::Stop(reason)) => {
                 // Every item is whole now (module doc) — a spoken message
-                // closes when it has played.
-                if active.output.speaks() {
-                    active.output.close_calls(conv, ob, item_status(&reason));
-                } else {
-                    active.output.close_items(conv, ob, item_status(&reason));
-                }
+                // closes when it has played, a server-side call with its
+                // result.
+                active.output.generated(conv, ids, ob, &reason);
                 active.stop = Some(reason);
                 active.phase = Phase::Closing;
+            }
+            Msg::SpeakerDone => active.spoken = true,
+            Msg::ToolSent(call) => active.output.mcp_sent(call),
+            Msg::ToolRunning { index, at } => {
+                active.timing.tool_running(at);
+                active.output.mcp_running(ob, index)
+            }
+            Msg::ToolDone { index, outcome, at } => {
+                active.timing.tool_done(at);
+                active.output.mcp_done(conv, ids, ob, index, outcome)
             }
             Msg::Delta(_)
             | Msg::Voices { .. }
@@ -122,13 +135,8 @@ impl Core {
         // or not the stream said why it stopped — a spoken message closes
         // when it has played.
         if let Ok(c) = &result {
-            let (conv, ob) = (&mut self.conversation, &mut self.ob);
-            let status = item_status(&c.finish_reason);
-            if active.output.speaks() {
-                active.output.close_calls(conv, ob, status);
-            } else {
-                active.output.close_items(conv, ob, status);
-            }
+            let (conv, ids, ob) = (&mut self.conversation, &self.ids, &mut self.ob);
+            active.output.generated(conv, ids, ob, &c.finish_reason);
         }
         active.ended = Some(result);
         active.phase = Phase::Playing;
@@ -152,12 +160,10 @@ impl Core {
         let Some(mut active) = self.active.take() else {
             return;
         };
-        let (conv, ob) = (&mut self.conversation, &mut self.ob);
+        let (conv, ids, ob) = (&mut self.conversation, &self.ids, &mut self.ob);
         let status = match ended {
             Ok(c) => {
-                active
-                    .output
-                    .close_items(conv, ob, item_status(&c.finish_reason));
+                active.output.finish_items(conv, ids, ob, &c.finish_reason);
                 let (status, details) = response_status(&c.finish_reason);
                 let usage = output::usage(&c.usage);
                 active.output.done(conv, ob, status, details, Some(usage));
@@ -166,6 +172,9 @@ impl Core {
             // The stream failed after its finish: every item was already
             // announced whole — a call may have been run on that — so the
             // response is what it said it was, and the failure is the log's.
+            // Its server-side calls still open were never run, or a failed
+            // voice cut them off, and close as such (realtime-server-tools
+            // §2.3).
             Err(f) if active.stop.is_some() => {
                 let reason = active.stop.take().unwrap_or(FinishReason::Stop);
                 tracing::warn!(
@@ -175,14 +184,14 @@ impl Core {
                     active.output.id,
                     f.log
                 );
-                active.output.close_items(conv, ob, item_status(&reason));
+                active.output.finish_items(conv, ids, ob, &reason);
                 let (status, details) = response_status(&reason);
                 let usage = output::known_usage(&active.usage);
                 active.output.done(conv, ob, status, details, usage);
                 status
             }
             Err(f) => {
-                active.output.abandon(conv, ob);
+                active.output.abandon(conv, ids, ob);
                 tracing::info!(
                     "realtime {}: response {} failed — {}",
                     self.session.id.as_deref().unwrap_or("?"),
@@ -222,6 +231,8 @@ impl Core {
     /// talking as it played — the queued create is carried to after the
     /// turn instead (`pending`, owner's decision Q3).
     pub(super) fn next_response(&mut self, mut ended: Active) {
+        // Its server-side calls' results are in for the next one (`refusal`).
+        self.mcp.results_in |= ended.output.has_mcp();
         let queued = ended.queued.take();
         drop(ended);
         if let Some(create) = queued {
@@ -234,14 +245,6 @@ impl Core {
         if self.active.is_none() {
             self.pending_after_response();
         }
-    }
-}
-
-/// How the items of a response that stopped for `reason` end.
-fn item_status(reason: &FinishReason) -> ItemStatus {
-    match reason {
-        FinishReason::Length | FinishReason::ContentFilter => ItemStatus::Incomplete,
-        _ => ItemStatus::Completed,
     }
 }
 

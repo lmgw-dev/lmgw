@@ -348,12 +348,12 @@ async fn a_row_without_a_ladder_is_sent_exactly_as_before() {
         assert!(w.apply_template_calls.is_empty(), "no count");
         assert!(w.tokenize_calls.is_empty());
         let ir = lmgw_core::ingress::openai::parse_chat_request(&request).unwrap();
-        let expected = lmgw_core::egress::openai::chat_body(
+        let expected = lmgw_core::egress::llama_cpp::chat_body(
             &ir,
             "chat-model",
             &ir.params,
             false,
-            lmgw_core::config::UpstreamKind::LlamaServer,
+            &lmgw_core::config::Snapshot::default().router_upstream(),
         );
         assert_eq!(w.chat_bodies[&chat_port], vec![expected], "byte for byte");
     }

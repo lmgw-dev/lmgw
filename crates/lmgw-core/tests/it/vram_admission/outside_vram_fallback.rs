@@ -1093,8 +1093,8 @@ async fn a_request_that_fits_never_runs_its_fallbacks_route_check() {
 }
 
 /// A cloud alias on the fixture's `cloud` upstream whose owner override says
-/// it cannot see images.
-async fn blind_cloud_alias(f: &Fixture, alias: &str) {
+/// whether it can see images (`vision`).
+pub(super) async fn cloud_alias_seeing(f: &Fixture, alias: &str, vision: bool) {
     let upstream_id = f
         .state
         .snapshot()
@@ -1103,19 +1103,24 @@ async fn blind_cloud_alias(f: &Fixture, alias: &str) {
         .find(|u| u.name == "cloud")
         .expect("cloud_upstream ran first")
         .id;
+    let modalities = if vision {
+        json!(["text", "image"])
+    } else {
+        json!(["text"])
+    };
     store::insert_alias(
         &f.state.db,
         &store::NewAlias {
             alias: alias.into(),
             upstream_id,
-            upstream_model_id: "gpt-cloud-text".into(),
+            upstream_model_id: format!("gpt-{alias}"),
             param_overrides: Default::default(),
             enabled: true,
             capabilities_override: Some(json!({"capabilities": {
                 "task": "chat",
                 "endpoints": ["/v1/chat/completions"],
-                "input_modalities": ["text"],
-                "vision": false,
+                "input_modalities": modalities,
+                "vision": vision,
                 "source": "owner",
             }})),
         },
@@ -1125,17 +1130,31 @@ async fn blind_cloud_alias(f: &Fixture, alias: &str) {
     f.state.reload_snapshot().await.unwrap();
 }
 
-/// Review finding 7: a chat request with image parts is never swapped to a
-/// fallback that says it cannot see images — the provider would answer the
-/// images with a 400, where today's path waits for the local model. A
-/// fallback whose vision is unknown is used, and so is a text-only one for a
-/// request without images.
+/// The last chat body the cloud mock received, as text.
+pub(super) async fn last_cloud_chat(cloud: &MockServer) -> String {
+    let reqs = cloud.received_requests().await.unwrap();
+    let last = reqs
+        .iter()
+        .rev()
+        .find(|r| r.url.path() == "/v1/chat/completions")
+        .expect("the cloud was sent a chat request");
+    String::from_utf8_lossy(&last.body).into_owned()
+}
+
+/// Review finding 7, inverted on 2026-10-06 (the owner's ruling: a
+/// configured fallback is always used, with no exception by content). A
+/// chat request with image parts is swapped to a fallback that says it
+/// cannot see images, as to any other: the fallback answers at once, with
+/// the image as a placeholder naming it, where admission used to wait for
+/// the local model. A fallback whose vision is unknown gets the image itself
+/// (absent means unknown), and so does one that sees.
 #[tokio::test]
-async fn images_are_not_swapped_to_a_fallback_that_cannot_see_them() {
+async fn images_go_to_a_fallback_that_cannot_see_them_as_placeholders() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
     f.attribute(3 * GIB);
     let cloud = cloud_chat(&f, "cloud-chat").await;
-    blind_cloud_alias(&f, "cloud-blind").await;
+    cloud_alias_seeing(&f, "cloud-blind", false).await;
+    cloud_alias_seeing(&f, "cloud-sees", true).await;
     set_queue_timeout(&f, 1).await;
     let with_image = json!({"model": "chat-model", "messages": [{"role": "user", "content": [
         {"type": "text", "text": "what is this"},
@@ -1152,32 +1171,56 @@ async fn images_are_not_swapped_to_a_fallback_that_cannot_see_them() {
                 .unwrap()
         }
     };
-
-    // Vision unknown: absent means unknown, so it answers.
-    set_global_fallback(&f, "cloud-chat").await;
-    let resp = send(with_image.clone()).await;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(fallback_reason(&resp), Some("external_vram"));
-
-    // A fallback that says it cannot see images: today's path.
-    set_global_fallback(&f, "cloud-blind").await;
-    let before = cloud.received_requests().await.unwrap().len();
-    let resp = send(with_image).await;
-    assert_eq!(resp.status(), 503);
-    assert!(resp.headers().get("x-lmgw-fallback").is_none());
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "vram_queue_timeout", "{body}");
-    assert_eq!(cloud.received_requests().await.unwrap().len(), before);
-
-    // The same fallback takes a request without images.
-    let resp = chat(&f.gateway).await;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
+    let fallback = |resp: &reqwest::Response| {
         resp.headers()
             .get("x-lmgw-fallback")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+
+    // Vision unknown, and a fallback that sees: the image goes.
+    for alias in ["cloud-chat", "cloud-sees"] {
+        set_global_fallback(&f, alias).await;
+        let resp = send(with_image.clone()).await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(fallback_reason(&resp), Some("external_vram"));
+        assert_eq!(fallback(&resp).as_deref(), Some(alias));
+        assert!(resp.headers().get("x-lmgw-images-omitted").is_none());
+        let sent = last_cloud_chat(&cloud).await;
+        assert!(
+            sent.contains("data:image/png;base64,iVBORw0KGgo="),
+            "{sent}"
+        );
+    }
+
+    // A fallback that says it cannot see images answers too, at once: the
+    // image is its placeholder, and the response says how many went so.
+    set_global_fallback(&f, "cloud-blind").await;
+    let resp = send(with_image).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(fallback_reason(&resp), Some("external_vram"));
+    assert_eq!(fallback(&resp).as_deref(), Some("cloud-blind"));
+    assert_eq!(
+        resp.headers()
+            .get("x-lmgw-images-omitted")
             .and_then(|v| v.to_str().ok()),
-        Some("cloud-blind")
+        Some("1")
     );
+    let sent = last_cloud_chat(&cloud).await;
+    assert!(!sent.contains("image_url"), "{sent}");
+    assert!(!sent.contains("iVBORw0KGgo="), "{sent}");
+    assert!(sent.contains("what is this"), "{sent}");
+    assert!(
+        sent.contains(
+            "[image/png image, 12 base64 bytes — omitted: the answering model cannot see images]"
+        ),
+        "{sent}"
+    );
+
+    // The same fallback takes a request without images, unchanged.
+    let resp = chat(&f.gateway).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(fallback(&resp).as_deref(), Some("cloud-blind"));
     assert!(f.runs().is_empty(), "{:?}", f.runs());
 }
 

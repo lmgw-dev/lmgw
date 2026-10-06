@@ -1,0 +1,17 @@
+{
+  "request": {
+    "body": "{\"dimensions\":256,\"input\":[\"alpha\"],\"model\":\"the-model\"}",
+    "body_json": {
+      "dimensions": 256,
+      "input": [
+        "alpha"
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/embeddings"
+  }
+}

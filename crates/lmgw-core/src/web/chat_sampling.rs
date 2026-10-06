@@ -8,7 +8,7 @@
 //! rather than sent to be silently dropped — or worse, rejected — upstream.
 //! An API client's request is not filtered; this is Chat-only.
 
-use crate::config::{Protocol, Route, UpstreamKind};
+use crate::config::{Protocol, Route};
 use crate::ir::Params;
 use crate::store::ChatThread;
 
@@ -73,20 +73,16 @@ pub(super) fn check(t: &mut ChatThread) -> Result<(), String> {
 /// thread set are reported, in a fixed order; `max_tokens` and `reasoning`
 /// are not sampling and pass through untouched.
 pub(super) fn split(params: &Params, route: &Route) -> (Params, Vec<&'static str>) {
-    split_for(params, route.upstream.protocol, route.upstream.kind)
+    split_for(params, route.upstream.protocol)
 }
 
-/// [`split`] on the two facts it reads.
-fn split_for(
-    params: &Params,
-    protocol: Protocol,
-    kind: UpstreamKind,
-) -> (Params, Vec<&'static str>) {
-    let (top_k, min_p, repeat, penalties, seed) = match (protocol, kind) {
-        (Protocol::Openai, UpstreamKind::LlamaServer) => (true, true, true, true, true),
-        (Protocol::Openai, _) => (false, false, false, true, true),
-        (Protocol::Anthropic, _) => (true, false, false, false, false),
-        (Protocol::Gemini, _) => (true, false, false, false, true),
+/// [`split`] on the one fact it reads.
+fn split_for(params: &Params, protocol: Protocol) -> (Params, Vec<&'static str>) {
+    let (top_k, min_p, repeat, penalties, seed) = match protocol {
+        Protocol::LlamaCpp => (true, true, true, true, true),
+        Protocol::Openai => (false, false, false, true, true),
+        Protocol::Anthropic => (true, false, false, false, false),
+        Protocol::Gemini => (true, false, false, false, true),
     };
     let mut sent = params.clone();
     let mut ignored = Vec::new();
@@ -146,14 +142,14 @@ mod tests {
 
     #[test]
     fn llama_server_takes_everything() {
-        let (sent, ignored) = split_for(&all(), Protocol::Openai, UpstreamKind::LlamaServer);
+        let (sent, ignored) = split_for(&all(), Protocol::LlamaCpp);
         assert_eq!(sent, all());
         assert!(ignored.is_empty());
     }
 
     #[test]
     fn generic_openai_drops_the_llama_extensions_only() {
-        let (sent, ignored) = split_for(&all(), Protocol::Openai, UpstreamKind::Generic);
+        let (sent, ignored) = split_for(&all(), Protocol::Openai);
         assert_eq!(ignored, ["top_k", "min_p", "repeat_penalty"]);
         assert_eq!(sent.top_k, None);
         assert_eq!(sent.min_p, None);
@@ -165,7 +161,7 @@ mod tests {
 
     #[test]
     fn anthropic_takes_top_k_and_stop_but_no_penalties_or_seed() {
-        let (sent, ignored) = split_for(&all(), Protocol::Anthropic, UpstreamKind::Generic);
+        let (sent, ignored) = split_for(&all(), Protocol::Anthropic);
         assert_eq!(
             ignored,
             [
@@ -183,7 +179,7 @@ mod tests {
 
     #[test]
     fn gemini_takes_seed_and_top_k() {
-        let (sent, ignored) = split_for(&all(), Protocol::Gemini, UpstreamKind::Generic);
+        let (sent, ignored) = split_for(&all(), Protocol::Gemini);
         assert_eq!(
             ignored,
             [
@@ -199,11 +195,7 @@ mod tests {
 
     #[test]
     fn unset_params_are_never_reported() {
-        let (_, ignored) = split_for(
-            &Params::default(),
-            Protocol::Anthropic,
-            UpstreamKind::Generic,
-        );
+        let (_, ignored) = split_for(&Params::default(), Protocol::Anthropic);
         assert!(ignored.is_empty());
     }
 

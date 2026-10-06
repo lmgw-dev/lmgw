@@ -255,6 +255,7 @@ async fn logs(State(st): State<SharedState>, Query(q): Query<LogsQuery>) -> Resp
                     max_tokens_clamped: r.max_tokens_clamped,
                     fallback_reason: r.fallback_reason,
                     rung: r.rung,
+                    degraded: r.degraded,
                 })
                 .collect();
             Json(dto::LogsResponse { logs }).into_response()
@@ -601,6 +602,7 @@ async fn upstreams(State(st): State<SharedState>) -> Response {
                     expose_all: u.expose_all,
                     expose_prefix: u.expose_prefix,
                     supports_responses: u.supports_responses,
+                    llama_facts: st.llama_facts.view(u.id),
                 })
                 .collect();
             Json(dto::UpstreamsResponse { upstreams }).into_response()
@@ -1029,7 +1031,7 @@ async fn op(
             None => Err("pass active: true or false".into()),
         },
         "audio_catalog" => audio_catalog_op(&st, &args).await,
-        // Voice-library transcripts by a local speech-to-text model
+        // Voice-library transcripts by a speech-to-text model
         // (audio-class gap 5); shared with `lmgw__voice_transcribe`.
         "voice_transcribe" => {
             ops::voice_transcribe(&st, arg_str(&args, "clip"), arg_str(&args, "alias")).await
@@ -1164,19 +1166,17 @@ pub(crate) struct UpstreamFullPatch {
 }
 
 async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Value, String> {
-    use crate::config::{Protocol, UpstreamKind};
+    use crate::ops::{sent_kind, sent_protocol, settle, UpstreamShape};
     use crate::store;
-    let protocol = |s: &Option<String>, cur: Protocol| -> Result<Protocol, String> {
-        match s.as_deref() {
-            None | Some("") => Ok(cur),
-            Some(v) => Protocol::parse(v).ok_or_else(|| format!("unknown protocol '{v}'")),
-        }
-    };
-    let kind = |s: &Option<String>, cur: UpstreamKind| -> Result<UpstreamKind, String> {
-        match s.as_deref() {
-            None | Some("") => Ok(cur),
-            Some(v) => UpstreamKind::parse(v).ok_or_else(|| format!("unknown kind '{v}'")),
-        }
+    // Protocol and kind as sent — `sd_cpp` refused by name like the tool
+    // plane's — settled against the row (llama.cpp egress design §5).
+    let settled = |cur: UpstreamShape| {
+        settle(
+            sent_protocol(p.protocol.as_deref())?,
+            sent_kind(p.kind.as_deref())?,
+            p.supports_responses,
+            cur,
+        )
     };
     match p.action.as_str() {
         "create" => {
@@ -1190,10 +1190,11 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or("create requires base_url")?;
+            let settled = settled(UpstreamShape::NEW_ROW)?;
             let new = store::NewUpstream {
                 name: name.clone(),
-                protocol: protocol(&p.protocol, Protocol::Openai)?,
-                kind: kind(&p.kind, UpstreamKind::Generic)?,
+                protocol: settled.shape.protocol,
+                kind: settled.shape.kind,
                 base_url,
                 api_key: p.api_key.clone().filter(|k| !k.is_empty()),
                 extra_headers: p.extra_headers.clone().unwrap_or_default(),
@@ -1206,16 +1207,16 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                     .unwrap_or_default()
                     .trim_matches('/')
                     .to_string(),
-                supports_responses: p.supports_responses.unwrap_or(false),
+                supports_responses: settled.shape.supports_responses,
             };
             let id = store::insert_upstream(&st.db, &new)
                 .await
                 .map_err(|e| e.to_string())?;
             st.reload_snapshot().await.map_err(|e| e.to_string())?;
             st.catalog.invalidate(id).await;
-            Ok(
-                serde_json::json!({ "ok": true, "id": id, "message": format!("upstream '{name}' created") }),
-            )
+            st.llama_facts.invalidate(id);
+            let message = settled.message(format!("upstream '{name}' created"));
+            Ok(serde_json::json!({ "ok": true, "id": id, "message": message }))
         }
         "update" => {
             let id = p.id.ok_or("pass id")?;
@@ -1223,6 +1224,7 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no upstream with id {id}"))?;
+            let settled = settled(UpstreamShape::of(&cur))?;
             let new_key = p.api_key.clone().filter(|k| !k.is_empty());
             let update_key = new_key.is_some();
             let headers = match p.extra_headers.clone() {
@@ -1250,8 +1252,8 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                     .clone()
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(cur.name),
-                protocol: protocol(&p.protocol, cur.protocol)?,
-                kind: kind(&p.kind, cur.kind)?,
+                protocol: settled.shape.protocol,
+                kind: settled.shape.kind,
                 base_url: p
                     .base_url
                     .clone()
@@ -1267,14 +1269,16 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                     .clone()
                     .map(|s| s.trim_matches('/').to_string())
                     .unwrap_or(cur.expose_prefix),
-                supports_responses: p.supports_responses.unwrap_or(cur.supports_responses),
+                supports_responses: settled.shape.supports_responses,
             };
             store::update_upstream(&st.db, id, &upd, update_key)
                 .await
                 .map_err(|e| e.to_string())?;
             st.reload_snapshot().await.map_err(|e| e.to_string())?;
             st.catalog.invalidate(id).await;
-            Ok(serde_json::json!({ "ok": true, "id": id, "message": "upstream updated" }))
+            st.llama_facts.invalidate(id);
+            let message = settled.message("upstream updated");
+            Ok(serde_json::json!({ "ok": true, "id": id, "message": message }))
         }
         other => Err(format!("unknown action '{other}' (create, update)")),
     }

@@ -15,6 +15,7 @@ use crate::state::SharedState;
 use super::background::{self, Restart};
 use super::ledger::Ledger;
 use super::scheduler::{Waiter, CONTROL_TIMEOUT, MIB, POLL};
+use super::stall::waiting_stage;
 use super::{
     Admission, Decided, ExternalFallback, Fit, Gated, LocalHold, StartPermit, Target, VramScheduler,
 };
@@ -407,6 +408,8 @@ impl VramScheduler {
         // Held from the first look that does not fit until this returns,
         // however it returns (candidate-aliases §4.5, §12 entry 47).
         let mut drain = None;
+        // One reconciliation pass per wait, at its first dead end (`stall`).
+        let mut looked = false;
         loop {
             // Switched on while this request waited — the hold, or a
             // benchmark's lease (benchmark design §3.2): nothing new goes on
@@ -466,11 +469,29 @@ impl VramScheduler {
             {
                 continue;
             }
-            // Everything resident is either busy or the target itself. Waiting
-            // is the only correct move: the alternative is killing somebody's
-            // half-finished generation, which is the thing `/slots` exists to
-            // prevent.
-            self.set_stage(waiter_id, "waiting for a busy model to finish");
+            // Everything resident is either busy or the target itself — or
+            // nothing of lmgw's is there, as far as the registry knows: a
+            // reconciliation pass looks once, before the wait, with the gate
+            // let go for it (`stall`). Waiting is the only correct move: the
+            // alternative is killing somebody's half-finished generation,
+            // which is the thing `/slots` exists to prevent.
+            if !looked {
+                looked = true;
+                drop(gate);
+                self.look_for_unheld(state, waiter_id, started, budget)
+                    .await;
+                gate = match self
+                    .take_gate(state, target, alias, None, started, budget, &mut fallback)
+                    .await
+                {
+                    Gated::Held(gate) => gate,
+                    Gated::External(short) => return Ok(Decided::External(short)),
+                    Gated::Expired => return Err(expired(describe_holders(&l))),
+                };
+                // Measured again whatever the pass found: the gate was let go.
+                continue;
+            }
+            self.set_stage(waiter_id, &waiting_stage(&l, target, needs, cap.free));
             tokio::time::sleep(POLL).await;
             if let Some(short) = self.recheck(state, target, alias, &mut fallback).await {
                 return Ok(Decided::External(short));

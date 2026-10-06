@@ -113,12 +113,12 @@ fn openai_models_min_p_and_repeat_penalty_and_llama_egress_emits_them_once() {
     // Modelled, so no longer carried by passthrough.
     assert!(!ir.passthrough.contains_key("min_p"));
     assert!(!ir.passthrough.contains_key("repeat_penalty"));
-    let out = lmgw_core::egress::openai::chat_body(
+    let out = lmgw_core::egress::llama_cpp::chat_body(
         &ir,
         "up",
         &ir.params,
         false,
-        lmgw_core::config::UpstreamKind::LlamaServer,
+        &lmgw_core::config::Snapshot::default().router_upstream(),
     );
     assert_eq!(out["min_p"], 0.05);
     assert_eq!(out["repeat_penalty"], 1.1);

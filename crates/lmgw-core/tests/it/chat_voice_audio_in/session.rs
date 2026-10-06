@@ -16,9 +16,10 @@
 //!   transcript with its note, and the session's later turns go as text.
 //! - **A pause in mid-sentence:** the response the first part started is
 //!   cut unheard, and one reply answers both parts.
-//! - **Privacy:** a cloud fallback the gate swaps to after the verdict said
-//!   "hears you" never gets the audio: the turn goes again as its
-//!   transcript, with the note.
+//! - **A fallback:** a cloud fallback that takes audio, which the gate
+//!   swaps to after the verdict said "hears you", hears the turn as the
+//!   model would have (changed 2026-10-06: capability, not locality; the
+//!   fallbacks that cannot are `fallbacks`).
 //! - **The GPU claim:** a reply waiting for its user row pins no VRAM.
 //! - **`off`:** nothing new is sent or stored.
 
@@ -30,6 +31,7 @@ use tokio::sync::Notify;
 use lmgw_core::config::HoldFallbackMode;
 use lmgw_core::store::NewCandidateAlias;
 
+use super::fallbacks::{Cloud, CLOUD_SAYS};
 use super::turns::{hears, row};
 use crate::realtime_chat_thread::{
     eventually, of_type, say, try_next, until, until_type, world_on, World,
@@ -124,7 +126,7 @@ pub(super) async fn rows(w: &World, tid: i64) -> Vec<(i64, String, String, Value
 
 #[tokio::test]
 async fn the_model_hears_the_turn_at_once_and_its_answer_waits_for_the_transcript() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     let release = Arc::new(Notify::new());
     w.asr
@@ -197,7 +199,7 @@ async fn the_model_hears_the_turn_at_once_and_its_answer_waits_for_the_transcrip
 
 #[tokio::test]
 async fn noise_ends_quietly_with_no_row_and_no_reply() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     // The transcript comes back empty after the model streamed its answer.
     let release = Arc::new(Notify::new());
@@ -222,7 +224,7 @@ async fn noise_ends_quietly_with_no_row_and_no_reply() {
 
 #[tokio::test]
 async fn a_refused_audio_goes_again_as_its_transcript_and_the_session_remembers() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     g.world().refuse_audio.insert("gemma".into(), 500);
     let (tid, mut ws) = session(&w).await;
     w.asr.push(Asr::Text("Wie spät ist es?"));
@@ -285,7 +287,7 @@ async fn vad(ws: &mut Ws) {
 
 #[tokio::test]
 async fn a_pause_in_mid_sentence_gets_one_reply_to_both_parts() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     vad(&mut ws).await;
     let release = Arc::new(Notify::new());
@@ -345,7 +347,7 @@ async fn a_pause_in_mid_sentence_gets_one_reply_to_both_parts() {
 async fn a_reply_waiting_for_its_user_row_pins_no_vram() {
     // Room for one of the two models, and a short queue: a claim still held
     // would time the second request out.
-    let (g, w) = hearing("local", 10 * GIB, 3).await;
+    let (g, w) = hearing("on", 10 * GIB, 3).await;
     // (Not `other`: the realtime fakes name a chat alias so.)
     g.model("second", 8 * GIB).await;
     let (tid, mut ws) = session(&w).await;
@@ -444,9 +446,9 @@ async fn with_audio_input_off_nothing_new_is_sent_or_stored() {
 }
 
 #[tokio::test]
-async fn a_cloud_fallback_the_gate_swaps_to_gets_the_transcript_and_never_the_audio() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
-    g.cloud("cloud", Some(hears())).await;
+async fn a_cloud_fallback_the_gate_swaps_to_hears_the_turn() {
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
+    let cloud = Cloud::new(&g, hears(), false).await;
     g.candidate(NewCandidateAlias {
         alias: "writer".into(),
         candidates: vec!["gemma".into()],
@@ -461,7 +463,7 @@ async fn a_cloud_fallback_the_gate_swaps_to_gets_the_transcript_and_never_the_au
     .await;
     // A game holds the card: admission's outside-VRAM verdict hands the turn
     // to the cloud fallback, which the verdict (`gate::resolve`) does not
-    // foresee — it says "hears you".
+    // foresee. The fallback takes audio: it hears the turn.
     {
         let mut gw = g.world();
         gw.attribution = true;
@@ -471,27 +473,28 @@ async fn a_cloud_fallback_the_gate_swaps_to_gets_the_transcript_and_never_the_au
     let mut ws = w.voice(tid).await;
     w.asr.push(Asr::Text("Wie spät ist es?"));
     say(&mut ws).await;
-    let mut events = until_type(&mut ws, "response.done").await;
+    let mut events = until_type(&mut ws, "lmgw.response.timing").await;
     events.extend(quiet(&mut ws).await);
     let input = of_type(&events, "lmgw.chat.input");
-    assert_eq!(input.len(), 2, "{events:?}");
-    assert_eq!(input[0]["input"], "audio", "the verdict's prediction");
-    assert_eq!(input[1]["input"], "transcript");
-    assert!(
-        input[1]["why"]
-            .as_str()
-            .unwrap()
-            .contains("a model lmgw does not run"),
-        "{input:?}"
-    );
-    let cloud = g.cloud_bodies().await;
-    assert!(!cloud.is_empty(), "the transcript went to the fallback");
-    for body in &cloud {
-        assert_eq!(audio_parts(body), 0, "the cloud never hears: {body}");
-    }
+    assert_eq!(input.len(), 1, "{events:?}");
+    assert_eq!(input[0]["input"], "audio");
+    assert!(chat_frames(&events, "error").is_empty(), "{events:?}");
+    let sent = cloud.bodies().await;
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(audio_parts(&sent[0]), 1, "the fallback heard it");
     assert!(g.world().streamed_bodies.is_empty(), "nothing ran locally");
+    let timing = events.last().unwrap();
+    assert_eq!(timing["input"], "audio", "{timing}");
+    assert!(timing.get("transcript_wait_ms").is_some(), "{timing}");
+    // The row holds the transcript and says the model heard it; the reply
+    // follows it.
     let r = rows(&w, tid).await;
-    assert_eq!(r[0].2, "Wie spät ist es?", "{r:?}");
+    let shape: Vec<(&str, &str)> = r.iter().map(|x| (x.1.as_str(), x.2.as_str())).collect();
+    assert_eq!(
+        shape,
+        [("user", "Wie spät ist es?"), ("assistant", CLOUD_SAYS)]
+    );
+    assert_eq!(r[0].3["input"], "audio", "{r:?}");
 }
 
 /// The skipped attempt (WP2 review): the thread's setting went off after
@@ -500,7 +503,7 @@ async fn a_cloud_fallback_the_gate_swaps_to_gets_the_transcript_and_never_the_au
 /// began. Before, the two waited on each other.
 #[tokio::test]
 async fn a_turn_whose_setting_went_off_since_the_verdict_goes_as_its_transcript() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     // Push-to-talk judges no verdict before the first turn: the bind's
     // ("hears you") stands.

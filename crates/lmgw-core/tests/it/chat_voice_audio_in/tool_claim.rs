@@ -37,7 +37,7 @@ async fn the_asr_a_heard_tool_turn_waits_for_gets_the_chat_model_s_room() {
     asr_chat_rows(&g, &["ears"]).await;
     g.world().transcript = "Wie spät ist es?".into();
     let w = world_on(g.state.clone(), |s| {
-        s.chat_voice_audio_input = "local".into();
+        s.chat_voice_audio_input = "on".into();
         s.chat_stt_alias = "ears".into();
     })
     .await;

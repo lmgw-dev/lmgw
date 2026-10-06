@@ -120,8 +120,9 @@ fn ModelChip(rt: Realtime) -> impl IntoView {
 /// Whether the chat model hears the turn or reads its transcript, from the
 /// thread's resolution and then what the session said of each response
 /// (`lmgw.chat.input`; the tooltip says why) — and, as the STT and TTS chips
-/// do, the live block: under the GPU hold or a benchmark run the model's
-/// fallback reads the transcript, amber (WP1 review M2).
+/// do, the live block: under the GPU hold or a benchmark run the chip shows
+/// the fallback's own verdict, amber (WP1 review M2; changed 2026-10-06:
+/// a fallback that takes audio hears you).
 #[component]
 fn InputChip(rt: Realtime) -> impl IntoView {
     let pv = rt.pv;

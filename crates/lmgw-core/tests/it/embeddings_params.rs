@@ -113,7 +113,7 @@ async fn dimensions_an_upstream_ignores_are_refused_by_name() {
         )
         .mount(&mock)
         .await;
-    let gw = world(&mock.uri(), Protocol::Openai, UpstreamKind::LlamaServer).await;
+    let gw = world(&mock.uri(), Protocol::LlamaCpp, UpstreamKind::LlamaServer).await;
 
     let (status, body) = post(&gw, json!({"model": "emb", "input": "hi", "dimensions": 2})).await;
     assert_eq!(status, 400, "{body}");

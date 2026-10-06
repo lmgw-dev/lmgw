@@ -1,0 +1,29 @@
+{
+  "request": {
+    "body": "{\"chat_template_kwargs\":{\"enable_thinking\":true},\"messages\":[{\"content\":\"Why is the sky blue?\",\"role\":\"user\"}],\"model\":\"the-model\",\"reasoning\":{\"enabled\":true,\"exclude\":true,\"max_tokens\":100}}",
+    "body_json": {
+      "chat_template_kwargs": {
+        "enable_thinking": true
+      },
+      "messages": [
+        {
+          "content": "Why is the sky blue?",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "enabled": true,
+        "exclude": true,
+        "max_tokens": 100
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/chat/completions"
+  }
+}

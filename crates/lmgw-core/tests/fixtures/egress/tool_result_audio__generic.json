@@ -1,0 +1,40 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"What is the weather in Berlin?\",\"role\":\"user\"},{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Berlin\\\"}\",\"name\":\"get_weather\"},\"id\":\"call_1\",\"type\":\"function\"}]},{\"content\":\"[audio/wav audio, 8 base64 bytes — omitted: this upstream's tool-result slot is text-only]\",\"role\":\"tool\",\"tool_call_id\":\"call_1\"}],\"model\":\"the-model\"}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "What is the weather in Berlin?",
+          "role": "user"
+        },
+        {
+          "content": null,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"city\":\"Berlin\"}",
+                "name": "get_weather"
+              },
+              "id": "call_1",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "[audio/wav audio, 8 base64 bytes — omitted: this upstream's tool-result slot is text-only]",
+          "role": "tool",
+          "tool_call_id": "call_1"
+        }
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

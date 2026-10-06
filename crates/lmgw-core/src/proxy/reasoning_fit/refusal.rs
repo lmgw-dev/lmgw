@@ -102,9 +102,11 @@ pub(super) fn after_refusal(protocol: Protocol, sent: &Off, msg: &str) -> Option
 fn names_control(protocol: Protocol, msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     match protocol {
-        Protocol::Openai => ["reasoning_effort", "reasoning effort", "reasoning.effort"]
-            .iter()
-            .any(|n| m.contains(n)),
+        Protocol::Openai | Protocol::LlamaCpp => {
+            ["reasoning_effort", "reasoning effort", "reasoning.effort"]
+                .iter()
+                .any(|n| m.contains(n))
+        }
         // `thinkingConfig`, `thinkingLevel`, `thinkingBudget`, "thinking
         // level", and Anthropic's `thinking` / `output_config.effort`.
         Protocol::Gemini => m.contains("thinking"),

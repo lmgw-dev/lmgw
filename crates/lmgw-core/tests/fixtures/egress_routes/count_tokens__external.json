@@ -1,0 +1,20 @@
+{
+  "requests": [
+    {
+      "body": "{\"content\":\"Hello, world!\",\"model\":\"chat-gguf\"}",
+      "body_json": {
+        "content": "Hello, world!",
+        "model": "chat-gguf"
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/tokenize"
+    }
+  ],
+  "status": 200
+}

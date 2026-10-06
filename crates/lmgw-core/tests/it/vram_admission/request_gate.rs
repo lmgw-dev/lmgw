@@ -608,12 +608,12 @@ async fn only_a_guarded_row_is_counted_and_an_unguarded_body_is_untouched() {
         );
         assert!(w.tokenize_calls.is_empty());
         let ir = lmgw_core::ingress::openai::parse_chat_request(&request).unwrap();
-        let expected = lmgw_core::egress::openai::chat_body(
+        let expected = lmgw_core::egress::llama_cpp::chat_body(
             &ir,
             "chat-model",
             &ir.params,
             false,
-            lmgw_core::config::UpstreamKind::LlamaServer,
+            &lmgw_core::config::Snapshot::default().router_upstream(),
         );
         assert_eq!(
             w.chat_bodies[&port][0], expected,

@@ -300,13 +300,14 @@ pub struct Settings {
     #[serde(default = "default_chat_turn_detection")]
     pub chat_turn_detection: String,
     /// Whether a voice turn goes to the chat model as audio
-    /// (voice-audio-input design §2.1): `off` (the model reads the
-    /// transcript, as before) or `local` — a local model lmgw runs whose
-    /// input modalities include audio hears the turn, the ASR still
-    /// transcribes it. Experimental; a cloud chat model never gets audio (a
-    /// cloud speech-to-text model still transcribes each turn's audio, as
-    /// with `off`). A thread can override it. One of
-    /// [`crate::store::AudioInputMode::NAMES`].
+    /// (voice-audio-input design §2.1, changed 2026-10-06): `off` (the model
+    /// reads the transcript, as before) or `on` — the model that answers the
+    /// turn (the thread's, or a fallback it is handed to, wherever it runs)
+    /// hears it when it takes audio input and lmgw can send it audio; the
+    /// ASR still transcribes it (a cloud speech-to-text model gets each
+    /// turn's audio, as with `off`). Experimental. A stored `local`, the
+    /// value's name before 2026-10-06, reads as `on`. A thread can override
+    /// it. One of [`crate::store::AudioInputMode::NAMES`].
     #[serde(default = "default_chat_voice_audio_input")]
     pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (design §9.3,

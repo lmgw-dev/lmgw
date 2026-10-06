@@ -321,7 +321,7 @@ async fn tool_session() -> (
     i64,
     Ws,
 ) {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let calls = Calls::default();
     let url = stub(calls.clone()).await;
     register(&g.state, &url).await;

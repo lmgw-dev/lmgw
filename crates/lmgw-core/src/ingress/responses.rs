@@ -42,67 +42,19 @@ use crate::ir::{
     flatten_tool_result, ChatRequest, ContentPart, Message, Params, ReasoningControl, Role,
     ToolChoice, ToolDef, ToolResultBlock, Usage,
 };
+use crate::mcp::spec::kind_of;
 use crate::sse::frame;
+
+mod tool_output;
+pub(crate) use tool_output::url_image_resource;
 
 // ---------------------------------------------------------------------------
 // Request
 // ---------------------------------------------------------------------------
 
-/// One `{"type": "mcp", ...}` entry: which registered MCP server to expose.
-#[derive(Debug, Clone, PartialEq)]
-pub struct McpToolSpec {
-    /// Matches a registered server's tool prefix (or its name when it has no
-    /// prefix). lmgw resolves labels against *its own* servers rather than
-    /// dialing a `server_url`, which is the whole point of routing through it.
-    pub server_label: String,
-    /// `allowed_tools`, when the client narrows the server's surface.
-    pub allowed_tools: Option<Vec<String>>,
-    /// `require_approval` — which of this server's tools need a round trip
-    /// before they run.
-    pub require_approval: ApprovalRule,
-}
-
-/// The `require_approval` field of an `mcp` tool.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum ApprovalRule {
-    /// `"never"` — run everything without asking. The API's default.
-    #[default]
-    Never,
-    /// `"always"` — every call on this server is gated.
-    Always,
-    /// The object form, `{"never": {"tool_names": […]}, "always": {…}}`.
-    Filter {
-        never: Vec<String>,
-        always: Vec<String>,
-    },
-}
-
-impl ApprovalRule {
-    /// Whether a tool needs approval. `exposed` is the prefixed name the model
-    /// sees, `upstream` the server's own name for it — a client may reasonably
-    /// write either in a `tool_names` list, so both match.
-    ///
-    /// In the object form an explicit `never` entry always wins. Past that, an
-    /// `always` list is a whitelist of what to gate; if only `never` was given,
-    /// it is a list of exceptions and everything else is gated — which is the
-    /// reading that fails closed.
-    pub fn requires(&self, exposed: &str, upstream: &str) -> bool {
-        let listed = |names: &[String]| names.iter().any(|n| n == exposed || n == upstream);
-        match self {
-            Self::Never => false,
-            Self::Always => true,
-            Self::Filter { never, always } => {
-                if listed(never) {
-                    false
-                } else if !always.is_empty() {
-                    listed(always)
-                } else {
-                    !never.is_empty()
-                }
-            }
-        }
-    }
-}
+/// The `mcp` tool entry, parsed by the code `/v1/realtime` shares
+/// (realtime-server-tools design §1.1).
+pub use crate::mcp::spec::{ApprovalRule, McpToolSpec};
 
 /// One `mcp_approval_response` input item: the client's verdict on a call an
 /// earlier response stopped at.
@@ -382,23 +334,7 @@ fn parse_tools(v: Option<&Value>) -> Result<(Vec<ToolDef>, Vec<McpToolSpec>), Ga
                     .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
             }),
             Some("mcp") => {
-                let label = t
-                    .get("server_label")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        GatewayError::BadRequest("mcp tool without 'server_label'".into())
-                    })?
-                    .to_string();
-                mcp.push(McpToolSpec {
-                    server_label: label.clone(),
-                    allowed_tools: t.get("allowed_tools").and_then(Value::as_array).map(|a| {
-                        a.iter()
-                            .filter_map(Value::as_str)
-                            .map(String::from)
-                            .collect()
-                    }),
-                    require_approval: parse_require_approval(t.get("require_approval"), &label)?,
-                });
+                mcp.push(crate::mcp::spec::parse_mcp_tool(t).map_err(GatewayError::BadRequest)?)
             }
             other => {
                 return Err(GatewayError::Unsupported(format!(
@@ -410,42 +346,6 @@ fn parse_tools(v: Option<&Value>) -> Result<(Vec<ToolDef>, Vec<McpToolSpec>), Ga
         }
     }
     Ok((functions, mcp))
-}
-
-/// `require_approval` in either of its two spellings.
-fn parse_require_approval(v: Option<&Value>, label: &str) -> Result<ApprovalRule, GatewayError> {
-    let names = |o: &Value, key: &str| -> Vec<String> {
-        o.pointer(&format!("/{key}/tool_names"))
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    match v {
-        None | Some(Value::Null) => Ok(ApprovalRule::Never),
-        Some(Value::String(s)) => match s.as_str() {
-            "never" => Ok(ApprovalRule::Never),
-            "always" => Ok(ApprovalRule::Always),
-            other => Err(GatewayError::BadRequest(format!(
-                "require_approval on mcp server '{label}': unknown value '{other}' \
-                 (expected \"never\", \"always\", or an object with never/always \
-                 tool_names)"
-            ))),
-        },
-        Some(o @ Value::Object(_)) => Ok(ApprovalRule::Filter {
-            never: names(o, "never"),
-            always: names(o, "always"),
-        }),
-        Some(other) => Err(GatewayError::BadRequest(format!(
-            "require_approval on mcp server '{label}' must be a string or an object, \
-             got {}",
-            kind_of(other)
-        ))),
-    }
 }
 
 /// `input` → IR messages plus any approval verdicts. Accepts the plain-string
@@ -474,17 +374,6 @@ fn parse_input(v: Option<&Value>) -> Result<ParsedInput, GatewayError> {
         }
     }
     Ok((out, approvals))
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 fn push_input_item(
@@ -566,19 +455,22 @@ fn push_input_item(
                 }],
             });
         }
-        Some("function_call_output") => out.push(Message {
-            role: Role::Tool,
-            content: vec![ContentPart::ToolResult {
-                id: str_at(item, "call_id").unwrap_or_default(),
-                name: None,
-                content: ToolResultBlock::one(match item.get("output") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => other.to_string(),
-                    None => String::new(),
-                }),
-                is_error: false,
-            }],
-        }),
+        // `output` is a string or an array of items; the array is read into
+        // blocks, so an `input_image` reaches the model as an image or its
+        // placeholder rather than as base64 text (`tool_output`).
+        Some("function_call_output") => {
+            let id = str_at(item, "call_id").unwrap_or_default();
+            let content = tool_output::output_blocks(item.get("output"), &id);
+            out.push(Message {
+                role: Role::Tool,
+                content: vec![ContentPart::ToolResult {
+                    id,
+                    name: None,
+                    content,
+                    is_error: false,
+                }],
+            })
+        }
         // A verdict on a call an earlier response stopped at. Not a
         // conversation turn: it decides whether a *pending* call runs, and the
         // handler settles it against the stored response.

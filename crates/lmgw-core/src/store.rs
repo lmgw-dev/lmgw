@@ -86,7 +86,15 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     repair_before_migrations(pool).await?;
     refuse_if_aliases_pin_the_managed_upstreams(pool).await?;
     empty_run_args_notice(pool).await?;
-    sqlx::migrate!("./migrations").run(pool).await?;
+    llama_cpp_notice(pool).await?;
+    let migrator = sqlx::migrate!("./migrations");
+    // A table rebuild runs with foreign keys off (0058), and that is the only
+    // way a reference can come to point at a row that is gone: every pool
+    // connection has them on. So a start that applies a migration marks the
+    // database, and a marked one is checked on every start until it is clean.
+    let applied_before = mark_before_migrations(pool, &migrator).await?;
+    migrator.run(pool).await?;
+    check_after_migrations(pool, applied_before).await?;
     Ok(())
 }
 

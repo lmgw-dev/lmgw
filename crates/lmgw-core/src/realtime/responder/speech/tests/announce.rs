@@ -37,7 +37,7 @@ fn split_written(announce: Option<Announce>) -> (Vec<(String, Written)>, String)
         match w {
             Work::Clause { said, written, .. } => clauses.push((said, written)),
             Work::Unspoken(raw) => unspoken.push_str(&raw),
-            Work::Pass(_) => panic!("no delta was passed"),
+            Work::Pass(_) | Work::Report(_) => panic!("no delta was passed"),
             Work::Break => {}
         }
     }
@@ -122,7 +122,7 @@ fn a_block_inside_a_clause_that_began_before_it_is_announced_once() {
                     history.push_str(&written.own);
                 }
                 Work::Unspoken(raw) => history.push_str(&raw),
-                Work::Pass(_) | Work::Break => {}
+                Work::Pass(_) | Work::Report(_) | Work::Break => {}
             }
         }
         assert_eq!(announced, 1, "{text:?}");

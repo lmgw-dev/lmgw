@@ -15,7 +15,11 @@ fn input_item() -> Value {
     json!({
         "description": "A message ({type:message,role,content}), a prior turn's \
             {type:function_call,call_id,name,arguments} or \
-            {type:function_call_output,call_id,output}, an mcp_call echo, or an \
+            {type:function_call_output,call_id,output} (output a string, or an array of \
+            {type:input_text,text} and {type:input_image,image_url} items: a base64 data: \
+            image goes on as an image where the upstream's tool results take one and as a \
+            named placeholder elsewhere, another URL as a resource naming it, and any other \
+            item as its JSON text), an mcp_call echo, or an \
             {type:mcp_approval_response,approval_request_id,approve,reason} verdict on a \
             previous response's pending call.",
     })
@@ -30,9 +34,20 @@ fn mcp_tool() -> Value {
             "server_label": {"type": "string", "description": "Matches a registered MCP \
                 server's own tool prefix (or its name when it has none) — lmgw resolves this \
                 against its own servers, never a client-supplied server_url."},
-            "allowed_tools": {"type": "array", "items": {"type": "string"}},
+            "allowed_tools": {
+                "oneOf": [
+                    {"type": "array", "items": {"type": "string"}},
+                    {"type": "object", "properties": {
+                        "tool_names": {"type": "array", "items": {"type": "string"}}}}
+                ],
+                "description": "Tool names, as a list or {tool_names}; a name matches the \
+                    exposed or the server's own spelling (docs__query or query). An empty \
+                    list leaves nothing. read_only is refused: lmgw does not read MCP tool \
+                    annotations."
+            },
             "require_approval": {"description": "\"never\" (default) | \"always\" | \
-                {never:{tool_names}, always:{tool_names}}."}
+                {never:{tool_names}, always:{tool_names}}. read_only is refused, as in \
+                allowed_tools."}
         }
     })
 }

@@ -35,19 +35,26 @@
 //! **A speaking response** (`speech`) runs a second task beside the stream:
 //! the text is cut into clauses as it arrives and synthesized in order over
 //! one TTS route, whose hold is dropped after the last clause — the chat
-//! hold still at the end of the stream (§9.1).
+//! hold still at the end of the stream (§9.1). Once the last clause is with
+//! the core, the core hears so ([`Msg::SpeakerDone`], realtime-server-tools
+//! §2.5).
+//!
+//! **The model's calls of offered MCP tools** run once the stream has ended,
+//! inside the chat call and before its end is reported (`tools`,
+//! realtime-server-tools §2.4): the response's `response.done` follows every
+//! call.
 //!
 //! **Every call reports back.** One that panics answers `Err(Internal)`, as
 //! the ASR path's does, or the response would stay Generating for good.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use tokio::sync::mpsc;
 
 use super::heard::Written;
 use super::policy;
-use crate::agent::DeltaSink;
+use crate::agent::{DeltaSink, ToolOutcome};
 use crate::config::Route;
 use crate::error::GatewayError;
 use crate::gate::GateHeaders;
@@ -59,8 +66,10 @@ use crate::telemetry::RequestClass;
 use crate::vram::LocalHold;
 
 mod speech;
+mod tools;
 
 pub(crate) use speech::{speak, Speaker, Speech, Splitter};
+pub(crate) use tools::{SentCall, ServerTools};
 
 /// What the responder tells the core, tagged with the response's
 /// generation so a message from a cancelled response is recognised.
@@ -130,6 +139,27 @@ pub(crate) enum Msg {
     /// refused, or ended before the model said anything. Said once; only a
     /// turn a model heard keeps a failed transcription to itself.
     Carried(bool),
+    /// A spoken response's speaker handed its last clause to the core: what
+    /// it says is all with the writer (realtime-server-tools §2.5). Queued
+    /// behind the clauses, so it never overtakes one.
+    SpeakerDone,
+    /// A server-side call went to its server — said straight to the core,
+    /// never queued behind clauses, so a cancel knows it may have run, with
+    /// what the core needs to announce its item itself should the call's
+    /// own deltas never reach it (realtime-server-tools §2.5). Speech mode
+    /// only: in text mode [`Msg::ToolRunning`] is never queued.
+    ToolSent(SentCall),
+    /// A server-side call of the response started at `at`
+    /// (realtime-server-tools §2.4); `index` is its upstream ordinal, as its
+    /// deltas name it.
+    ToolRunning { index: usize, at: Instant },
+    /// A server-side call ended at `at` with `outcome` — or failed unrun,
+    /// its arguments no JSON object (§2.3).
+    ToolDone {
+        index: usize,
+        outcome: ToolOutcome,
+        at: Instant,
+    },
     /// The call is over, and its claims on the models are already released.
     /// Boxed: one per response, and the deltas need not be its size.
     Finished(Box<Result<Completion, GatewayError>>),
@@ -178,6 +208,8 @@ pub(crate) struct Job {
     pub stop: StopSignal,
     /// How the response speaks; `None` for text output.
     pub speech: Option<Speech>,
+    /// The MCP tools it offered, which it runs itself (`tools`).
+    pub tools: ServerTools,
 }
 
 /// Run `job` to its end; the result goes to the core as [`Msg::Finished`].
@@ -212,6 +244,7 @@ async fn call(job: &Job) -> Result<Completion, GatewayError> {
         tx,
         stop,
         speech,
+        tools: served,
     } = job;
     let alias = ir.model_alias.as_str();
     policy::check_call(state, ctx, alias, RequestClass::Chat).await?;
@@ -262,7 +295,15 @@ async fn call(job: &Job) -> Result<Completion, GatewayError> {
             tx,
             stop,
         };
-        return stream(state, ctx, hold, &route, &headers, ir, &mut sink).await;
+        let mut collect = tools::Collect::new(&mut sink, served);
+        let result = stream(state, ctx, hold, &route, &headers, ir, &mut collect).await;
+        let calls = collect.into_calls();
+        if let Ok(c) = &result {
+            let report = tools::Report::direct(*gen, tx);
+            let stop = Some(stop.clone());
+            tools::run((state, ctx), served, calls, &c.finish_reason, stop, &report).await;
+        }
+        return result;
     };
     // Speaking: the stream feeds the speaker's queue, and the speaker stops
     // the stream — through the sink's own stop — on a cancel or a failed
@@ -272,9 +313,18 @@ async fn call(job: &Job) -> Result<Completion, GatewayError> {
     // A stock session skips code and tables silently (no announcement).
     let mut sink = speech::Splitter::new(*gen, tx, work, chat_stop, &speech.label, None);
     let chat = async {
-        let result = stream(state, ctx, hold, &route, &headers, ir, &mut sink).await;
-        // The last clause, and the end of the speaker's queue.
+        let mut collect = tools::Collect::new(&mut sink, served);
+        let result = stream(state, ctx, hold, &route, &headers, ir, &mut collect).await;
+        let calls = collect.into_calls();
+        // The last clause, and the end of the speaker's queue — once the
+        // calls are reported behind it.
         sink.finish();
+        sink.said_all();
+        if let Ok(c) = &result {
+            let report = sink.report();
+            let stop = sink.stop();
+            tools::run((state, ctx), served, calls, &c.finish_reason, stop, &report).await;
+        }
         drop(sink);
         result
     };

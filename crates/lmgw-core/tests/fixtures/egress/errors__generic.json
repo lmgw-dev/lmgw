@@ -1,0 +1,88 @@
+{
+  "errors": [
+    {
+      "body": "{\"error\":{\"code\":400,\"message\":\"request (8010 tokens) exceeds the available context size (4096 tokens), try increasing it\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":8010,\"n_ctx\":4096}}",
+      "exceed_context": {
+        "n_ctx": 4096,
+        "n_prompt_tokens": 8010
+      },
+      "map_error": "ContextExceeded { model: \"\", prompt_tokens: 8010, max_output: None, limit: 4096, top_rung: None }",
+      "status": 400
+    },
+    {
+      "body": "{\"error\":{\"code\":400,\"message\":\"request (8010 tokens) exceeds the available context size (4096 tokens), try increasing it\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":8010,\"n_ctx\":4096}}",
+      "exceed_context": {
+        "n_ctx": 4096,
+        "n_prompt_tokens": 8010
+      },
+      "map_error": "Upstream { status: 500, provider_type: Some(\"exceed_context_size_error\"), message: \"request (8010 tokens) exceeds the available context size (4096 tokens), try increasing it\" }",
+      "status": 500
+    },
+    {
+      "body": "{\"error\":{\"code\":400,\"message\":\"too long\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":8010}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 400, provider_type: Some(\"exceed_context_size_error\"), message: \"too long\" }",
+      "status": 400
+    },
+    {
+      "body": "{\"error\":{\"code\":500,\"message\":\"Context size has been exceeded.\",\"type\":\"server_error\"}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 500, provider_type: Some(\"server_error\"), message: \"Context size has been exceeded.\" }",
+      "status": 500
+    },
+    {
+      "body": "{\"error\":{\"code\":500,\"message\":\"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj\",\"type\":\"server_error\"}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 500, provider_type: Some(\"server_error\"), message: \"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj\" }",
+      "status": 500
+    },
+    {
+      "body": "{\"error\":{\"code\":503,\"message\":\"Loading model\",\"type\":\"unavailable_error\"}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 503, provider_type: Some(\"unavailable_error\"), message: \"Loading model\" }",
+      "status": 503
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Invalid value for 'temperature'.\",\"type\":\"invalid_request_error\",\"param\":\"temperature\",\"code\":null}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 400, provider_type: Some(\"invalid_request_error\"), message: \"Invalid value for 'temperature'.\" }",
+      "status": 400
+    },
+    {
+      "body": "{\"error\":{\"message\":\"Incorrect API key provided.\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 401, provider_type: Some(\"invalid_request_error\"), message: \"Incorrect API key provided.\" }",
+      "status": 401
+    },
+    {
+      "body": "{\"error\":{\"message\":\"The model 'x' does not exist\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\"}}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 404, provider_type: Some(\"invalid_request_error\"), message: \"The model 'x' does not exist\" }",
+      "status": 404
+    },
+    {
+      "body": "{\"error\":\"rate limited\"}",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 429, provider_type: None, message: \"{\\\"error\\\":\\\"rate limited\\\"}\" }",
+      "status": 429
+    },
+    {
+      "body": "Bad Gateway",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 502, provider_type: None, message: \"Bad Gateway\" }",
+      "status": 502
+    },
+    {
+      "body": "",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 400, provider_type: None, message: \"\" }",
+      "status": 400
+    },
+    {
+      "body": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "exceed_context": null,
+      "map_error": "Upstream { status: 500, provider_type: None, message: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\" }",
+      "status": 500
+    }
+  ]
+}

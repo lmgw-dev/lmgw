@@ -3,17 +3,18 @@
 //! A cloning model that declares `reference_text` (Fish, CosyVoice3) clones
 //! well only with the clip's transcript, which audio.cpp injects from the
 //! library's `prompt_text` when a request's `voice` names the clip. Typing
-//! one per clip was the only way to get it there. Here a local
-//! speech-to-text model writes it:
+//! one per clip was the only way to get it there. Here a speech-to-text
+//! model writes it:
 //! - per clip (`POST /audio-lab/api/refs/{name}/transcribe`), overwriting;
 //! - for every clip without one (the `voice_transcribe` op and its
 //!   `lmgw__voice_transcribe` tool);
 //! - on upload, when the owner set `audio.voice_transcribe_alias` — empty by
 //!   default, so nothing is transcribed unless the owner chose a model.
 //!
-//! Always through [`proxy::transcribe_local_only`]: the clip is the owner's
-//! voice and is never sent to a cloud route — not under the GPU hold's
-//! fallback, not to a cloud alias named by mistake.
+//! Always through [`proxy::transcribe_voice_clip`]: the model that answers
+//! must transcribe, and a configured fallback answers as for any request
+//! (changed 2026-10-06, the owner's ruling; until then the clip went only
+//! to a local speech-to-text row, never to the GPU hold's fallback).
 
 use std::path::Path;
 
@@ -38,7 +39,7 @@ pub(crate) fn alias_for(state: &SharedState, asked: Option<&str>) -> Result<Stri
         .to_string();
     if set.is_empty() {
         return Err(
-            "no transcription model: name a local speech-to-text model (alias), or set one under \
+            "no transcription model: name a speech-to-text model (alias), or set one under \
              Settings → Runtimes → Audio → Clip transcripts"
                 .into(),
         );
@@ -47,17 +48,36 @@ pub(crate) fn alias_for(state: &SharedState, asked: Option<&str>) -> Result<Stri
 }
 
 /// What [`transcribe_clip`] wrote.
+#[derive(Debug)]
 pub(crate) struct Written {
     pub transcript: String,
-    /// `asr:<alias>` — where the transcript came from.
+    /// `asr:<model>` — where the transcript came from: the alias asked
+    /// for, or the fallback that answered in its place (review V1).
     pub source: String,
+    /// The fallback that answered, when one did: its name and the gate's
+    /// reason (`hold`, `external_vram`, …).
+    pub answered_by: Option<(String, &'static str)>,
+    /// Who wrote it, in a sentence's words ([`proxy::answered_line`]).
+    pub by: String,
+}
+
+impl Written {
+    /// The answer's fields about who wrote the transcript.
+    pub(crate) fn provenance(&self) -> serde_json::Value {
+        serde_json::json!({
+            "transcript_source": self.source,
+            "answered_by": self.answered_by.as_ref().map(|(f, _)| f),
+            "fallback_reason": self.answered_by.as_ref().map(|(_, r)| r),
+            "by": self.by,
+        })
+    }
 }
 
 /// Why a clip was not transcribed.
 #[derive(Debug)]
 pub(crate) enum ClipError {
-    /// The model may not hear any clip now: the hold, a benchmark, an alias
-    /// that is no local speech-to-text model.
+    /// The model may not hear any clip now: the hold or a benchmark with no
+    /// fallback, an alias that is no speech-to-text model.
     Refused(String),
     /// This clip: unreadable, no speech in it, the model failed on it.
     Clip(String),
@@ -97,19 +117,20 @@ pub(crate) async fn transcribe_clip(
         .first_or_octet_stream()
         .as_ref()
         .to_string();
-    let text = proxy::transcribe_local_only(state, alias, Bytes::from(bytes), &name, &mime)
+    let heard = proxy::transcribe_voice_clip(state, alias, Bytes::from(bytes), &name, &mime)
         .await
         .map_err(|e| match e.kind() {
-            "gpu_hold" | "gpu_benchmark" | "local_asr_required" | "unknown_alias" => {
+            "gpu_hold" | "gpu_benchmark" | proxy::ASR_REQUIRED | "unknown_alias" => {
                 ClipError::Refused(e.to_string())
             }
             _ => ClipError::Clip(e.to_string()),
         })?;
+    let by = proxy::answered_line(alias, heard.answered_by.as_ref());
     // One line per clip in the index.
-    let text = text.replace(['\n', '\r'], " ").trim().to_string();
+    let text = heard.text.replace(['\n', '\r'], " ").trim().to_string();
     if text.is_empty() {
         return Err(ClipError::Clip(format!(
-            "'{alias}' heard no speech in {name} — nothing was recorded"
+            "{by} heard no speech in {name} — nothing was recorded"
         )));
     }
     let mut texts = read_prompt_text(&dir);
@@ -118,7 +139,9 @@ pub(crate) async fn transcribe_clip(
         .map_err(|e| ClipError::Clip(format!("writing {PROMPT_TEXT_FILE}: {e}")))?;
     Ok(Written {
         transcript: text,
-        source: format!("asr:{alias}"),
+        source: format!("asr:{}", heard.by(alias)),
+        answered_by: heard.answered_by.map(|(f, r)| (f, r.as_str())),
+        by,
     })
 }
 
@@ -148,8 +171,8 @@ pub(crate) fn clips_without_transcript(dir: &Path) -> Vec<String> {
 /// What [`transcribe_missing`] did.
 #[derive(Debug, Default)]
 pub(crate) struct Bulk {
-    /// `(clip, characters, source)` per clip transcribed.
-    pub transcribed: Vec<(String, usize, String)>,
+    /// `(clip, characters, what wrote it)` per clip transcribed.
+    pub transcribed: Vec<(String, usize, Written)>,
     /// `(clip, why)` per clip that failed.
     pub failed: Vec<(String, String)>,
     /// Clips that had a transcript already.
@@ -161,7 +184,7 @@ pub(crate) struct Bulk {
 
 /// Transcribe every clip of the library that has no transcript, one at a
 /// time, with `alias`. A refusal that would refuse every clip the same way
-/// (the hold, an alias that is no local speech-to-text model) ends the run
+/// (the hold with no fallback, an alias that is no speech-to-text model) ends the run
 /// where it happens rather than repeating itself; what was transcribed
 /// before it stays recorded.
 pub(crate) async fn transcribe_missing(state: &SharedState, alias: &str) -> Result<Bulk, String> {
@@ -177,7 +200,7 @@ pub(crate) async fn transcribe_missing(state: &SharedState, alias: &str) -> Resu
         match transcribe_clip(state, &clip, alias).await {
             Ok(w) => bulk
                 .transcribed
-                .push((clip, w.transcript.chars().count(), w.source)),
+                .push((clip, w.transcript.chars().count(), w)),
             Err(ClipError::Refused(why)) => {
                 bulk.stopped = Some(why);
                 break;

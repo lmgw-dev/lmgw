@@ -1,0 +1,19 @@
+{
+  "deltas": [
+    [
+      {
+        "text": "Partial"
+      }
+    ],
+    [
+      {
+        "error": "the slot was cancelled"
+      }
+    ],
+    [
+      {
+        "error": "upstream error"
+      }
+    ]
+  ]
+}

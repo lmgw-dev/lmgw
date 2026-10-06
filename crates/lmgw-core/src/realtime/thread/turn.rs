@@ -83,6 +83,9 @@ pub(crate) struct Job {
     /// A heard response's audio input (`audio`); `None`: its turns go as
     /// their transcripts.
     pub audio: Option<audio::Launch>,
+    /// Its turns go as their transcripts because the model lacks audio
+    /// input: what its request rows say (`request_logs.degraded`).
+    pub degraded: Option<String>,
 }
 
 /// What the turn saved, for the journal — sent once, on every path.
@@ -231,6 +234,7 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         }),
         language: bound::turn_language(&state.snapshot(), &thread, plan.is_some()),
         stop: turn_signal,
+        degraded: job.degraded.take(),
     };
     let mut attempt = audio::Attempt::new(job.audio.take(), gen, tx, saved.journal.clone());
     let (mut frames, mut began) = attempt.first(&starter, user_message_id, &job.stop).await?;

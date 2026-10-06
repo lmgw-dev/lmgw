@@ -176,10 +176,17 @@ async fn messages(gw: &Gw, tid: i64) -> Vec<Value> {
         .clone()
 }
 
-/// The body of the last request the upstream saw.
+/// The body of the last request the upstream saw — the last POST: a send
+/// on a `llama_cpp` row also asks the server's `/props` in the background
+/// (llama egress design §4.2), a GET without a body.
 async fn last_upstream_body(mock: &MockServer) -> Value {
     let seen = mock.received_requests().await.unwrap();
-    serde_json::from_slice(&seen.last().expect("the upstream was called").body).unwrap()
+    let last = seen
+        .iter()
+        .rev()
+        .find(|r| r.method.as_str() == "POST")
+        .expect("the upstream was called");
+    serde_json::from_slice(&last.body).unwrap()
 }
 
 /// The request's turns past the system prompt, as `(role, content)`.
@@ -531,7 +538,7 @@ async fn continue_state(gw: &Gw, tid: i64) -> Value {
 async fn continue_on_llama_server_prefills_the_reply_and_appends_to_it() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, " there lived a cat.", 12, 5).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw).await;
     seed(&state, tid, "user", "tell a story").await;
     let rid = store::append_chat_message(
@@ -724,7 +731,7 @@ async fn continue_is_refused_where_there_is_no_prefill_or_nothing_to_continue() 
     // A reply that ran tools carries its record, and cannot be continued; an
     // empty record is no record.
     let mock = MockServer::start().await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw).await;
     seed(&state, tid, "user", "q").await;
     let with_tools = store::append_chat_message(
@@ -836,7 +843,7 @@ async fn continue_through_the_tool_loop_appends_to_the_reply() {
 
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, " the end.", 30, 3).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let s = Settings {
         self_admin: SelfAdmin::ReadOnly,
         ..state.snapshot().settings.clone()
@@ -914,7 +921,7 @@ async fn a_continue_that_calls_a_tool_replays_without_duplication() {
         .with_priority(2)
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let s = Settings {
         self_admin: SelfAdmin::ReadOnly,
         ..state.snapshot().settings.clone()

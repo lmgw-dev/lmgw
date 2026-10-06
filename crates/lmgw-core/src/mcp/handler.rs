@@ -183,7 +183,9 @@ impl ClientHandler for GatewayClientHandler {
 
         // Run it in-process through our own egress adapters, logged as
         // `mcp-sampling` with real tokens (the §8 observability claim), bounded
-        // by the self-starvation deadline.
+        // by the self-starvation deadline. The request carries no image for
+        // a fallback that cannot see to miss (`gate::fallback_images`): this
+        // ingress keeps a message's text only (`ir_from_create_message`).
         let completion = proxy::sample_once(
             &state,
             hold.as_ref(),

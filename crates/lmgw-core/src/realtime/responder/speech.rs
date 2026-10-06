@@ -193,6 +193,10 @@ pub(crate) enum Work {
     Unspoken(String),
     /// A delta for the core, after the clauses before it.
     Pass(StreamDelta),
+    /// A server-side call's report for the core, after the clauses and the
+    /// deltas before it: the call runs at once, and its report must not
+    /// overtake its own item (`tools`, realtime-server-tools §2.4).
+    Report(Msg),
     /// The text stopped — a tool call, a flush, the stream's end: no clause
     /// after it joins one before it, and nothing is waited for (`batch`).
     Break,
@@ -350,6 +354,20 @@ impl<'a> Splitter<'a> {
         }
         let _ = self.work.send(Work::Break);
     }
+
+    /// The stream is over and every clause handed: once the speaker has
+    /// said them, the core hears so ([`Msg::SpeakerDone`],
+    /// realtime-server-tools §2.5). A speaker that is gone says nothing
+    /// more anyway.
+    pub(super) fn said_all(&self) {
+        let _ = self.work.send(Work::Report(Msg::SpeakerDone));
+    }
+
+    /// Where the response's server-side calls report: behind everything
+    /// handed to the speaker so far (`tools`).
+    pub(super) fn report(&self) -> super::tools::Report<'a> {
+        super::tools::Report::queued(self.gen, self.tx, self.work.clone())
+    }
 }
 
 impl DeltaSink for Splitter<'_> {
@@ -445,6 +463,10 @@ pub(crate) async fn speak(mut s: Speaker<'_>) -> Result<(), GatewayError> {
             Some(Work::Break) => continue,
             Some(Work::Pass(d)) => {
                 let _ = s.tx.send((s.gen, Msg::Delta(d)));
+                continue;
+            }
+            Some(Work::Report(msg)) => {
+                let _ = s.tx.send((s.gen, msg));
                 continue;
             }
             Some(Work::Unspoken(raw)) => {

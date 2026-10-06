@@ -162,6 +162,13 @@ pub async fn send_gated_marked<F>(
 where
     F: Fn(&Route) -> Result<reqwest::RequestBuilder, GatewayError>,
 {
+    // The fit's frozen tool-image decision, on the route every attempt is
+    // built from — and counted on, beside a ladder's send (llama egress
+    // design §3.2). The held endpoint's single writer carries it unchanged
+    // through a dead-container retry and a climb.
+    let llama = lease.llama.clone();
+    let decided = super::tool_images::on_route(route, llama.as_ref());
+    let route: &Route = &decided;
     // The fit already found this candidate cannot take the send (a guest
     // over its pool's per-request limit, or the candidate lost at the count).
     if let Some(cause) = lease.skip.take() {
@@ -259,7 +266,7 @@ async fn context_refusal(
     }
     let (status, version, headers) = (resp.status(), resp.version(), resp.headers().clone());
     let bytes = resp.bytes().await.map_err(GatewayError::from)?;
-    if let Some(ec) = crate::egress::openai::parse_exceed_context(&bytes) {
+    if let Some(ec) = crate::egress::llama_cpp::parse_exceed_context(&bytes) {
         return Ok(Err(GatewayError::ContextExceeded {
             model: hold.model_id().to_string(),
             prompt_tokens: ec.n_prompt_tokens,
@@ -398,7 +405,10 @@ where
                 // the one the send would reach. Judge again.
                 continue;
             }
-            match self.pair(attempt.0, tag.per_slot, backstop_left).await? {
+            match self
+                .pair(attempt, facts.as_deref(), tag.per_slot, backstop_left)
+                .await?
+            {
                 Verdict::Answer(resp) => {
                     lease.send = Some(guard);
                     return Ok(Sent::Upstream(resp));
@@ -447,19 +457,28 @@ where
         }
     }
 
-    /// Count and send together on the container at `port`, and decide. The
-    /// response is never handed over before the count's verdict on it.
+    /// Count and send together on the container `attempt` names (its port
+    /// and generation, judged with `started`, its start facts), and decide.
+    /// The response is never handed over before the count's verdict on it.
+    ///
+    /// Both go out with the send's tool-image decision rechecked against
+    /// that container (`tool_images::recheck`): a rung climbed to, or a
+    /// container recovered onto, that does not see gets placeholders in the
+    /// count and in the send alike.
     async fn pair(
         &self,
-        port: u16,
+        attempt: (u16, u64),
+        started: Option<&super::facts::GateFacts>,
         per_slot: u64,
         backstop_left: bool,
     ) -> Result<Verdict, GatewayError> {
+        let (port, generation) = attempt;
         let root = format!("http://127.0.0.1:{port}");
         let mut on = self.route.clone();
-        on.upstream.base_url = format!("{root}/v1");
+        crate::vram::LocalHold::point_at(&mut on, port);
+        super::tool_images::recheck(&mut on, self.hold, generation, started);
         let sent = crate::vram::send_built((self.build)(&on)?, self.timeout);
-        let counted = self.count_on(&root);
+        let counted = self.count_on(&root, &on.upstream);
         tokio::pin!(sent, counted);
         // A guest's second backstop refusal is held back for a re-pick.
         let guest = candidate::holds_back_refusals(Some(self.hold)).then(|| self.hold.model_id());
@@ -500,18 +519,23 @@ where
     /// The exact count of this request on the server at `root`: the chat
     /// body's prompt with its media bound, or the legacy body's largest
     /// prompt. Bounded by the route's own request timeout, like the count of
-    /// a guarded pool.
-    async fn count_on(&self, root: &str) -> Result<u64, GatewayError> {
+    /// a guarded pool. The chat body is rendered for `upstream`, the route
+    /// this attempt sends on.
+    async fn count_on(
+        &self,
+        root: &str,
+        upstream: &crate::config::Upstream,
+    ) -> Result<u64, GatewayError> {
         let http = &self.state.http;
         let counted = async {
             match self.count {
                 CountInput::Chat { ir, params, stream } => {
-                    let body = crate::egress::openai::chat_body(
+                    let body = crate::egress::llama_cpp::chat_body(
                         ir,
                         &self.route.upstream_model,
                         params,
                         *stream,
-                        self.route.upstream.kind,
+                        upstream,
                     );
                     let bound = self.plan.image_bound.clone();
                     count_chat_prompt(http, root, &body, self.plan.media, bound)
@@ -655,7 +679,7 @@ async fn judge(
             }
         }
     };
-    if let Some(ec) = crate::egress::openai::parse_exceed_context(&bytes) {
+    if let Some(ec) = crate::egress::llama_cpp::parse_exceed_context(&bytes) {
         if backstop_left {
             return Ok(Judged::Now(Verdict::Climb {
                 prompt: ec.n_prompt_tokens,

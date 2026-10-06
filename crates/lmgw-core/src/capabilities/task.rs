@@ -65,7 +65,8 @@ pub fn by_name(id: &str) -> Option<&'static str> {
 /// The lmgw routes a model of `task` answers on, served by an upstream of
 /// `protocol` (module doc).
 pub fn endpoints(task: &str, protocol: Protocol) -> Vec<String> {
-    let openai = protocol == Protocol::Openai;
+    // llama-server answers OpenAI's chat routes and `/v1/audio/transcriptions`.
+    let openai = protocol.speaks_openai_http();
     match task {
         "chat" if openai => strings(&CHAT_ENDPOINTS_OPENAI),
         "chat" => strings(&CHAT_ENDPOINTS_OTHER),

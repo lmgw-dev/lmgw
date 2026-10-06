@@ -23,6 +23,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `webkit2gtk::ffi` (webkit2gtk-sys), which the safe binding lacks.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2.0", features = ["v2_38"] }
+# Dropping tao's Wayland header bar so KWin decorates the window (main.rs,
+# show_main_window). The version tao builds the window with.
+gtk = "0.18"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

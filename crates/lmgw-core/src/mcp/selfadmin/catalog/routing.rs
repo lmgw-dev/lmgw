@@ -31,14 +31,21 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "protocol",
                     enum_p(
-                        "Wire protocol the upstream speaks. Required on create.",
-                        &["openai", "anthropic", "gemini"],
+                        "Wire protocol the upstream speaks. Required on create. 'llama_cpp' is \
+                         llama.cpp's own server (llama-server, ik_llama.cpp) and is always kind \
+                         'llama_server'; 'openai' with kind 'llama_server' is its old spelling \
+                         and is stored as 'llama_cpp'.",
+                        &["openai", "anthropic", "gemini", "llama_cpp"],
                     ),
                 ),
                 (
                     "kind",
                     enum_p(
-                        "Upstream flavour. Default 'generic'.",
+                        "Upstream flavour. Default 'generic'. 'llama_server' goes with protocol \
+                         'llama_cpp' (or 'anthropic', for llama-server's /v1/messages) and \
+                         marks the upstream local and free; leave it out with 'llama_cpp'. \
+                         Switching the protocol to openai or gemini alone makes a llama_server \
+                         'generic'.",
                         &["generic", "llama_server", "audio_cpp"],
                     ),
                 ),
@@ -65,8 +72,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                     bool_p(
                         "The upstream implements OpenAI's /v1/responses itself, so the gateway \
                          forwards that route verbatim instead of synthesizing it from \
-                         /v1/chat/completions. Default false. Leave it off for llama-server \
-                         and other local servers, which have no such endpoint.",
+                         /v1/chat/completions. Default false. Never on for protocol \
+                         'llama_cpp': lmgw synthesizes /v1/responses there, so every request \
+                         goes through its llama.cpp egress. Most other local servers have no \
+                         such endpoint.",
                     ),
                 ),
             ],

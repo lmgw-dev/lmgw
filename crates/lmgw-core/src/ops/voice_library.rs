@@ -1,6 +1,6 @@
 //! `voice_transcribe` (audio-class gap 5), shared by `/api/op/voice_transcribe`
 //! and `lmgw__voice_transcribe`: voice-library clip transcripts written by a
-//! local speech-to-text model ([`crate::web::audio_lab::transcribe`]).
+//! speech-to-text model ([`crate::web::audio_lab::transcribe`]).
 //!
 //! The answer says which clips were transcribed and how long each
 //! transcript is, never the text: the clips are the owner's own recordings,
@@ -14,9 +14,9 @@ use crate::web::audio_lab::transcribe::{alias_for, transcribe_clip, transcribe_m
 
 /// Transcribe `clip` (a file or voice name; it is replaced if it had one),
 /// or with no clip every clip of the library that has no transcript — with
-/// `alias`, else the setting `audio.voice_transcribe_alias`. The model must
-/// be a local speech-to-text row, and is refused under the GPU hold rather
-/// than answered by a fallback.
+/// `alias`, else the setting `audio.voice_transcribe_alias`. The model that
+/// answers must be a speech-to-text model, wherever it runs: the alias, or
+/// the fallback the GPU hold or an outside-VRAM verdict hands it to.
 pub async fn voice_transcribe(
     state: &SharedState,
     clip: Option<&str>,
@@ -28,13 +28,17 @@ pub async fn voice_transcribe(
             .await
             .map_err(|e| e.to_string())?;
         let chars = w.transcript.chars().count();
+        let mut entry = w.provenance();
+        entry["clip"] = json!(clip);
+        entry["chars"] = json!(chars);
         return Ok(json!({
             "ok": true,
-            "transcribed": [{"clip": clip, "chars": chars, "transcript_source": w.source}],
+            "transcribed": [entry],
             "failed": [],
             "message": format!(
-                "{clip} transcribed by '{alias}' ({chars} characters) and recorded as its \
-                 transcript — the Audio lab's voice library shows it"
+                "{clip} transcribed by {} ({chars} characters) and recorded as its \
+                 transcript — the Audio lab's voice library shows it",
+                w.by
             ),
         }));
     }
@@ -47,10 +51,26 @@ pub async fn voice_transcribe(
     let transcribed: Vec<Value> = bulk
         .transcribed
         .iter()
-        .map(|(clip, chars, source)| {
-            json!({"clip": clip, "chars": chars, "transcript_source": source})
+        .map(|(clip, chars, w)| {
+            let mut entry = w.provenance();
+            entry["clip"] = json!(clip);
+            entry["chars"] = json!(chars);
+            entry
         })
         .collect();
+    // Who wrote them: one line per model, a fallback named as one.
+    let mut by: Vec<&str> = bulk
+        .transcribed
+        .iter()
+        .map(|(_, _, w)| w.by.as_str())
+        .collect();
+    by.sort_unstable();
+    by.dedup();
+    let by = match by.as_slice() {
+        [] => format!("'{alias}'"),
+        [one] => one.to_string(),
+        many => many.join(" and "),
+    };
     let failed: Vec<Value> = bulk
         .failed
         .iter()
@@ -61,8 +81,8 @@ pub async fn voice_transcribe(
             "every clip has a transcript already ({}) — nothing to do",
             bulk.kept
         ),
-        (n, 0) => format!("{n} clip(s) transcribed by '{alias}'"),
-        (n, f) => format!("{n} clip(s) transcribed by '{alias}', {f} failed"),
+        (n, 0) => format!("{n} clip(s) transcribed by {by}"),
+        (n, f) => format!("{n} clip(s) transcribed by {by}, {f} failed"),
     };
     if let Some(why) = &bulk.stopped {
         message.push_str(&format!("; stopped before the rest: {why}"));

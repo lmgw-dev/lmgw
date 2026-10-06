@@ -113,7 +113,8 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
         if !sweep.failed.is_empty() {
             m.push_str(&format!(
                 ". {} container(s) could NOT be stopped and are still holding GPU memory — \
-                 nothing will retry them: {}",
+                 lmgw retries the ones it started on later reaper ticks, backing off while the \
+                 stop keeps failing; `podman stop` them if they stay: {}",
                 sweep.failed.len(),
                 sweep.failed.join("; ")
             ));

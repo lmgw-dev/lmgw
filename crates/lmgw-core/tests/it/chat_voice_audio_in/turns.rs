@@ -2,9 +2,11 @@
 //! §7): the request a heard turn makes, on `support/gpu_world.rs`'s local
 //! rows — a model lmgw runs, behind the real gate. The new turn alone goes
 //! as audio and earlier spoken turns as text; a tool thread's every model
-//! call carries it and its record never does; a cloud fallback the gate
-//! swaps to at admission, or a guest's re-pick hands it to, never gets it;
-//! and a managed server's refusal of the audio goes once more as the
+//! call carries it and its record never does; a cloud fallback that takes
+//! audio, which the gate swaps to at admission or a guest's re-pick hands
+//! it to, gets it (changed 2026-10-06: capability, not locality; the
+//! fallbacks that cannot are `fallbacks`); and a managed server's refusal
+//! of the audio goes once more as the
 //! transcript, with the note — kept by the session when the refusal names
 //! the audio or the transcript retry answered, never after a failed retry.
 //! Driven through the turn seam (`web::spoken_turn_for_tests`) and the
@@ -63,13 +65,13 @@ pub(super) fn row(id: &str) -> NewLocalModel {
 }
 
 /// A card with the row `gemma`, which hears and streams, and the setting at
-/// `local`.
+/// `on`.
 pub(super) async fn world() -> Gpu {
     let g = Gpu::new(24 * GIB, 2, 2).await;
     g.row(row("gemma"), 8 * GIB).await;
     g.world().thinking.insert("gemma".into());
     let mut s = g.state.snapshot().settings.clone();
-    s.chat_voice_audio_input = "local".into();
+    s.chat_voice_audio_input = "on".into();
     s.self_admin = SelfAdmin::ReadOnly;
     store::save_settings(&g.state.db, &s).await.unwrap();
     g.state.reload_snapshot().await.unwrap();
@@ -184,10 +186,11 @@ async fn a_tool_threads_every_model_call_hears_the_turn_and_its_record_never_doe
 }
 
 /// The gate's swap at admission (§4.7's outside-VRAM verdict) hands the
-/// turn to a cloud fallback after the verdict said "hears you": that route
-/// is refused before a byte leaves, and nothing is started.
+/// turn to a cloud fallback after the verdict said "hears you": the
+/// fallback takes audio, so it hears the turn (changed 2026-10-06), and
+/// nothing is started.
 #[tokio::test]
-async fn a_cloud_fallback_the_gate_swaps_to_at_admission_never_gets_the_audio() {
+async fn a_cloud_fallback_the_gate_swaps_to_at_admission_gets_the_audio() {
     let g = world().await;
     g.cloud("cloud", Some(hears())).await;
     g.candidate(NewCandidateAlias {
@@ -209,29 +212,24 @@ async fn a_cloud_fallback_the_gate_swaps_to_at_admission_never_gets_the_audio() 
     }
     let tid = thread(&g, "writer", "chat").await;
     let frames = spoken_turn_for_tests(&g.state, tid, vec![audio()]).await;
-    let error = &frames
-        .iter()
-        .find(|(e, _)| e == "error")
-        .expect("refused")
-        .1;
-    assert_eq!(error["code"], "audio_not_local", "{frames:?}");
     assert!(
-        error["message"].as_str().unwrap().contains("cloud-cloud"),
-        "the fallback is named: {error}"
+        !frames.iter().any(|(e, _)| e == "error"),
+        "not refused: {frames:?}"
     );
-    assert_eq!(last_frame(&frames)["aborted"], true);
-    assert!(g.cloud_bodies().await.is_empty(), "the cloud got nothing");
+    let cloud = g.cloud_bodies().await;
+    assert_eq!(cloud.len(), 1, "{cloud:?}");
+    let msgs = cloud[0]["messages"].as_array().unwrap();
+    assert_eq!(audio_parts(&cloud[0]), [msgs.len() - 1], "the new turn");
     assert!(streamed(&g).is_empty() && g.runs().is_empty());
 }
 
 /// A guest's candidate that cannot hold the request (llama-server's context
 /// refusal, held back for a re-pick) hands it to the alias's cloud fallback
-/// before anything is answered (WP2 review #8): that route is refused the
-/// audio before a byte leaves, on the plain path and in the tool loop,
-/// whose re-route is checked inside the loop (that a refused route gets no
-/// catalog read for the reasoning fit is `proxy/in_process/tests.rs`).
+/// before anything is answered (WP2 review #8): that fallback takes audio,
+/// so it hears the turn, on the plain path and in the tool loop, whose
+/// re-route is judged inside the loop (`PerRoute::request`).
 #[tokio::test]
-async fn a_guests_repick_to_its_cloud_fallback_never_gets_the_audio() {
+async fn a_guests_repick_to_its_cloud_fallback_gets_the_audio() {
     // Hears and calls tools, as a tool thread's alias must promise.
     let tools = || {
         let mut c = hears();
@@ -264,23 +262,9 @@ async fn a_guests_repick_to_its_cloud_fallback_never_gets_the_audio() {
         g.world().refuse_context.insert("tooly".into());
         let tid = thread(&g, "helper", kind).await;
         let frames = spoken_turn_for_tests(&g.state, tid, vec![audio()]).await;
-        let error = &frames
-            .iter()
-            .find(|(e, _)| e == "error")
-            .unwrap_or_else(|| panic!("{kind}: refused: {frames:?}"))
-            .1;
-        assert_eq!(error["code"], "audio_not_local", "{kind}: {frames:?}");
         assert!(
-            error["message"].as_str().unwrap().contains("cloud-cloud"),
-            "{kind}: the fallback is named: {error}"
-        );
-        assert_eq!(last_frame(&frames)["aborted"], true);
-        // The walk read the fallback's catalog to judge it, as it does for
-        // any request; the refused route itself got nothing.
-        let reached = g.cloud_requests().await;
-        assert!(
-            reached.iter().all(|r| r == "GET /v1/models"),
-            "{kind}: no chat call reached the cloud: {reached:?}"
+            !frames.iter().any(|(e, _)| e == "error"),
+            "{kind}: not refused: {frames:?}"
         );
         let sent = streamed(&g);
         assert_eq!(
@@ -289,6 +273,13 @@ async fn a_guests_repick_to_its_cloud_fallback_never_gets_the_audio() {
             "{kind}: the candidate heard it once: {sent:?}"
         );
         assert_eq!(audio_parts(&sent[0]).len(), 1);
+        let cloud = g.cloud_bodies().await;
+        assert_eq!(cloud.len(), 1, "{kind}: {cloud:?}");
+        assert_eq!(
+            audio_parts(&cloud[0]).len(),
+            1,
+            "{kind}: the fallback heard it"
+        );
     }
 }
 

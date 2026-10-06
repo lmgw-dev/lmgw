@@ -23,7 +23,7 @@ use crate::support::realtime_audio::Asr;
 
 #[tokio::test]
 async fn a_failed_transcription_plays_the_reply_and_marks_the_row() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     // The model hears the turn and answers before the transcription fails.
     let release = Arc::new(Notify::new());
@@ -86,7 +86,7 @@ async fn a_failed_transcription_plays_the_reply_and_marks_the_row() {
 /// words to answer, ends quietly: no row, no reply.
 #[tokio::test]
 async fn a_failed_transcription_before_the_model_answered_is_said_and_ends_the_turn() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let runs = g.gate_runs();
     let (tid, mut ws) = session(&w).await;
     w.asr.push(Asr::Status(
@@ -116,7 +116,7 @@ async fn a_failed_transcription_before_the_model_answered_is_said_and_ends_the_t
 /// failure is said as with audio input off, and nothing is written.
 #[tokio::test]
 async fn a_turn_whose_speech_recognition_went_away_is_never_heard() {
-    let (_g, w) = hearing("local", 24 * GIB, 30).await;
+    let (_g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     crate::realtime_chat_thread::settings(&w.state, |s| {
         s.chat_stt_alias = String::new();
@@ -144,7 +144,7 @@ async fn a_turn_whose_speech_recognition_went_away_is_never_heard() {
 /// and the reply nobody heard is not kept.
 #[tokio::test]
 async fn a_session_closing_mid_hold_keeps_the_words_and_drops_the_reply() {
-    let (g, w) = hearing("local", 24 * GIB, 30).await;
+    let (g, w) = hearing("on", 24 * GIB, 30).await;
     let (tid, mut ws) = session(&w).await;
     let release = Arc::new(Notify::new());
     w.asr

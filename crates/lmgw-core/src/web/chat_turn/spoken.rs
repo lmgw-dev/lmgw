@@ -10,12 +10,16 @@
 //!   message. A stored row whose transcription failed and that has no words
 //!   goes as [`NOT_TRANSCRIBED`]. Only the turn being answered goes as
 //!   audio: earlier spoken turns are rows, and replay as their transcript.
-//! - **Local only.** A turn whose spoken parts carry audio goes only to a
-//!   route this lmgw runs ([`local_only`], decision 5): `fit_route` refuses
-//!   any other with `audio_not_local` before a byte is sent — the admitted
-//!   route and every one the gate re-routes the send to (a fallback at
-//!   admission, a ladder climb's, a candidate alias's next pick). An
-//!   attachment's audio is not local only: attaching is an explicit act.
+//! - **Only to a model that hears.** A turn whose spoken parts carry audio
+//!   goes only to a route whose answering model takes it ([`may_hear`]:
+//!   `capabilities::hears`, the verdict's predicate): `fit_route` refuses
+//!   any other with `audio_input_unsupported` before a byte is sent — the
+//!   admitted route and every one the gate re-routes the send to (a
+//!   fallback at admission, a ladder climb's, a candidate alias's next
+//!   pick). Where the model runs plays no role (changed 2026-10-06, the
+//!   owner's ruling): a configured fallback is always used, and hears the
+//!   turn when it can. Attachments have their own capability check
+//!   (`chat_attach_gate`).
 //! - **The barrier** ([`barrier`]): the reply is saved only once the journal
 //!   has said what became of the user row, so the reply row follows it; on
 //!   a veto, a row the journal could not write, or a journal gone, nothing
@@ -33,10 +37,13 @@ use std::future::Future;
 
 use tokio::sync::watch;
 
+use crate::capabilities::hears;
 use crate::config::Route;
 use crate::error::GatewayError;
 use crate::ir::ContentPart;
+use crate::state::SharedState;
 use crate::store::ChatMessageRow;
+use crate::vram::LocalHold;
 
 mod seam;
 #[cfg(test)]
@@ -44,8 +51,9 @@ mod tests;
 
 pub use seam::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnForTests};
 
-/// The code a route the audio may not go to is refused with (§3.4).
-pub(crate) const AUDIO_NOT_LOCAL: &str = "audio_not_local";
+/// The code a route whose model cannot take the audio is refused with
+/// (§3.4).
+pub(crate) const AUDIO_NOT_HEARD: &str = "audio_input_unsupported";
 
 /// What a spoken user row with no words goes to a model as: its
 /// transcription failed, and the model heard it once (§3.4).
@@ -75,25 +83,33 @@ pub(crate) enum UserRow {
 /// [`UserRow`] as the journal sets it: `None` until it said.
 pub(crate) type RowWatch = watch::Receiver<Option<UserRow>>;
 
-/// Whether `spoken` carries audio: such a turn is local only (§3.4).
+/// Whether `spoken` carries audio: such a turn goes only to a model that
+/// hears it (§3.4).
 pub(crate) fn hears(spoken: Option<&[ContentPart]>) -> bool {
     spoken.is_some_and(|parts| parts.iter().any(|p| matches!(p, ContentPart::Audio { .. })))
 }
 
-/// Refuse `route` for a turn whose spoken parts carry audio, unless this
-/// lmgw runs it (`vram::classify`, decision 5): a llama-server elsewhere on
-/// the network is no more local here than a cloud API. `audio_not_local`,
-/// a 400, before anything is sent.
-pub(crate) fn local_only(route: &Route) -> Result<(), GatewayError> {
-    if crate::vram::classify(route).is_some() {
+/// Refuse `route` for a turn whose spoken parts carry audio unless
+/// `answering` — the model that answers on it, as a turn names who
+/// answered — takes it ([`crate::capabilities::hears`], with what the
+/// server `hold` claims said in `/props`): `audio_input_unsupported`, a
+/// 400, before anything is sent. Unknown is no (decision D1).
+pub(crate) async fn may_hear(
+    state: &SharedState,
+    route: &Route,
+    hold: Option<&LocalHold>,
+    answering: hears::Model<'_>,
+) -> Result<(), GatewayError> {
+    let facts = hears::server_facts(state, hold, route);
+    let heard = hears::hears(state, answering, route, facts.as_deref()).await;
+    let Some(why) = heard.why(answering.name()) else {
         return Ok(());
-    }
+    };
     Err(GatewayError::InvalidRequest {
-        code: AUDIO_NOT_LOCAL,
+        code: AUDIO_NOT_HEARD,
         message: format!(
-            "this turn carries the user's speech as audio, which goes only to a model this lmgw \
-             runs, and '{}' (upstream '{}') is not one: the audio was not sent",
-            route.upstream_model, route.upstream.name
+            "{why} (upstream '{}'), so nothing was sent",
+            route.upstream.name
         ),
     })
 }

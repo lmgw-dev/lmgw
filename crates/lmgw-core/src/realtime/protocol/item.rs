@@ -1,12 +1,17 @@
 //! Conversation items (realtime design §7.1): user, assistant and system
-//! messages, function calls and their outputs.
+//! messages, function calls and their outputs, and server-side MCP calls and
+//! listings (realtime-server-tools design §1.2, §2.2).
 //!
 //! Ids are optional on input — `conversation.item.create` normally arrives
 //! without one, and the session mints `item_…` — and always set on the
-//! server's echo. `mcp_*` items and `input_image` content are §19 and fail
-//! to parse, which the client hears as an `error` naming the variant.
+//! server's echo. The approval items (realtime-server-tools §6) and
+//! `input_image` content (§19) fail to parse: a client's approval item is
+//! refused by name (`conversation`), anything else as an `error` naming the
+//! variant.
 
 use serde::{Deserialize, Serialize};
+
+use super::mcp::{McpCallItem, McpListToolsItem};
 
 /// One conversation item, tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15,6 +20,10 @@ pub enum Item {
     Message(MessageItem),
     FunctionCall(FunctionCallItem),
     FunctionCallOutput(FunctionCallOutputItem),
+    /// Boxed: its always-written fields make it twice any other item, and
+    /// every event that carries an item would pay for it.
+    McpCall(Box<McpCallItem>),
+    McpListTools(McpListToolsItem),
 }
 
 impl Item {
@@ -23,6 +32,8 @@ impl Item {
             Self::Message(m) => m.id.as_deref(),
             Self::FunctionCall(c) => c.id.as_deref(),
             Self::FunctionCallOutput(o) => o.id.as_deref(),
+            Self::McpCall(c) => c.id.as_deref(),
+            Self::McpListTools(l) => l.id.as_deref(),
         }
     }
 
@@ -32,6 +43,8 @@ impl Item {
             Self::Message(m) => &mut m.id,
             Self::FunctionCall(c) => &mut c.id,
             Self::FunctionCallOutput(o) => &mut o.id,
+            Self::McpCall(c) => &mut c.id,
+            Self::McpListTools(l) => &mut l.id,
         };
         if slot.is_none() {
             *slot = Some(mint());

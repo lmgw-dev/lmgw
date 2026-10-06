@@ -15,9 +15,19 @@ use crate::state::SharedState;
 /// Probe an upstream's model list with its stored credentials. `Ok("")` means
 /// reachable; the error carries the upstream's own complaint, truncated.
 pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<String, String> {
+    // A llama.cpp row's `/props` facts are asked again, now (llama egress
+    // §4.2): of its server, and of a router about what its aliases name.
+    let aliased: Vec<String> = state
+        .snapshot()
+        .aliases
+        .values()
+        .filter(|a| a.enabled && a.upstream_id == u.id)
+        .map(|a| a.upstream_model_id.clone())
+        .collect();
+    state.llama_facts.retest(&state.http, u, aliased);
     let base = u.base();
     let rb = match u.protocol {
-        Protocol::Openai => {
+        Protocol::Openai | Protocol::LlamaCpp => {
             let mut rb = state.http.get(format!("{base}/models"));
             if let Some(k) = u.api_key.as_deref().filter(|k| !k.is_empty()) {
                 rb = rb.bearer_auth(k);

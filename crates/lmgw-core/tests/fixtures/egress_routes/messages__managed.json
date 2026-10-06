@@ -1,0 +1,73 @@
+{
+  "requests": [
+    {
+      "body": "{\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":64,\"messages\":[{\"content\":\"Be brief.\",\"role\":\"system\"},{\"content\":\"Show me the weather chart.\",\"role\":\"user\"},{\"content\":\"Fetching it.\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Berlin\\\"}\",\"name\":\"chart\"},\"id\":\"toolu_1\",\"type\":\"function\"}]},{\"content\":\"The chart:\\n[image/png image, 12 base64 bytes — omitted: this upstream's tool-result slot is text-only]\",\"role\":\"tool\",\"tool_call_id\":\"toolu_1\"},{\"content\":\"What does it show?\",\"role\":\"user\"}],\"model\":\"chat-model\",\"reasoning_budget_tokens\":1024,\"thinking_budget_tokens\":1024,\"tools\":[{\"function\":{\"description\":\"A weather chart.\",\"name\":\"chart\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"type\":\"object\"}},\"type\":\"function\"}]}",
+      "body_json": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        },
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "Show me the weather chart.",
+            "role": "user"
+          },
+          {
+            "content": "Fetching it.",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"city\":\"Berlin\"}",
+                  "name": "chart"
+                },
+                "id": "toolu_1",
+                "type": "function"
+              }
+            ]
+          },
+          {
+            "content": "The chart:\n[image/png image, 12 base64 bytes — omitted: this upstream's tool-result slot is text-only]",
+            "role": "tool",
+            "tool_call_id": "toolu_1"
+          },
+          {
+            "content": "What does it show?",
+            "role": "user"
+          }
+        ],
+        "model": "chat-model",
+        "reasoning_budget_tokens": 1024,
+        "thinking_budget_tokens": 1024,
+        "tools": [
+          {
+            "function": {
+              "description": "A weather chart.",
+              "name": "chart",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ]
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

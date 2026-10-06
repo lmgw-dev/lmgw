@@ -4,19 +4,20 @@
 //!
 //! **The window the input is judged against** ([`Core::listen`]) is the
 //! writer's record of the latest speaking response's playback
-//! (`writer::playback`). While that response is still producing audio the
-//! window is open-ended: a pause while the next clause is synthesized is
-//! still the middle of the answer — and so it is while any of its audio
-//! still waits in the writer (B3 review 8). Then the window ends where the
-//! client's playback does, plus a **margin** (B3 review 2): the window is
-//! the server's release time, and the client plays it a transit and its
-//! output buffer later; the capture estimate is arrival-based, so the
-//! client's input transit and buffer make it later still. The two delays
-//! add — the earlier claim that they cancel was wrong — so the end used for
-//! membership is pushed back by the liveness ping's round trip, when one
-//! was measured, plus `echo_tail_ms` for what the round trip cannot see
-//! (the client's audio buffers, Bluetooth, the room's reverberation). Both
-//! the barge-in gate and half duplex judge by that end; the cut itself
+//! (`writer::playback`). While that response is still producing audio — until
+//! its speaker handed the last clause (`producing`, realtime-server-tools
+//! §2.5) — the window is open-ended: a pause while the next clause is
+//! synthesized is still the middle of the answer — and so it is while any of
+//! its audio still waits in the writer (B3 review 8). Then the window ends
+//! where the client's playback does, plus a **margin** (B3 review 2): the
+//! window is the server's release time, and the client plays it a transit and
+//! its output buffer later; the capture estimate is arrival-based, so the
+//! client's input transit and buffer make it later still. The two delays add
+//! — the earlier claim that they cancel was wrong — so the end used for
+//! membership is pushed back by the liveness ping's round trip, when one was
+//! measured, plus `echo_tail_ms` for what the round trip cannot see (the
+//! client's audio buffers, Bluetooth, the room's reverberation). Both the
+//! barge-in gate and half duplex judge by that end; the cut itself
 //! (`PlayedOut`) still judges by the modelled end, since response.done goes
 //! out there.
 //!
@@ -31,6 +32,9 @@
 //!   marked cancelled, WP3 review H4);
 //! - a spoken response whose audio had played out when the speech began —
 //!   it is finishing, not interrupted;
+//! - a response of which only its server-side calls are left, nothing of it
+//!   playing — the turn is an ordinary one, and the response finishes with
+//!   their results (`producing`, realtime-server-tools §2.5);
 //! - anything else is cut, when `interrupt_response` says so — or when it
 //!   is held for a transcript, so nobody heard it (`held`).
 //!
@@ -78,6 +82,9 @@ pub(crate) enum Interruption {
     Generated { id: String },
     /// Its audio had played out when the speech began.
     PlayedOut { id: String },
+    /// Only its server-side calls run, and nothing of it plays: the turn is
+    /// an ordinary one (`producing`).
+    ToolsRun { id: String },
 }
 
 impl Core {
@@ -91,7 +98,7 @@ impl Core {
                 && self
                     .active
                     .as_ref()
-                    .is_some_and(|a| a.output.gen == pb.gen && a.phase != Phase::Playing);
+                    .is_some_and(|a| a.output.gen == pb.gen && a.producing());
             // Audio of it still waits to leave: the answer is not over,
             // whatever the end of what left says (B3 review 8).
             let open = producing || pb.waiting;
@@ -108,16 +115,22 @@ impl Core {
         // What a turn starting now cancels (`Self::interruption`): a frame
         // inside the window has not played out, so only the closed items
         // and `interrupt_response` decide — and a held response nobody
-        // heard is cut whatever it says (`held`).
+        // heard is cut whatever it says (`held`). A response of which only
+        // its server-side calls are left is neither cut nor being heard
+        // (`producing`).
         let interrupts = super::super::input::interrupt_response(&self.session) || self.holding();
+        let calls_only = self
+            .active
+            .as_ref()
+            .is_some_and(|a| self.only_tools_run(a, Instant::now()));
         let cuts = self
             .active
             .as_ref()
-            .filter(|a| a.cancellable() && interrupts)
+            .filter(|a| a.cancellable() && interrupts && !calls_only)
             .map(|a| a.output.gen);
         Listen {
             view,
-            heard: self.active.as_ref().is_some_and(|a| self.heard(a)),
+            heard: !calls_only && self.active.as_ref().is_some_and(|a| self.heard(a)),
             cuts,
         }
     }
@@ -181,6 +194,9 @@ impl Core {
         let ended = playback.filter(|p| !p.waiting).and_then(|p| p.end());
         if a.phase == Phase::Playing && ended.is_some_and(|end| at >= end) {
             return Interruption::PlayedOut { id };
+        }
+        if self.only_tools_run(a, at) {
+            return Interruption::ToolsRun { id };
         }
         Interruption::Cuts { id, into_ms }
     }

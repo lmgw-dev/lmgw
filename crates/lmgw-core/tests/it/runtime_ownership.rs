@@ -399,14 +399,14 @@ async fn a_join_never_starts_a_model_that_is_absent_or_stopping() {
     assert_eq!(fake.runs(), 1, "the join started nothing");
 }
 
-/// A join on a start in flight waits for it and shares it; a start whose
-/// client went away leaves the model absent, and the join says "not loaded"
-/// instead of taking the start over, as an `acquire` would.
+/// A join on a start in flight waits for it and shares it — also when the
+/// request that started it went away meanwhile: the start is the registry's
+/// (`owned.rs`), so it lands regardless, and the join holds the one claim on
+/// it. A join never starts anything itself.
 #[tokio::test]
 async fn a_join_shares_a_start_in_flight_but_never_takes_one_over() {
     let c = healthy().await;
     let fake = Arc::new(Fake::default());
-    // Two starts, one port each: the abandoned one took its port with it.
     let reg = registry(fake.clone(), vec![c.address().port(), c.address().port()]);
     let rt = runtime("m");
     let go = fake.hold_runs();
@@ -424,10 +424,22 @@ async fn a_join_shares_a_start_in_flight_but_never_takes_one_over() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!joiner.is_finished(), "it waits on the start");
     starter.abort();
-    let joined = joiner.await.unwrap().unwrap();
-    assert!(joined.is_none(), "not loaded, and not started by the join");
-    assert!(view(&reg, "m").is_none());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !joiner.is_finished(),
+        "the start goes on without its requester, and the join with it"
+    );
+    go.send_replace(true);
+    let joined = joiner.await.unwrap().unwrap().expect("the start it joined");
+    assert_eq!(
+        view(&reg, "m").unwrap().in_flight,
+        1,
+        "the join's claim, and none for the requester that went away"
+    );
     assert_eq!(fake.runs(), 1);
+    drop(joined);
+    reg.stop(Class::Chat, "m", false).await.unwrap();
+    go.send_replace(false);
 
     // Shared: the start lands, and the join holds a claim on it.
     let starter = tokio::spawn({

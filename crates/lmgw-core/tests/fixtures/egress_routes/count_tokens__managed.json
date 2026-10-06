@@ -1,0 +1,18 @@
+{
+  "requests": [
+    {
+      "body": "{\"content\":\"Hello, world!\",\"model\":\"chat-model\"}",
+      "body_json": {
+        "content": "Hello, world!",
+        "model": "chat-model"
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/tokenize"
+    }
+  ],
+  "status": 200
+}

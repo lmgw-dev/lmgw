@@ -1,0 +1,53 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"Weather in Berlin?\",\"role\":\"user\"}],\"model\":\"the-model\",\"tool_choice\":\"required\",\"tools\":[{\"function\":{\"description\":\"The weather in a city.\",\"name\":\"get_weather\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}},\"type\":\"function\"},{\"function\":{\"description\":null,\"name\":\"no_description\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"}]}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "Weather in Berlin?",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "tool_choice": "required",
+      "tools": [
+        {
+          "function": {
+            "description": "The weather in a city.",
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": null,
+            "name": "no_description",
+            "parameters": {
+              "properties": {},
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

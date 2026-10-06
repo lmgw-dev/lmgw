@@ -1,0 +1,31 @@
+{
+  "keyless": {
+    "guessed": 1
+  },
+  "plans": [
+    {
+      "base_url": "http://generic.test",
+      "plan": {
+        "guessed": 1
+      }
+    },
+    {
+      "base_url": "http://generic.test/v1/",
+      "plan": {
+        "guessed": 1
+      }
+    },
+    {
+      "base_url": "http://generic.test/llama/v1",
+      "plan": {
+        "guessed": 1
+      }
+    },
+    {
+      "base_url": "http://generic.test/v1/v1",
+      "plan": {
+        "guessed": 1
+      }
+    }
+  ]
+}

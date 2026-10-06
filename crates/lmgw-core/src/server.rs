@@ -46,6 +46,11 @@ pub fn build_router(state: SharedState) -> Router {
         // slashes (`kilo/anthropic/claude-sonnet-5`), so the id is everything
         // after `/models/` (model capabilities design §2.2).
         .route("/models/{*id}", get(model_by_id))
+        // The MCP labels a caller may attach to a `/v1/realtime` or
+        // `/v1/responses` tool (realtime-server-tools design §1.4): the list
+        // connects nothing, the detail lists one label's tools.
+        .route("/mcp/servers", get(crate::mcp::discovery::list))
+        .route("/mcp/servers/{label}", get(crate::mcp::discovery::detail))
         // This document, filtered to the inference plane (api-docs design
         // §4.11): the same generated document as `/api/openapi.json`, minus
         // everything an inference-only credential cannot reach.
@@ -119,7 +124,15 @@ pub fn build_router(state: SharedState) -> Router {
         // cross-site page never has the cookie sent (`SameSite=Strict`), a
         // same-site page on another port is refused by §3.6, and a
         // credential-less request reaches only `Public` routes.
-        .layer(tower_http::cors::CorsLayer::permissive())
+        //
+        // The request headers are mirrored rather than answered with `*`: the
+        // Fetch standard never lets the wildcard cover `Authorization`, so a
+        // preflight answered `*` blocks exactly the browser client with a
+        // bearer this layer is here for.
+        .layer(
+            tower_http::cors::CorsLayer::permissive()
+                .allow_headers(tower_http::cors::AllowHeaders::mirror_request()),
+        )
         // Second from the outside (§3.11, origins §4.2): a request whose `Host`
         // is an agent origin is answered by that agent's container here, so it
         // is **inside** the trace — both planes are in the log — and **outside**
@@ -191,6 +204,8 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/tokenize", Cap::Inference),
     ("GET", "/v1/models", Cap::Inference),
     ("GET", "/v1/models/{*id}", Cap::Inference),
+    ("GET", "/v1/mcp/servers", Cap::Inference),
+    ("GET", "/v1/mcp/servers/{label}", Cap::Inference),
     ("GET", "/v1/openapi.json", Cap::Inference),
     ("POST", "/v1/audio/speech", Cap::Inference),
     ("POST", "/v1/audio/transcriptions", Cap::Inference),

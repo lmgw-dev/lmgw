@@ -131,13 +131,15 @@ pub(super) const CHAT_VOICE: &[Def] = &[
         Ctl::Choice(AUDIO_INPUTS),
     )
     .hint(
-        "experimental; local models only: a voice turn goes to the chat model as audio when it \
-         is a local model lmgw runs that takes audio — a cloud chat model never gets audio. \
-         Speech to text still transcribes every turn either way, so a cloud speech-to-text \
-         model still receives the audio (the transcript is what is saved); a thread can \
-         override it",
+        "experimental: a voice turn goes to the chat model as audio when the model that answers \
+         it takes audio input. A configured fallback is always used: one that takes audio hears \
+         the turn wherever it runs. A model lmgw cannot judge reads the transcript until its \
+         alias's capabilities override says task chat and input modalities text and audio (a \
+         passthrough model needs an alias). Speech to text still transcribes every turn either \
+         way, so a cloud speech-to-text model still receives the audio (the transcript is what \
+         is saved); a thread can override it",
     )
-    .terms("chat voice audio input hear omni multimodal gemma local experimental"),
+    .terms("chat voice audio input hear omni multimodal gemma fallback cloud experimental"),
 ];
 
 /// A language box, and beneath it where the saved settings' speech model of

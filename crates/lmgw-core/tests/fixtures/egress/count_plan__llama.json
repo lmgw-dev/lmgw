@@ -1,0 +1,18 @@
+{
+  "plan": {
+    "request": {
+      "body": "{\"content\":\"Hello, world! How are you?\",\"model\":\"the-model\"}",
+      "body_json": {
+        "content": "Hello, world! How are you?",
+        "model": "the-model"
+      },
+      "headers": {
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "url": "http://llama.test/tokenize"
+    }
+  }
+}

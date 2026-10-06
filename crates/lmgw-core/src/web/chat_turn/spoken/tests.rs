@@ -41,7 +41,13 @@ fn built(history: &[ChatMessageRow], spoken: Option<&[ContentPart]>) -> Vec<Mess
         system_prompt: "Be brief.".into(),
         ..Default::default()
     };
-    build_messages(&thread, "m", (history, spoken), &HashMap::new(), None)
+    build_messages(
+        &thread,
+        "m",
+        (history, spoken),
+        (&HashMap::new(), false),
+        None,
+    )
 }
 
 #[test]
@@ -135,22 +141,90 @@ fn without_spoken_parts_the_messages_are_the_historys() {
     assert!(hears(Some(&[ContentPart::text("a"), audio()])));
 }
 
+/// Capability, not locality (changed 2026-10-06): a cloud model that takes
+/// audio gets it; one that does not, or that lmgw cannot judge, or whose
+/// API has no audio part, is refused before anything is sent.
 #[tokio::test]
-async fn audio_goes_only_to_a_route_this_lmgw_runs() {
+async fn audio_goes_only_to_a_model_that_takes_it_wherever_it_runs() {
+    use crate::capabilities::hears::Model;
+    use crate::config::{ModelAlias, Protocol, Upstream, UpstreamKind};
     let state = AppState::init_for_tests().await.unwrap();
+    let mut snap = (*state.snapshot()).clone();
+    let upstream = |id: i64, protocol| Upstream {
+        id,
+        name: format!("up{id}"),
+        protocol,
+        kind: UpstreamKind::Generic,
+        base_url: "http://127.0.0.1:9/v1".into(),
+        api_key: None,
+        extra_headers: vec![],
+        timeout_ms: 1_000,
+        enabled: true,
+        expose_all: false,
+        expose_prefix: String::new(),
+        supports_responses: false,
+        llama: None,
+    };
+    snap.upstreams = HashMap::from([
+        (7, upstream(7, Protocol::Openai)),
+        (8, upstream(8, Protocol::Anthropic)),
+    ]);
+    let alias = |name: &str, up: i64, modalities: Option<&[&str]>| {
+        (
+            name.to_string(),
+            ModelAlias {
+                id: 1,
+                alias: name.into(),
+                upstream_id: up,
+                upstream_model_id: name.into(),
+                param_overrides: Default::default(),
+                enabled: true,
+                capabilities_override: modalities.map(|m| {
+                    serde_json::json!({ "capabilities": { "task": "chat", "input_modalities": m } })
+                }),
+            },
+        )
+    };
+    snap.aliases = HashMap::from([
+        alias("gpt", 7, Some(&["text", "audio"])),
+        alias("texty", 7, Some(&["text"])),
+        alias("unsaid", 7, None),
+        alias("claude", 8, Some(&["text", "audio"])),
+    ]);
+    state.set_snapshot_for_tests(snap);
     let snap = state.snapshot();
-    assert!(local_only(&snap.chat_local_route("gemma")).is_ok());
-    let mut cloud = snap.chat_local_route("gpt");
-    cloud.upstream.id = 7;
-    cloud.upstream.name = "openai".into();
-    let e = local_only(&cloud).unwrap_err();
-    assert_eq!(e.code(), AUDIO_NOT_LOCAL);
+    let refused = |name: &'static str| {
+        let state = state.clone();
+        let route = snap.resolve(name).unwrap();
+        async move {
+            may_hear(&state, &route, None, Model::Named(name))
+                .await
+                .unwrap_err()
+        }
+    };
+    let gpt = snap.resolve("gpt").unwrap();
+    assert!(may_hear(&state, &gpt, None, Model::Named("gpt"))
+        .await
+        .is_ok());
+    let e = refused("texty").await;
+    assert_eq!(e.code(), AUDIO_NOT_HEARD);
     assert_eq!(e.http_status().as_u16(), 400);
-    let msg = e.to_string();
-    assert!(msg.contains("'gpt' (upstream 'openai')"), "{msg}");
-    // An aux, audio or image route lmgw runs is local too; the gate never
-    // sends a chat request to one.
-    assert!(local_only(&snap.aux_local_route("embed")).is_ok());
+    assert_eq!(
+        e.to_string(),
+        "texty does not take audio input (upstream 'up7'), so nothing was sent"
+    );
+    assert_eq!(
+        refused("unsaid").await.to_string(),
+        "lmgw cannot tell whether unsaid takes audio (upstream 'up7'), so nothing was sent"
+    );
+    assert!(refused("claude")
+        .await
+        .to_string()
+        .starts_with("claude is served over the Anthropic API"));
+    // Judged by the name of the model that answers, as a turn names it.
+    assert!(may_hear(&state, &gpt, None, Model::Named("texty"))
+        .await
+        .is_err());
 }
 
 /// The barrier, as the journal settles it.

@@ -384,7 +384,7 @@ async fn messages_count_on_remote_llama_flattens_via_tokenize() {
         .await;
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -647,7 +647,7 @@ async fn counts_are_not_logged_but_scope_refusals_are() {
         .await;
     let (state, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -755,7 +755,7 @@ async fn a_spent_budget_never_refuses_a_count() {
         .await;
     let (state, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -865,7 +865,7 @@ async fn tokenize_forwards_the_llama_shape_verbatim() {
         .await;
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -893,7 +893,7 @@ async fn tokenize_forwards_the_llama_shape_verbatim() {
 async fn tokenize_without_model_is_a_llama_400() {
     let (_s, gw) = gateway(
         "http://127.0.0.1:1",
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -985,7 +985,7 @@ async fn tokenize_relays_upstream_errors() {
         .await;
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -1034,7 +1034,7 @@ async fn tokenize_reads_json_whatever_the_content_type() {
         .await;
     let (_s, gw) = gateway(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -1062,7 +1062,7 @@ async fn tokenize_reads_json_whatever_the_content_type() {
 async fn tokenize_over_the_body_limit_is_413() {
     let (state, gw) = gateway(
         "http://127.0.0.1:1",
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )
@@ -1184,7 +1184,7 @@ async fn count_tokens_flags_message_framing() {
         .await;
     let (_s, gw) = gateway(
         &llama.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         "tgt-model",
     )

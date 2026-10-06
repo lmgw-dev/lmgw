@@ -1,0 +1,21 @@
+{
+  "requests": [
+    {
+      "body": "{\"input\":[\"alpha\",\"beta\"],\"model\":\"emb\"}",
+      "body_json": {
+        "input": [
+          "alpha",
+          "beta"
+        ],
+        "model": "emb"
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/embeddings"
+    }
+  ],
+  "status": 200
+}

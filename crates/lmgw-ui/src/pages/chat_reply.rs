@@ -20,6 +20,9 @@ pub(super) struct Finished {
     pub id: Option<i64>,
     pub model: Option<String>,
     pub answered_by: Option<String>,
+    /// A fallback that cannot see answered: what it got in the images'
+    /// place (`images_note`, only on such a reply).
+    pub images_note: Option<String>,
 }
 
 impl Finished {
@@ -35,6 +38,7 @@ impl Finished {
             id: done["message_id"].as_i64().filter(|id| *id > 0 && saved),
             model: text("model"),
             answered_by: text("answered_by"),
+            images_note: text("images_note"),
         }
     }
 

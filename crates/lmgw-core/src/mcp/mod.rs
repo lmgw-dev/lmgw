@@ -13,6 +13,9 @@
 //! `rmcp` types are confined to this module boundary (§19) so a version bump is
 //! localized — `web/`, `config.rs`, and `store.rs` never name an `rmcp::` type.
 
+/// `GET /v1/mcp/servers[/{label}]`: the labels a caller may attach
+/// (realtime-server-tools design §1.4).
+pub(crate) mod discovery;
 pub mod docs;
 pub mod exec;
 pub mod handler;
@@ -20,8 +23,12 @@ pub mod ingress;
 pub mod inventory;
 /// The `kb__*` knowledge-base toolset (chat-complete design §9.4).
 pub mod kb;
+mod lazy_list;
+mod listed_call;
 pub mod scope;
 pub mod selfadmin;
+/// The `{"type": "mcp"}` entry both `/v1/responses` and `/v1/realtime` take.
+pub mod spec;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -616,6 +623,10 @@ pub enum CallError {
     Timeout { server: String, timeout_ms: u64 },
     /// The upstream peer returned a transport/service error.
     Upstream { server: String, detail: String },
+    /// The name was listed from `server`, and routes to another server now
+    /// ([`McpManager::call_listed`]): refused rather than run where the
+    /// caller was never shown it.
+    Relisted { name: String, server: String },
 }
 
 impl CallError {
@@ -627,6 +638,7 @@ impl CallError {
             Self::NotConnected { .. } => "mcp_not_connected",
             Self::Timeout { .. } => "mcp_timeout",
             Self::Upstream { .. } => "mcp_upstream",
+            Self::Relisted { .. } => "tool_relisted",
         }
     }
 
@@ -635,7 +647,7 @@ impl CallError {
     /// it is the same lookup miss — the *message* is what carries the reason.
     pub fn rpc_code(&self) -> i64 {
         match self {
-            Self::ToolNotFound(_) | Self::Disabled(_) => -32601,
+            Self::ToolNotFound(_) | Self::Disabled(_) | Self::Relisted { .. } => -32601,
             _ => -32603,
         }
     }
@@ -648,7 +660,8 @@ impl CallError {
             Self::ToolNotFound(_) | Self::Disabled(_) => None,
             Self::NotConnected { server, .. }
             | Self::Timeout { server, .. }
-            | Self::Upstream { server, .. } => Some(server),
+            | Self::Upstream { server, .. }
+            | Self::Relisted { server, .. } => Some(server),
         }
     }
 }
@@ -667,6 +680,13 @@ impl std::fmt::Display for CallError {
             Self::Upstream { server, detail } => {
                 write!(f, "server '{server}' returned an error: {detail}")
             }
+            Self::Relisted { name, server } => write!(
+                f,
+                "tool '{name}' was listed from server '{server}', and since then the gateway \
+                 routes that name to another server (one without a tool prefix that offers a \
+                 tool of the same name): it was not run. List the label again to see what it \
+                 offers now"
+            ),
         }
     }
 }
@@ -1416,82 +1436,7 @@ impl McpManager {
     /// its `start_one` fires the `tools/list_changed` nudge (M5) so a client on
     /// the `GET /mcp` stream re-lists and picks it up without a manual refresh.
     pub async fn list_tools(&self, snap: &Snapshot) -> Aggregate {
-        let dev = self.dev_urls(snap).await;
-        // Which enabled servers aren't Ready yet? Those are the lazy-connect set.
-        let to_connect: Vec<&McpServer> = {
-            let conns = self.conns.read().await;
-            snap.mcp_servers
-                .values()
-                .filter(|s| s.enabled)
-                .filter(|s| self.listable_now(s, &dev))
-                .filter(|s| {
-                    conns
-                        .get(&s.id)
-                        .map(|c| c.status != McpStatus::Ready)
-                        .unwrap_or(true)
-                })
-                .collect()
-        };
-
-        if !to_connect.is_empty() {
-            // Kick each lazy connect as a **detached** task, then only *wait* up
-            // to the budget for readiness. Awaiting `start_one` inside a
-            // `timeout` would *cancel* it on expiry — dropping the in-flight
-            // connect future kills the `podman run` mid-pull (rmcp's child
-            // cleanup), so a server whose cold pull exceeds the budget could
-            // never become `Ready` (re-pulled from scratch every list). Detached,
-            // the pull completes in the background and the server is `Ready` by
-            // the client's **next** `tools/list`. `start_one`'s atomic
-            // `Connecting`-claim prevents a concurrent list/tick from spawning a
-            // duplicate `podman run`, and its failure bookkeeping always runs so
-            // backoff engages.
-            let ids: Vec<i64> = to_connect.iter().map(|s| s.id).collect();
-            let mut spawned = false;
-            if let Some(app) = self.app() {
-                for s in &to_connect {
-                    let app = app.clone();
-                    let server = (*s).clone();
-                    tokio::spawn(async move { app.mcp.start_one(&server).await });
-                }
-                spawned = true;
-            }
-
-            // Wait up to the per-server budget for the kicked connects to
-            // **settle**; the spawned tasks run on regardless of whether we keep
-            // waiting.
-            //
-            // Settled means `Ready` or `Error` — the two states `start_one`
-            // finishes in. Waiting on "left `Connecting`" instead was wrong in
-            // both directions: `reconcile` parks an `autostart = false` server at
-            // `Stopped`, and a server seen for the first time has no conn entry
-            // at all (`tokio::spawn` only queues the task, and the uncontended
-            // `conns.read()` below resolves without yielding, so this poll
-            // routinely runs before `start_one` claims its slot). Either way the
-            // loop broke on its first pass and returned an empty aggregate — so
-            // the *first* `tools/list` reported **no tools** for every lazy
-            // server, and only a second one saw them. That is precisely the wait
-            // this loop exists to perform (§9 "connect on first use").
-            //
-            // When nothing was spawned (no `AppState` yet) a missing entry stays
-            // settled, so this can never burn the full budget on a connect that
-            // will not happen.
-            let deadline = Instant::now() + LAZY_LIST_BUDGET;
-            loop {
-                let pending = {
-                    let conns = self.conns.read().await;
-                    ids.iter().any(|id| {
-                        conns.get(id).map_or(spawned, |c| {
-                            !matches!(c.status, McpStatus::Ready | McpStatus::Error(_))
-                        })
-                    })
-                };
-                if !pending || Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-
+        self.connect_lazily(snap, |_| true).await;
         self.aggregate(snap).await
     }
 
@@ -1535,12 +1480,24 @@ impl McpManager {
                 agg = self.aggregate(snap).await;
             }
         }
-        let (server_id, upstream_tool) = agg
+        let owner = agg
             .reverse
             .get(exposed_name)
             .cloned()
             .ok_or_else(|| CallError::ToolNotFound(exposed_name.to_string()))?;
+        self.call_on(snap, exposed_name, owner, arguments).await
+    }
 
+    /// The call of `exposed_name`, resolved to its owning server's id and
+    /// the upstream tool's own name: the lazy connect, the call itself and
+    /// its timeout ([`call`](Self::call)).
+    async fn call_on(
+        &self,
+        snap: &Snapshot,
+        exposed_name: &str,
+        (server_id, upstream_tool): (i64, String),
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(rmcp::model::CallToolResult, String), CallError> {
         let server = snap
             .mcp_servers
             .get(&server_id)

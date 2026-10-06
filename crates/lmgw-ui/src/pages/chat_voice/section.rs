@@ -253,7 +253,7 @@ pub(in crate::pages) fn VoiceSection(
             />
             {move || lang_error.get().map(|e| view! { <div class="notice warn">{e}</div> })}
             <div class="field" data-voice-audio-input="">
-                <label title="experimental; local models only: a cloud chat model never gets audio (a cloud speech-to-text model still transcribes each turn's audio)">
+                <label title="experimental: the model that answers the turn (the thread's, or a fallback it is handed to, wherever it runs) hears it when it takes audio input (a speech-to-text model still transcribes each turn)">
                     "Audio input in voice mode"
                 </label>
                 <Select value=audio_input options=audio_opts/>

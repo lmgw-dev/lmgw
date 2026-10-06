@@ -144,6 +144,40 @@ impl ToolResultBlock {
     }
 }
 
+/// Why [`flatten_tool_result`] leaves a binary block out: the slot it fills
+/// takes text only.
+pub const TEXT_ONLY_SLOT: &str = "this upstream's tool-result slot is text-only";
+
+/// What a tool-result image is, for a placeholder or a WARN: its mime and the
+/// length of its base64.
+pub fn tool_image_note(mime: &str, data: &str) -> String {
+    format!("{mime} image, {} base64 bytes", data.len())
+}
+
+/// The text a tool-result image that is not sent becomes: what it was, and
+/// `why` it is not there. [`flatten_tool_result`]'s `why` is
+/// [`TEXT_ONLY_SLOT`]; the llama.cpp egress names its own reasons (llama
+/// egress design §8.2).
+pub fn tool_image_placeholder(mime: &str, data: &str, why: &str) -> String {
+    format!("[{} — omitted: {why}]", tool_image_note(mime, data))
+}
+
+/// [`tool_image_note`] for any image a request carries, a user message's
+/// too: an inline one is its mime and base64 length, one by URL says so.
+pub fn image_note(mime: &str, source: &ImageSource) -> String {
+    match source {
+        ImageSource::Base64 { data } => tool_image_note(mime, data),
+        ImageSource::Url { .. } => format!("{mime} image by URL"),
+    }
+}
+
+/// [`tool_image_placeholder`] for any image a request carries: the same
+/// text, so a placeholder reads alike wherever an image was left out
+/// (`gate::fallback_images`: a fallback that cannot see).
+pub fn image_placeholder(mime: &str, source: &ImageSource, why: &str) -> String {
+    format!("[{} — omitted: {why}]", image_note(mime, source))
+}
+
 /// Render tool-result blocks down to a single string, for protocols whose
 /// tool-result slot is text-only (OpenAI chat-completions `role: "tool"`).
 ///
@@ -161,17 +195,12 @@ pub fn flatten_tool_result(blocks: &[ToolResultBlock]) -> (String, Vec<String>) 
                 parts.push(serde_json::to_string(value).unwrap_or_else(|_| "null".into()))
             }
             ToolResultBlock::Image { mime, data } => {
-                let note = format!("{mime} image, {} base64 bytes", data.len());
-                parts.push(format!(
-                    "[{note} — omitted: this upstream's tool-result slot is text-only]"
-                ));
-                notes.push(note);
+                parts.push(tool_image_placeholder(mime, data, TEXT_ONLY_SLOT));
+                notes.push(tool_image_note(mime, data));
             }
             ToolResultBlock::Audio { mime, data } => {
                 let note = format!("{mime} audio, {} base64 bytes", data.len());
-                parts.push(format!(
-                    "[{note} — omitted: this upstream's tool-result slot is text-only]"
-                ));
+                parts.push(format!("[{note} — omitted: {TEXT_ONLY_SLOT}]"));
                 notes.push(note);
             }
             ToolResultBlock::Resource { uri, mime, text } => match text {
@@ -264,8 +293,9 @@ pub struct ReasoningControl {
     /// template or the provider does not know is their 400, with their message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// Thinking-token budget (llama-server `reasoning_budget_tokens`,
-    /// Anthropic `thinking.budget_tokens`, Gemini `thinkingBudget`).
+    /// Thinking-token budget (llama-server `reasoning_budget_tokens` and
+    /// `thinking_budget_tokens`, Anthropic `thinking.budget_tokens`, Gemini
+    /// `thinkingBudget`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<i64>,
 }

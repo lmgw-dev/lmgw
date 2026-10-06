@@ -1094,7 +1094,7 @@ async fn apply_under_hold_reports_a_failed_stop_as_a_failure_not_as_held() {
     let msg = out["message"].as_str().unwrap_or_default();
     assert!(msg.contains("could NOT be stopped"), "{out}");
     assert!(
-        msg.contains("still be holding GPU memory") && msg.contains("nothing will retry"),
+        msg.contains("still be holding GPU memory") && msg.contains("later reaper ticks"),
         "and says what that leaves behind: {out}"
     );
 

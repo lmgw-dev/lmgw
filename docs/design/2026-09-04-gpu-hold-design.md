@@ -53,6 +53,18 @@ route `classify()`s as non-local. A fallback that is itself local, or does not
 resolve, is a 503 whose message says exactly that — a misconfiguration is
 surfaced, never silently downgraded to a refusal.
 
+*Changed 2026-10-06* (the owner's ruling: a configured fallback is always used,
+with no exception by content; only capability keeps content from a route): the
+one thing downstream that treats the fallback's route other than as if the
+client had named it is a request's images. A fallback whose exposed
+capabilities say `vision: false` gets them as placeholders ("omitted: the
+answering model cannot see images"), with a WARN naming it, instead of images
+its provider would refuse (`gate::fallback_images`; the route says it is a
+fallback, `Route::fallback`). `x-lmgw-fallback` names who answered and
+`x-lmgw-images-omitted` how many images it did not get; the Chat's reply says
+it in `images_note` and sends a PDF's pages as its text. A fallback that
+sees, or whose vision is unknown, gets the images.
+
 *(rev)* Known limit: on a deployment with a **bare** `expose_all` upstream,
 `resolve_passthrough` accepts any name, so a typo'd fallback resolves at set
 time and at request time and fails at the provider with the provider's own

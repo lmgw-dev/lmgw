@@ -1,0 +1,29 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":[{\"input_audio\":{\"data\":\"UklGRg==\",\"format\":\"wav\"},\"type\":\"input_audio\"}],\"role\":\"user\"}],\"model\":\"the-model\"}",
+    "body_json": {
+      "messages": [
+        {
+          "content": [
+            {
+              "input_audio": {
+                "data": "UklGRg==",
+                "format": "wav"
+              },
+              "type": "input_audio"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

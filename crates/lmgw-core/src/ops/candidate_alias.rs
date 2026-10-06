@@ -168,16 +168,10 @@ async fn build_and_validate(
         derived.common,
         &derived.unsupported_by,
     )?;
-
-    if let crate::config::FallbackRoute::Usable { alias: fb, .. } = snap.alias_fallback(&probe) {
-        if let Err(f) = candidates::derive::fallback_supports(state, &fb, enabled_facets).await {
-            return Err(format!(
-                "fallback '{fb}' does not support {} — disable that facet, or pick a fallback \
-                 that supports it",
-                f.as_str()
-            ));
-        }
-    }
+    // A fallback that lacks a facet the alias enables is no reason to refuse
+    // the save (changed 2026-10-06, the owner's ruling: a configured
+    // fallback is always used): it answers with what it cannot take
+    // degraded, which `derive`'s advisories say.
 
     Ok(CandidateAlias {
         capabilities_disabled: disabled_facets.names(),
@@ -379,22 +373,9 @@ async fn preview(state: &SharedState, snap: &Snapshot, p: &CandidateAliasPatch) 
     );
     let (enabled, fallback_usable) = match enabled_result {
         Ok((enabled, _disabled)) => {
-            let usable = match snap.alias_fallback(&probe) {
-                FallbackRoute::Usable { alias: fb, .. } => {
-                    match candidates::derive::fallback_supports(state, &fb, enabled).await {
-                        Ok(()) => true,
-                        Err(f) => {
-                            error.get_or_insert(format!(
-                                "fallback '{fb}' does not support {} — disable that facet, or \
-                                 pick a fallback that supports it",
-                                f.as_str()
-                            ));
-                            false
-                        }
-                    }
-                }
-                _ => false,
-            };
+            // One that lacks an enabled facet is usable all the same
+            // (changed 2026-10-06); `derive`'s advisories name what it lacks.
+            let usable = matches!(snap.alias_fallback(&probe), FallbackRoute::Usable { .. });
             (enabled, usable)
         }
         Err(e) => {

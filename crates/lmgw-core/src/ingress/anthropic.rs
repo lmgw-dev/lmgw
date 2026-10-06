@@ -323,21 +323,7 @@ fn parse_tool_result_content(v: Option<&Value>) -> Vec<ToolResultBlock> {
                 Some("text") => {
                     ToolResultBlock::text(b.get("text").and_then(Value::as_str).unwrap_or_default())
                 }
-                Some("image") => {
-                    let src = b.get("source");
-                    ToolResultBlock::Image {
-                        mime: src
-                            .and_then(|s| s.get("media_type"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("image/png")
-                            .to_string(),
-                        data: src
-                            .and_then(|s| s.get("data"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    }
-                }
+                Some("image") => tool_result_image(b),
                 _ => ToolResultBlock::Json { value: b.clone() },
             })
             .collect(),
@@ -346,6 +332,29 @@ fn parse_tool_result_content(v: Option<&Value>) -> Vec<ToolResultBlock> {
             value: other.clone(),
         }],
         None => Vec::new(),
+    }
+}
+
+/// A `tool_result` image block by its source. Base64 (or no source type) is
+/// the image itself. A URL is the resource naming it, as the Responses
+/// ingress names its URL images ([`crate::ingress::responses::url_image_resource`]):
+/// the IR's tool image carries bytes, and an image block with none used to
+/// reach every egress as an empty image. Any other source (a Files API
+/// `file`) is kept as the block's JSON, as every block this ingress does not
+/// read is.
+fn tool_result_image(b: &Value) -> ToolResultBlock {
+    let src = b.get("source");
+    let field = |k: &str| src.and_then(|s| s.get(k)).and_then(Value::as_str);
+    match field("type") {
+        Some("base64") | None => ToolResultBlock::Image {
+            mime: field("media_type").unwrap_or("image/png").to_string(),
+            data: field("data").unwrap_or_default().to_string(),
+        },
+        Some("url") => match field("url").filter(|u| !u.is_empty()) {
+            Some(url) => crate::ingress::responses::url_image_resource(url),
+            None => ToolResultBlock::Json { value: b.clone() },
+        },
+        Some(_) => ToolResultBlock::Json { value: b.clone() },
     }
 }
 

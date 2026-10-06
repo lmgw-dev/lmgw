@@ -33,7 +33,8 @@ fn message_schema() -> Value {
                 "description": "A string, or an array of parts: {type:text,text}, \
                     {type:image_url,image_url:{url}} (a plain URL or a data: URI), \
                     {type:input_audio,input_audio:{data,format}} (data: URI, or raw base64 \
-                    with format required).",
+                    with format required). A tool message keeps only its text, as OpenAI \
+                    defines it; any other part is dropped with a WARN naming it.",
             },
             "tool_call_id": {"type": "string", "description": "role: tool only."},
             "name": {"type": "string", "description": "role: tool only, forwarded as the \

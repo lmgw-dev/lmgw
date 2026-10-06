@@ -88,9 +88,15 @@ pub(in crate::realtime) fn has_words(item: &Item, hearing: Option<&Hearing>) -> 
     })
 }
 
-/// Something a response answers: words, or a tool's output.
+/// Something a response answers: words, or a tool's output — a client
+/// function's, or a server-side call's result (realtime-server-tools §2.6).
 fn answerable(item: &Item, hearing: Option<&Hearing>) -> bool {
-    has_words(item, hearing) || matches!(item, Item::FunctionCallOutput(_))
+    has_words(item, hearing)
+        || match item {
+            Item::FunctionCallOutput(_) => true,
+            Item::McpCall(c) => c.output.is_some() || c.error.is_some(),
+            _ => false,
+        }
 }
 
 /// A committed turn whose ASR call failed: audio with no transcript.
@@ -305,6 +311,54 @@ impl Core {
                 self.id(),
                 result.as_deref().unwrap_or_default()
             ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::super::super::conversation::Conversation;
+    use super::super::super::protocol::Item;
+    use super::transcripts_failed;
+
+    fn item(v: serde_json::Value) -> Item {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// A server-side call's result after a turn that failed to transcribe
+    /// is something to answer, as a function's output is; a call still
+    /// without one is not (realtime-server-tools §2.6).
+    #[test]
+    fn an_mcp_call_with_a_result_is_answerable() {
+        let failed = item(json!({"type": "message", "id": "item_u", "role": "user",
+                                 "content": [{"type": "input_audio"}]}));
+        let call = |result: serde_json::Value| {
+            let mut v = json!({"type": "mcp_call", "id": "item_c", "server_label": "a",
+                               "name": "echo", "arguments": "{}"});
+            if let serde_json::Value::Object(r) = result {
+                v.as_object_mut().unwrap().extend(r);
+            }
+            item(v)
+        };
+        let awaited = ["item_u".to_string()];
+        for (result, answerable) in [
+            (json!({"output": "done"}), true),
+            (
+                json!({"error": {"type": "tool_execution_error", "message": "no"}}),
+                true,
+            ),
+            (json!({}), false),
+        ] {
+            let mut conv = Conversation::default();
+            conv.append(failed.clone());
+            conv.append(call(result.clone()));
+            assert_eq!(
+                transcripts_failed(&conv, &awaited, None),
+                !answerable,
+                "{result}"
+            );
         }
     }
 }

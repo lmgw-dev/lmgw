@@ -131,9 +131,10 @@ pub(crate) fn request_fallback(snap: &Snapshot, hold: &LocalHold) -> FallbackRou
     }
 }
 
-/// The facets the fallback of the request `hold` serves must support: a
-/// candidate alias's enabled set, `None` for every other request
-/// ([`crate::gate::open::fallback_serves`]).
+/// The facets the request `hold` serves is held to: a candidate alias's
+/// enabled set, `None` for every other request (`gate::tool_images`: a
+/// tool image goes only where the alias enables Vision). A fallback is no
+/// longer held to them (changed 2026-10-06).
 pub(crate) fn fallback_facets(snap: &Snapshot, hold: &LocalHold) -> Option<FacetSet> {
     ctx(hold).map(|c| c.enabled(snap))
 }

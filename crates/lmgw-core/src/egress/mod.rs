@@ -3,7 +3,9 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub mod llama_cpp;
 pub mod openai;
+pub mod openai_wire;
 
 use crate::config::{Protocol, Upstream};
 use crate::error::GatewayError;
@@ -53,10 +55,10 @@ pub trait Egress: Send + Sync {
         Err(GatewayError::Unsupported("embeddings".into()))
     }
 
-    /// Build a cross-encoder rerank request (quickdoc §9a). llama.cpp serves
-    /// this at `/v1/rerank` in the Jina shape; providers that have no such
-    /// endpoint inherit the refusal below rather than being sent a request they
-    /// would answer with something else.
+    /// Build a cross-encoder rerank request (quickdoc §9a): the Jina shape at
+    /// `/v1/rerank`, which llama.cpp, vLLM, TEI, Infinity and Jina serve.
+    /// Providers that have no such endpoint inherit the refusal below rather
+    /// than being sent a request they would answer with something else.
     fn build_rerank(
         &self,
         _http: &reqwest::Client,
@@ -77,8 +79,8 @@ pub trait Egress: Send + Sync {
     /// Plan how to count the tokens of `text` against `model` on this upstream
     /// (§6). Each protocol uses its native mechanism: llama.cpp `/tokenize`,
     /// Anthropic `/v1/messages/count_tokens`, Gemini `:countTokens`, or — for
-    /// real OpenAI upstreams that expose no token endpoint — a local
-    /// tiktoken count. Returns [`CountPlan::Ready`] when counted locally with
+    /// OpenAI and OpenAI-compatible providers, which expose no token
+    /// endpoint — a local tiktoken count. Returns [`CountPlan::Ready`] when counted locally with
     /// the model's own encoding, [`CountPlan::Guessed`] when counted locally
     /// with a stand-in, or [`CountPlan::Request`] (then
     /// [`parse_count`](Egress::parse_count) reads the count from the
@@ -126,6 +128,7 @@ pub trait EgressStreamDecoder: Send {
 }
 
 static OPENAI: openai::OpenaiEgress = openai::OpenaiEgress;
+static LLAMA_CPP: llama_cpp::LlamaCppEgress = llama_cpp::LlamaCppEgress;
 static ANTHROPIC: anthropic::AnthropicEgress = anthropic::AnthropicEgress;
 static GEMINI: gemini::GeminiEgress = gemini::GeminiEgress;
 
@@ -134,6 +137,7 @@ pub fn for_protocol(p: Protocol) -> &'static dyn Egress {
         Protocol::Openai => &OPENAI,
         Protocol::Anthropic => &ANTHROPIC,
         Protocol::Gemini => &GEMINI,
+        Protocol::LlamaCpp => &LLAMA_CPP,
     }
 }
 
@@ -149,8 +153,8 @@ pub(crate) fn apply_extra_headers(
 }
 
 /// Bearer key + extra headers — the auth convention of every OpenAI-shaped
-/// upstream. The openai adapter uses it for chat/embeddings/tokenize, and the
-/// raw passthrough routes in `proxy/legacy.rs` (`/v1/completions`) and
+/// upstream. The OpenAI and llama.cpp egresses use it for chat, embeddings,
+/// rerank, `/tokenize` and `/props`, and the raw passthrough routes in `proxy/legacy.rs` (`/v1/completions`) and
 /// `proxy/audio.rs` (`/v1/audio/*`) use it too, so a change of auth style
 /// can't miss one of them.
 pub(crate) fn apply_bearer_auth(

@@ -37,7 +37,7 @@
 //! offered to the model nor executed. The gateway's own runs pass
 //! [`ToolScope::gateway`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -45,14 +45,23 @@ use serde_json::Value;
 
 use crate::agent::{ResolvedTool, ToolExecutor, ToolOutcome};
 use crate::config::Snapshot;
-use crate::ingress::responses::McpToolSpec;
 use crate::ir::{ToolDef, ToolResultBlock};
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 
 use super::kb::KbAccess;
 use super::scope::ToolScope;
+use super::spec::McpToolSpec;
 use super::{docs, kb, selfadmin};
+
+mod labels;
+mod served_by;
+
+use labels::shown_to;
+pub use labels::{
+    label_entry, labels, list_label, LabelEntry, LabelError, LabelKind, LabelTool, LabelTools,
+};
+pub(crate) use served_by::server_of;
 
 /// The label a client uses to name a registered server in a `{"type":"mcp"}`
 /// tool: its tool prefix, or its name when it has none.
@@ -79,6 +88,9 @@ pub struct Resolved {
     /// An explicit set rather than a prefix test, so a run that never attached
     /// `lmgw` cannot reach the self-admin plane by naming one of its tools.
     pub builtin: Vec<String>,
+    /// Names resolved from a registered server, and its id: a call of one
+    /// runs on that server or not at all ([`McpExecutor::with_listed`]).
+    pub servers: HashMap<String, i64>,
 }
 
 /// Resolve the `{"type":"mcp"}` entries of a request against the registered
@@ -94,6 +106,7 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
         listed: Vec::new(),
         failed: Vec::new(),
         builtin: Vec::new(),
+        servers: HashMap::new(),
     };
     if specs.is_empty() {
         return out;
@@ -109,7 +122,7 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
     // Only for a caller who could use it: naming a label is not a reason to
     // start a container whose tools the caller's scope keeps out anyway.
     let mut woke = false;
-    for spec in specs {
+    for spec in specs.iter().filter(|s| !leaves_nothing(s)) {
         let Some(server) = find_server(&snap, &spec.server_label) else {
             continue;
         };
@@ -127,7 +140,17 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
             );
         }
     }
-    let agg = state.mcp.list_tools(&snap).await;
+    // Only the servers named here are connected and listed (§1.2 of the
+    // realtime-server-tools design): a built-in label needs none, and a label
+    // the caller cannot reach is answered without one.
+    let named: Vec<i64> = specs
+        .iter()
+        .filter(|s| builtin_label(&s.server_label).is_none() && !leaves_nothing(s))
+        .filter_map(|s| find_server(&snap, &s.server_label))
+        .filter(|s| scope.may_reach(s))
+        .map(|s| s.id)
+        .collect();
+    let agg = state.mcp.list_tools_of(&snap, &named).await;
     // An agent's list names a label's *current* tools, and a service agent
     // that was asleep a moment ago had none; read it again now it is up.
     let refreshed = if woke {
@@ -142,12 +165,13 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
         // registered servers are searched — `ops` refuses those labels for a
         // user-created server, so there is nothing here to shadow.
         if let Some(label) = builtin_label(&spec.server_label) {
-            match resolve_builtin(&snap, label, spec.allowed_tools.as_deref(), scope) {
+            match resolve_builtin(&snap, label, spec, scope) {
                 Ok(defs) => {
                     out.builtin.extend(defs.iter().map(|d| d.name.clone()));
                     out.tools.extend(defs.iter().map(|d| {
+                        let short = builtin_short_name(label, &d.name);
                         ResolvedTool::server_side(label, d.clone())
-                            .gated(spec.require_approval.requires(&d.name, &d.name))
+                            .gated(spec.require_approval.requires(&d.name, short))
                     }));
                     out.listed.push((label.to_string(), defs));
                 }
@@ -156,8 +180,13 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
             continue;
         }
         // A server this caller can never use is answered like one that does
-        // not exist, so a scoped key cannot map the inventory by probing.
-        let Some(server) = find_server(&snap, &spec.server_label).filter(|s| scope.may_reach(s))
+        // not exist, so a scoped key cannot map the inventory by probing. A
+        // bare server has no namespace for `may_reach` to read — it was only
+        // worth connecting — so it is known now, by what it lists: one that
+        // offers this caller nothing is not there for it either.
+        let Some(server) = find_server(&snap, &spec.server_label)
+            .filter(|s| scope.may_reach(s))
+            .filter(|s| !s.tool_prefix.trim().is_empty() || shown_to(s, &agg, scope))
         else {
             out.failed.push((
                 spec.server_label.clone(),
@@ -176,6 +205,11 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
                 spec.server_label.clone(),
                 format!("MCP server '{}' is disabled", server.name),
             ));
+            continue;
+        }
+        if leaves_nothing(spec) {
+            out.failed
+                .push((spec.server_label.clone(), ALLOWED_LEFT_NOTHING.into()));
             continue;
         }
 
@@ -205,10 +239,8 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
             if snap.tool_disabled(exposed) {
                 continue;
             }
-            if let Some(allowed) = &spec.allowed_tools {
-                if !allowed.iter().any(|a| a == exposed || a == upstream_name) {
-                    continue;
-                }
+            if !spec.allows(exposed, upstream_name) {
+                continue;
             }
             if !scope.admits(exposed) {
                 scoped_out += 1;
@@ -235,10 +267,8 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
                     scope.describe()
                 ),
                 _ => match &spec.allowed_tools {
-                    Some(a) if !a.is_empty() => {
-                        format!("none of allowed_tools {a:?} are exposed by this server")
-                    }
-                    _ => "the server exposed no tools".to_string(),
+                    Some(a) => format!("none of allowed_tools {a:?} are exposed by this server"),
+                    None => "the server exposed no tools".to_string(),
                 },
             };
             out.failed.push((spec.server_label.clone(), detail));
@@ -246,6 +276,8 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
         }
 
         let label = server_label(server);
+        out.servers
+            .extend(defs.iter().map(|d| (d.name.clone(), server.id)));
         out.tools.extend(
             defs.iter()
                 .zip(&gated)
@@ -273,16 +305,7 @@ fn available_labels(snap: &Snapshot, agg: &super::Aggregate, scope: &ToolScope) 
     let mut labels: Vec<String> = snap
         .mcp_servers
         .values()
-        .filter(|s| s.enabled)
-        .filter(|s| {
-            !scope.narrows()
-                || agg.tools.iter().any(|t| {
-                    agg.reverse
-                        .get(t.name.as_ref())
-                        .is_some_and(|(id, _)| *id == s.id)
-                        && scope.admits(t.name.as_ref())
-                })
-        })
+        .filter(|s| s.enabled && shown_to(s, agg, scope))
         .map(server_label)
         .collect();
     labels.sort();
@@ -333,6 +356,25 @@ fn builtin_label(label: &str) -> Option<&'static str> {
     }
 }
 
+/// A built-in tool's own name: its full name minus `<label>__`, the second
+/// spelling `allowed_tools` and `require_approval` match, as the upstream
+/// name is for a registered server's tool.
+fn builtin_short_name<'a>(label: &str, name: &'a str) -> &'a str {
+    name.strip_prefix(label)
+        .and_then(|rest| rest.strip_prefix("__"))
+        .unwrap_or(name)
+}
+
+/// What a label resolves to when its `allowed_tools` is an empty list —
+/// said as such, not as a server or toolset that offers nothing. Such a
+/// server is neither woken nor connected.
+const ALLOWED_LEFT_NOTHING: &str = "allowed_tools is an empty list, so it left nothing: \
+     name the tools to allow, or leave allowed_tools out for all of them";
+
+fn leaves_nothing(spec: &McpToolSpec) -> bool {
+    spec.allowed_tools.as_ref().is_some_and(Vec::is_empty)
+}
+
 /// A `tools/list` JSON entry as an IR tool definition.
 fn tool_def(entry: &Value) -> ToolDef {
     ToolDef {
@@ -359,7 +401,7 @@ fn tool_def(entry: &Value) -> ToolDef {
 fn resolve_builtin(
     snap: &Snapshot,
     label: &'static str,
-    allowed: Option<&[String]>,
+    spec: &McpToolSpec,
     scope: &ToolScope,
 ) -> Result<Vec<ToolDef>, String> {
     // Who asks, before what the Setting allows: an answer about the mode would
@@ -389,7 +431,7 @@ fn resolve_builtin(
     let defs: Vec<ToolDef> = offered
         .iter()
         .filter(|d| !snap.tool_disabled(&d.name))
-        .filter(|d| allowed.is_none_or(|a| a.iter().any(|t| t == &d.name)))
+        .filter(|d| spec.allows(&d.name, builtin_short_name(label, &d.name)))
         .cloned()
         .collect();
     let in_scope: Vec<ToolDef> = defs
@@ -406,8 +448,9 @@ fn resolve_builtin(
     let defs = in_scope;
     if defs.is_empty() {
         let names: Vec<&str> = offered.iter().map(|d| d.name.as_str()).collect();
-        return Err(match allowed {
-            Some(a) if !a.is_empty() => format!(
+        return Err(match &spec.allowed_tools {
+            Some(a) if a.is_empty() => ALLOWED_LEFT_NOTHING.to_string(),
+            Some(a) => format!(
                 "none of allowed_tools {a:?} are offered by the '{label}' toolset \
                  (it has: {})",
                 names.join(", ")
@@ -423,6 +466,9 @@ pub struct McpExecutor {
     state: SharedState,
     ctx: RequestCtx,
     proto: &'static str,
+    /// The names the run listed from a registered server, and its id
+    /// ([`Self::with_listed`]).
+    listed: HashMap<String, i64>,
 }
 
 impl McpExecutor {
@@ -431,7 +477,17 @@ impl McpExecutor {
             state,
             ctx,
             proto: crate::telemetry::RESPONSES_TOOL_PROTO,
+            listed: HashMap::new(),
         }
+    }
+
+    /// Run each of these names on the server the run listed it from, and
+    /// nowhere else ([`McpManager::call_listed`](super::McpManager::call_listed)):
+    /// between the listing and the call another server may have come to own
+    /// the name. A name not among them routes by the aggregate as it is.
+    pub fn with_listed(mut self, listed: HashMap<String, i64>) -> Self {
+        self.listed = listed;
+        self
     }
 
     /// Log this executor's calls under a different `ingress_proto`, so Logs
@@ -460,7 +516,16 @@ impl ToolExecutor for McpExecutor {
         // by name — hiding it from `tools/list` is not enough, because a model
         // working from an earlier list still reaches here. It arrives as a tool
         // error carrying the reason, like any other routing failure.
-        let (server_name, outcome) = match self.state.mcp.call(&snap, name, arguments).await {
+        let routed = match self.listed.get(name) {
+            Some(&server) => {
+                self.state
+                    .mcp
+                    .call_listed(&snap, name, server, arguments)
+                    .await
+            }
+            None => self.state.mcp.call(&snap, name, arguments).await,
+        };
+        let (server_name, outcome) = match routed {
             Ok((result, server)) => {
                 let is_error = result.is_error == Some(true);
                 (

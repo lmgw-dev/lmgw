@@ -53,7 +53,7 @@ use super::count::{
 use super::facts::GateFacts;
 use super::ladder::{ladder_ready, RungTag};
 use super::pool::{self, Ask, Need, PoolTicket};
-use crate::config::Route;
+use crate::config::{LlamaRoute, Route};
 use crate::error::GatewayError;
 use crate::ir::{ChatRequest, Params};
 use crate::runtime::registry::SendGuard;
@@ -105,6 +105,15 @@ pub struct TurnLease {
     /// send ([`super::send::send_gated`]) picks again before anything is sent,
     /// so every site handles it where it already handles a reroute.
     pub(super) skip: Option<GatewayError>,
+    /// The send's frozen tool-image decision and the facts it was made on
+    /// (llama egress design §3.2, [`super::tool_images::decide`]): what
+    /// [`super::send::send_gated`] sets on the route every attempt is built
+    /// from. `None` off llama.cpp and while nothing is known.
+    pub(super) llama: Option<Arc<LlamaRoute>>,
+    /// What went to a fallback that cannot see as placeholders
+    /// ([`super::fallback_images`]): how many images (what
+    /// `x-lmgw-images-omitted` says), and the request row's marker.
+    omitted: Option<super::fallback_images::Omitted>,
 }
 
 /// What a ladder row's send helper needs from the fit: the numbers the count
@@ -171,6 +180,20 @@ impl TurnLease {
                 ticket.mark_complete();
             }
         }
+    }
+
+    /// How many images this send carried as placeholders, because the
+    /// fallback it goes to cannot see ([`super::fallback_images`]): what
+    /// `x-lmgw-images-omitted` says. `None` when it left none out.
+    pub fn images_omitted(&self) -> Option<usize> {
+        self.omitted.as_ref().map(|o| o.count)
+    }
+
+    /// What this send's content lost to a model that lacks a capability, as
+    /// its request row says it (`request_logs.degraded`,
+    /// [`crate::degraded`]). `None` when it lost nothing.
+    pub fn degraded(&self) -> Option<String> {
+        self.omitted.as_ref().map(|o| o.marker.clone())
     }
 
     /// The `max_tokens` a client-set value was lowered to — what
@@ -272,6 +295,15 @@ fn guarded(hold: Option<&LocalHold>) -> Result<Option<(&LocalHold, Guard)>, Gate
     )))
 }
 
+/// The facts of the container a held chat route is on, when something gates
+/// it ([`guarded`]): where [`super::tool_images::decide`] reads a guarded
+/// row's per-image bound from, for a count that builds a body without a send
+/// (`/v1/messages/count_tokens`), so it decides as the fit would. `None` on an
+/// unguarded row, and on one the fit would refuse outright.
+pub(crate) fn guard_facts(hold: Option<&LocalHold>) -> Option<Arc<GateFacts>> {
+    guarded(hold).ok().flatten().map(|(_, g)| g.facts)
+}
+
 /// The lease of a send whose candidate cannot take it ([`TurnLease::skip`]):
 /// the clamp it already ran, and why.
 fn skipped(max_tokens_clamped: Option<u32>, error: GatewayError) -> TurnLease {
@@ -311,7 +343,18 @@ pub(super) async fn within<T>(
 /// The per-send half for a chat send (`/v1/chat/completions`, `/v1/messages`,
 /// every in-process turn, the dashboard chat, the load test's probe).
 ///
-/// On a guarded pool, in order:
+/// First, on a route a configured fallback answers on: the request's images
+/// as placeholders when that fallback cannot see them
+/// ([`super::fallback_images`]). Everything below reads, counts and sends
+/// the request as it comes out of that.
+///
+/// Then, on every route the llama.cpp egress serves, guarded or not: the
+/// send's frozen tool-image decision (llama egress design §3.2, §8.2,
+/// `tool_images::decide`), returned on the lease for the send to
+/// carry. Where it lets tool images go, the count below adds them at the
+/// per-image bound, as it adds the user's.
+///
+/// Then, on a guarded pool, in order:
 /// 1. **clamp** — a passthrough `n_predict` is bound first, then
 ///    `max_tokens` is clamped to the row's `n_predict` ([`bind_max_output`]);
 /// 2. **count** — `/apply-template` on the exact body egress will send
@@ -328,6 +371,7 @@ pub(super) async fn within<T>(
 /// caller uses to send with this lease.
 ///
 /// Returns the lease and the request to send: borrowed unchanged unless a
+/// fallback that cannot see got its images as placeholders, or a
 /// passthrough `n_predict` had to be bound. `params` is clamped in place; the
 /// caller builds its egress body from both.
 ///
@@ -345,16 +389,35 @@ pub async fn fit_chat<'a>(
     stream: bool,
     deadline: Option<Instant>,
 ) -> Result<(TurnLease, Cow<'a, ChatRequest>), FitRefusal> {
-    let (hold, guard) = match guarded(hold) {
-        Ok(Some(g)) => g,
-        Ok(None) => return Ok((TurnLease::unguarded(), Cow::Borrowed(ir))),
-        Err(e) => return Err(unfit(hold, e)),
+    let guarded = guarded(hold).map_err(|e| unfit(hold, e))?;
+    // A fallback that cannot see gets the images as placeholders, once per
+    // send, before anything reads the request (the owner's ruling,
+    // 2026-10-06).
+    let (mut ir, omitted) = super::fallback_images::fit(state, route, ir).await;
+    // The tool-image decision, once per send and on every row the llama.cpp
+    // egress serves, guarded or not (llama egress design §3.2).
+    let guard_facts = guarded.as_ref().map(|(_, g)| &*g.facts);
+    let super::tool_images::Decided {
+        llama,
+        images: tool_images,
+        bound: tool_image_bound,
+    } = super::tool_images::decide(state, hold, route, &ir, guard_facts).await;
+    // A guarded row is a local model, never a fallback: only this path
+    // can have left an image out.
+    let Some((hold, guard)) = guarded else {
+        let lease = TurnLease {
+            llama,
+            omitted,
+            ..TurnLease::unguarded()
+        };
+        return Ok((lease, ir));
     };
+    // What the count renders: the route as the send will carry it.
+    let decided_route = super::tool_images::on_route(route, llama.as_ref());
 
     // 1. Clamp. The raw `n_predict` is taken out of the passthrough (it is
     // the one field that would otherwise carry a limit past the clamp — see
     // `clamp_max_tokens`'s doc comment) and folded into `max_tokens`.
-    let mut ir = Cow::Borrowed(ir);
     let raw_n_predict = if ir.passthrough.contains_key("n_predict") {
         ir.to_mut().passthrough.remove("n_predict")
     } else {
@@ -364,16 +427,25 @@ pub async fn fit_chat<'a>(
     let max_output = u64::from(params.max_tokens.unwrap_or(0));
     let rung = RungTag::of(&guard.facts);
 
-    // The per-image bound: both kinds count images against it.
-    let media = media_parts(&ir);
+    // The per-image bound: both kinds count images against it — the user's,
+    // and the tool images the decision lets go (§8.2), at the same bound.
+    let user_media = media_parts(&ir);
+    let media = MediaParts {
+        images: user_media.images.saturating_add(tool_images),
+        ..user_media
+    };
     let image_bound = async {
         if media.images == 0 {
             return Ok(None);
         }
-        let facts = &guard.facts;
-        image_token_bound(&facts.models_dir, facts.projector_row())
-            .await
-            .map_err(GatewayError::BadRequest)
+        let read = match tool_image_bound {
+            Some(read) => read,
+            None => {
+                let facts = &guard.facts;
+                image_token_bound(&facts.models_dir, facts.projector_row()).await
+            }
+        };
+        read.map_err(GatewayError::BadRequest)
     };
 
     if guard.kind == Kind::Ladder {
@@ -395,6 +467,7 @@ pub async fn fit_chat<'a>(
                     max_tokens_clamped: clamped,
                     ladder: Some(plan),
                     served: rung,
+                    llama,
                     ..TurnLease::default()
                 },
                 ir,
@@ -412,24 +485,32 @@ pub async fn fit_chat<'a>(
     // is re-attached to `clamped` in one place (review finding 7) rather than
     // at each of their own `?`.
     let reserved: Result<Option<PoolTicket>, GatewayError> = async {
-        // 2. Count, on the running server, the body egress is about to send.
-        let body = crate::egress::openai::chat_body(
-            &ir,
-            &route.upstream_model,
-            params,
-            stream,
-            route.upstream.kind,
-        );
+        // 2. Count, on the running server, the body egress is about to send:
+        // rendered per attempt, as the send renders it, so a count retried on
+        // a recovered container carries that container's tool-image verdict
+        // (`tool_images::recheck`).
         let image_bound = image_bound.await?;
         let http = &state.http;
-        let (body, image_bound) = (&body, &image_bound);
-        let count = within(
-            deadline,
-            on_running_server(route, hold, move |root| async move {
-                count_chat_prompt(http, &root, body, media, image_bound.clone()).await
-            }),
-        )
-        .await?;
+        let (ir_ref, params_ref) = (&*ir, &*params);
+        let (decided_route, image_bound) = (&decided_route, &image_bound);
+        let count =
+            within(
+                deadline,
+                on_running_server(route, hold, move |root| {
+                    let attempt = hold.on_attempt(decided_route);
+                    let body = crate::egress::llama_cpp::chat_body(
+                        ir_ref,
+                        &route.upstream_model,
+                        params_ref,
+                        stream,
+                        &attempt.upstream,
+                    );
+                    async move {
+                        count_chat_prompt(http, &root, &body, media, image_bound.clone()).await
+                    }
+                }),
+            )
+            .await?;
 
         // 3. Reserve.
         let completions =
@@ -468,6 +549,7 @@ pub async fn fit_chat<'a>(
         TurnLease {
             max_tokens_clamped: clamped,
             reservation: ticket,
+            llama,
             ..TurnLease::default()
         },
         ir,
@@ -628,8 +710,8 @@ pub fn planned_rung(hold: Option<&LocalHold>) -> Option<RungTag> {
 }
 
 /// Name the model on a [`GatewayError::ContextExceeded`] that came back from
-/// llama-server itself (`egress::openai::map_error`'s backstop, which cannot
-/// know it). Every other error passes through untouched.
+/// llama-server itself (the llama.cpp egress's `map_error` backstop, which
+/// cannot know it). Every other error passes through untouched.
 pub fn attribute(e: GatewayError, route: &Route) -> GatewayError {
     match e {
         GatewayError::ContextExceeded {

@@ -526,11 +526,15 @@ async fn an_owner_alias_whose_primary_is_disabled_answers_from_its_fallback() {
     assert!(g.runs().is_empty());
 }
 
-/// A fallback that lacks a facet the alias enables counts as none (§4.6):
-/// a guest whose primary is blocked is deferred rather than sent to it, and
-/// under the hold it is `gpu_hold` — each naming why.
+/// A fallback that lacks a facet the alias enables (Vision) is used all the
+/// same (changed 2026-10-06, the owner's ruling: a configured fallback is
+/// always used; until then it counted as none, §4.6): a guest whose primary
+/// is blocked is answered by it, and under the hold too. What it cannot
+/// take goes to it degraded — an image as its placeholder — and the request
+/// row says so (`request_logs.degraded`); a request without images loses
+/// nothing and is not marked.
 #[tokio::test]
-async fn a_fallback_lacking_an_enabled_facet_counts_as_none() {
+async fn a_fallback_lacking_an_enabled_facet_is_used_and_degrades() {
     let (g, gw) = world(24 * GIB, 2).await;
     g.model("x", 20 * GIB).await;
     g.row(row("p", Some(caps(true))), 8 * GIB).await;
@@ -540,28 +544,30 @@ async fn a_fallback_lacking_an_enabled_facet_counts_as_none() {
     g.candidate(alias("jobs", &["p"], true, Some("blind"), &["vision"]))
         .await;
     owner_loads(&g, "x").await;
+    let with_image = |model: &str| {
+        json!({"model": model, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+        ]}]})
+    };
+    let marker = "fallback 'blind' lacks vision: 1 image sent as a placeholder";
 
-    let resp = chat(&gw, "jobs").await;
-    assert_eq!(resp.status(), 503);
-    assert_eq!(header(&resp, "x-lmgw-fallback"), None);
-    let v: Value = resp.json().await.unwrap();
-    let msg = v["error"]["message"].as_str().unwrap();
-    assert!(
-        msg.contains("fallback 'blind' cannot take this request"),
-        "{msg}"
+    answered_by_fallback(&g, chat(&gw, "jobs").await, "jobs", "blind", "background").await;
+    assert_eq!(newest_log(&g, "jobs").await.degraded, None);
+    let resp = chat_body(&gw, with_image("jobs")).await;
+    assert_eq!(header(&resp, "x-lmgw-images-omitted"), Some("1"));
+    answered_by_fallback(&g, resp, "jobs", "blind", "background").await;
+    assert_eq!(
+        newest_log(&g, "jobs").await.degraded.as_deref(),
+        Some(marker)
     );
-    let row = newest_log(&g, "jobs").await;
-    assert_eq!(row.error_kind.as_deref(), Some("gpu_deferred"), "{row:?}");
 
     hold_on(&g).await;
 
-    let resp = chat(&gw, "writer").await;
-    assert_eq!(resp.status(), 503);
-    assert_eq!(header(&resp, "x-lmgw-fallback"), None);
-    let v: Value = resp.json().await.unwrap();
-    assert_eq!(v["error"]["code"], "gpu_hold");
-    let msg = v["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("fallback 'blind' lacks vision"), "{msg}");
+    let resp = chat_body(&gw, with_image("writer")).await;
+    answered_by_fallback(&g, resp, "writer", "blind", "hold").await;
+    let row = newest_log(&g, "writer").await;
+    assert_eq!(row.degraded.as_deref(), Some(marker), "{row:?}");
 }
 
 // ---------------------------------------------------------------------------

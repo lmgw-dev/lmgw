@@ -101,7 +101,8 @@ pub struct ThreadVoice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_detection: Option<TurnDetection>,
     /// Whether a voice turn may go to the chat model as audio
-    /// (voice-audio-input design §2.1): `off` or `local`.
+    /// (voice-audio-input design §2.1): `off` or `on` (a stored `local`,
+    /// its name before 2026-10-06, reads as `on`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_input: Option<AudioInputMode>,
     /// The TTS's speech instructions, as `session.lmgw.speech_instructions`.
@@ -127,10 +128,17 @@ impl ThreadVoice {
 
     /// [`Self::from_stored`] for a value already parsed — the `voice` inside
     /// a folder's defaults. `None` for anything but an object (`null`
-    /// included).
+    /// included). An `audio_input` of `local`, the value's name before
+    /// 2026-10-06, reads as `on`: the derive stays strict, so the API
+    /// refuses `local` on input.
     pub fn from_value(v: Value) -> Option<Self> {
         match v {
-            Value::Object(map) => Some(keep_parsable(map)),
+            Value::Object(mut map) => {
+                if map.get("audio_input").and_then(Value::as_str) == Some(audio_input::OLD_ON) {
+                    map.insert("audio_input".into(), AudioInputMode::On.as_str().into());
+                }
+                Some(keep_parsable(map))
+            }
             _ => None,
         }
     }

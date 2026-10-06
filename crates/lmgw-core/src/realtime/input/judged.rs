@@ -172,6 +172,10 @@ fn turn_start_line(onset_ms: u64, gate: bool, how: &Interruption, cut: bool) -> 
         Interruption::PlayedOut { id } => {
             format!("during response {id} — not cancelled: its audio had already played out")
         }
+        Interruption::ToolsRun { id } => format!(
+            "during response {id} — not cancelled: only its MCP calls run and nothing of it \
+             plays, so this is a turn of its own, answered after it"
+        ),
     };
     Some(format!("speech from {onset_ms} ms of the input{by} {what}"))
 }

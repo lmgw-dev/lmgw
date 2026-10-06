@@ -232,6 +232,7 @@ impl Snapshot {
                 upstream: upstream.clone(),
                 upstream_model: entry.upstream_model_id.clone(),
                 param_defaults: entry.param_overrides.clone(),
+                fallback: None,
             });
         }
         self.resolve_local(alias)
@@ -331,6 +332,9 @@ impl Snapshot {
     /// clause here rather than letting it fall through to "does not resolve"
     /// gives the owner the actual reason). `Err` is why not, as the clause a
     /// refusal names it with.
+    ///
+    /// The route comes back marked as the fallback it is ([`Route::fallback`]):
+    /// this is where every fallback's route is born.
     pub fn usable_fallback(&self, fallback: &str) -> Result<Route, &'static str> {
         if self
             .candidate_aliases
@@ -338,10 +342,11 @@ impl Snapshot {
         {
             return Err("is itself a candidate alias");
         }
-        let route = self.resolve(fallback).map_err(|_| "does not resolve")?;
+        let mut route = self.resolve(fallback).map_err(|_| "does not resolve")?;
         if crate::vram::classify(&route).is_some() {
             return Err("is itself a local model");
         }
+        route.fallback = Some(fallback.into());
         Ok(route)
     }
 
@@ -422,6 +427,7 @@ impl Snapshot {
         Self::synthetic_upstream(
             ROUTER_UPSTREAM_ID,
             ROUTER_UPSTREAM_NAME,
+            Protocol::LlamaCpp,
             UpstreamKind::LlamaServer,
             self.settings.router.request_timeout_seconds,
         )
@@ -432,6 +438,7 @@ impl Snapshot {
         Self::synthetic_upstream(
             AUX_UPSTREAM_ID,
             AUX_UPSTREAM_NAME,
+            Protocol::LlamaCpp,
             UpstreamKind::LlamaServer,
             self.settings.aux_router.request_timeout_seconds,
         )
@@ -442,6 +449,7 @@ impl Snapshot {
         Self::synthetic_upstream(
             AUDIO_UPSTREAM_ID,
             AUDIO_UPSTREAM_NAME,
+            Protocol::Openai,
             UpstreamKind::AudioCpp,
             self.settings.audio.request_timeout_seconds,
         )
@@ -452,6 +460,7 @@ impl Snapshot {
         Self::synthetic_upstream(
             IMAGE_UPSTREAM_ID,
             IMAGE_UPSTREAM_NAME,
+            Protocol::Openai,
             UpstreamKind::SdCpp,
             self.settings.image.request_timeout_seconds,
         )
@@ -459,7 +468,9 @@ impl Snapshot {
 
     /// One of the four per-class synthetic upstreams (§5). Never persisted,
     /// never `expose_all` (the classes enumerate their own tables — see
-    /// [`Snapshot::exposed_models`]), always `protocol = openai`.
+    /// [`Snapshot::exposed_models`]). `protocol` is the caller's:
+    /// `llama_cpp` for the two llama.cpp classes, `openai` for audio.cpp and
+    /// sd-server (llama.cpp egress design §5).
     ///
     /// `timeout_seconds` is the caller's class setting, not a constant: the
     /// four classes used to share one 600 s ceiling, which was right for none
@@ -468,13 +479,14 @@ impl Snapshot {
     fn synthetic_upstream(
         id: i64,
         name: &str,
+        protocol: Protocol,
         kind: UpstreamKind,
         timeout_seconds: u64,
     ) -> Upstream {
         Upstream {
             id,
             name: name.into(),
-            protocol: Protocol::Openai,
+            protocol,
             kind,
             // Overwritten with the acquired container's endpoint before any
             // request is built — see [`UNHELD_BASE_URL`].
@@ -495,6 +507,7 @@ impl Snapshot {
             supports_responses: false,
             expose_all: false,
             expose_prefix: String::new(),
+            llama: None,
         }
     }
 
@@ -551,6 +564,7 @@ impl Snapshot {
             upstream: self.router_upstream(),
             upstream_model: model_id.to_string(),
             param_defaults: Params::default(),
+            fallback: None,
         }
     }
 
@@ -564,6 +578,7 @@ impl Snapshot {
             upstream: self.aux_upstream(),
             upstream_model: model_id.to_string(),
             param_defaults: Params::default(),
+            fallback: None,
         }
     }
 
@@ -606,6 +621,7 @@ impl Snapshot {
             upstream: self.audio_upstream(),
             upstream_model: m.model_id.clone(),
             param_defaults: Params::default(),
+            fallback: None,
         })
     }
 
@@ -622,6 +638,7 @@ impl Snapshot {
             upstream: self.image_upstream(),
             upstream_model: m.model_id.clone(),
             param_defaults: Params::default(),
+            fallback: None,
         })
     }
 
@@ -661,6 +678,7 @@ impl Snapshot {
             upstream: u.clone(),
             upstream_model: model,
             param_defaults: Params::default(),
+            fallback: None,
         })
     }
 

@@ -63,6 +63,11 @@ pub struct RuntimeStatus {
     /// every other class, and for an image container whose capabilities route
     /// answered anything but a 200.
     pub image_capabilities: Option<ImageCapabilities>,
+    /// What a llama-server container said about itself in `GET /props`
+    /// (llama egress design §4). `None` for every other engine, and when the
+    /// read failed — [`Self::warnings`] then says why.
+    #[serde(default)]
+    pub llama_props: Option<LlamaProps>,
     /// The rung this container runs (ladder design §6). `None` for a row
     /// without a ladder, and `#[serde(default)]` so a frame from before this
     /// field existed still decodes.
@@ -91,6 +96,28 @@ pub struct RuntimeStatus {
     /// the frame — is the GPU, every other container.
     #[serde(default)]
     pub placement: Option<String>,
+}
+
+/// Mirror of `egress::llama_cpp::props::LlamaFacts` (llama egress design
+/// §4.1), read once per start, climb and adoption. Every field is optional,
+/// and `None` is unknown — the server did not say — never `false`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LlamaProps {
+    /// `modalities.vision`: the server loaded a projector that sees.
+    pub vision: Option<bool>,
+    /// `modalities.audio`: the server loaded a projector that hears.
+    pub audio: Option<bool>,
+    /// `modalities.video` — official builds only.
+    pub video: Option<bool>,
+    /// `chat_template_caps`, the template's own booleans; empty on
+    /// ik_llama.cpp, which sends none of them.
+    pub caps: Option<std::collections::BTreeMap<String, bool>>,
+    /// One slot's context in tokens (`default_generation_settings.n_ctx`).
+    pub n_ctx_slot: Option<u64>,
+    /// `b<number>-<commit>` on official builds; ik_llama.cpp sends none.
+    pub build_info: Option<String>,
 }
 
 /// Mirror of `runtime::registry::climb::RungStatus` (ladder design §6): the
@@ -511,4 +538,10 @@ pub struct RequestRow {
     /// a ladder, and for a request its fallback answered.
     #[serde(default)]
     pub rung: Option<i64>,
+    /// What the request's content lost on its way to a model that lacks a
+    /// capability: "fallback 'x' lacks vision: 3 images sent as
+    /// placeholders", "'m' lacks audio: transcript sent", several joined by
+    /// "; ". `None` = nothing was degraded.
+    #[serde(default)]
+    pub degraded: Option<String>,
 }

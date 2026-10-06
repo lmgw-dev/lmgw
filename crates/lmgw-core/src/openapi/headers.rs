@@ -155,7 +155,7 @@ const VOICES_ROUTES: &[(&str, &str)] = &[("GET", "/v1/audio/voices")];
 
 /// The table (§4.9). In spec order: the reasoning trio, then the two
 /// literal-only headers (`x-lmgw-run`, `x-lmgw-admin-token`), the internal
-/// `x-lmgw-face`, the gated-response trio, the three "route could not
+/// `x-lmgw-face`, the gated-response trio and its images count, the three "route could not
 /// comply" headers, the ladder pair, and the new counter-approximation
 /// header.
 pub const LMGW_HEADERS: &[LmgwHeader] = &[
@@ -237,7 +237,22 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
         scope: Scope::Routes(GATED_ROUTES),
         schema: HeaderSchema::Text,
         description: "RESPONSE: the alias that actually answered instead of the requested local \
-            model; the body's model field still names the one requested.",
+            model; the body's model field still names the one requested. On the chat routes, \
+            a fallback whose capabilities say it cannot see got the request's images as text \
+            placeholders, and x-lmgw-images-omitted says how many.",
+    },
+    LmgwHeader {
+        name: "x-lmgw-images-omitted",
+        direction: Direction::Response,
+        audience: Audience::Client,
+        scope: Scope::Routes(REASONING_IGNORED_ROUTES),
+        schema: HeaderSchema::Integer,
+        description: "RESPONSE: next to x-lmgw-fallback, how many of the request's images went \
+            to the fallback that answered as text placeholders, because its capabilities say it \
+            cannot see ('[image/png image, N base64 bytes — omitted: the answering model cannot \
+            see images]'); the model reads the placeholder, the client this count. On \
+            /v1/responses it counts the images the run opened with. Absent when every image was \
+            sent, and on a route the client named itself, which always gets its images.",
     },
     LmgwHeader {
         name: "x-lmgw-fallback-reason",
@@ -421,8 +436,9 @@ mod tests {
     #[test]
     fn headers_block_has_exactly_the_client_rows() {
         let block = headers_block();
-        assert_eq!(block.len(), 15, "{block:#?}");
+        assert_eq!(block.len(), 16, "{block:#?}");
         assert!(block.contains_key("x-lmgw-count-approximate"));
+        assert!(block.contains_key("x-lmgw-images-omitted"));
         assert!(block.contains_key("x-lmgw-reasoning"));
     }
 

@@ -1,18 +1,12 @@
 {
   "identifier": "remote-ui",
-  "description": "Allow the gateway web UI (served from localhost into the webview) to drive the window frame: drag, resize, minimize/maximize, close-to-tray, its own zoom level (the interface-scale setting), the system file picker an agent's directory/file config field opens to bind a host mount, and the voice output choice: list the PipeWire sinks and route lmgw's own playback streams to one (chat-voice §12.3).",
+  "description": "Allow the gateway web UI (served from localhost into the webview) to report that it has mounted (the shell shows the window then), set its own zoom level (the interface-scale setting), open the system file picker an agent's directory/file config field uses to bind a host mount, and choose the voice output: list the PipeWire sinks and route lmgw's own playback streams to one (chat-voice §12.3). KWin draws the window frame, so the page drives no window controls.",
   "windows": ["main"],
   "remote": {
     "urls": ["http://127.0.0.1:*", "http://localhost:*"]
   },
   "permissions": [
-    "core:window:allow-start-dragging",
-    "core:window:allow-internal-toggle-maximize",
-    "core:window:allow-toggle-maximize",
-    "core:window:allow-minimize",
-    "core:window:allow-close",
-    "core:window:allow-start-resize-dragging",
-    "core:window:allow-is-maximized",
+    "core:event:allow-emit",
     "core:webview:allow-set-webview-zoom",
     "dialog:allow-open",
     "allow-audio-outputs",

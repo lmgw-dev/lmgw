@@ -18,6 +18,8 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
+mod llama_cpp;
+
 /// An in-memory database migrated up to `version` and no further — the state an
 /// install that has not taken the aux-router upgrade yet is sitting in.
 pub(crate) async fn db_at_version(version: i64) -> SqlitePool {
@@ -272,6 +274,37 @@ fn a_migration_that_opens_with_a_dash_dash_n_comment_is_the_directive_itself() {
         }
     }
     assert!(checked >= 20, "only {checked} migration files were read");
+}
+
+/// From 0058 on, `-- no-transaction` is the first line of a migration or
+/// nowhere in it. sqlx reads the directive only as the file's prefix, so one
+/// written lower down is a comment: the file runs inside sqlx's transaction,
+/// where its `PRAGMA foreign_keys = OFF` does nothing and a table rebuild's
+/// `DROP TABLE` cascades through every row that references it. 0013 is such
+/// a file; the files before 0058 are applied history and stay as they are.
+#[test]
+fn from_0058_on_no_transaction_is_the_first_line_or_nowhere() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+        if !name.ends_with(".sql") || digits.parse::<u32>().map_or(true, |v| v < 58) {
+            continue;
+        }
+        let sql = std::fs::read_to_string(&path).unwrap();
+        for (n, line) in sql.lines().enumerate().skip(1) {
+            assert!(
+                !line.trim_start().starts_with("-- no-transaction"),
+                "{name}:{}: `-- no-transaction` below the first line is a comment to sqlx — \
+                 move it to line 1, or say something else",
+                n + 1
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 1, "0058 itself was not read");
 }
 
 /// The 0018 repair must not touch a database that has nothing wrong with it,

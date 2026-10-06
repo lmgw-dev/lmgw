@@ -3317,10 +3317,11 @@ struct PropsCheck {
 /// derivation `/v1/models` publishes, re-run here through
 /// [`capabilities::exposed::derived_for_local`]) against the running
 /// llama-server's own `GET /props` (design §3.1's live-verified gloss, §8
-/// item 9). `/props` lives on the container root, not under `/v1`
-/// (`AcquireGuard::endpoint`'s split from `LocalHold::endpoint`), so this
-/// dials `hold.port()` directly rather than the route base the probe request
-/// used.
+/// item 9), read live through the registry's reader on the container the
+/// hold is on. The read also refreshes that container's entry (llama egress
+/// design §4.2), so a read that failed at its start does not stay failed —
+/// and one that fails now leaves facts read before on it.
+/// Bounded by `vram.load_timeout_seconds`, the budget its start's read had.
 async fn props_cross_check(
     state: &SharedState,
     hold: &crate::vram::LocalHold,
@@ -3334,40 +3335,34 @@ async fn props_cross_check(
         "input_modalities": caps.and_then(|c| c.input_modalities.clone()),
     });
 
-    let props_url = format!("http://127.0.0.1:{}/props", hold.port());
-    let fetch = async {
-        let resp = state
-            .http
-            .get(&props_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status().as_u16()));
-        }
-        resp.json::<Value>().await.map_err(|e| e.to_string())
-    };
-
-    match fetch.await {
-        Ok(props) => {
-            let disagreements = caps
-                .map(|c| props_disagreements(c, &props))
-                .unwrap_or_default();
-            PropsCheck {
-                props,
-                static_caps,
-                disagreements,
-                note: None,
-            }
-        }
+    let (port, generation) = hold.attempt();
+    let budget = state.snapshot().settings.vram.load_timeout_seconds;
+    let runtime = state.runtime();
+    let read = runtime
+        .read_llama_props(port, std::time::Duration::from_secs(budget))
+        .await;
+    let kept = runtime.refresh_llama_props(hold.class(), hold.model_id(), generation, read.clone())
+        == crate::runtime::registry::Refresh::Kept;
+    match read {
+        Ok(facts) => PropsCheck {
+            props: facts.raw.clone(),
+            static_caps,
+            disagreements: caps
+                .map(|c| props_disagreements(c, &facts))
+                .unwrap_or_default(),
+            note: None,
+        },
         Err(e) => PropsCheck {
             props: Value::Null,
             static_caps,
             disagreements: Vec::new(),
             note: Some(format!(
-                "GET /props on the running container could not be read ({e}); the \
-                 static-vs-running comparison is skipped, everything else above is unaffected."
+                "{}. The static-vs-running comparison is skipped; everything else above is \
+                 unaffected.",
+                match kept {
+                    true => format!("{e}; the facts read before stay on the container"),
+                    false => crate::runtime::registry::unknown_until(&e),
+                }
             )),
         },
     }
@@ -3377,13 +3372,14 @@ async fn props_cross_check(
 /// derivation (design §8 item 9). Only compared when both sides state an
 /// opinion: an absent static field is "unknown", not a mismatch, and a
 /// `/props` shape this old a build does not send is the same "unknown".
-fn props_disagreements(caps: &ModelCapabilities, props: &Value) -> Vec<String> {
-    let ctc = &props["chat_template_caps"];
-    let modalities = &props["modalities"];
+fn props_disagreements(
+    caps: &ModelCapabilities,
+    props: &crate::egress::llama_cpp::props::LlamaFacts,
+) -> Vec<String> {
     let mut out = Vec::new();
 
     let static_native = caps.tool_calls.as_ref().map(|t| t.kind == "native");
-    if let (Some(s), Some(live)) = (static_native, ctc["supports_tools"].as_bool()) {
+    if let (Some(s), Some(live)) = (static_native, props.cap("supports_tools")) {
         if s != live {
             out.push(format!(
                 "tools: the static derivation says tool_calls.kind == \"{}\" (native tool calls \
@@ -3398,10 +3394,7 @@ fn props_disagreements(caps: &ModelCapabilities, props: &Value) -> Vec<String> {
     }
 
     let static_parallel = caps.tool_calls.as_ref().and_then(|t| t.parallel);
-    if let (Some(s), Some(live)) = (
-        static_parallel,
-        ctc["supports_parallel_tool_calls"].as_bool(),
-    ) {
+    if let (Some(s), Some(live)) = (static_parallel, props.cap("supports_parallel_tool_calls")) {
         if s != live {
             out.push(format!(
                 "parallel tool calls: the static derivation says tool_calls.parallel = {s}, but \
@@ -3411,7 +3404,7 @@ fn props_disagreements(caps: &ModelCapabilities, props: &Value) -> Vec<String> {
     }
 
     let static_levels = caps.reasoning.as_ref().map(|r| r.kind == "levels");
-    if let (Some(s), Some(live)) = (static_levels, ctc["supports_reasoning_effort"].as_bool()) {
+    if let (Some(s), Some(live)) = (static_levels, props.cap("supports_reasoning_effort")) {
         if s != live {
             out.push(format!(
                 "reasoning effort: the static derivation says reasoning.kind == \"{}\" (effort \
@@ -3425,10 +3418,7 @@ fn props_disagreements(caps: &ModelCapabilities, props: &Value) -> Vec<String> {
     }
 
     let static_preserve = caps.reasoning.as_ref().and_then(|r| r.preserve_history);
-    if let (Some(s), Some(live)) = (
-        static_preserve,
-        ctc["supports_preserve_reasoning"].as_bool(),
-    ) {
+    if let (Some(s), Some(live)) = (static_preserve, props.cap("supports_preserve_reasoning")) {
         if s != live {
             out.push(format!(
                 "preserve reasoning: the static derivation says reasoning.preserve_history = \
@@ -3438,7 +3428,7 @@ fn props_disagreements(caps: &ModelCapabilities, props: &Value) -> Vec<String> {
     }
 
     let static_vision = caps.vision;
-    if let (Some(s), Some(live)) = (static_vision, modalities["vision"].as_bool()) {
+    if let (Some(s), Some(live)) = (static_vision, props.vision) {
         if s != live {
             out.push(format!(
                 "vision: the static derivation says capabilities.vision = {s}, but /props \
@@ -3451,7 +3441,7 @@ fn props_disagreements(caps: &ModelCapabilities, props: &Value) -> Vec<String> {
         .input_modalities
         .as_ref()
         .map(|m| m.iter().any(|x| x == "audio"));
-    if let (Some(s), Some(live)) = (static_audio, modalities["audio"].as_bool()) {
+    if let (Some(s), Some(live)) = (static_audio, props.audio) {
         if s != live {
             out.push(format!(
                 "audio: the static derivation says input_modalities contains \"audio\" = {s}, \

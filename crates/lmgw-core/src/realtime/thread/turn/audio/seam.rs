@@ -59,6 +59,7 @@ pub async fn heard_response_for_tests(
             parts: spoken.into_iter().map(Spoken::Ready).collect(),
             user_row,
         }),
+        degraded: None,
     })
     .await;
     let mut out = HeardForTests {

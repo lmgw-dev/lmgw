@@ -312,7 +312,7 @@ pub async fn upstreams(state: &SharedState) -> Result<Value, String> {
     let out: Vec<Value> = rows
         .iter()
         .map(|u| {
-            json!({
+            let mut row = json!({
                 "id": u.id,
                 "name": u.name,
                 "protocol": u.protocol.as_str(),
@@ -324,7 +324,13 @@ pub async fn upstreams(state: &SharedState) -> Result<Value, String> {
                 "enabled": u.enabled,
                 "expose_all": u.expose_all,
                 "expose_prefix": u.expose_prefix,
-            })
+            });
+            // What a llama.cpp row's server said in `GET /props`, and a
+            // router per model (llama egress design §4.2).
+            if u.protocol == crate::config::Protocol::LlamaCpp {
+                row["llama_facts"] = json!(state.llama_facts.view(u.id));
+            }
+            row
         })
         .collect();
     Ok(json!({ "upstreams": out }))

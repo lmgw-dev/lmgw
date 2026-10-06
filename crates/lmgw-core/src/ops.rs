@@ -39,6 +39,8 @@ mod reads;
 pub use reads::*;
 mod routing;
 pub use routing::*;
+mod upstream_settle;
+pub use upstream_settle::*;
 mod ladder_checks;
 pub use ladder_checks::*;
 mod local_model;

@@ -673,7 +673,8 @@ async fn count_tokens_llama_server_forwards_model() {
         .mount(&mock)
         .await;
 
-    let (_state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::LlamaServer).await;
+    let (_state, base) =
+        setup_kind(&mock.uri(), Protocol::LlamaCpp, UpstreamKind::LlamaServer).await;
     let body: Value = reqwest::Client::new()
         .post(format!("{base}/v1/count_tokens"))
         .json(&json!({"model": "my-model", "input": "Hallo Welt"}))
@@ -856,7 +857,8 @@ async fn sent_body(mock: &MockServer) -> Value {
 #[tokio::test]
 async fn a_reasoning_header_beats_the_body_field() {
     let mock = chat_mock().await;
-    let (_state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::LlamaServer).await;
+    let (_state, base) =
+        setup_kind(&mock.uri(), Protocol::LlamaCpp, UpstreamKind::LlamaServer).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
@@ -881,7 +883,8 @@ async fn a_reasoning_header_beats_the_body_field() {
 #[tokio::test]
 async fn reasoning_off_reaches_a_llama_server_as_a_template_kwarg() {
     let mock = chat_mock().await;
-    let (_state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::LlamaServer).await;
+    let (_state, base) =
+        setup_kind(&mock.uri(), Protocol::LlamaCpp, UpstreamKind::LlamaServer).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/chat/completions"))
@@ -1219,7 +1222,7 @@ async fn a_header_effort_overrides_an_alias_that_is_off() {
     let mock = chat_mock().await;
     let (_state, base) = setup_with_alias_reasoning(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         lmgw_core::ir::ReasoningControl {
             enabled: Some(false),
@@ -1248,7 +1251,7 @@ async fn a_body_effort_overrides_an_alias_that_is_off() {
     let mock = chat_mock().await;
     let (_state, base) = setup_with_alias_reasoning(
         &mock.uri(),
-        Protocol::Openai,
+        Protocol::LlamaCpp,
         UpstreamKind::LlamaServer,
         lmgw_core::ir::ReasoningControl {
             enabled: Some(false),
@@ -1368,7 +1371,7 @@ async fn a_malformed_header_does_not_break_routes_that_ignore_it() {
 async fn enable_thinking_is_a_llama_only_control() {
     let llama = chat_mock().await;
     let (_state, base) =
-        setup_kind(&llama.uri(), Protocol::Openai, UpstreamKind::LlamaServer).await;
+        setup_kind(&llama.uri(), Protocol::LlamaCpp, UpstreamKind::LlamaServer).await;
     let client = reqwest::Client::new();
     let body = json!({
         "model": "my-model",

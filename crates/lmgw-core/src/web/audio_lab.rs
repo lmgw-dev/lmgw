@@ -462,7 +462,7 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
                 .into_response();
         }
     }
-    // Without a typed transcript, a local speech-to-text model writes one —
+    // Without a typed transcript, a speech-to-text model writes one —
     // only when the owner chose one (`audio.voice_transcribe_alias`, empty
     // by default). The upload stands either way; a failure is reported.
     let mut transcribed: Vec<Value> = Vec::new();
@@ -477,7 +477,11 @@ pub async fn upload_ref(State(state): State<SharedState>, mut mp: Multipart) -> 
         for clip in &saved {
             transcribed.push(
                 match transcribe::transcribe_clip(&state, clip, alias).await {
-                    Ok(w) => json!({"clip": clip, "transcript_source": w.source}),
+                    Ok(w) => {
+                        let mut entry = w.provenance();
+                        entry["clip"] = json!(clip);
+                        entry
+                    }
                     Err(e) => json!({"clip": clip, "transcribe_error": e.to_string()}),
                 },
             );
@@ -576,7 +580,7 @@ pub async fn set_ref_text(
 }
 
 /// `POST /audio-lab/api/refs/{name}/transcribe` — `{alias?}`: transcribe the
-/// clip with a local speech-to-text model (the alias, else the setting
+/// clip with a speech-to-text model (the alias, else the setting
 /// `audio.voice_transcribe_alias`) and record it as its transcript,
 /// replacing one it had ([`transcribe`]).
 pub async fn transcribe_ref(
@@ -598,14 +602,13 @@ pub async fn transcribe_ref(
             let clips = voices_dir(&state)
                 .map(|d| clip_entries(&d))
                 .unwrap_or_default();
-            Json(json!({
-                "ok": true,
-                "clip": name,
-                "transcript": w.transcript,
-                "transcript_source": w.source,
-                "clips": clips,
-            }))
-            .into_response()
+            let mut body = w.provenance();
+            body["ok"] = json!(true);
+            body["clip"] = json!(name);
+            body["transcript"] = json!(w.transcript);
+            body["clips"] = json!(clips);
+            body["message"] = json!(format!("{name} transcribed by {}", w.by));
+            Json(body).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(error_body(e.to_string()))).into_response(),
     }

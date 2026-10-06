@@ -33,9 +33,11 @@
 //! `response.done`, while the user still talks. Started at once it would
 //! talk over the user; refused, the client would report an error on every
 //! barge-in after a tool preamble and never retry. A second one meanwhile is
-//! refused as `conversation_already_has_active_response`. A carried create
-//! is answered even when the turn turns out to have no words: the client
-//! asked.
+//! refused as `conversation_already_has_active_response` — but one that
+//! arrives while the held create is the cut response's own, carried again,
+//! is absorbed into it (`absorb`, realtime-server-tools §2.5). A carried
+//! create is answered even when the turn turns out to have no words: the
+//! client asked.
 //!
 //! **A barge-in** (§6.4, `interrupt`) defers the debt before it cancels
 //! anything (WP1c review H5), so neither an owed response that was due nor
@@ -51,6 +53,8 @@ use super::super::input::has_words;
 use super::super::protocol::ErrorObject;
 use super::{Core, Create};
 
+mod absorb;
+
 /// The **Pending** phase (module doc).
 #[derive(Debug)]
 pub(crate) struct Pending {
@@ -63,6 +67,9 @@ pub(crate) struct Pending {
     due: bool,
     /// A client's `response.create` held while the user spoke (module doc).
     carried: Option<Create>,
+    /// `carried` is a cut response's own create, held again (`interrupt`):
+    /// the client's next create is absorbed into it (`absorb`).
+    again: bool,
     /// The response a barge-in cut while it was being heard: not resumed if
     /// the turn has no words (module doc), which the log says.
     interrupted: Option<String>,
@@ -75,6 +82,7 @@ impl Pending {
             deferred: true,
             due: false,
             carried: None,
+            again: false,
             interrupted: None,
         }
     }
@@ -157,7 +165,7 @@ impl Core {
     /// the wait.
     pub(super) fn pending_carry(&mut self, create: Create) {
         if self.pending_carries() {
-            return self.pending_refuse(create);
+            return self.pending_second(create);
         }
         tracing::debug!(
             "realtime {}: the user is speaking — the client's response.create waits for the \
@@ -166,6 +174,7 @@ impl Core {
         );
         let p = self.pending.get_or_insert_with(Pending::deferred);
         p.carried = Some(create);
+        p.again = false;
         p.due = false;
         p.deferred = true;
     }
@@ -188,6 +197,9 @@ impl Core {
             self.id()
         );
         self.pending_carry(create);
+        if let Some(p) = self.pending.as_mut() {
+            p.again = true;
+        }
     }
 
     /// The speech that deferred the owed response will not commit (module

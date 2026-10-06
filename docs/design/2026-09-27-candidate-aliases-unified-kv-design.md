@@ -420,12 +420,24 @@ three rules directly:
 too, so it has to support every enabled facet. With `inherit`, that means the
 global fallback. A cloud entry with unknown capabilities gets them through its
 own `capabilities_override`.
+*Changed 2026-10-06* (the owner's decision: a configured fallback is always
+used, with no exception by content; only capability shapes what it is sent):
+the fallback is no longer held to it. One that lacks an enabled facet answers
+like any fallback — the hold's, a guest's, the outside-VRAM swap's, a climb's —
+and what it cannot take reaches it degraded: images as placeholders
+(`gate::fallback_images`), a Chat PDF's pages as its text (`chat_turn::blind`),
+a voice turn as its transcript (`capabilities::hears`, per route). Each such
+request's row says so (`request_logs.degraded`: "fallback 'x' lacks vision: 3
+images sent as placeholders"). The save no longer refuses such a fallback; the
+editor names what it lacks as an advisory.
 
 **When a row changes later.** If a candidate's row (or the fallback) is edited
 so it no longer supports an enabled facet:
 - that candidate is **skipped** when routing;
-- the fallback is treated as none;
-- the alias shows a problem in the editor, `lmgw__models` and `lmgw__status`.
+- the fallback is treated as none (*changed 2026-10-06:* it is used, with
+  what it cannot take degraded, as above);
+- the alias shows a problem in the editor, `lmgw__models` and `lmgw__status`
+  (an advisory for the fallback, since 2026-10-06).
 
 The contract never shrinks silently.
 
@@ -986,6 +998,12 @@ rootless podman, qwen3.5-0.8b):**
       client asked for, and the stored chain is already loaded by then.
     - The dashboard chat's `model_vision` gates image attachments on the
       hold-effective alias only.
+      *Changed 2026-10-06* (the owner's ruling: a configured fallback is
+      always used): only when the hold's fallback sees, or its vision is
+      unknown. A hold fallback that cannot see no longer gates: the thread's
+      own model does, and the fallback answers with the images as
+      placeholders and a PDF's pages as its text (entry 43,
+      chat-archive-pin-attachments §2).
 32. **The log column.** Migration `0042_fallback_reason.sql` adds
     `request_logs.fallback_reason TEXT`, NULL when no fallback answered.
     Every logging site fills it from its `GateHeaders`:
@@ -1104,6 +1122,28 @@ Phase 2 review (`feat/external-vram-fallback`), for review:
     costs nothing when the verdict is not External. The hold's swap is
     unchanged (there is no local model to wait for). MCP sampling and agent
     runs do not set the flag.
+    *Changed 2026-10-06* (the owner's ruling: a configured fallback is
+    always used, with no exception by content; only capability keeps
+    content from a route): superseded. A fallback that cannot see answers
+    the external swap like any other, at once, and the request's images go
+    to it as placeholders ("omitted: the answering model cannot see
+    images"), with a WARN naming the fallback (`gate::fallback_images`,
+    decided once per send at the top of `fit_chat`; the llama egress's
+    tool-image placeholder's shape); `x-lmgw-images-omitted` says how many.
+    The same holds for the hold's swap and a climb's fallback, which until
+    then sent the images as they were; the Chat sends a PDF's pages as its
+    text instead. `vision: true` and unknown send the images.
+    `Routed::carrying_images` and the `images` flag are gone. What still
+    makes a fallback none is configuration: a route check the endpoint
+    fails, and a candidate alias's fallback that lacks a facet the alias
+    enables (§4.6). So a candidate alias's fallback never gets an image it
+    cannot see: an image request to an alias without Vision is refused, and
+    with Vision enabled a fallback that does not positively support it
+    (blind or unknown) counts as none — `gpu_hold` under the hold, a wait
+    at the external verdict. *Changed again 2026-10-06* (the owner's
+    decision, §4.6): that facet rule is gone too; a candidate alias's
+    fallback that lacks Vision answers, with the images as placeholders, and
+    its request row is marked (`request_logs.degraded`).
 44. **The verdict is taken again while waiting** (review, finding 8). The
     spec's principle, waiting does not help when the shortfall is outside
     lmgw, holds during the wait too: a request that queued as Unavailable
@@ -1388,7 +1428,9 @@ Phase 4, C2 (`feat/candidate-aliases`, 2026-09-27): the gate half —
     support every enabled facet counts as none on every path: the
     outside-VRAM swap, a climb's, the hold during a climb, and the background
     walk. The hold at `resolve` checks it itself, and names the facet in the
-    `gpu_hold` detail.
+    `gpu_hold` detail. *Changed 2026-10-06* (§4.6): no path asks it any
+    more; `fallback_serves` is the site's route check alone, and such a
+    fallback answers with what it cannot take degraded.
 73. **The re-pick hands the site a whole admission.** `Sent::Fallback` became
     `Sent::Rerouted(Result<Opened, OpenFailed>)`, so every site has one arm
     for a climb's fallback and for a re-pick. `Err` carries fresh headers, so

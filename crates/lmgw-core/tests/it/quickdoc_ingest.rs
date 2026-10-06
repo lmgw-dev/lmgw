@@ -731,7 +731,7 @@ async fn a_reranker_can_never_become_a_corpus_embedder() {
         &state.db,
         &NewUpstream {
             name: AUX_UPSTREAM_NAME.into(),
-            protocol: Protocol::Openai,
+            protocol: Protocol::LlamaCpp,
             kind: UpstreamKind::LlamaServer,
             // Nothing listens here: if the gate stopped firing, this would fail
             // with a transport error instead of quietly passing.

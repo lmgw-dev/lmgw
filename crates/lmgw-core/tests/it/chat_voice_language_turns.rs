@@ -37,10 +37,12 @@ pub(crate) async fn read_out(r: reqwest::Response) -> Vec<(String, Value)> {
 async fn a_spoken_send_regenerate_and_continue_say_the_language_and_a_typed_send_does_not() {
     let w = world(|_| {}).await;
     // A route that takes a prefill, for the continue: llama-server.
-    sqlx::query("UPDATE upstreams SET kind = 'llama_server' WHERE name = 'fake'")
-        .execute(&w.state.db)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE upstreams SET protocol = 'llama_cpp', kind = 'llama_server' WHERE name = 'fake'",
+    )
+    .execute(&w.state.db)
+    .await
+    .unwrap();
     w.state.reload_snapshot().await.unwrap();
     let tid = thread(&w.gw, "chatty").await;
 

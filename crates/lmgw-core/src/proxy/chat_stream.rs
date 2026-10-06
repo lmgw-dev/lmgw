@@ -39,6 +39,7 @@ pub(super) async fn stream_chat(
     mut lease: crate::gate::TurnLease,
 ) -> Result<Turn<Response>, GatewayError> {
     let max_tokens_clamped = lease.max_tokens_clamped();
+    let degraded = lease.degraded();
     let timeout = route.upstream.request_timeout();
     // The connect is retried through the shared dead-container path (§3.2);
     // once the relay below has started, the response is the client's — and
@@ -159,6 +160,7 @@ pub(super) async fn stream_chat(
                 max_tokens_clamped,
                 fallback,
                 rung,
+                degraded,
             },
             StatusCode::OK.as_u16(),
             outcome.ttfb_ms,

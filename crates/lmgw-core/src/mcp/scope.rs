@@ -332,6 +332,14 @@ impl<E> ScopedExecutor<E> {
             proto: crate::telemetry::RESPONSES_TOOL_PROTO,
         }
     }
+
+    /// Log a refusal under another surface's tool proto, as the executors it
+    /// wraps do (`McpExecutor::with_proto`): a `/v1/realtime` session's calls
+    /// are `realtime-tool` rows, refused ones included.
+    pub fn with_proto(mut self, proto: &'static str) -> Self {
+        self.proto = proto;
+        self
+    }
 }
 
 #[async_trait]

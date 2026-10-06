@@ -26,6 +26,7 @@ pub mod candidates;
 pub mod capabilities;
 pub mod catalog;
 pub mod config;
+pub mod degraded;
 pub mod egress;
 pub mod error;
 pub mod extract;
@@ -56,6 +57,10 @@ pub mod knowledge;
 /// recomputing.
 pub mod ladder;
 pub mod llama_caps;
+/// What lmgw knows about the llama-server a chat send goes to (llama egress
+/// design §3.2, §4.2): the per-send resolver, and the background `/props`
+/// cache of external `llama_cpp` rows with its four invalidations.
+pub mod llama_facts;
 pub mod mcp;
 pub mod modelinfo;
 pub mod net;

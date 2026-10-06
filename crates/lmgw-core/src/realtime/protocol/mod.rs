@@ -7,12 +7,14 @@
 
 mod client;
 mod item;
+mod mcp;
 mod server;
 mod session;
 mod tools;
 
 pub use client::*;
 pub use item::*;
+pub use mcp::*;
 pub use server::*;
 pub use session::*;
 pub use tools::*;

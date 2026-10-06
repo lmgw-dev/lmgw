@@ -29,9 +29,19 @@ pub async fn handle_legacy_completions(
     body: Value,
 ) -> Response {
     let started = Instant::now();
-    state.telemetry.request_started();
     let proto = ClientProto::OpenaiChat;
     let streamed = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    // Opens the in-flight gauge, and writes the `499` row should the client
+    // go away before any row is written (`unanswered.rs`).
+    let mut unanswered = Unanswered::open(
+        &state,
+        proto,
+        &ctx,
+        body.get("model").and_then(Value::as_str).unwrap_or("?"),
+        started,
+        RequestClass::Chat,
+    );
+    unanswered.streamed(streamed);
     let Some(alias) = body
         .get("model")
         .and_then(Value::as_str)
@@ -41,6 +51,7 @@ pub async fn handle_legacy_completions(
         // `/v1/chat/completions` logs its parse errors. It used to route the
         // placeholder name `?` and answer 404 "unknown model alias: ?".
         let e = GatewayError::BadRequest("missing 'model'".into());
+        unanswered.logging();
         record(
             LogParams {
                 state: &state,
@@ -55,6 +66,7 @@ pub async fn handle_legacy_completions(
                 max_tokens_clamped: None,
                 fallback: None,
                 rung: None,
+                degraded: None,
             },
             e.http_status().as_u16(),
             None,
@@ -65,10 +77,11 @@ pub async fn handle_legacy_completions(
         return error_response(proto, &e);
     };
 
-    if let Some(r) =
-        policy_or_refuse(&state, proto, &ctx, &alias, started, RequestClass::Chat).await
-    {
-        return r;
+    unanswered.stage("checking the key's policy");
+    if let Some(e) = policy_refusal(&state, &ctx, &alias).await {
+        unanswered.logging();
+        record_refusal(&state, proto, &ctx, &alias, started, RequestClass::Chat, &e).await;
+        return error_response(proto, &e);
     }
 
     // The gate's per-request half. The hold swap runs *before* the protocol
@@ -77,6 +90,7 @@ pub async fn handle_legacy_completions(
     // anthropic-protocol upstream therefore fails here with this handler's own
     // error, exactly as it would if the client had named that alias — never a
     // silent misroute.
+    unanswered.stage("waiting for admission (GPU room, or the model's container starting)");
     let opened = match async {
         crate::gate::resolve(&state, &alias, crate::gate::RouteCheck::LegacyCompletions)
             .await?
@@ -89,6 +103,7 @@ pub async fn handle_legacy_completions(
         Ok(o) => o,
         Err(f) => {
             let out = error_response(proto, &f.error);
+            unanswered.logging();
             record(
                 LogParams {
                     state: &state,
@@ -103,6 +118,7 @@ pub async fn handle_legacy_completions(
                     max_tokens_clamped: None,
                     fallback: f.headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 f.error.http_status().as_u16(),
                 None,
@@ -113,7 +129,17 @@ pub async fn handle_legacy_completions(
             return f.headers.stamp(out);
         }
     };
-    serve_legacy(state, ctx, alias, body, streamed, opened, started).await
+    serve_legacy(
+        state,
+        ctx,
+        alias,
+        body,
+        streamed,
+        opened,
+        started,
+        &mut unanswered,
+    )
+    .await
 }
 
 /// The post-admission half of [`handle_legacy_completions`] — run once, and
@@ -121,6 +147,10 @@ pub async fn handle_legacy_completions(
 /// it before anything was sent (ladder design §12 entry 8). That fallback
 /// already passed this endpoint's route check: the climb judges it with the
 /// check the admission recorded on the hold.
+///
+/// `unanswered` holds the request's row until a row is written: it is handed
+/// over right before each write here, and to the relay task with a stream.
+#[allow(clippy::too_many_arguments)]
 async fn serve_legacy(
     state: SharedState,
     ctx: RequestCtx,
@@ -129,6 +159,7 @@ async fn serve_legacy(
     streamed: bool,
     opened: crate::gate::Opened,
     started: Instant,
+    unanswered: &mut Unanswered,
 ) -> Response {
     let proto = ClientProto::OpenaiChat;
     let crate::gate::Opened {
@@ -136,6 +167,8 @@ async fn serve_legacy(
         hold: admission,
         mut headers,
     } = opened;
+    unanswered.routed_to(&route, headers.fallback_reason());
+    unanswered.stage("waiting for the model's answer");
     // A guarded row's or a ladder's fit rewrites the body's max-output
     // fields; wherever the gate reroutes the request instead gets the body
     // as the client sent it. Only a ladder row or a candidate alias's model
@@ -156,6 +189,7 @@ async fn serve_legacy(
             Err(f) => {
                 let e = f.error;
                 let out = error_response(proto, &e);
+                unanswered.logging();
                 record(
                     LogParams {
                         state: &state,
@@ -173,6 +207,7 @@ async fn serve_legacy(
                         max_tokens_clamped: f.max_tokens_clamped,
                         fallback: headers.fallback_reason(),
                         rung: f.rung.as_ref().map(crate::gate::RungTag::log),
+                        degraded: None,
                     },
                     e.http_status().as_u16(),
                     None,
@@ -230,7 +265,7 @@ async fn serve_legacy(
             drop(admission);
             let body = pristine.unwrap_or(body);
             return Box::pin(serve_legacy(
-                state, ctx, alias, body, streamed, opened, started,
+                state, ctx, alias, body, streamed, opened, started, unanswered,
             ))
             .await;
         }
@@ -239,6 +274,7 @@ async fn serve_legacy(
         Ok(crate::gate::Sent::Rerouted(Err(f))) => {
             headers = f.headers;
             let out = error_response(proto, &f.error);
+            unanswered.logging();
             record(
                 LogParams {
                     state: &state,
@@ -253,6 +289,7 @@ async fn serve_legacy(
                     max_tokens_clamped: None,
                     fallback: headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 f.error.http_status().as_u16(),
                 None,
@@ -264,6 +301,7 @@ async fn serve_legacy(
         }
         Err(e) => {
             let out = error_response(proto, &e);
+            unanswered.logging();
             record(
                 LogParams {
                     state: &state,
@@ -278,6 +316,7 @@ async fn serve_legacy(
                     max_tokens_clamped,
                     fallback: headers.fallback_reason(),
                     rung,
+                    degraded: None,
                 },
                 e.http_status().as_u16(),
                 None,
@@ -314,8 +353,9 @@ async fn serve_legacy(
                 .unwrap_or_default();
             (200u16, usage, None)
         } else {
+            // The route's own egress: llama.cpp's context refusal is its own.
             let e = crate::gate::attribute(
-                for_protocol(crate::config::Protocol::Openai).map_error(status.as_u16(), &bytes),
+                for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes),
                 &route,
             );
             (
@@ -324,6 +364,7 @@ async fn serve_legacy(
                 Some((e.kind().to_string(), e.to_string())),
             )
         };
+        unanswered.logging();
         record(
             LogParams {
                 state: &state,
@@ -338,6 +379,7 @@ async fn serve_legacy(
                 max_tokens_clamped,
                 fallback: headers.fallback_reason(),
                 rung,
+                degraded: None,
             },
             status_out,
             Some(started.elapsed().as_millis() as i64),
@@ -355,7 +397,7 @@ async fn serve_legacy(
         }
         // Normalize the error into OpenAI shape.
         let e = crate::gate::attribute(
-            for_protocol(crate::config::Protocol::Openai).map_error(status.as_u16(), &bytes),
+            for_protocol(route.upstream.protocol).map_error(status.as_u16(), &bytes),
             &route,
         );
         return with_annotations(headers.stamp(error_response(proto, &e)), &annotations);
@@ -371,6 +413,9 @@ async fn serve_legacy(
     let ctx2 = ctx.clone();
     let route2 = route.clone();
     let fallback = headers.fallback_reason();
+    // The relay task writes the stream's row from here on, a client that goes
+    // away mid-stream included (`canceled`).
+    unanswered.logging();
     tokio::spawn(async move {
         let mut upstream = resp.bytes_stream();
         let mut error: Option<(String, String)> = None;
@@ -415,6 +460,7 @@ async fn serve_legacy(
                 max_tokens_clamped,
                 fallback,
                 rung,
+                degraded: None,
             },
             200,
             None,

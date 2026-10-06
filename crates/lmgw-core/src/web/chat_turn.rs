@@ -30,18 +30,22 @@ use super::chat_live::Ticket;
 use super::chat_repo::ChatRepo;
 use super::chat_voice::ReadAloud;
 use super::{chat_attach, chat_knowledge, chat_reasoning, chat_sampling};
-use crate::config::{Protocol, Route, Snapshot, UpstreamKind};
+use crate::config::{Protocol, Route, Snapshot};
 use crate::error::GatewayError;
 use crate::ir::{ChatRequest, ContentPart, Message, Params, ReasoningControl, Role};
 use crate::state::{AppState, SharedState};
 use crate::store::{ChatAttachmentFull, ChatMessageRow, ChatReply, ChatThread, ContinueSave};
 
+mod blind;
+pub(super) use blind::Blind;
 mod merge;
 mod out;
 mod spoken;
 pub(crate) use out::{refuse, refuse_sent, SentAs, TurnFrame, TurnLanguage, TurnOpts, VoiceTurn};
+pub(crate) use spoken::{
+    row_text, tools_may_run, RowWatch, ToolsHeld, UserRow, AUDIO_NOT_HEARD, NOT_TRANSCRIBED,
+};
 pub use spoken::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnForTests};
-pub(crate) use spoken::{tools_may_run, RowWatch, ToolsHeld, UserRow, AUDIO_NOT_LOCAL};
 #[cfg(test)]
 mod seam_tests;
 
@@ -77,10 +81,21 @@ pub(super) struct Turn {
     /// The caller's own stop ([`TurnOpts::stop`]).
     stop: Option<crate::proxy::StopSignal>,
     /// The request carries the user's speech as audio: it goes only to a
-    /// route this lmgw runs ([`spoken::local_only`]).
-    local_only: bool,
+    /// model that takes it ([`spoken::may_hear`]).
+    hears: bool,
+    /// A heard turn's new turns that went as their transcript beside the
+    /// audio: what a tool loop takes out again when a later call goes as
+    /// text (`agentchat::unheard`, review V2). Text only, never audio.
+    spoken_texts: Vec<String>,
     /// The pre-save barrier ([`TurnOpts::user_row`]).
     user_row: Option<RowWatch>,
+    /// What the turn sends a fallback that cannot see ([`blind`]): set once
+    /// its request is built.
+    blind: std::sync::Arc<blind::Blind>,
+    /// What the turn's content lost to the thread's own model, which lacks
+    /// a capability — attachments as notes or transcripts, a heard turn as
+    /// its transcript — for its request rows (`request_logs.degraded`).
+    degraded: Option<String>,
 }
 
 /// Why a turn gave up before its end.
@@ -162,9 +177,38 @@ impl Turn {
     }
 
     /// The request carries the user's speech as audio (voice-audio-input
-    /// design §3.4): only a route this lmgw runs may take it.
-    pub(super) fn local_only(&self) -> bool {
-        self.local_only
+    /// design §3.4): only a model that takes it may get it.
+    pub(super) fn hears(&self) -> bool {
+        self.hears
+    }
+
+    /// The spoken parts that went as text ([`Self::spoken_texts`] field).
+    pub(super) fn spoken_texts(&self) -> &[String] {
+        &self.spoken_texts
+    }
+
+    /// What the turn sends a fallback that cannot see, and what its reply
+    /// says of it ([`blind`]).
+    pub(super) fn blind(&self) -> &std::sync::Arc<blind::Blind> {
+        &self.blind
+    }
+
+    /// The turn, its request built with `text_form` (a PDF sent as page
+    /// images, as its text) beside it, and `lacked`, what its attachments
+    /// lost to the thread's model.
+    fn with_request(self, text_form: Option<Vec<Message>>, lacked: Option<String>) -> Self {
+        Self {
+            blind: std::sync::Arc::new(blind::Blind::new(text_form)),
+            degraded: crate::degraded::join([self.degraded.clone(), lacked]),
+            ..self
+        }
+    }
+
+    /// What the turn's content lost to the thread's own model before any
+    /// route was taken ([`Self::degraded`] field): its row's marker, joined
+    /// with what a send's route took off ([`blind::Blind::marker`]).
+    pub(super) fn degraded(&self) -> Option<String> {
+        self.degraded.clone()
     }
 
     /// A heard voice turn's pre-save barrier, which its tools wait on too
@@ -287,6 +331,9 @@ impl Turn {
             ir_messages: r.ir_messages.map(str::to_string),
             model: Some(self.model.clone()),
             answered_by: r.answered_by,
+            // What a fallback that cannot see was sent in the images' place,
+            // when one answered (`blind`).
+            images_note: self.blind.note(),
             voice: None,
         };
         let res = match &self.persist {
@@ -338,6 +385,25 @@ impl Turn {
 /// headers for the route that answered: a GPU-hold, outside-VRAM or ladder
 /// fallback's alias, or a candidate alias's pick (by its public name).
 /// `None` when the model asked for answered itself.
+/// The model that answers on a route the gate opened with `headers`, for
+/// the capability check (`capabilities::hears::Model`): `answered_by` (this
+/// turn's name for it, else `alias`), and a candidate's pick read from its
+/// row, so an alias of the same name never stands in for it (review V8).
+pub(super) fn answering<'a>(
+    answered_by: Option<&'a str>,
+    headers: &crate::gate::GateHeaders,
+    alias: &'a str,
+) -> crate::capabilities::hears::Model<'a> {
+    use crate::capabilities::hears::Model;
+    match answered_by {
+        Some(name) if headers.fallback().is_none() && headers.candidate().is_some() => {
+            Model::Pick(name)
+        }
+        Some(name) => Model::Named(name),
+        None => Model::Named(alias),
+    }
+}
+
 pub(super) fn answered_by(snap: &Snapshot, headers: &crate::gate::GateHeaders) -> Option<String> {
     headers
         .fallback()
@@ -451,6 +517,7 @@ pub(crate) async fn start_turn_into(
         began,
         spoken,
         user_row,
+        degraded,
     } = opts;
     if let Some(began) = began {
         let _ = began.send(ticket.generation());
@@ -525,8 +592,23 @@ pub(crate) async fn start_turn_into(
         model: thread.model_alias.clone(),
         ticket,
         stop,
-        local_only: spoken::hears(spoken.as_deref()),
+        hears: spoken::hears(spoken.as_deref()),
+        spoken_texts: spoken
+            .as_deref()
+            .filter(|s| spoken::hears(Some(s)))
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         user_row,
+        blind: Default::default(),
+        degraded,
     };
     let state = state.clone();
     let thread = thread.clone();
@@ -582,13 +664,15 @@ pub(crate) async fn start_turn_into(
                 return;
             }
         };
-        let ir = request(
+        let (ir, text_form) = request(
             &state,
             &thread,
             (&history, spoken.as_deref()),
             &rendered,
             (voice.as_ref(), language.as_ref()),
         );
+        let lacked = chat_attach::lacked_marker(&thread.model_alias, rendered.values().flatten());
+        let turn = turn.with_request(text_form, lacked);
         // The request holds the spoken parts now; the turn keeps no copy
         // (voice-audio-input design §4).
         drop(spoken);
@@ -607,25 +691,39 @@ pub(crate) async fn start_turn_into(
 /// for a turn with a reply language, the languages
 /// (`chat_voice::prompt::turn_block`). `spoken`: a heard response's new
 /// turns, after the history (voice-audio-input design §3.4).
+///
+/// Beside it, when a PDF went as page images, the same messages with each
+/// such PDF in its text form (`Rendered::text_form`): what a fallback that
+/// cannot see is sent instead ([`blind`]). Merging goes by role alone, so
+/// the two lists hold the same messages.
 fn request(
     state: &SharedState,
     thread: &ChatThread,
     (history, spoken): (&[ChatMessageRow], Option<&[ContentPart]>),
     attachments: &HashMap<i64, Vec<chat_attach::Rendered>>,
     (voice, language): (Option<&VoiceTurn>, Option<&TurnLanguage>),
-) -> ChatRequest {
+) -> (ChatRequest, Option<Vec<Message>>) {
     // A voice turn's prompt block, a language, and the reasoning (§8.5).
     let settings = &state.snapshot().settings.realtime;
     let (block, reasoning) = super::chat_voice::turn_block(thread, settings, voice, language);
-    ChatRequest {
-        model_alias: thread.model_alias.clone(),
-        messages: build_messages(
+    let answering = effective_alias(state, &thread.model_alias);
+    let messages = |text_form: bool| {
+        build_messages(
             thread,
-            &effective_alias(state, &thread.model_alias),
+            &answering,
             (history, spoken),
-            attachments,
+            (attachments, text_form),
             block.as_deref(),
-        ),
+        )
+    };
+    let paged = attachments
+        .values()
+        .flatten()
+        .any(|r| r.text_form.is_some());
+    let text_form = paged.then(|| messages(true));
+    let ir = ChatRequest {
+        model_alias: thread.model_alias.clone(),
+        messages: messages(false),
         params: Params {
             // temperature plus the thread's other sampling choices; the relay
             // drops what the route cannot take and reports it.
@@ -643,7 +741,8 @@ fn request(
         passthrough: Default::default(),
         llama_kwargs_enabled: None,
         anthropic_beta: Vec::new(),
-    }
+    };
+    (ir, text_form)
 }
 
 // ---------------------------------------------------------------------------
@@ -679,17 +778,50 @@ fn request(
 /// (`model_vision`) and whether `input_modalities` contains `audio`
 /// (`model_audio_input`) — [`Caps`] carries both, because the lookup probes the
 /// upstream's catalog and is not worth paying twice.
+///
+/// *Changed 2026-10-06* (the owner's ruling: a configured fallback is always
+/// used, with no exception by content): a hold's fallback that cannot see
+/// no longer decides `vision`. The send gives it the images as placeholders
+/// (`gate::fallback_images`), and the turn says so; so the thread's own
+/// model decides, as it does without the hold, and a draft image is refused
+/// only when that model cannot see it. A fallback that sees still lets a
+/// thread whose own model cannot send its images.
 pub(super) async fn model_caps(state: &SharedState, alias: &str) -> Caps {
     let effective = effective_alias(state, alias);
     let caps = crate::capabilities::exposed::exposed_entry(state, &effective)
         .await
         .and_then(|e| e.capabilities);
-    Caps {
-        vision: caps.as_ref().and_then(|c| c.vision),
-        audio: caps
+    let mut vision = caps.as_ref().and_then(|c| c.vision);
+    if vision == Some(false) && effective != alias {
+        vision = crate::capabilities::exposed::exposed_entry(state, alias)
+            .await
+            .and_then(|e| e.capabilities)
+            .and_then(|c| c.vision);
+    }
+    // Audio by the voice turn's predicate (`capabilities::hears`, review
+    // V7): the egress must have an audio part and the server must not have
+    // said it loaded no audio projector, beside what the model publishes.
+    // A name with no static route (a candidate alias) is read as published.
+    use crate::capabilities::hears::{self, Hears};
+    let route = state
+        .snapshot()
+        .resolve_for_request(alias)
+        .ok()
+        .map(|r| r.route);
+    let audio = match &route {
+        Some(route) => {
+            let facts = hears::server_facts(state, None, route);
+            match hears::hears_from(caps.as_ref(), route, facts.as_deref()) {
+                Hears::Yes => Some(true),
+                Hears::No(_) => Some(false),
+                Hears::Unknown => None,
+            }
+        }
+        None => caps
             .and_then(|c| c.input_modalities)
             .map(|m| m.iter().any(|x| x == "audio")),
-    }
+    };
+    Caps { vision, audio }
 }
 
 /// The alias that will answer a turn sent to `alias`: its GPU-hold fallback
@@ -791,18 +923,18 @@ pub(super) fn has_tool_record(m: &ChatMessageRow) -> bool {
 ///   answer a trailing assistant message with a new message.
 pub(super) fn prefill_refusal(route: &Route, control: &ReasoningControl) -> Option<String> {
     let name = &route.upstream.name;
-    match (route.upstream.protocol, route.upstream.kind) {
-        (Protocol::Anthropic, _) if control.enabled == Some(true) => Some(
+    match route.upstream.protocol {
+        Protocol::Anthropic if control.enabled == Some(true) => Some(
             "extended thinking is on for this thread, and Anthropic cannot continue a reply \
              while thinking — switch reasoning off in the thread settings to continue"
                 .into(),
         ),
-        (Protocol::Anthropic, _) | (Protocol::Openai, UpstreamKind::LlamaServer) => None,
-        (Protocol::Openai, _) => Some(format!(
+        Protocol::Anthropic | Protocol::LlamaCpp => None,
+        Protocol::Openai => Some(format!(
             "the route answering this thread (upstream '{name}') is an OpenAI-compatible API, \
              which cannot continue a reply — Continue needs an Anthropic or llama-server route"
         )),
-        (Protocol::Gemini, _) => Some(format!(
+        Protocol::Gemini => Some(format!(
             "the route answering this thread (upstream '{name}') is Gemini, which cannot \
              continue a reply — Continue needs an Anthropic or llama-server route"
         )),
@@ -827,16 +959,23 @@ pub(super) struct RouteFit {
 
 /// [`RouteFit`] for `route`, with `ir.params` the thread's own choices.
 /// `continuing`: `ir` ends with the reply being continued — refused by name
-/// on a route without a prefill ([`prefill_refusal`]). `local_only`: `ir`
-/// carries the user's speech as audio — refused with `audio_not_local` on
-/// a route this lmgw does not run (voice-audio-input design §3.4).
-pub(super) fn fit_route(
-    route: &Route,
+/// on a route without a prefill ([`prefill_refusal`]). `hears`: `ir`
+/// carries the user's speech as audio — refused with
+/// `audio_input_unsupported` unless `answering`, the model that answers on
+/// `route` (as a turn names who answered), takes it; `hold` is the claim
+/// the send goes out on, whose server's `/props` is read (voice-audio-input
+/// design §3.4, changed 2026-10-06). A fallback that cannot see the
+/// request's images is not refused: the turn's request is given to it in
+/// the form it takes first ([`Turn::blind`]), and this fits that.
+pub(super) async fn fit_route(
+    state: &SharedState,
+    (route, hold): (&Route, Option<&crate::vram::LocalHold>),
+    answering: crate::capabilities::hears::Model<'_>,
     ir: &ChatRequest,
-    (continuing, local_only): (bool, bool),
+    (continuing, hears): (bool, bool),
 ) -> Result<RouteFit, GatewayError> {
-    if local_only {
-        spoken::local_only(route)?;
+    if hears {
+        spoken::may_hear(state, route, hold, answering).await?;
     }
     let mut ignored = chat_reasoning::ignored(ir, route);
     let (params, sampling_ignored) = chat_sampling::split(&ir.params, route);
@@ -872,8 +1011,7 @@ pub(super) fn fit_route(
 /// caller to take out again should another route answer instead; nothing for
 /// any other route, or a request that does not end with a reply.
 pub(super) fn mark_continuation(route: &Route, ir: &mut ChatRequest) -> Vec<&'static str> {
-    let llama = route.upstream.kind == UpstreamKind::LlamaServer
-        && route.upstream.protocol == Protocol::Openai;
+    let llama = route.upstream.protocol == Protocol::LlamaCpp;
     let ends_with_reply = ir
         .messages
         .last()
@@ -931,12 +1069,14 @@ fn group_by_message(atts: Vec<ChatAttachmentFull>) -> HashMap<i64, Vec<ChatAttac
 /// Adjacent user messages go out as one ([`merge`]). A voice turn's
 /// `voice_block` follows the thread's prompt in the system message. A heard
 /// response's `spoken` parts follow the history as a user message, and a
-/// spoken row with no words says so ([`spoken`]).
+/// spoken row with no words says so ([`spoken`]). With `text_form`, a PDF
+/// rendered as page images goes as its text form instead
+/// (`Rendered::text_form`, [`blind`]).
 fn build_messages(
     thread: &ChatThread,
     answering: &str,
     (history, spoken): (&[ChatMessageRow], Option<&[ContentPart]>),
-    attachments: &HashMap<i64, Vec<chat_attach::Rendered>>,
+    (attachments, text_form): (&HashMap<i64, Vec<chat_attach::Rendered>>, bool),
     voice_block: Option<&str>,
 ) -> Vec<Message> {
     let mut msgs = merge::Messages::with_capacity(history.len() + 2);
@@ -985,7 +1125,11 @@ fn build_messages(
         if let Some(atts) = attachments.get(&m.id) {
             for r in atts {
                 had_attachment_parts = true;
-                content.extend(r.parts.iter().cloned());
+                let parts = match &r.text_form {
+                    Some(text) if text_form => text,
+                    _ => &r.parts,
+                };
+                content.extend(parts.iter().cloned());
             }
         }
         // A plain assistant turn keeps its trace in its own column; replay it

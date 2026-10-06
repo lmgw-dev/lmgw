@@ -1,0 +1,46 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":[{\"text\":\"Compare these.\",\"type\":\"text\"},{\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgo=\"},\"type\":\"image_url\"},{\"input_audio\":{\"data\":\"SUQz\",\"format\":\"mpeg\"},\"type\":\"input_audio\"},{\"input_audio\":{\"data\":\"UklGRg==\",\"format\":\"wav\"},\"type\":\"input_audio\"}],\"role\":\"user\"}],\"model\":\"the-model\"}",
+    "body_json": {
+      "messages": [
+        {
+          "content": [
+            {
+              "text": "Compare these.",
+              "type": "text"
+            },
+            {
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgo="
+              },
+              "type": "image_url"
+            },
+            {
+              "input_audio": {
+                "data": "SUQz",
+                "format": "mpeg"
+              },
+              "type": "input_audio"
+            },
+            {
+              "input_audio": {
+                "data": "UklGRg==",
+                "format": "wav"
+              },
+              "type": "input_audio"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "the-model"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/chat/completions"
+  }
+}

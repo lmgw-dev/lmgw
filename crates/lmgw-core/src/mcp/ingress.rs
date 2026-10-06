@@ -50,7 +50,10 @@ use crate::mcp::scope::ToolScope;
 use crate::mcp::{selfadmin, CallError};
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
-use crate::store::{self, NewRequestLog};
+
+mod tool_row;
+
+pub(crate) use tool_row::{record_tool_call, record_tool_canceled, RowWatch};
 
 /// Protocol revision we advertise. Clients on an older supported rev still work.
 const PROTOCOL_VERSION: &str = "2025-11-25";
@@ -482,101 +485,6 @@ async fn record_mcp_call(
         state.agent_meters.note_tool_call(run);
     }
     record_tool_call(state, ctx, "mcp", exposed_tool, server_name, started, error).await
-}
-
-/// Write the `request_logs` row for **one tool call**, from either producer:
-/// the northbound `/mcp` `tools/call` above, or the `/v1/responses` loop
-/// executing a tool on the model's behalf (§21). They differ only in
-/// `ingress_proto`, so the row shape — NULL tokens, synthesized 502 on failure,
-/// live-feed broadcast — cannot drift between them.
-///
-/// `ingress_proto` must be one the telemetry bus excludes from the token
-/// aggregates ([`crate::telemetry::counts_in_token_stats`]); a tool call has no
-/// tokens and a synthesized status, so counting it would skew both.
-pub(crate) async fn record_tool_call(
-    state: &SharedState,
-    ctx: &RequestCtx,
-    ingress_proto: &str,
-    exposed_tool: &str,
-    server_name: Option<String>,
-    started: Instant,
-    error: Option<String>,
-) {
-    debug_assert!(
-        !crate::telemetry::counts_in_token_stats(ingress_proto),
-        "tool-call rows must be excluded from the token stats"
-    );
-    let total_ms = started.elapsed().as_millis() as i64;
-    let (status, error_kind, error_msg): (i64, Option<String>, Option<String>) = match error {
-        Some(msg) => (502, Some("tool_error".to_string()), Some(msg)),
-        None => (200, None, None),
-    };
-    let row = NewRequestLog {
-        client_key: ctx.client_key.clone(),
-        ingress_proto: ingress_proto.to_string(),
-        requested_alias: exposed_tool.to_string(),
-        upstream_id: None,
-        upstream_name: server_name,
-        upstream_model: None,
-        mcp_tool: Some(exposed_tool.to_string()),
-        egress_proto: Some("mcp".to_string()),
-        status,
-        // ttfb is meaningless for a single tool call; total_ms is the latency.
-        ttfb_ms: None,
-        total_ms: Some(total_ms),
-        // Tokens are meaningless for tools/call (§10 fix 2) — NULL, excluded.
-        prompt_tokens: None,
-        completion_tokens: None,
-        streamed: false,
-        error_kind,
-        error_msg,
-        // A tool call is not a model call: no tokens, no price, and the rollup
-        // keeps it out of the unpriced remainder for that reason (§2.3).
-        key_id: state.snapshot().key_id_for_name(
-            ctx.client_key.as_deref().unwrap_or_else(|| {
-                crate::telemetry::internal_identity(ingress_proto).unwrap_or("")
-            }),
-        ),
-        class: crate::telemetry::RequestClass::Tool,
-        ..Default::default()
-    };
-    let log_id = store::insert_request_log(&state.db, &row)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("failed to write MCP tool-call log: {e}");
-            0
-        });
-    // Broadcast onto the live feed like any request (the §10 observability
-    // claim) — request_finished excludes `mcp` from the token/error counters.
-    state
-        .telemetry
-        .request_finished(crate::telemetry::RequestSummary {
-            log_id,
-            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            client_key: row.client_key.clone(),
-            ingress_proto: row.ingress_proto,
-            requested_alias: row.requested_alias,
-            upstream_name: row.upstream_name,
-            upstream_model: row.mcp_tool.clone(),
-            egress_proto: row.egress_proto,
-            status: status as u16,
-            ttfb_ms: row.ttfb_ms,
-            total_ms: row.total_ms,
-            prompt_tokens: row.prompt_tokens,
-            completion_tokens: row.completion_tokens,
-            cached_in_tokens: row.cached_in_tokens,
-            cache_write_tokens: row.cache_write_tokens,
-            streamed: row.streamed,
-            error_kind: row.error_kind,
-            error_msg: row.error_msg,
-            // A tool execution has no money dimension at all — not an unpriced
-            // one. The rollup keeps it out of the remainder for the same reason.
-            cost_micro: None,
-            class: row.class.as_str().to_string(),
-            key_id: row.key_id,
-            fallback_reason: None,
-            rung: None,
-        });
 }
 
 /// First chunk of text from a tool-error result, for the log's `error_msg`.

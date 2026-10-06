@@ -304,7 +304,7 @@ fn every_clause_carries_what_the_model_wrote() {
         got.push(match w {
             Work::Clause { said, written, .. } => (Some(said), written.before, written.own),
             Work::Unspoken(raw) => (None, raw, String::new()),
-            Work::Pass(_) => panic!("no delta was passed"),
+            Work::Pass(_) | Work::Report(_) => panic!("no delta was passed"),
             Work::Break => continue,
         });
     }
@@ -363,7 +363,7 @@ fn split(deltas: &[&str]) -> (Vec<Handed>, Vec<String>) {
                 tts, said, written, ..
             } => clauses.push((tts, said, written.before, written.own)),
             Work::Unspoken(raw) => unspoken.push(raw),
-            Work::Pass(_) => panic!("no delta was passed"),
+            Work::Pass(_) | Work::Report(_) => panic!("no delta was passed"),
             Work::Break => {}
         }
     }

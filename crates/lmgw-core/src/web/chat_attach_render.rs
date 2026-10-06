@@ -23,7 +23,52 @@ use super::chat_repo::ChatRepo;
 pub struct Rendered {
     pub parts: Vec<ContentPart>,
     pub notes: Vec<String>,
+    /// A PDF whose pages went as images: the parts it renders to for a model
+    /// that cannot see — its extracted text, and a note for the pages
+    /// without text — which no page is rasterized for. The send swaps them
+    /// in when a fallback that cannot see answers (`chat_turn::blind`).
+    /// `None` for every other attachment.
+    pub text_form: Option<Vec<ContentPart>>,
+    /// What the model it was rendered for lacked, and so got in another
+    /// form ([`marker`]); `None` when it went as it is.
+    pub lacked: Option<Lacked>,
 }
+
+/// What a model lacked for an attachment, and so got it in another form:
+/// the turn's request row says so ([`marker`], `request_logs.degraded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lacked {
+    /// Vision: an image went as a note.
+    ImageNote,
+    /// Vision: a PDF's page images went as its text, or a note for the
+    /// pages without text.
+    PdfText,
+    /// Audio input: an audio file went as its transcript.
+    AudioTranscript,
+}
+
+/// The request row's marker for the attachments of a turn rendered for
+/// `model` ([`crate::degraded`]): what it lacked, and what went instead.
+/// `None` when every attachment went as it is.
+pub fn marker<'a>(model: &str, rendered: impl IntoIterator<Item = &'a Rendered>) -> Option<String> {
+    let lacked: Vec<Lacked> = rendered.into_iter().filter_map(|r| r.lacked).collect();
+    let count = |l: Lacked| lacked.iter().filter(|x| **x == l).count();
+    let images = count(Lacked::ImageNote);
+    crate::degraded::join([
+        (images > 0).then(|| {
+            let sent = crate::degraded::images(images, "a note", "notes");
+            crate::degraded::lacks(model, false, "vision", &sent)
+        }),
+        (count(Lacked::PdfText) > 0)
+            .then(|| crate::degraded::lacks(model, false, "vision", "PDF pages sent as text")),
+        (count(Lacked::AudioTranscript) > 0)
+            .then(|| crate::degraded::lacks(model, false, "audio", "transcript sent")),
+    ])
+}
+
+/// Who a PDF's text form names as the model that cannot see: whichever
+/// answers, which the render does not know.
+const ANSWERING: &str = "the answering model";
 
 impl Rendered {
     fn note(&mut self, text: String) {
@@ -64,12 +109,26 @@ pub async fn render(
     let model = thread.model_alias.as_str();
     let mut out = Rendered::default();
     match att.kind.as_str() {
-        "image" if caps.vision == Some(false) => out.note(format!(
-            "image \"{}\" not sent: {model} does not accept images",
-            escape_attr(&att.name)
-        )),
+        "image" if caps.vision == Some(false) => {
+            out.note(format!(
+                "image \"{}\" not sent: {model} does not accept images",
+                escape_attr(&att.name)
+            ));
+            out.lacked = Some(Lacked::ImageNote);
+        }
         "image" => out.parts.push(image_part(&att.mime, &att.data)),
-        "pdf" => render_pdf(state, att, caps, model, &mut out).await,
+        "pdf" => {
+            render_pdf(state, att, caps.vision != Some(false), model, &mut out).await;
+            let paged = out
+                .parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Image { .. }));
+            if paged {
+                let mut text = Rendered::default();
+                render_pdf(state, att, false, ANSWERING, &mut text).await;
+                out.text_form = Some(text.parts);
+            }
+        }
         "office" => {
             let attrs = format!(" kind=\"office\"{}", format_attr(att));
             let text = att.extracted.as_deref().unwrap_or_default();
@@ -97,10 +156,12 @@ fn format_attr(att: &ChatAttachmentFull) -> String {
 
 // -- PDF ----------------------------------------------------------------------
 
+/// Render a PDF for a model that `sees` images, or not; `model` is who the
+/// notes of the second case name.
 async fn render_pdf(
     state: &SharedState,
     att: &ChatAttachmentFull,
-    caps: Caps,
+    sees: bool,
     model: &str,
     out: &mut Rendered,
 ) {
@@ -115,7 +176,6 @@ async fn render_pdf(
         .get("class")
         .and_then(|c| c.as_str())
         .unwrap_or("text");
-    let sees = caps.vision != Some(false);
 
     // Every page as an image: a text-class PDF the user sent as Pages.
     if class == "text" && att.mode.as_deref() == Some("images") {
@@ -126,6 +186,7 @@ async fn render_pdf(
         }
         // History replayed on a model that cannot see: the pages cannot go, so
         // the extracted text does, and the note says so.
+        out.lacked = Some(Lacked::PdfText);
         out.note(format!(
             "PDF \"{}\" was sent as page images and {model} does not accept images — its \
              extracted text is sent instead",
@@ -146,6 +207,7 @@ async fn render_pdf(
     if sees {
         push_page_images(state, att, &textless, out).await;
     } else {
+        out.lacked = Some(Lacked::PdfText);
         out.note(format!(
             "\"{}\" pages {}: no text, and this model does not see images",
             escape_attr(&att.name),
@@ -218,6 +280,12 @@ async fn render_audio(
     };
     let attrs = format!(" kind=\"audio-transcript\" by=\"{}\"", escape_attr(&alias));
     out.parts.push(file_block(&att.name, &attrs, &transcript));
+    // The model is not known to take audio: it lacked it. (One that takes
+    // audio gets a container it cannot decode as its transcript too: a
+    // format, not a capability.)
+    if caps.audio != Some(true) {
+        out.lacked = Some(Lacked::AudioTranscript);
+    }
 }
 
 /// The transcript, stored one or made now (and stored) with the thread's

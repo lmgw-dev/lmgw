@@ -65,7 +65,7 @@ use crate::ir::Params;
 /// **One bypass remains, and it is real: a raw, native `n_predict` field in
 /// the client's JSON body.** `n_predict` is llama.cpp's own completion field,
 /// it is not in `ingress/openai.rs`'s `MODELED_KEYS`, so it survives into
-/// `ChatRequest.passthrough` untouched, and `egress::openai::chat_body`'s
+/// `ChatRequest.passthrough` untouched, and `egress::llama_cpp::chat_body`'s
 /// passthrough loop (`body.entry(k.clone()).or_insert_with(...)`) re-emits it
 /// verbatim because the body never sets a `"n_predict"` key itself — nothing
 /// currently stops it from reaching llama-server above the clamp, and fact 1

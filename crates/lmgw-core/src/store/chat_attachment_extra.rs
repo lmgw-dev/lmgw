@@ -47,6 +47,7 @@ impl NewAttachment {
             extracted_tokens: attachment_tokens(&self.meta),
             meta: self.meta.clone(),
             blockers: None,
+            hints: None,
         }
     }
 }

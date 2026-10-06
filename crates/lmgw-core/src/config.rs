@@ -5,6 +5,8 @@
 
 mod routes;
 pub use routes::*;
+mod llama_route;
+pub use llama_route::*;
 mod models;
 pub use models::*;
 mod llama_params;

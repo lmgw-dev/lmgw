@@ -59,11 +59,12 @@ impl Core {
         self.hearing().is_some_and(|h| h.hears(item_id))
     }
 
-    /// Whether a response must still wait for a transcript before it
-    /// launches: a turn the chat model hears goes as audio
-    /// (`Transcriber::busy_for_launch`).
+    /// Whether a response must still wait before it launches: for a
+    /// transcript — a turn the chat model hears goes as audio
+    /// (`Transcriber::busy_for_launch`) — or for an MCP label's listing in
+    /// flight (realtime-server-tools §1.2).
     pub(in crate::realtime) fn busy_for_launch(&self) -> bool {
-        self.transcriber.busy_for_launch(|id| self.hears(id))
+        self.transcriber.busy_for_launch(|id| self.hears(id)) || self.mcp.table.listing()
     }
 
     /// The upload of turn `item_id`, committed now (module doc): its WAV

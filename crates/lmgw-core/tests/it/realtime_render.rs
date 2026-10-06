@@ -56,6 +56,7 @@ fn messages(items: &[Item], instructions: &str) -> Vec<Message> {
         reasoning: None,
         speech_hint: None,
         written: &|_| None,
+        mcp: Default::default(),
     })
     .messages
 }
@@ -301,6 +302,7 @@ fn tools_lose_their_schema_keys_and_keep_everything_else() {
         reasoning: None,
         speech_hint: None,
         written: &|_| None,
+        mcp: Default::default(),
     });
     assert_eq!(ir.tools.len(), 1);
     assert_eq!(
@@ -328,6 +330,7 @@ fn tools_lose_their_schema_keys_and_keep_everything_else() {
         reasoning: None,
         speech_hint: None,
         written: &|_| None,
+        mcp: Default::default(),
     });
     assert_eq!(ir.tool_choice, None);
     assert!(ir.passthrough.is_empty());

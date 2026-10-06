@@ -1,0 +1,40 @@
+{
+  "requests": [
+    {
+      "body": "{\"add_generation_prompt\":false,\"continue_final_message\":true,\"messages\":[{\"content\":\"You are m. Be brief.\",\"role\":\"system\"},{\"content\":\"Tell me a story.\",\"role\":\"user\"},{\"content\":\"Once upon a\",\"role\":\"assistant\"}],\"model\":\"chat-gguf\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"timings_per_token\":true}",
+      "body_json": {
+        "add_generation_prompt": false,
+        "continue_final_message": true,
+        "messages": [
+          {
+            "content": "You are m. Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "Tell me a story.",
+            "role": "user"
+          },
+          {
+            "content": "Once upon a",
+            "role": "assistant"
+          }
+        ],
+        "model": "chat-gguf",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "timings_per_token": true
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

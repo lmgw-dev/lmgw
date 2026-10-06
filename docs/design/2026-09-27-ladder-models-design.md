@@ -707,6 +707,10 @@ the same standing permission:
     the claim the start completes, like any start admitted before the toggle.
     Under the hold the fallback is judged as the resolve-time hold swap
     judges it: the route check runs, the image rule does not.
+    *Changed 2026-10-06:* there is no image rule any more (the owner's
+    ruling: a configured fallback is always used). A climb's fallback that
+    cannot see answers, here and at the outside-VRAM verdict, and gets the
+    request's images as placeholders (candidate-aliases §12 entry 43).
 29. **The climb's verdict is `verdict_for(needed)`.** `verdict` keeps its
     callers and its "the model is up" exit. The measurement moved into
     `verdict_for(state, snap, target, needed, fill)`, which it calls and

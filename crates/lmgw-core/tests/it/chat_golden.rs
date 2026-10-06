@@ -346,7 +346,7 @@ async fn continue_a_reply() {
         .respond_with(sse_reply(openai_sse(" and more.", 10, 3)))
         .mount(&mock)
         .await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw, json!({})).await;
     store::append_chat_message(&state.db, tid, "user", "q", "", None, None, None)
         .await
@@ -705,7 +705,7 @@ async fn a_refused_save() {
         release.clone(),
     )
     .await;
-    let (state, gw) = gateway_at(&base, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway_at(&base, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw, json!({})).await;
     store::append_chat_message(&state.db, tid, "user", "q", "", None, None, None)
         .await

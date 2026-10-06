@@ -44,3 +44,58 @@ async fn a_key_deleted_while_its_call_ran_gets_no_token_window() {
     assert_eq!(priced.client_key.as_deref(), Some("gone"));
     assert!(!state.policy.tracks(gone), "no window for a deleted key");
 }
+
+/// A handler dropped while its row is being written — its client went away
+/// mid-insert — neither loses the row nor leaves the in-flight gauge open
+/// (`recording/write.rs`).
+#[tokio::test]
+async fn a_row_dropped_mid_write_still_lands_and_closes_the_gauge() {
+    use futures::FutureExt;
+
+    let state = AppState::init_for_tests().await.unwrap();
+    state.telemetry.request_started();
+    let ctx = super::RequestCtx::default();
+    let row = super::record(
+        super::LogParams {
+            state: &state,
+            proto: crate::ingress::ClientProto::OpenaiChat,
+            ctx: &ctx,
+            alias: "dropped".into(),
+            route: None,
+            started: std::time::Instant::now(),
+            streamed: false,
+            class: crate::telemetry::RequestClass::Chat,
+            timings: None,
+            max_tokens_clamped: None,
+            fallback: None,
+            rung: None,
+            degraded: None,
+        },
+        200,
+        None,
+        Usage::default(),
+        None,
+    );
+    // Polled once — as far as the insert — then dropped, as hyper drops it.
+    assert!(
+        row.now_or_never().is_none(),
+        "the insert is still on its way"
+    );
+
+    for _ in 0..500 {
+        if state.telemetry.stats().active_requests == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state.telemetry.stats().active_requests,
+        0,
+        "the gauge is closed"
+    );
+    let rows = crate::store::query_logs(&state.db, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "and the row landed");
+    assert_eq!(rows[0].requested_alias, "dropped");
+}

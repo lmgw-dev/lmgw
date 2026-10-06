@@ -1,0 +1,28 @@
+{
+  "request": {
+    "body": "{\"max_tokens\":1,\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"the-model\",\"seed\":-1,\"stop\":[\"</s>\"],\"temperature\":0.0,\"top_p\":1.0}",
+    "body_json": {
+      "max_tokens": 1,
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "seed": -1,
+      "stop": [
+        "</s>"
+      ],
+      "temperature": 0.0,
+      "top_p": 1.0
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://llama.test/v1/chat/completions"
+  }
+}

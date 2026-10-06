@@ -87,7 +87,6 @@ pub(super) fn ignored(ir: &ChatRequest, route: &Route) -> Vec<&'static str> {
         .reasoning_control();
     crate::proxy::reasoning_ignored(
         route.upstream.protocol,
-        route.upstream.kind,
         &sent,
         crate::egress::openai::has_reasoning_object(ir),
     )

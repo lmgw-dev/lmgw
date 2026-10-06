@@ -1,0 +1,32 @@
+{
+  "egress_proto": [
+    "llama_cpp"
+  ],
+  "requests": [
+    {
+      "body": "{\"max_tokens\":64,\"messages\":[{\"content\":\"Be brief.\",\"role\":\"system\"},{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"chat-model\",\"temperature\":0.5}",
+      "body_json": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "chat-model",
+        "temperature": 0.5
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

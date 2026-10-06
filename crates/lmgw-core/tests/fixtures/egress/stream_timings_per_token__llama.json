@@ -1,0 +1,50 @@
+{
+  "deltas": [
+    [
+      {
+        "text": "Hel"
+      },
+      {
+        "timings": {
+          "predicted_ms": 10.0,
+          "predicted_n": 1,
+          "predicted_per_second": 100.0,
+          "prompt_ms": 10.0,
+          "prompt_n": 5,
+          "prompt_per_second": 500.0
+        }
+      }
+    ],
+    [
+      {
+        "text": "lo"
+      },
+      {
+        "timings": {
+          "predicted_ms": 20.0,
+          "predicted_n": 2,
+          "predicted_per_second": 100.0,
+          "prompt_ms": 10.0,
+          "prompt_n": 5,
+          "prompt_per_second": 500.0
+        }
+      }
+    ],
+    [
+      {
+        "stop": "stop"
+      },
+      {
+        "timings": {
+          "predicted_ms": 20.0,
+          "predicted_n": 2,
+          "predicted_per_second": 100.0,
+          "prompt_ms": 10.0,
+          "prompt_n": 5,
+          "prompt_per_second": 500.0
+        }
+      }
+    ],
+    []
+  ]
+}

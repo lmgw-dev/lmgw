@@ -1,0 +1,21 @@
+{
+  "request": {
+    "body": "{\"documents\":[\"Paris\",\"Berlin\",\"Rome\"],\"model\":\"the-model\",\"query\":\"capital of France\"}",
+    "body_json": {
+      "documents": [
+        "Paris",
+        "Berlin",
+        "Rome"
+      ],
+      "model": "the-model",
+      "query": "capital of France"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/rerank"
+  }
+}

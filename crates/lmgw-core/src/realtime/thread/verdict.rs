@@ -11,8 +11,9 @@
 //!
 //! **A prediction, not a permission.** A turn committed under a verdict
 //! that has gone stale still goes only where `fit_route` lets its audio go
-//! (a route this lmgw runs); anything else is refused before a byte leaves,
-//! and the turn goes again as its transcript.
+//! (a model that answers and takes audio, `capabilities::hears`); anything
+//! else is refused before a byte leaves, and the turn goes again as its
+//! transcript.
 
 use super::super::session::Core;
 use crate::store::InputPath;
@@ -77,12 +78,12 @@ impl Core {
     }
 
     /// Whether audio input is on for the thread (the setting resolves to
-    /// `local`): the session then says how each response's turns went
+    /// `on`): the session then says how each response's turns went
     /// (`lmgw.chat.input`, the timing's fields). With it off, nothing new is
     /// sent or stored (§5).
     pub(in crate::realtime) fn audio_input_on(&self) -> bool {
         self.bound
             .as_ref()
-            .is_some_and(|b| b.audio_input.value == crate::store::AudioInputMode::Local)
+            .is_some_and(|b| b.audio_input.value == crate::store::AudioInputMode::On)
     }
 }

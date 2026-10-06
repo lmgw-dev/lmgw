@@ -71,7 +71,7 @@ async fn upstream_body(mock: &MockServer, route: &str) -> Value {
 async fn a_llama_server_route_receives_every_sampling_param() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "ok", 3, 1).await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw, json!({})).await;
     assert_eq!(settings(&gw, tid, all()).await.status(), 200);
 
@@ -162,7 +162,7 @@ async fn an_anthropic_route_gets_top_k_and_stop_sequences() {
 #[tokio::test]
 async fn the_values_persist_clear_and_are_validated_server_side() {
     let mock = MockServer::start().await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw, json!({})).await;
     let fresh = get_json(&gw, &format!("/chat/api/threads/{tid}")).await;
     assert_eq!(fresh["thread"]["top_k"], Value::Null, "{fresh}");
@@ -210,7 +210,7 @@ async fn the_values_persist_clear_and_are_validated_server_side() {
 #[tokio::test]
 async fn temporary_threads_carry_the_fields_and_keeping_stores_them() {
     let mock = MockServer::start().await;
-    let (_state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (_state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = thread(&gw, json!({"temporary": true})).await;
     assert!(tid < 0);
     assert_eq!(settings(&gw, tid, all()).await.status(), 200);

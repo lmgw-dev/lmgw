@@ -174,10 +174,11 @@ impl Registry {
     ///   as the claim, and the mark is armed under that lock too
     ///   ([`Self::drain_for_owner`]), so no background claim lands on a model
     ///   after the owner's wait began;
-    /// - the start it parked on was abandoned by its client, or the climb it
-    ///   parked on could not start its rung ([`RuntimeError::ClimbFailed`] is
-    ///   `None` here, not an error: the model is simply not loaded any more,
-    ///   and no waiter is sent to start it).
+    /// - the climb it parked on could not start its rung
+    ///   ([`RuntimeError::ClimbFailed`] is `None` here, not an error: the
+    ///   model is simply not loaded any more, and no waiter is sent to start
+    ///   it). A start it parked on outlives the request that started it
+    ///   (`owned.rs`), so a client that went away is no reason to give up.
     ///
     /// **The race it closes.** The gate picks a candidate from
     /// [`Self::list`] and claims it a moment later; the reaper, an eviction
@@ -256,7 +257,7 @@ impl Registry {
     /// stop is then [`RuntimeError::Moved`], nothing stopped. Never forced: a
     /// claim in flight is [`RuntimeError::Busy`], as for every eviction.
     pub async fn stop_idle_background(
-        &self,
+        self: &Arc<Self>,
         class: Class,
         model_id: &str,
         generation: u64,
@@ -275,7 +276,7 @@ impl Registry {
     /// The owner's model is [`RuntimeError::claimed_by_owner`], nothing
     /// stopped.
     pub async fn stop_dead_background(
-        &self,
+        self: &Arc<Self>,
         class: Class,
         model_id: &str,
         generation: u64,

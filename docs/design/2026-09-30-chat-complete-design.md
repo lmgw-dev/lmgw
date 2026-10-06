@@ -305,6 +305,15 @@ Office; calamine was dropped for own sparse xlsx/ods readers, 2026-09-30).
     as a visible note ("pages 3, 7: no text, and this model does not see images").
   - `images` mode sends every page as an image, which needs vision; without it, the chip says so
     and Send is blocked, like an image today.
+  - *Changed 2026-10-06:* "the model" is the thread's own when the GPU hold's fallback cannot see
+    (chat-archive-pin-attachments §2). A PDF whose pages are rendered as images keeps the form a
+    model that cannot see gets here beside them (its extracted text, and the note for pages
+    without text; `Rendered::text_form`, nothing rasterized for it), and the turn's request is
+    built a second time with it. When the route a send goes out on is a fallback that cannot
+    see — the hold's, a benchmark lease's, the outside-VRAM swap's, a climb's — the send swaps
+    that second list in (`chat_turn::blind`, plain stream and tool loop alike), and the reply's
+    `images_note` says "PDF pages went to it as the PDF's text". Other images go as placeholders.
+    A draft says so beforehand, without blocking Send.
   - Text goes as the existing `<file name=… kind="pdf" pages=…>` block with `--- page N ---`
     markers.
 - **Office**: always the extracted text, wrapped the same way.

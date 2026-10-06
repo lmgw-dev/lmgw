@@ -15,6 +15,9 @@ use crate::fmt::grouped;
 use crate::widgets::{
     use_toasts, MenuItem, Modal, ModalFooter, PageFrame, RowMenu, Select, Toasts,
 };
+use llama_facts::LlamaFactsRow;
+
+mod llama_facts;
 
 /// One upstream's live catalog on this page: how many models it lists, or
 /// why it could not be read.
@@ -326,6 +329,10 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
         }
     };
     let edit_u = StoredValue::new(u.clone());
+    // A llama.cpp row's server, per model, in a row of its own under it.
+    let llama = (u.protocol == LLAMA_CPP).then(|| {
+        view! { <LlamaFactsRow facts=u.llama_facts.clone() enabled=enabled span=8/> }
+    });
     let menu = Signal::derive(move || {
         vec![
             MenuItem::new("Edit", move || ctx.editing.set(Some(edit_u.get_value()))),
@@ -378,6 +385,7 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
                 <RowMenu items=menu/>
             </td>
         </tr>
+        {llama}
     }
 }
 
@@ -472,23 +480,43 @@ fn UpstreamForm(
     let enabled = RwSignal::new(u.enabled);
     let saving = RwSignal::new(false);
 
+    // The kind follows the protocol into and out of llama.cpp (design §5):
+    // the form always posts `kind`, so without the reset a switch away from
+    // llama_cpp would come back as the old openai + llama_server spelling.
+    Effect::new(move |prev: Option<String>| {
+        let p = protocol.get();
+        if let Some(prev) = prev {
+            let k = kind_after_protocol(&prev, &p, &kind.get_untracked());
+            if k != kind.get_untracked() {
+                kind.set(k);
+            }
+        }
+        p
+    });
+    let llama_cpp = move || protocol.with(|p| p == LLAMA_CPP);
+
     let protocol_opts = Signal::derive(|| {
         [
             ("openai", "OpenAI-compatible"),
             ("anthropic", "Anthropic"),
             ("gemini", "Gemini"),
+            (LLAMA_CPP, "llama.cpp (llama-server, ik_llama.cpp)"),
         ]
         .into_iter()
         .map(|(v, l)| (v.to_string(), l.to_string()))
         .collect::<Vec<_>>()
     });
-    let kind_opts = Signal::derive(|| {
+    // llama-server is a kind of the Anthropic protocol only: llama.cpp's own
+    // server is the llama_cpp protocol (design §5).
+    let kind_opts = Signal::derive(move || {
+        let anthropic = protocol.with(|p| p == "anthropic");
         [
             ("generic", "generic"),
             ("llama_server", "llama-server"),
             ("audio_cpp", "audio.cpp"),
         ]
         .into_iter()
+        .filter(|(v, _)| anthropic || *v != "llama_server")
         .map(|(v, l)| (v.to_string(), l.to_string()))
         .collect::<Vec<_>>()
     });
@@ -530,7 +558,9 @@ fn UpstreamForm(
             "timeout_ms": timeout_v,
             "expose_all": expose_all.get_untracked(),
             "expose_prefix": expose_prefix.get_untracked().trim(),
-            "supports_responses": supports_responses.get_untracked(),
+            // Never on for llama_cpp (decision 19); the checkbox is hidden there.
+            "supports_responses": supports_responses.get_untracked()
+                && protocol.with_untracked(|p| p != LLAMA_CPP),
             "enabled": enabled.get_untracked(),
         });
         saving.set(true);
@@ -582,10 +612,18 @@ fn UpstreamForm(
                 <input class="input mono" prop:value=move || timeout.get()
                     on:input=move |ev| timeout.set(event_target_value(&ev))/>
             </div>
-            <div class="field">
-                <label>"Kind"</label>
-                <Select value=kind options=kind_opts/>
-            </div>
+            // llama_cpp is always a llama-server: no kind to pick.
+            {move || {
+                (!llama_cpp())
+                    .then(|| {
+                        view! {
+                            <div class="field">
+                                <label>"Kind"</label>
+                                <Select value=kind options=kind_opts/>
+                            </div>
+                        }
+                    })
+            }}
             <div class="field">
                 <label>"Passthrough prefix"</label>
                 <input class="input mono" prop:value=move || expose_prefix.get()
@@ -603,11 +641,18 @@ fn UpstreamForm(
                     on:change=move |ev| expose_all.set(event_target_checked(&ev))/>
                 "expose the whole catalog (passthrough)"
             </label>
-            <label class="row dim" style="gap:5px">
-                <input type="checkbox" prop:checked=move || supports_responses.get()
-                    on:change=move |ev| supports_responses.set(event_target_checked(&ev))/>
-                "native /v1/responses"
-            </label>
+            {move || {
+                (!llama_cpp())
+                    .then(|| {
+                        view! {
+                            <label class="row dim" style="gap:5px">
+                                <input type="checkbox" prop:checked=move || supports_responses.get()
+                                    on:change=move |ev| supports_responses.set(event_target_checked(&ev))/>
+                                "native /v1/responses"
+                            </label>
+                        }
+                    })
+            }}
             <label class="row dim" style="gap:5px">
                 <input type="checkbox" prop:checked=move || enabled.get()
                     on:change=move |ev| enabled.set(event_target_checked(&ev))/>
@@ -622,5 +667,74 @@ fn UpstreamForm(
                 {move || if saving.get() { "Saving…" } else { "Save upstream" }}
             </button>
         </ModalFooter>
+    }
+}
+
+/// The protocol value of llama.cpp's own server (llama-server, ik_llama.cpp).
+const LLAMA_CPP: &str = "llama_cpp";
+
+/// The kind once the protocol moved from `prev` to `next`: `llama_cpp` is
+/// always `llama_server`, leaving it resets the kind to `generic`, and
+/// `llama_server` survives only under `anthropic` (llama.cpp egress design §5,
+/// what `settle` accepts). Any other move keeps the owner's pick.
+fn kind_after_protocol(prev: &str, next: &str, kind: &str) -> String {
+    if next == LLAMA_CPP {
+        "llama_server".into()
+    } else if prev == LLAMA_CPP || (next != "anthropic" && kind == "llama_server") {
+        "generic".into()
+    } else {
+        kind.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_kind_follows_the_protocol_into_and_out_of_llama_cpp() {
+        assert_eq!(
+            kind_after_protocol("openai", "llama_cpp", "generic"),
+            "llama_server"
+        );
+        assert_eq!(
+            kind_after_protocol("anthropic", "llama_cpp", "audio_cpp"),
+            "llama_server"
+        );
+        // Leaving llama_cpp: never the old openai + llama_server spelling.
+        assert_eq!(
+            kind_after_protocol("llama_cpp", "openai", "llama_server"),
+            "generic"
+        );
+        assert_eq!(
+            kind_after_protocol("llama_cpp", "anthropic", "llama_server"),
+            "generic"
+        );
+        // Elsewhere the owner's pick stands.
+        assert_eq!(
+            kind_after_protocol("openai", "anthropic", "llama_server"),
+            "llama_server"
+        );
+        // llama_server only survives under anthropic.
+        assert_eq!(
+            kind_after_protocol("anthropic", "gemini", "llama_server"),
+            "generic"
+        );
+        assert_eq!(
+            kind_after_protocol("anthropic", "openai", "llama_server"),
+            "generic"
+        );
+        assert_eq!(
+            kind_after_protocol("anthropic", "openai", "audio_cpp"),
+            "audio_cpp"
+        );
+        assert_eq!(
+            kind_after_protocol("anthropic", "anthropic", "llama_server"),
+            "llama_server"
+        );
+        assert_eq!(
+            kind_after_protocol("openai", "gemini", "audio_cpp"),
+            "audio_cpp"
+        );
     }
 }

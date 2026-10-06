@@ -104,7 +104,8 @@ where
             |r| build(r, &current),
             prompt_sent,
         )
-        .await?;
+        .await;
+        let sent = crate::llama_facts::observe(state, hold, route, sent).await?;
         let Sent::Upstream(resp) = sent else {
             return Ok(sent);
         };
@@ -262,6 +263,7 @@ async fn record_refused(
                     max_tokens_clamped: None,
                     fallback,
                     rung: None,
+                    degraded: None,
                 },
                 status,
                 None,
@@ -289,6 +291,7 @@ async fn record_refused(
                     max_tokens_clamped: None,
                     fallback,
                     rung: None,
+                    degraded: None,
                 },
                 status,
                 None,

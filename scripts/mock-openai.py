@@ -12,7 +12,7 @@ Two shapes for `/chat/completions`, picked off the request body:
   enum output has exactly this shape, and so did the mail workflow it replaced.
 * **Chat** (`stream: true`) — a genuine `text/event-stream` of one-token-ish
   chunks with a configurable per-chunk delay, which is what makes it usable for
-  exercising anything that measures a live stream (the titlebar's tok/s
+  exercising anything that measures a live stream (the sidebar pulse's tok/s
   readout: STREAM_DELAY=0.05 lands around 20 tok/s). Without `stream` the same
   answer comes back as one JSON body.
 
@@ -91,7 +91,7 @@ SENTENCES = [
     " the resulting rate predictable rather than merely plausible.",
     "Nothing here is generated; it is canned text, metered out one piece at a"
     " time so the transport behaves exactly like a real completion.",
-    "If the number in the titlebar tracks the configured delay, the measurement"
+    "If the number under the sidebar tracks the configured delay, the measurement"
     " is honest end to end.",
     "The point of a mock is to be boring in every dimension except the one under"
     " test.",

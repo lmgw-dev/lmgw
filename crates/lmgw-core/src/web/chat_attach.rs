@@ -9,7 +9,7 @@
 
 use crate::ir::ContentPart;
 
-pub use super::chat_attach_render::{render, Rendered};
+pub use super::chat_attach_render::{marker as lacked_marker, render, Rendered};
 
 /// Escape a name for the `<file name="…">` attribute: the four characters
 /// XML reserves in an attribute value, plus CR/LF flattened to spaces so an

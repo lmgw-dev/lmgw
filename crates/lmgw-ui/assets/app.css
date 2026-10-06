@@ -42,9 +42,6 @@
   --shadow: 0 1px 2px rgba(0,0,0,.25), 0 4px 16px rgba(0,0,0,.18);
   --sans: "Plex Sans", system-ui, sans-serif;
   --mono: "Plex Mono", monospace;
-  /* Width of the window edge-resize strip (undecorated Tauri window). Read by
-     assets/titlebar.js, so the hit zone and the gutter below cannot drift. */
-  --resize-edge: 9px;
   /* syntax tokens (highlight.js), tuned to the palette above */
   --code-cmt: #6A737D; --code-key: #6CBCF2; --code-tag: #E5786E;
   --code-attr: #94BEE8; --code-str: #94C87E; --code-num: #E8A33D;
@@ -95,6 +92,36 @@
   --grid: #E4E8EB;
 }
 
+/* ---------- desktop shell ---------- */
+/* Inside the app window (desktop.js sets .tauri) the text is set in the
+   desktop's own fonts, as in every other window beside it: fontconfig's
+   generic families, which are the desktop's choice (Noto Sans and Noto Sans
+   Mono on Fedora KDE). A LAN browser keeps the bundled Plex. */
+html.tauri { --sans: system-ui, sans-serif; --mono: monospace; }
+
+/* The desktop palette. On KDE the shell hands over the colour scheme's
+   title-bar shade as the sidebar's --bg0, and the other neutrals stepped off
+   it the way the bundled ones step off theirs, in its own hue and chroma
+   (src-tauri/src/desktop_palette/ramp.rs; its test fails when the tokens
+   above move): KWin's title bar runs on into the sidebar, and the panes are
+   lighter greys of the same shade. Only when the desktop and the app's theme
+   agree on dark or light; otherwise, and in a browser, the bundled palette.
+   --text stays the bundled one. */
+html.desk-dark:not([data-theme="light"]),
+html.desk-light[data-theme="light"] {
+  --bg0: var(--desk-bg0); --bg1: var(--desk-bg1);
+  --surface: var(--desk-surface); --surface-hi: var(--desk-surface-hi);
+  --border: var(--desk-border); --border-strong: var(--desk-border-strong);
+  --grid: var(--desk-grid); --seq0: var(--desk-seq0);
+  --text-2: var(--desk-text-2); --text-3: var(--desk-text-3);
+}
+/* An unfocused window's title bar takes the scheme's inactive shade (KWin
+   fades it); the sidebar goes with it, as Breeze's own toolbars do. */
+html.desk-dark.desk-inactive:not([data-theme="light"]) .sidebar,
+html.desk-light.desk-inactive[data-theme="light"] .sidebar {
+  background: var(--desk-title-inactive); }
+html.desk-dark .sidebar, html.desk-light .sidebar { transition: background-color .15s; }
+
 /* ---------- density ---------- */
 .density-dense { --ctl-h: 28px; --fs: 13px; --fs-sm: 12px; --pad: 10px; --gap: 8px;
                  --card-r: 10px; --row-h: 32px; }
@@ -104,6 +131,22 @@
 /* ---------- base ---------- */
 * { box-sizing: border-box; scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent; }
+/* In the app window the scrollbars are drawn here, not by WebKitGTK. Its
+   own (Adwaita overlay) bar ignores scrollbar-width and, under the pointer,
+   swaps the thin thumb for a wide one inside an outlined trough. A styled
+   ::-webkit-scrollbar takes over only while the standard properties are
+   auto. This one stays thin (a 4px thumb in a 10px band, which it takes from
+   the layout, as Breeze's do) and only brightens under the pointer. */
+html.tauri * { scrollbar-width: auto; scrollbar-color: auto; }
+html.tauri ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+html.tauri ::-webkit-scrollbar-track,
+html.tauri ::-webkit-scrollbar-corner { background: transparent; }
+html.tauri ::-webkit-scrollbar-button { display: none; }
+html.tauri ::-webkit-scrollbar-thumb { min-width: 40px; min-height: 40px;
+  border: 3px solid transparent; border-radius: 5px;
+  background: var(--border-strong) padding-box; }
+html.tauri ::-webkit-scrollbar-thumb:hover { background-color: var(--text-3); }
+html.tauri ::-webkit-scrollbar-thumb:active { background-color: var(--text-2); }
 html, body { margin: 0; height: 100%; }
 /* `hidden` wins over any display a class gives: a search that hides a field
    grid must not lose to `.field-grid { display: grid }`. */
@@ -111,40 +154,50 @@ html, body { margin: 0; height: 100%; }
 body { font-family: var(--sans); background: var(--bg0); color: var(--text);
        font-size: 14px; -webkit-font-smoothing: antialiased; overflow: hidden; }
 a { color: var(--accent); }
-.app { --sidebar-w: 216px; display: grid; grid-template-rows: 40px minmax(0, 1fr);
+/* Controls and the labels that name things are not text to select, as in any
+   desktop app: a drag across the window or a double-click on a tab must not
+   light up the interface. What the app shows (chat, code, logs, table values,
+   errors, every field) stays selectable, for copying. */
+.sidebar, .page-head h1, .rail-head, .rail-group, .rail-item,
+button, .btn, select, label, summary, [role="button"], [role="tab"],
+[role="menuitem"], [role="option"], [role="switch"],
+.seg, .chip, .facet, .menu-item, .select-btn, .select-opt,
+table.data th, .sec-head, .group-toggle, .group-label,
+.tile-label, .chart-head h3, .ov-section > h2, .ov-section > .row > h2, .ov-title,
+.edit-section h3, .lab-h3, .results-title, .task-head, .dock-title, .dock-rail,
+.thread-group, .thread-row, .thread-folder, .mp-head, .mp-row,
+.md .code-tools, .preview-lang {
+  -webkit-user-select: none; user-select: none; }
+input, textarea, [contenteditable]:not([contenteditable="false"]) {
+  -webkit-user-select: text; user-select: text; }
+.app { --sidebar-w: 216px; display: grid; grid-template-rows: minmax(0, 1fr);
        grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-       grid-template-areas: "titlebar titlebar" "sidebar content"; height: 100vh; }
+       grid-template-areas: "sidebar content"; height: 100vh; }
 /* The sidebar as an icon rail: the owner's choice (the foot toggle), or
    forced below 1100px of window. No width transition — every container
    query in the pane would re-fire on each frame of it. */
 .app.rail { --sidebar-w: 52px; }
 
-/* ---------- titlebar (drag region in Tauri) ---------- */
-.titlebar { grid-area: titlebar; display: flex; align-items: center; gap: 14px;
-  padding: 0 6px 0 16px; background: var(--bg0); border-bottom: 1px solid var(--border);
-  user-select: none; }
-.brand { font-family: var(--mono); font-weight: 500; font-size: 13px;
-  letter-spacing: .06em; color: var(--text-2); }
-.brand b { color: var(--text); font-weight: 500; }
+/* ---------- gateway status (the sidebar's foot) ---------- */
 /* signature: ambient traffic pulse */
-.pulse { display: flex; align-items: center; gap: 8px; }
-.pulse svg { display: block; }
+.pulse { display: flex; align-items: center; gap: 8px; min-width: 0; padding-left: 4px;
+  user-select: none; }
+.pulse svg { display: block; flex: none; }
 .pulse .wave { stroke: var(--amber); fill: none; stroke-width: 1.5;
   filter: drop-shadow(0 0 3px var(--amber)); stroke-dasharray: 120;
   animation: flow 2.2s linear infinite; }
 @keyframes flow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -120; } }
-.pulse .label { font-family: var(--mono); font-size: 11px; color: var(--amber); }
-/* live tok/s: a fixed-width slot that fades in, so the pulse never shifts.
-   The number is right-aligned in its own cell so "9" → "142" doesn't move
-   the unit either. */
-.pulse .rate { font-family: var(--mono); font-size: 11px; color: var(--amber);
-  white-space: nowrap; min-width: 78px; opacity: 0; transition: opacity .3s ease; }
-.pulse .rate.on { opacity: 1; }
-.pulse .rate::before { content: "·"; color: var(--text-3); margin-right: 8px; }
+.pulse .label { font-family: var(--mono); font-size: 11px; color: var(--amber);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* live tok/s: right-aligned, always shown (0 in grey), so nothing moves or
+   empties when a stream starts or ends. The number is right-aligned in its own
+   cell so "9" → "142" doesn't move the unit either. */
+.pulse .rate { margin-left: auto; font-family: var(--mono); font-size: 11px;
+  color: var(--text-3); white-space: nowrap; }
+.pulse .rate.on { color: var(--amber); }
 .pulse .rate .n { display: inline-block; min-width: 4ch; text-align: right; }
 .pulse.idle .wave { stroke: var(--text-3); filter: none; animation: none; }
 .pulse.idle .label { color: var(--text-3); }
-@media (prefers-reduced-motion: reduce) { .pulse .rate { transition: none; } }
 @media (prefers-reduced-motion: reduce) { .pulse .wave { animation: none; } }
 /* GPU hold pill: same "something wants attention" amber as .nav-badge. It is
    the GPU pill while the hold is engaged; a click opens the same panel, with
@@ -154,6 +207,8 @@ a { color: var(--accent); }
   background: var(--amber-bg); color: var(--amber); font: 600 11px var(--mono);
   letter-spacing: .03em; cursor: pointer; }
 .hold-pill:hover, .hold-pill[aria-expanded="true"] { border-color: var(--amber); }
+.hold-pill .dot { display: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--amber); }
 /* The GPU at a glance: quiet — a grey dot, green while a local model is up,
    and how many are. A click opens the card, its models and the hold switch. */
 .gpu-pill { display: inline-flex; align-items: center; gap: 6px; height: 22px;
@@ -178,18 +233,14 @@ a { color: var(--accent); }
 .gpu-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gpu-meta { margin-left: auto; white-space: nowrap; }
 .gpu-act { margin-top: 4px; }
-.titlebar .spacer { flex: 1; }
-.win-controls { display: flex; }
-.win-controls button { width: 40px; height: 40px; border: 0; background: none;
-  color: var(--text-2); font-size: 13px; cursor: pointer; }
-.win-controls button:hover { background: var(--surface-hi); color: var(--text); }
-.win-controls button.close:hover { background: var(--err); color: #fff; }
 
 /* ---------- sidebar ---------- */
 .sidebar { grid-area: sidebar; background: var(--bg0); padding: 10px 8px;
-  display: flex; flex-direction: column; gap: 2px; overflow-x: hidden; overflow-y: auto;
-  min-height: 0; }
-.nav-group { margin-top: 14px; }
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+/* The groups scroll when the window is too short for them; the foot stays. */
+.nav-scroll { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 2px;
+  overflow-x: hidden; overflow-y: auto; }
+.nav-group { margin-top: 12px; }
 .nav-group:first-child { margin-top: 4px; }
 .nav-eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .09em;
   text-transform: uppercase; color: var(--text-3); padding: 0 10px 4px; }
@@ -207,16 +258,17 @@ a { color: var(--accent); }
   border-radius: 999px; background: var(--amber-bg); color: var(--amber);
   font: 500 10.5px var(--mono); display: inline-flex; align-items: center;
   justify-content: center; }
-.sidebar .foot { margin-top: auto; padding: 8px 4px 2px 10px;
-  border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px;
-  color: var(--text-3); display: flex; align-items: center; gap: 7px; }
-.sidebar .foot .ver { flex: 1; }
+/* The foot: live traffic above the GPU pill and the rail toggle. */
+.sidebar .foot { flex: none; padding: 8px 4px 2px 6px;
+  border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.foot-row { display: flex; align-items: center; gap: 8px; }
+.foot-row .nav-toggle { margin-left: auto; }
 .nav-toggle { width: 24px; height: 22px; padding: 0; border: 0; border-radius: 6px;
   background: none; color: var(--text-3); font: 500 14px/1 var(--sans); cursor: pointer; }
 .nav-toggle:hover:not(:disabled) { background: var(--surface); color: var(--text); }
 .nav-toggle:disabled { opacity: .4; cursor: default; }
 .nav-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.app.rail :is(.nav-label, .nav-eyebrow, .sidebar .foot .ver) { display: none; }
+.app.rail :is(.nav-label, .nav-eyebrow) { display: none; }
 .app.rail .nav-item { justify-content: center; padding: 0; position: relative; }
 .app.rail .nav-group { margin-top: 0; }
 .app.rail .nav-group + .nav-group { margin-top: 8px; padding-top: 8px;
@@ -233,10 +285,21 @@ a { color: var(--accent); }
 .nav-badge + .nav-badge { margin-left: 4px; }
 .nav-badge.news { background: var(--accent-bg); color: var(--accent); }
 .app.rail .nav-badge.news { top: auto; bottom: 6px; background: var(--accent); }
-.app.rail .sidebar .foot { justify-content: center; padding: 8px 0 2px; }
+/* On the rail the foot keeps the marks — the wave, the pill's dot — and the
+   words move into their tooltips. */
+.app.rail .sidebar .foot { align-items: center; padding: 8px 0 2px; }
+.app.rail .foot-row { flex-direction: column; }
+.app.rail .foot-row .nav-toggle { margin-left: 0; }
+.app.rail .pulse { padding-left: 0; }
+.app.rail .pulse svg { width: 32px; height: 8px; }
+.app.rail .pulse :is(.label, .rate) { display: none; }
+.app.rail :is(.gpu-pill, .hold-pill) { width: 24px; padding: 0; justify-content: center; }
+.app.rail :is(.gpu-pill, .hold-pill) .pill-text { display: none; }
+.app.rail .hold-pill .dot { display: block; }
 /* A short window keeps the whole nav on screen: tighter rows, and rules in
-   place of the group eyebrows. */
-@media (max-height: 700px) {
+   place of the group eyebrows. 760px is where the full nav and the status
+   foot stop fitting (measured: 686 + 53 + the sidebar's padding). */
+@media (max-height: 760px) {
   .nav-item { height: 26px; }
   .nav-eyebrow { display: none; }
   .nav-group, .nav-group:first-child { margin-top: 0; }
@@ -253,16 +316,10 @@ a { color: var(--accent); }
 .content { grid-area: content; background: var(--bg1); overflow: hidden;
   min-width: 0; min-height: 0; container: pane / inline-size;
   border-left: 1px solid var(--border); }
-
-/* Edge-resize gutter (Tauri only; a LAN browser has no edge resize and keeps
-   its scrollbars flush). The resize strip and a pane's scrollbar were landing
-   on the same pixels at the right border, and a native scrollbar swallows the
-   mouse — so the drag never started where a scrollbar was showing. The
-   content pane reserves the strip as a transparent border instead of
-   fighting for it: every scroller inside it (a page body, a transcript, a
-   side panel) keeps its scrollbar fully grabbable just inside the strip, and
-   nothing depends on who wins a hit test. One border here covers them all. */
-html.tauri .content { border-right: var(--resize-edge) solid transparent; }
+/* In the app window the title bar sits right above the page: the same line
+   parts them as parts the page from the sidebar, which runs on into the
+   title bar unbroken. A browser tab's page starts at the viewport's edge. */
+html.tauri .content { border-top: 1px solid var(--border); }
 
 /* ---------- page frame (widgets/page.rs) ----------
    A head strip, one scroller, an optional foot. The head (title, tabs,
@@ -288,7 +345,7 @@ html.tauri .content { border-right: var(--resize-edge) solid transparent; }
 /* A doc page's scrollbar coming and going must not change its width: charts
    sized from their card (0.3 × width) would shrink, lose the scrollbar, grow
    back and bring it again, every frame (review code:C5). Overlay scrollbars
-   (WebKitGTK) take no room and are unaffected. */
+   take no room and are unaffected. */
 .page.doc > .page-body { scrollbar-gutter: stable; }
 .page-foot { flex: none; border-top: 1px solid var(--border); background: var(--bg0);
   padding: 8px 24px; }
@@ -367,7 +424,7 @@ a.btn { text-decoration: none; }
 .btn:disabled { opacity: .5; cursor: default; }
 .btn.primary:disabled { background: var(--surface); border-color: var(--border-strong);
   color: var(--text); }
-:is(.btn, .input, .nav-item, .win-controls button):focus-visible {
+:is(.btn, .input, .nav-item):focus-visible {
   outline: 2px solid var(--accent); outline-offset: 1px; }
 /* A two-step destructive action (ConfirmButton). The armed pair replaces the
    button in place, so a nowrap actions cell simply grows by it. */
@@ -497,6 +554,18 @@ td.clip .copy-btn { margin-right: 4px; }
    in the tooltip) rather than widening the table. */
 td.up-catalog { max-width: 26ch; overflow: hidden; text-overflow: ellipsis; }
 td.up-catalog .problem { display: inline; padding: 0; }
+/* Upstreams: a llama.cpp row's server per model (GET /props), in a quiet row
+   under it; an unknown says why in one clipped line, all of it in the
+   tooltip. */
+table.data tr.detail-row.up-llama td { padding: 5px 14px 7px 28px; white-space: normal; }
+.up-llama-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px;
+  font-size: var(--fs-sm); }
+.up-llama-label { color: var(--text-2); font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; }
+.up-llama-model { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.up-llama-model .problem { display: inline-block; padding: 0; max-width: 56ch; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.up-llama-model .chip { height: 18px; font-size: 11px; }
 .type-badge { font-family: var(--mono); font-size: 11px; color: var(--text-2);
   border: 1px solid var(--border-strong); border-radius: 5px; padding: 1px 6px; }
 /* Request log: a fallback answered instead of the requested local model
@@ -2187,7 +2256,7 @@ table.data.kv-table td { height: 26px; }
     grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); }
   .run-side > .notice { max-width: none; }
 }
-/* WebKitGTK draws its overlay scrollbar over the pane's right edge: keep the
+/* An overlay scrollbar (a browser's) is drawn over the pane's right edge: keep the
    column's borders and last glyphs out from under it (ux:U-21). */
 .fill-pane.run-setup { padding-right: 10px; }
 /* a run on screen: its review fills the body, the config folded beside it */
@@ -2889,6 +2958,10 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 .seg-mini .seg-btn.on { background: var(--accent-bg); color: var(--accent); }
 .attach-blockers { flex-direction: column; gap: 2px; }
 .attach-blocker { color: var(--amber); }
+/* What a draft becomes on the way (a GPU block's fallback that cannot see):
+   amber like the blockers above, and Send stays on. */
+.attach-hints { flex-direction: column; gap: 2px; }
+.attach-hint { color: var(--amber); }
 .viewer-meta { display: flex; align-items: center; justify-content: space-between;
   gap: 8px; margin-bottom: 8px; }
 .attach-text { margin: 0; white-space: pre-wrap;
@@ -2896,3 +2969,5 @@ mark.kb-hl { background: var(--amber-bg); color: var(--text);
 /* A reply the server refused to store: dimmed, with its note (Copy only). */
 .msg-unsaved > .md, .msg-unsaved > .reasoning { opacity: .6; }
 .msg-unsaved-note { color: var(--amber); }
+/* A reply a fallback that cannot see answered: what it got in the images' place. */
+.msg-images-note { color: var(--amber); }

@@ -88,7 +88,7 @@ fn each_field_takes_the_first_level_that_sets_it_and_names_it() {
         reply_language: Some("fr".into()),
         read_aloud: Some(false),
         turn_detection: Some(TurnDetection::PushToTalk),
-        audio_input: Some(crate::store::AudioInputMode::Local),
+        audio_input: Some(crate::store::AudioInputMode::On),
         seed: Some(42),
     };
     let r = resolve(&snap, &t);

@@ -1,8 +1,14 @@
 # Voice turns the model hears: a local audio model gets the spoken turn as audio, ASR beside it
 
+*Superseded 2026-10-06 (the owner's ruling):* not only a local model. Any chat model that takes
+audio input hears the turn, wherever it runs; see [Changed 2026-10-06: capability, not
+locality](#changed-2026-10-06-capability-not-locality).
+
 Requested by the owner 2026-10-04; this **lean version** was approved the same day. In voice
 mode, a thread whose chat model is a local model that takes audio input gets the user's spoken
 turn as audio; the ASR transcribes the same audio beside it, for everything that needs text.
+*Superseded 2026-10-06:* the model that answers the turn, local or not, hears it when it takes
+audio input.
 Companion to [2026-10-03-chat-voice-design.md](2026-10-03-chat-voice-design.md) ("chat-voice
 §n") and [2026-10-01-realtime-voice-design.md](2026-10-01-realtime-voice-design.md) ("realtime
 §n"); it lifts realtime §19's "audio-native chat models" for sessions bound to a chat thread.
@@ -34,9 +40,12 @@ ASR's time into gain.
 3. **No audio is stored** (§4; chat-voice ruling 1). Dictation stays on ASR.
 4. **`chat_voice_audio_input`: `off` | `local`, default `off`**, with a thread override (§2).
    *Why off:* llama.cpp marks audio input experimental, and real voices are untested.
+   *Superseded 2026-10-06:* the values are `off` | `on`; a stored `local` reads as `on`.
 5. **Local means managed by this lmgw**, `vram::classify(&route).is_some()`, for both the verdict
    and the route check (§2.2, §3.4). A llama-server elsewhere on the network counts as remote.
+   *Superseded 2026-10-06:* an oversight. Locality plays no role; capability alone decides.
 6. **Generic:** any local model whose `input_modalities` include `audio`, not only Gemma.
+   *Superseded 2026-10-06:* any chat model, wherever it runs.
 7. **A refused audio attempt is retried once with the transcript, with a visible note** (§3.5).
 8. **Noise ends quietly; a failed ASR does not stop the reply** (§3.2): all-empty transcripts
    cancel with no error, note or row; after a failed ASR the reply plays and the row says so.
@@ -47,12 +56,108 @@ ASR's time into gain.
 10. **Timing records the path and the hold** (§5); no `audio_tokens` (`prompt_tokens` and
     `audio_ms` are stored already).
 
+## Changed 2026-10-06: capability, not locality
+
+**The owner's ruling (2026-10-06).** A configured fallback is always used, with no exception by
+content, and locality plays no role anywhere. The locality guard of this feature (decision 5: the
+verdict's locality row, `fit_route`'s `local_only`, the forecast that a candidate alias's walk may
+reach a model lmgw does not run) was an oversight. Whether a turn goes as audio is decided by
+capability alone: the model that actually answers takes audio input, and lmgw's egress to it can
+encode an audio part. Otherwise the turn goes as its transcript, by the path that existed. Keeping a
+voice on the machine is the owner's choice of an alias without a fallback, not a rule by content.
+
+What changed:
+
+- **One predicate** (`capabilities/hears.rs`), asked of the model that answers and the route it
+  answers on, by the verdict and at the send alike. (1) The egress: the OpenAI-compatible, llama.cpp
+  and Gemini egresses encode an audio part; Anthropic's API has none. (2) The model, as `/v1/models`
+  publishes it (the owner's override merged in): a chat model (task `chat`; a speech-to-text row
+  takes audio too) whose `input_modalities` include `audio`; a candidate a walk picked that is not
+  public is read by its row. (3) The server: what a llama-server said in `GET /props`
+  (`LlamaFacts.audio`, llama egress design §4.1). No audio projector loaded vetoes; one loaded lifts
+  an unknown (a projector lmgw could not read); unknown leaves step 2's answer (egress decision 14).
+  At the send the facts are the claimed container's, in the verdict those of the container up now
+  or an external row's cache.
+- **Unknown is no** (decision D1), at the verdict and at the send: a server that drops a content
+  part it does not know answers an empty turn. Where the page or the self-admin text explains why a
+  model reads the transcript, it says how to make it hear: list `audio` in its capabilities
+  override (Gemini's and OpenAI's own catalogs publish no modalities).
+- **The verdict** (§2.2) has no locality row and no forecast of a candidate walk's fallback (with the
+  Audio facet on, a fallback that does not take audio counts as none, so every model the walk can
+  reach hears). *Changed 2026-10-06* (candidate-aliases §4.6): such a fallback is used; a turn the
+  walk hands to it goes as its transcript, and under the hold the verdict says so. Every request
+  whose audio went as its transcript because the model lacks it (the verdict at launch, a retry
+  after a refusal of the audio, a tool-loop call) carries "'m' lacks audio: transcript sent" on
+  its row (`request_logs.degraded`). Under a swap at resolve (the hold, a benchmark's lease) only the fallback is judged,
+  without the candidate walk or its guards, and the swap's words come along (`lead`). With no block
+  live, the verdict a block would bring is computed beside (`blocked`, decision D3): the fallback's
+  own, or the refusal when there is none. The page shows it while it sees a block, and says when a
+  fallback hears ("under the GPU hold your voice goes to … as audio").
+- **The send** (§3.4): `fit_route`'s `local_only` is `spoken::may_hear`, the predicate on the model
+  that answers (`answered_by`, else the thread's model) and the route about to be sent, with its
+  claim's `/props`. A model that cannot take the audio, or that lmgw cannot judge, is refused with
+  `audio_input_unsupported` (400) before anything is sent; a bound session's turn goes again as its
+  transcript, with the predicate's sentence as the note, and it is not remembered (§3.5: the next
+  verdict judges that route itself). `fit_route` and `PerRoute::request` are async.
+- **The crash memory** (§3.5, decision D5): a dropped connection or a failed restart under the audio
+  is remembered only on a route to a llama-server (`UpstreamKind::LlamaServer`,
+  `SentAs::llama_server`). llama-server aborts on an audio part its projector cannot take, so a drop
+  there is evidence about the audio. Through a cloud API, a proxy or any other server it is a network
+  or provider fault that says nothing about the audio, and the model hears the next turn again. The
+  rule is about the quality of the evidence, not about where the model runs.
+- **The value** (decision D2): `local` is `on`. Strict on input (`local` is refused, naming `off,
+  on`); a stored `local`, in the settings blob, a thread's voice or a folder's default, reads as
+  `on`. No migration: the next settings save stores the new name.
+- **Live checks** still call no cloud model: `scripts/voice-audio-in-check.py` refuses to run when
+  the thread's verdict names another model than the one under test (a fallback would answer), and
+  fails a run a fallback answered. That is the test harness's conduct, not product behaviour.
+
+Everything not about locality stays: the transcript as the text of record, the hold until it has
+words, the noise veto, nothing stored, tools waiting for the user row, the GPU claim let go while
+waiting, the context guard, the refusal retry and its memory, and `off` as today's bytes. Other
+guards that skip a configured fallback by content are outside this change.
+
+*Changed 2026-10-06, after the review (V1–V16):*
+- **A tool loop's later call** to a model that cannot take the audio — a candidate re-pick, a
+  fallback — goes with the user row's words in place of the spoken parts once the journal settled
+  the row (`agentchat::unheard`); before, it failed after its tool frames. An Anthropic alias
+  fallback counts as lacking the Audio facet, so the walk and the predicate agree.
+- **A claim let go while tools wait** and refused again by a GPU block (the hold switched on
+  meanwhile) no longer fails the turn: that call goes where the gate sends any request under the
+  block, its configured fallback (`agentchat::claim::under_block`).
+- **A dropped connection on a route that is no llama-server**, under the audio and before an
+  answer, retries that one turn with the transcript and is not remembered (`refusal::dropped`):
+  a provider that closes the connection on large bodies no longer fails every turn. D5 stays for
+  llama-server.
+- **A candidate's pick** is judged by its row through the route (`hears::Model::Pick`), never by
+  its public name, which an alias of the same name would shadow.
+- **The verdict never waits on a catalog** (`catalog::cached_only`): a cold one is read in the
+  background and the verdict says "lmgw is still reading the model list … is in" until it is in.
+  The send reads it in full, raced against the turn's stop, and stays the authority.
+- **The hint** for a model lmgw cannot judge says what the owner does where it lives: an alias's
+  or a row's capabilities override with task `chat` and input modalities `text` and `audio`, and
+  an alias for a passthrough model, which has no override of its own.
+- **Attachments** decide native audio by the same predicate (`hears::hears_from`): an Anthropic
+  alias or a server with no audio projector gets the transcript at upload. The Anthropic egress's
+  own refusal of an audio part is classified as lmgw's (`Refusal::Unheard`).
+- **Voice-library clips** name the model that wrote their transcript, a fallback as one
+  (`transcript_source: asr:<fallback>`, `answered_by`, the op's and the toast's words).
+- **The live check** runs only on a model with no fallback at all.
+- **Known, accepted (V10):** under the GPU hold, a fallback that hears answers a turn whose own
+  speech recognition is a GPU row with no fallback, which the same hold refuses. Every such turn
+  then ends as a failed transcription the model heard: the reply plays, no tool runs, the row is
+  "[spoken turn, not transcribed]", and noise is answered rather than vetoed. On the transcript
+  path the same turn fails visibly with `transcription_failed`. A speech-to-text row on the CPU
+  is not affected; give a GPU speech-to-text row a fallback (or move it to the
+  CPU) to keep the veto under the hold.
+
 ## Ground rules, and what exists today
 
 chat-voice's ground rules hold. **New child modules:** `realtime/lifecycle/held.rs` (the hold;
 `realtime/audio_in.rs` is taken), `realtime/thread/turn/audio.rs` (attempt and retry; `turn.rs`
 is 566 lines), `web/chat_voice/audio_input.rs` (the verdict), `web/chat_turn/spoken.rs` (spoken
-parts, barrier, local-only predicate); the deferred row is in `thread/journal/user.rs`. Other files
+parts, barrier, local-only predicate; *superseded 2026-10-06:* the capability check
+`may_hear`); the deferred row is in `thread/journal/user.rs`. Other files
 gain call sites only. **No hidden limits:** the audio goes as long as the turn was; a refused one is
 retried as transcript, with the note. **`off` is today:** no event, no timing field, the same
 bytes. **Privacy:** only TTS-generated speech and synthetic noise; live checks run on a dev copy
@@ -84,6 +189,9 @@ the journal writes the user row, after which the reply is saved.
 takes the two values. The MCP text says "experimental; local models only, a cloud chat model never
 gets audio" (*changed, WP1 review m3:* it and the Settings hint add that the speech-to-text model
 transcribes every turn either way, so a cloud speech-to-text alias still receives the audio).
+*Superseded 2026-10-06:* the MCP text and the Settings hint say the model that answers hears the
+turn when it takes audio, that a configured fallback is always used wherever it runs, and how to
+make a model lmgw cannot judge hear.
 `ThreadVoice.audio_input` sits next to `language` (`store/chat_voice.rs:84`): strict on
 input, tolerant on read, carried into folder defaults by `ThreadDefaults.voice`.
 
@@ -98,15 +206,17 @@ Every row must pass; the first that fails gives the `why`, and the path `transcr
 | the thread's knowledge bases are not in auto mode | "its knowledge bases search with your words (auto mode)" |
 | (*added, WP3 review #2*) its speech-to-text alias is set and resolves | "no speech recognition is set up, and only a transcript tells your words from noise" |
 | `gate::resolve(alias, RouteCheck::None)` (`gate/open.rs:477`) settles a route: hold and benchmark swaps, a candidate alias's fallback under the hold (`:488-511`, `:586`); it starts nothing | the resolve's own error |
-| that route is **managed by this lmgw**: `vram::classify(route).is_some()` (`vram/routing_target.rs:26-38`) | "openai/… is a model lmgw does not run: your voice stays on this machine"; with a fallback, "under the GPU hold this goes to <fallback>" |
+| that route is **managed by this lmgw**: `vram::classify(route).is_some()` (`vram/routing_target.rs:26-38`). *Superseded 2026-10-06: row removed* | "openai/… is a model lmgw does not run: your voice stays on this machine"; with a fallback, "under the GPU hold this goes to <fallback>" |
 | no context guard: not a ladder row (`LocalModel::is_ladder`, `ladder.rs:55`) or guarded pool (`pool_guarded`, `config/llama_params.rs:492`); for a candidate alias, none of its candidates | "<model> guards its context, which cannot bound audio" |
-| `input_modalities` include `audio` (`model_caps`) | "<model> does not take audio input" / "lmgw cannot tell whether <model> takes audio" |
+| `input_modalities` include `audio` (`model_caps`). *Changed 2026-10-06:* the model that answers hears (`capabilities::hears`): an egress with an audio part, a chat model whose `input_modalities` include `audio`, a server whose `/props` did not say it loaded no audio projector | "<model> does not take audio input" / "lmgw cannot tell whether <model> takes audio" (*2026-10-06:* ": if it does, list audio in its capabilities override"), "<model> is served over the Anthropic API, which has no audio input part", "<model> is not a chat model", "<model>'s server loaded no audio projector"; after a swap "under the GPU hold this goes to <fallback>, which …" |
 | (session only) its server has not refused audio this session (§3.5) | "it refused the audio this session: …" |
 
 Unknown is no. `Snapshot::is_local_upstream` (`config/snapshot.rs:171-184`) is not used: it is
 true for any llama-server-kind upstream wherever it runs, which is right for pricing and wrong
 here. Under the hold a candidate alias is judged by its fallback, so the chip never says "hears
-you" while a cloud model would answer. The verdict is computed for the thread JSON
+you" while a cloud model would answer. *Superseded 2026-10-06:* nothing here asks where a model
+runs. Under the hold the fallback is judged by capability alone, and alone: the chip says "hears
+you" when it takes audio, wherever it runs. The verdict is computed for the thread JSON
 (`speech::resolve_shown`, `web/chat_voice/speech/plan.rs:150`), at the bind, and at every
 `speech_started` beside the warm's thread re-read (`realtime/input.rs:355-382`). That last one
 arrives by a new session-loop arm (`realtime/session.rs:131-137`). The core keeps the result as
@@ -117,12 +227,13 @@ arrives by a new session-loop arm (`realtime/session.rs:131-137`). The core keep
 `VoiceConfig` gains `audio_input {value, source, path, model, why}`. The thread's Voice section
 (`pages/chat_voice/section.rs`) shows the select, its source, and "your voice goes to gemma4-12b
 as audio" or "gemma4-12b gets the transcript: <why>". Settings → Chat → Voice says "experimental;
-local models only". The chip (`pages/chat_voice/realtime/chips.rs`) says "hears you" or "reads the
+local models only" (*superseded 2026-10-06:* it says a configured fallback is always used, and
+hears the turn when it takes audio). The chip (`pages/chat_voice/realtime/chips.rs`) says "hears you" or "reads the
 transcript" (tooltip: `why`), from the thread JSON and then each `lmgw.chat.input`.
 
 *Built (WP1):*
 - **Types.** `store::AudioInputMode` (`off` | `local`, the dashboard's `AUDIO_INPUTS` kept in step by a
-  test) and `store::InputPath` (`audio` | `transcript`), which `VoiceTiming.input` and
+  test; *superseded 2026-10-06:* `off` | `on`) and `store::InputPath` (`audio` | `transcript`), which `VoiceTiming.input` and
   `MessageVoice.input` use too. Every new stored field is skipped when absent, so `off` stores
   today's bytes; a value a newer build wrote is dropped alone.
 - **The verdict** is `web/chat_voice/audio_input.rs`: `setting`, `thread_rows` (the setting and the
@@ -130,13 +241,16 @@ transcript" (tooltip: `why`), from the thread JSON and then each `lmgw.chat.inpu
   is an `Option`, filled only by `resolve_shown`, since the sync `resolve` cannot judge a route.
   `model` is the thread's alias, or the fallback a block hands the turn to.
 - **One addition to the locality row:** the route must be a *chat* model lmgw runs
-  (`Class::Chat`); an aux, audio or image row says "<model> is not a chat model".
+  (`Class::Chat`); an aux, audio or image row says "<model> is not a chat model". *Superseded
+  2026-10-06:* the predicate checks the task (`chat`) of whatever answers.
 - **Wording.** A llama-server lmgw does not run: "<model> is served by a server this lmgw does not
   run: your voice goes only to models lmgw runs" (`is_local_upstream` picks only these words). With a
   fallback: "under the GPU hold this goes to openai/…, a model lmgw does not run: your voice stays on
-  this machine" ("while a benchmark run holds the GPU …" under a lease).
+  this machine" ("while a benchmark run holds the GPU …" under a lease). *Superseded 2026-10-06:* no
+  locality wording; "under the GPU hold this goes to openai/…, which does not take audio input".
 - **The page.** The drawer's "Audio input in voice mode" select (inherit / off / local, a folder's
-  defaults too) shows "in effect: local · Settings → Chat" and the verdict line. The chip is a chip
+  defaults too) shows "in effect: local · Settings → Chat" and the verdict line (*2026-10-06:*
+  inherit / off / on). The chip is a chip
   of its own, `INPUT`, after the model chip.
 - **Docs.** The `/v1/realtime` DocRoute lists the three timing fields; the event and
   `lmgw.chat.user`'s `response_id` are listed since WP3 sends them.
@@ -151,13 +265,17 @@ transcript" (tooltip: `why`), from the thread JSON and then each `lmgw.chat.inpu
   a model lmgw does not run: …", "its primary 'x' is disabled, so this may go to …". The module doc
   no longer claims more: admission's outside-VRAM swap, a climb, the walk over loaded candidates and
   a hold switched on after the verdict stay unforeseen, and `fit_route`'s `local_only` stays the only
-  guard (§3.4).
+  guard (§3.4). *Superseded 2026-10-06:* removed. With the Audio facet on, the walk's fallback takes
+  audio or counts as none, so the alias hears either way; `fit_route` asks the predicate of
+  whatever answers. (Later on 2026-10-06 the fallback stopped counting as none: one that cannot
+  hear gets the transcript.)
 - **Only routable candidates guard** (m1): a disabled or missing guarded row says nothing about the
   alias. The guard names the row by its public name (m6).
 - **One snapshot for the capability** (m2): the lookup is `capabilities::exposed::exposed_entry` for
   the name the resolve settled on, not a second resolve.
 - **Wording** (m3): a route that is not a llama-server-kind upstream is "a model lmgw does not run"
-  (a LAN OpenAI-compatible server is no cloud model either).
+  (a LAN OpenAI-compatible server is no cloud model either). *Superseded 2026-10-06:* gone with the
+  locality row.
 - **Speech recognition is a row** (WP3 review #2): only the transcript can veto noise, so a thread
   whose speech-to-text alias is unset at every level, or does not resolve, reads the transcript, and
   its turns fail to transcribe as with the setting off (`asr_not_configured`). The row is the
@@ -167,7 +285,11 @@ transcript" (tooltip: `why`), from the thread JSON and then each `lmgw.chat.inpu
   titlebar's block (`pv.block`, as the STT and TTS chips do). Under the hold or a benchmark run an
   audio verdict shows "reads the transcript", amber: "the next voice turn: under the GPU hold it goes
   to <model>'s fallback, or is refused, as its transcript: your voice goes only to models lmgw
-  runs". The drawer's "in effect" line shows the value's label (m6).
+  runs". The drawer's "in effect" line shows the value's label (m6). *Superseded 2026-10-06
+  (decision D3):* under a live block the page shows the gateway's forecast (`blocked`), the
+  fallback's own verdict: amber "hears you" and "under the GPU hold your voice goes to <fallback> as
+  audio", or "… this goes to <fallback>, which does not take audio input", or "… <model> has no
+  fallback, so the turn is refused".
 
 ## 3. A turn the model hears, end to end
 
@@ -375,7 +497,10 @@ no text part beside it: none exists yet, and the probe answered from audio alone
 `audio_not_local` (a 4xx; nothing sent). It already runs on every route a request goes to: the
 admitted one, and every re-route before anything is sent. That covers the plain stream
 (`web/chat.rs:1101`) and the tool loop (`web/agentchat.rs:191`, `:531`); a continue's prefill is
-refused there for the same reason.
+refused there for the same reason. *Superseded 2026-10-06:* **capability is enforced where the
+bytes are routed.** `fit_route` asks `spoken::may_hear` of the model that answers on the route
+(the predicate), and refuses one that cannot take the audio with `audio_input_unsupported`, on the
+same routes.
 
 *Why not a `RouteCheck`:* after `resolve`, the gate also swaps at admission's outside-VRAM verdict
 (`gate/open.rs:690-700`), in a climb under the hold (`vram/climb.rs:705-750`) and in the candidate
@@ -384,7 +509,10 @@ walk (`gate/candidate/walk.rs:538-566`, `:606-634`). Each judges the site's chec
 queue into `vram_queue_timeout`, and the climb and walk would refuse with `gpu_hold`, stranding the
 audio turn on an error the retry does not take. With `fit_route` the gate decides as it would for
 the transcript, the swapped route is refused before a byte leaves, and the retry takes the same
-swap with text. An attachment's audio is not `local_only`.
+swap with text. An attachment's audio is not `local_only`. (*2026-10-06:* this holds for the
+capability check too, with one more reason: a failing `RouteCheck` would keep the configured
+fallback from being used at all, which the owner's ruling forbids. An attachment's audio has its
+own capability check, `chat_attach_gate`.)
 
 **Tool threads** send `spoken` with each model call. The stored record starts after the request's
 messages (`agentchat.rs:604-613`), so audio never reaches `ir_messages`. **Regenerate** replays the
@@ -392,18 +520,21 @@ stored row. On a reply with `timing.input: audio` its tooltip says "answers from
 the audio is not kept".
 
 *Built (WP2):*
-- **`web/chat_turn/spoken.rs`** holds the turn's half: `hears` (the parts carry audio), `local_only`,
-  the placeholder (`row_text`, user rows only) and the barrier. `user_row` is a `watch` of
+- **`web/chat_turn/spoken.rs`** holds the turn's half: `hears` (the parts carry audio), `local_only`
+  (*2026-10-06:* `may_hear`), the placeholder (`row_text`, user rows only) and the barrier. `user_row` is a `watch` of
   `Option<UserRow>`: `Written(id)`, `Failed` (the row has `transcript_error`), `NoRow`, `Veto`.
 - **`fit_route(route, ir, (continuing, local_only))`**; a turn is `local_only` when its spoken parts
   carry audio. The refusal is a 400 `invalid_request_error`, code `audio_not_local`, naming the model
-  and its upstream; the plain path writes its request row as for any refusal there.
+  and its upstream; the plain path writes its request row as for any refusal there. *Superseded
+  2026-10-06:* `fit_route(state, (route, hold), answering, ir, (continuing, hears))`, async; code
+  `audio_input_unsupported`, the predicate's sentence, the upstream, "so nothing was sent".
 - **The barrier** waits after the nothing-to-save return. A turn superseded during the wait goes on
   to its own save check, which refuses it. A veto saves nothing quietly (`done {saved: false}`, no
   `error`); a journal gone saves nothing and says `not_saved`. The turn drops its spoken parts once
   the request is built.
 - **Tests.** The `off` golden is `tests/fixtures/chat_requests/` (`seam_tests/spoken.rs`), captured
-  at 1e1475f before the request changed. A route only lmgw runs can take the audio, so the request
+  at 1e1475f before the request changed. A route only lmgw runs can take the audio (*superseded
+  2026-10-06:* any route whose model takes it), so the request
   shape, the tool loop, the swap at admission (§4.7's outside-VRAM verdict to a cloud fallback) and a
   server's refusal run in `tests/it/chat_voice_audio_in/turns.rs` on `gpu_world`'s local rows,
   through two doc-hidden seams like the other `*_for_tests`: `web::spoken_turn_for_tests` (the turn)
@@ -467,7 +598,10 @@ the tool runs once and the reply is saved; before the fix the turn never ended.
   request with no spoken parts unchanged through WP2, and this one guards a managed body and the
   events from here on. A guest's re-pick to its alias's cloud fallback (llama-server's context
   refusal held back) is refused the audio on the plain path and in the tool loop
-  (`turns.rs`); a refused route gets no catalog read (`proxy/in_process/tests.rs`).
+  (`turns.rs`); a refused route gets no catalog read (`proxy/in_process/tests.rs`). *Superseded
+  2026-10-06:* a cloud fallback that takes audio gets it there; one that reads text only is refused
+  (`fallbacks.rs`). The refused route still gets no reasoning fit, but the predicate reads its
+  catalog to judge it.
 
 ### 3.5 A refused audio attempt (`thread/turn/audio.rs`)
 
@@ -476,12 +610,13 @@ now fails (setting off, auto-mode knowledge), it skips the audio attempt and run
 turn below at once. Route and capability are left to `fit_route` and the model's own refusal.
 
 **Retried once with the transcript:** a refusal of the audio attempt before its first `delta`,
-`reasoning` or `tool` frame, of two kinds. One is lmgw's own about the audio: `audio_not_local`,
+`reasoning` or `tool` frame, of two kinds. One is lmgw's own about the audio: `audio_not_local`
+(*2026-10-06:* `audio_input_unsupported`),
 or the context guard's (`gate/count.rs:197-205`) when a candidate alias picked a guarded row. The
 other is a 4xx from the managed server: an audio part it cannot take, a body too large, or
 `context_length_exceeded` (the transcript is 7–10× smaller). Such a 4xx is not left over from the
 reasoning fit's retries, because that fit never retries an off on a local route
-(`Fitted::retryable`, `proxy/reasoning_fit.rs:155-160`). **Not retried:** a 5xx, a dropped
+(`Fitted::retryable`, `proxy/reasoning_fit. *Added 2026-10-06:* a cloud route now hears too, and there the reasoning fit does retry an off (model-capabilities §5.6): a 4xx about the reasoning parameter can be read as the server's refusal of the audio and cost one transcript call more, never a wrong answer.rs:155-160`). **Not retried:** a 5xx, a dropped
 connection, a server crash or OOM, a timeout, `gpu_hold`, `gpu_benchmark`, `vram_queue_timeout`,
 `vram_too_large`, `superseded`, `not_saved`, a stop, or a policy refusal.
 
@@ -496,7 +631,9 @@ on `veto` the core has cancelled already. The journal gets the retry's generatio
 `input_why`. Only a refusal by the model's server is remembered (`Bound.refused`, the verdict's
 last row), so its later turns go as transcript until voice mode is entered again: one refusal, one
 note, no loop. `audio_not_local` and the context guard concern the route, not the model, and are
-not remembered.
+not remembered. (*2026-10-06:* `audio_input_unsupported` concerns the route the gate took this time,
+which the next verdict judges itself: not remembered either. A cloud model's own refusal of the
+audio is a server's refusal, retried and remembered like any other.)
 
 *Built (WP2):*
 - **Changed: llama-server refuses an audio part it cannot take with a 500**, not a 4xx:
@@ -531,14 +668,18 @@ not remembered.
 - **A server that went away under the audio** (a dropped connection after the dead-container
   restart, or a restart that failed) is still not retried — the response's error — but is kept for
   that model at once, with a note (`lmgw.chat.input`, about the later turns; the response's own
-  timing keeps its path), so later turns do not pay two restarts each.
+  timing keeps its path), so later turns do not pay two restarts each. *Changed 2026-10-06
+  (decision D5):* kept only when the attempt went to a llama-server, where a drop under the audio is
+  evidence about it; elsewhere it says nothing about the audio and is not kept.
 - **Only a frame carrying a gateway error decides.** An `error` frame with none (an MCP server that
   did not answer, before any model call) no longer disarms the attempt: it and what follows it,
   `state` frames aside, are held back — dropped when the audio is refused (the retry says them
   again), relayed in order otherwise.
 - **The skipped attempt relays how it ended** as the retry does: the frames above are now sent.
 - **Wording.** lmgw's own refusals say nothing was sent ("its route is a model lmgw does not run, so
-  nothing was sent: …", "the model picked for it guards its context, …"); `transcription_failed` on
+  nothing was sent: …" — *superseded 2026-10-06:* the predicate's sentence, e.g. "openai/gpt does
+  not take audio input (upstream 'cloud'), so nothing was sent" —, "the model picked for it guards
+  its context, …"); `transcription_failed` on
   the audio path no longer points at a `transcription.failed` that is not sent there.
 
 *Changed (WP3 review fixes):* a refused or skipped attempt never makes its turn heard (§3.1's note),
@@ -584,7 +725,7 @@ says "heard as audio, held N ms" or "transcript: <why>".
 - `Timing` gains `held_at`, `released` and the first held output's arrival; `transcript_wait_ms` is
   absent for a response held and never released. The log line ends `; input=audio held=N ms`.
 - `lmgw.chat.input` and the timing's `input`/`input_why` are sent while the thread's setting is
-  `local` (whatever the path); a launch whose turns were all transcribed before it says why:
+  `local` (*2026-10-06:* `on`) (whatever the path); a launch whose turns were all transcribed before it says why:
   "its turns were transcribed before it started".
 - **The page:** the INPUT chip takes each `lmgw.chat.input` over the thread JSON's verdict
   (`Realtime.said_input`); the mic badge's title names the path and an error; the not-transcribed
@@ -612,7 +753,8 @@ instead. Read-aloud is output only.
   verdict from the turn's first seconds (an ASR call on its head, say) calls it early, while the
   row still waits for the full transcript. This is what turns the ASR's time into gain.
 - **`any`, audio to cloud models:** a new setting value. The verdict's locality row and
-  `fit_route`'s `local_only` take it, one predicate each.
+  `fit_route`'s `local_only` take it, one predicate each. *Superseded 2026-10-06:* done without a
+  new value: `on` sends audio to any model that takes it.
 - **Stock `/v1/realtime` sessions** (realtime §19): `hearing`, launch at commit, the hold and the
   veto live in the core, not the binding. Such a session needs the renderer (`realtime/render.rs`)
   to carry a held turn's WAV as `ContentPart::Audio`, and no journal.
@@ -626,11 +768,13 @@ as listener beside a larger answerer (better listener, worse answerer).
 
 ## 7. Tests and live checks
 
-**Unit tests:** the verdict table row by row (a llama-server on another host is remote; the hold
+**Unit tests:** the verdict table row by row (a llama-server on another host is remote —
+*superseded 2026-10-06:* it hears like any model that takes audio; the hold
 with a candidate fallback; a guarded row); `has_words` with `hearing`, `busy_for_launch`, a debt
 decided at commit and dropped on an empty transcript; the hold (pass-through, replay order, veto,
 failed ASR, marks); `build_messages` with `spoken` (merge, placeholder, `None` = today's bytes);
-`local_only` in `fit_route`; §3.5's classification; the journal (row before reply, the `write_if`
+`local_only` in `fit_route` (*2026-10-06:* `may_hear`, and the predicate's own tests,
+`capabilities/hears/tests.rs`); §3.5's classification; the journal (row before reply, the `write_if`
 fallback, veto, failed marker, title).
 
 **ITs** (`tests/it` module `chat_voice_audio_in.rs`, mock upstreams, TTS fixtures):
@@ -645,6 +789,13 @@ fallback, veto, failed marker, title).
   climb and to a candidate fallback each give `audio_not_local` and a retry. The cloud mock never
   sees `input_audio`. (*Built:* admission's swap and a guest's re-pick to its cloud fallback, plain
   and tool threads, in `turns.rs` and `session.rs`; the climb shares the same `fit_route` call.)
+  *Superseded 2026-10-06: **Fallbacks.*** A hold with a fallback that takes audio gives the audio
+  verdict naming it, and the fallback gets the audio; one that reads text only gets the transcript.
+  Admission's swap and a guest's re-pick to a cloud fallback that takes audio send it the audio,
+  plain and tool threads; to one that reads text only they give `audio_input_unsupported` and a
+  retry; a fallback's own refusal is kept for it alone (`turns.rs`, `session.rs`, `fallbacks.rs`). A
+  server's `/props` saying no audio projector refuses the audio; one saying it loaded one lifts an
+  unknown (`props.rs`).
 - **Refusal:** a 400 gives one retry and the note, no `turn` frame, and the next turn goes as
   transcript. A second 400 is the error, a 503 is not retried, and a refusal plus a failed ASR is
   `transcription_failed`.
@@ -655,7 +806,9 @@ fallback, veto, failed marker, title).
 on the CPU. It uses only TTS-generated German clips (the probe's corpus) and synthetic noise and
 silence, and calls no cloud model. A committed driver, `scripts/voice-audio-in-check.py`, streams
 each clip in real time into `/v1/realtime?chat_thread=` (server VAD), with one thread under
-`local` and then `off`. It reports median `to_first_audio_ms` per path for 2–5 s and 30–60 s
+`local` (*2026-10-06:* `on`) and then `off`. *Added 2026-10-06:* it refuses to run when the
+thread's verdict names another model than the one under test, and fails a run a fallback answered,
+so it never calls a cloud model now that fallbacks hear. It reports median `to_first_audio_ms` per path for 2–5 s and 30–60 s
 turns, `transcript_wait_ms`, prompt tokens per second of audio, both paths' replies side by side,
 whether noise and silence end quietly, and whether a paused utterance is answered once.
 
@@ -684,12 +837,13 @@ Each WP ends green on `cargo fmt --check --all`, `cargo test -p <crates touched>
 `VoiceTiming`/`MessageVoice` fields, and the drawer line, Settings select and chip text.
 *Verified by* the verdict tests, a settings IT (both save paths, the MCP schema, the thread
 override) and `scripts/ui-matrix.py`. *Live:* on the dev copy, the 12B thread shows "audio input is
-off" by default and "your voice goes to … as audio" under `local`; a cloud-model thread shows its
+off" by default and "your voice goes to … as audio" under `local` (*2026-10-06:* `on`); a cloud-model thread shows its
 transcript line. *Built:* the settings IT is `tests/it/chat_voice_audio_in.rs` (§7's module, which
 WP2 and WP3 extend).
 
 **WP2: the request** (§3.4, §3.5), testable through `TurnOpts` alone. *Delivers* `spoken`,
-`user_row`, the append and placeholder, the barrier in `persist`, `local_only` in `fit_route`,
+`user_row`, the append and placeholder, the barrier in `persist`, `local_only` in `fit_route`
+(*2026-10-06:* `may_hear`),
 `thread/turn/audio.rs` and the refusal memory. *Verified by* their unit tests and the
 request-shape, privacy, refusal, `off`-golden and tool-thread ITs at the seam
 (`chat_turn/seam_tests.rs`). *Live:* under the default `off`, three German clips in voice mode
@@ -711,13 +865,13 @@ copy); §7's driver is `scripts/voice-audio-in-check.py`.
 | Finding | Resolution |
 |---|---|
 | B1 latency claim | Hold until the transcript; gain restated (intro, Decision 1): 80–125 ms short or segmented, under a second unbroken, never the ASR's seconds; `transcript_wait_ms`; head-verdict release as the later upgrade (§6) |
-| B2 "local" | `vram::classify(&route).is_some()` for the verdict and `fit_route`; `is_local_upstream` named and not used (§2.2) |
+| B2 "local" | `vram::classify(&route).is_some()` for the verdict and `fit_route`; `is_local_upstream` named and not used (§2.2). *Superseded 2026-10-06:* capability, not locality |
 | M3 launch gating | `has_words` counts a turn in `hearing`; `busy_for_launch` at the three launch sites; `end_bound_turns` keeps `busy()` (§3.1) |
-| M4 swaps after resolve | `audio_not_local` from `fit_route`, which every route passes before bytes leave; a `RouteCheck` strands the turn via `fallback_serves`; retried with the transcript (§3.4, §3.5) |
+| M4 swaps after resolve | `audio_not_local` from `fit_route`, which every route passes before bytes leave; a `RouteCheck` strands the turn via `fallback_serves`; retried with the transcript (§3.4, §3.5). *2026-10-06:* `audio_input_unsupported`, only where the answering model cannot take the audio |
 | M5/M6, S7 pending rows | No pending row: it is written once heard, as an insert under `write_if`, with a pre-save barrier in `TurnOpts` and the barrier op kept empty. The veto is quiet, pauses go through the existing re-owe, and a failed ASR plays and marks the row. Dropped: fill, `{removed}`, title move, veto delete (§3.1–§3.3) |
 | S8 `audio_tokens` | Dropped (Decision 10) |
 | m9 timing marks | `Mark`, `Planned`, `Tts`, `state` pass through; arrival and release marks kept apart (§3.2, §5) |
-| m10 verdict | Context-guard row; the hold's candidate fallback judged through `gate::resolve`; privacy refusals not remembered (§2.2, §3.5) |
+| m10 verdict | Context-guard row; the hold's candidate fallback judged through `gate::resolve`; privacy refusals not remembered (§2.2, §3.5). *2026-10-06:* lmgw's capability refusals are not remembered either |
 | m11 retry | Only 4xx refusals of the audio, with the reasoning-fit point; refusal plus failed ASR gives `transcription_failed`; no `turn` frame; a failed ASR sends no `error` (§3.2, §3.5) |
 | m12 title | `lmgw.chat.thread` from the journal, through `bound_planned`'s compare (§3.3) |
 | m13 drift | Re-cited at 5ad9ee5; `lifecycle/held.rs` and `thread/turn/audio.rs`; WAV built once; language comparison dropped; DocRoute fields (§5) |

@@ -151,6 +151,38 @@ pub(super) struct World {
     /// How many times the fake driver listed processes: what a sampler
     /// reads ([`Until::Sampled`]).
     pub(super) process_reads: u64,
+    /// While set, every container's `/health` answers 503: a model still
+    /// loading, for as long as a test needs a start to stay in flight after
+    /// its `podman run`.
+    pub(super) health_held: bool,
+    /// Whether `podman ps` and `podman inspect --format json` report the
+    /// containers this world runs, as podman would — what reconciliation
+    /// reads. Off: `ps` lists nothing and `inspect` says nothing readable,
+    /// which every test written before the pass after boot relies on.
+    pub(super) reports: bool,
+    /// Container name -> podman's `Created` (unix seconds), set at `run`.
+    pub(super) created: HashMap<String, i64>,
+    /// More `podman ps` rows, as written: containers this world does not run
+    /// itself — another instance's, a benchmark's, an agent's.
+    pub(super) extra_ps: Vec<Value>,
+    /// Every podman argv, in order.
+    pub(super) calls: Vec<Vec<String>>,
+}
+
+impl World {
+    /// The podman calls that named `name` (its last argument).
+    pub(super) fn calls_naming(&self, name: &str) -> Vec<Vec<String>> {
+        self.calls
+            .iter()
+            .filter(|c| c.last().map(String::as_str) == Some(name))
+            .cloned()
+            .collect()
+    }
+
+    /// The calls of one podman verb, in order.
+    pub(super) fn verb(&self, verb: &str) -> usize {
+        self.calls.iter().filter(|c| c[0] == verb).count()
+    }
 }
 
 /// A request's transient on an audio container ([`World::transient`]).

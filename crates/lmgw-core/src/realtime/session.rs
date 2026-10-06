@@ -43,6 +43,7 @@ use super::inbox::Inbox;
 use super::input::{barge_params, detector_params, log_turn_detection, OpenTurn};
 use super::lifecycle::{Active, Pending, TurnTiming};
 use super::liveness::{Answer, Beat, Liveness};
+use super::mcp_tools::McpSession;
 use super::merge;
 use super::protocol::{ErrorObject, ServerEvent, Session};
 use super::resolve::{self, ChatResolution};
@@ -104,6 +105,9 @@ pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
     let (asr_tx, mut from_asr) = mpsc::unbounded_channel();
     let (score_tx, mut from_scorer) = mpsc::unbounded_channel();
     let mut core = Core::new(init, ids, out.clone(), responder_tx, asr_tx, score_tx);
+    // The session's MCP listings report here (realtime-server-tools §1.2).
+    let (mcp_tx, mut from_mcp) = mpsc::unbounded_channel();
+    core.mcp.listen(mcp_tx);
     // A bound session's journal and connect warm say what they did here
     // (chat-voice §8.3, §8.7); an unbound session's are never fed.
     let (bound_tx, mut from_journal) = mpsc::unbounded_channel();
@@ -136,6 +140,7 @@ pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
                 AsrMsg::Check(done) => core.on_word_check(done),
             },
             Some(score) = from_scorer.recv() => core.on_turn_score(score),
+            Some(listed) = from_mcp.recv() => core.on_listed(listed),
             Some(gen) = drained.recv() => core.on_drained(gen),
             Some(ev) = from_journal.recv() => core.journal_event(ev),
             Some(state) = from_warm.recv() => core.model_state(state),
@@ -329,6 +334,9 @@ pub(super) struct Core {
     pub(super) pending: Option<Pending>,
     /// The one response in flight (§4.3).
     pub(super) active: Option<Active>,
+    /// The session's `mcp` labels and what they listed
+    /// (realtime-server-tools §1.2).
+    pub(super) mcp: McpSession,
     /// The latest committed turn no response has taken yet: the next
     /// response's timing line starts from it (§11).
     pub(super) last_turn: Option<TurnTiming>,
@@ -454,6 +462,7 @@ impl Core {
             turn: None,
             pending: None,
             active: None,
+            mcp: McpSession::default(),
             last_turn: None,
             warmer: Warmer::default(),
             generation: 0,

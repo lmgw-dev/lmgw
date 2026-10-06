@@ -22,19 +22,19 @@ use crate::runtime::{container_name, Class};
 /// actually turns on (the command, the published port) comes from `podman
 /// inspect`, which is the authoritative record for both.
 #[derive(Debug, Deserialize)]
-struct PsRow {
+pub(super) struct PsRow {
     #[serde(default, rename = "Names")]
-    names: Vec<String>,
+    pub(super) names: Vec<String>,
     #[serde(default, rename = "Labels")]
-    labels: HashMap<String, String>,
+    pub(super) labels: HashMap<String, String>,
     #[serde(default, rename = "State")]
-    state: String,
+    pub(super) state: String,
     /// Unix seconds, podman's own `Created` (not `CreatedAt`, which is the
     /// human "6 minutes ago"). `0` when the field is absent, which reads as
     /// "long ago" everywhere it is compared — the safe direction for a
     /// reconciliation that removes things.
     #[serde(default, rename = "Created")]
-    created: i64,
+    pub(super) created: i64,
 }
 
 /// One `podman ps` row, for a caller outside this module.
@@ -81,17 +81,17 @@ struct InspectRow {
 /// container's run state. Its own row type rather than a field on
 /// [`InspectRow`], so adoption's decoding does not change.
 #[derive(Debug, Deserialize)]
-struct InspectStateRow {
+pub(super) struct InspectStateRow {
     #[serde(default, rename = "State")]
-    state: Option<InspectState>,
+    pub(super) state: Option<InspectState>,
 }
 
 #[derive(Debug, Deserialize)]
-struct InspectState {
+pub(super) struct InspectState {
     #[serde(default, rename = "Status")]
     status: String,
     #[serde(default, rename = "Running")]
-    running: bool,
+    pub(super) running: bool,
     #[serde(default, rename = "ExitCode")]
     exit_code: i64,
 }
@@ -129,6 +129,22 @@ pub enum Presence {
     Absent,
     /// podman did not answer at all — carries the rendered reason.
     Unknown(String),
+}
+
+/// Why [`Registry::adopt`] would not adopt a container.
+#[derive(Debug)]
+pub(super) struct Refused {
+    /// The sentence the log line prints.
+    pub(super) why: String,
+    /// It did not answer its readiness probe — as a container that is still
+    /// loading does not. Everything else about it may be in order.
+    pub(super) silent: bool,
+}
+
+impl From<String> for Refused {
+    fn from(why: String) -> Self {
+        Self { why, silent: false }
+    }
 }
 
 /// What one [`Registry::reconcile`] pass did (§3.4).
@@ -173,8 +189,17 @@ impl Registry {
                 in_flight: e.in_flight,
                 started_at_age_seconds: now.saturating_duration_since(e.started_at).as_secs(),
                 last_used_age_seconds: now.saturating_duration_since(e.last_used).as_secs(),
-                warnings: e.warnings.clone(),
+                // A `/props` read that failed is one of the entry's
+                // warnings, kept apart so a refresh can replace it
+                // (`llama_props.rs`).
+                warnings: e
+                    .warnings
+                    .iter()
+                    .chain(e.llama.as_ref().and_then(|l| l.props.as_ref().err()))
+                    .cloned()
+                    .collect(),
                 image_capabilities: e.capabilities.clone(),
+                llama_props: e.llama.as_ref().and_then(|l| l.facts().cloned()),
                 rung: e.charge.as_ref().map(RungStatus::from_charge),
                 climbing: e.climb.as_ref().map(|m| m.status(now)),
                 sends: *e.sends.borrow(),
@@ -308,11 +333,11 @@ impl Registry {
                 continue;
             }
             match self.adopt(container_prefix, candidates, &row, &name).await {
-                Ok(()) => {
+                Ok(_) => {
                     tracing::info!(container = %name, "adopted running container");
                     report.adopted.push(name);
                 }
-                Err(reason) => {
+                Err(Refused { why: reason, .. }) => {
                     let removed = self.rm_force(&name).await;
                     match removed {
                         Ok(()) => tracing::info!(container = %name, "removed container: {reason}"),
@@ -329,17 +354,20 @@ impl Registry {
     }
 
     /// Decide one container's fate and, if it survives, insert it as `ready`.
-    /// `Err(reason)` means "remove it, because …" — every rejection carries
-    /// the sentence the log line prints.
-    async fn adopt(
+    /// `Err` means "remove it, because …" — every rejection carries the
+    /// sentence the log line prints ([`Refused`]). `Ok(true)`: this call inserted the
+    /// entry; `Ok(false)`: the key was already the registry's, or a start
+    /// claimed it meanwhile, and nothing was touched. Shared with the pass
+    /// after boot (`unheld.rs`), which reports only what it inserted.
+    pub(super) async fn adopt(
         &self,
         container_prefix: &str,
         candidates: &[AcquireSpec<'_>],
         row: &PsRow,
         name: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, Refused> {
         if row.state != "running" {
-            return Err(format!("not running (state '{}')", row.state));
+            return Err(format!("not running (state '{}')", row.state).into());
         }
         let class = row
             .labels
@@ -363,24 +391,22 @@ impl Registry {
             .filter(|s| s.runtime.class == class && s.runtime.model_id == model_id)
             .collect();
         if specs.is_empty() {
-            return Err(format!(
-                "no enabled {class} model '{model_id}' is configured"
-            ));
+            return Err(format!("no enabled {class} model '{model_id}' is configured").into());
         }
         // A name that is not the one this model renders today can never be
         // collected by a future `podman run --replace`, so it would leak for
         // as long as the box runs. Reject it while we still have it in hand.
         let expected_name = container_name(container_prefix, class, &model_id);
         if name != expected_name {
-            return Err(format!(
-                "name is not the one '{model_id}' renders ({expected_name})"
-            ));
+            return Err(
+                format!("name is not the one '{model_id}' renders ({expected_name})").into(),
+            );
         }
         // Already ours (a second reconcile pass, or a start that raced it):
         // leave the live entry exactly as it is, and report the name as
         // adopted so the legacy sweep's guard still sees it.
         if self.map().contains_key(&(class, model_id.clone())) {
-            return Ok(());
+            return Ok(false);
         }
 
         let inspected = self.inspect(name).await?;
@@ -407,21 +433,21 @@ impl Registry {
                 format!("{why}, at none of its {} rungs", specs.len())
             } else {
                 why
-            });
+            }
+            .into());
         };
         let runtime: &ModelRuntime = probed.as_ref().unwrap_or(spec.runtime);
 
         // One probe, not a poll: an adopted container is claimed to be up
-        // already, so this is a verification, not a wait for a load. Bounded by
-        // `vram.load_timeout_seconds` — the same visible setting that bounds
-        // every other "is this model answering yet" question, rather than a
-        // second invented number.
+        // already, so this is a verification, not a wait for a load. Bounded
+        // as one readiness probe is ([`Self::probe_once`]).
+        let deadline = Instant::now() + spec.load_timeout;
         let probe = self.probe_once(&render, port, spec.load_timeout).await;
         if !probe.answered {
             // Worded per engine, because what counts as an answer differs:
             // llama and audio must say 200, an image container may say 5xx
             // (its capabilities scan can be broken while it generates).
-            return Err(if matches!(render.engine, EngineArgs::Image(_)) {
+            let why = if matches!(render.engine, EngineArgs::Image(_)) {
                 format!(
                     "no HTTP response from its {} on the recovered port {port}",
                     render.health_path
@@ -431,13 +457,37 @@ impl Registry {
                     "no HTTP 200 from its {} on the recovered port {port}",
                     render.health_path
                 )
-            });
+            };
+            // Silent, which a container still loading is too: the pass after
+            // boot leaves a young one be (`unheld.rs`).
+            return Err(Refused { why, silent: true });
         }
 
         // The gate's facts for an adopted container are the row's as it is
         // now — which is what the container runs: the argv comparison above
         // only lets through a command line this very descriptor renders.
         let gate = GateFacts::of_start(runtime, spec.models_dir).await;
+        // What a llama-server says about itself, read as a start reads it
+        // (llama egress design §4.2): after the probe, before the insert, in
+        // what is left of the same budget. A pass cut short here has inserted
+        // nothing, and the next one reads it again. A failed read is a
+        // warning on the entry, never a reason not to adopt.
+        let llama = match render.engine {
+            EngineArgs::Llama(_) => {
+                let props = self.read_llama_props_by(port, deadline).await;
+                if let Err(why) = &props {
+                    tracing::warn!(
+                        container = %name,
+                        "adopting {class} model '{model_id}', with a warning: {why}"
+                    );
+                }
+                Some(LlamaEntry {
+                    props,
+                    ubatch_advisory: llama_props::ubatch_advisory(runtime, spec.models_dir).await,
+                })
+            }
+            _ => None,
+        };
 
         // The decisions above (`inspect`, the config read, the `/health`
         // probe) all happened with the map lock released, so the "not ours
@@ -462,7 +512,7 @@ impl Registry {
                     "not adopting: a concurrent start already claimed {class} \
                      model '{model_id}'"
                 );
-                Ok(())
+                Ok(false)
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let (tx, _rx) = watch::channel(Phase::Ready);
@@ -491,6 +541,7 @@ impl Registry {
                     // so what it read is kept.
                     warnings: Vec::new(),
                     capabilities: probe.capabilities,
+                    llama,
                     gate,
                     // The rung whose command line it runs — the one the
                     // ledger charges from now on.
@@ -504,7 +555,7 @@ impl Registry {
                     // on it did not survive that lmgw.
                     owner: Origin::Owner,
                 });
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -587,17 +638,22 @@ impl Registry {
     /// `Some("the container exited with code N")` when podman says a starting
     /// container is no longer running, so the readiness poll can stop at once
     /// instead of waiting out the load timeout on a port nothing will ever
-    /// open again. Anything podman cannot answer clearly — inspect failing,
-    /// JSON it cannot read, a state it does not name — is `None`: "keep
-    /// waiting", which is exactly the behaviour before this check, so a doubt
-    /// never fails a start that might still come up.
-    async fn exited(&self, name: &str) -> Option<String> {
+    /// open again — and so is "no such container", the one failing inspect
+    /// with a clear answer. Anything else podman cannot answer clearly —
+    /// inspect failing otherwise, JSON it cannot read, a state it does not
+    /// name — is `None`: "keep waiting", so a doubt never fails a start that
+    /// might still come up.
+    pub(super) async fn exited(&self, name: &str) -> Option<String> {
         let out = self
             .podman(&["inspect", "--format", "json", name])
             .await
             .ok()?;
+        // A start only asks after its own `podman run` succeeded, so a name
+        // podman no longer knows is a container somebody removed while it
+        // loaded — dead, not "keep waiting" until the load budget is spent.
         if !out.ok() {
-            return None;
+            return is_no_such_container(&out.stderr)
+                .then(|| "the container was removed while the model was loading".to_string());
         }
         let rows: Vec<InspectStateRow> = serde_json::from_str(&out.stdout).ok()?;
         let state = rows.into_iter().next()?.state?;
@@ -679,6 +735,15 @@ impl Registry {
     ) -> ProbeAnswer {
         let url = format!("http://127.0.0.1:{port}{}", render.health_path);
         let is_image = matches!(render.engine, EngineArgs::Image(_));
+        // Bounded as one readiness probe of a start is (`await_health`,
+        // `await_ready`): llama's `/health` and audio's `/v1/models` answer at
+        // once when the container is up, so [`CONTAINER_EXIT_POLL`]; an image
+        // container's capabilities scan may take its time, so the load budget.
+        let timeout = if is_image {
+            timeout
+        } else {
+            CONTAINER_EXIT_POLL.min(timeout)
+        };
         let Ok(resp) = self.http.get(&url).timeout(timeout).send().await else {
             return ProbeAnswer::default();
         };

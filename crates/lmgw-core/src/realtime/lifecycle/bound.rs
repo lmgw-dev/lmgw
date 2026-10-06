@@ -234,6 +234,15 @@ impl Core {
             row,
         });
         self.launch_input(gen, &response_id, audio.is_some());
+        // Its turns go as their transcript because the model they go to
+        // lacks audio input (or refused it this session): its request rows
+        // say so (`request_logs.degraded`).
+        let degraded = match self.audio_now() {
+            Some(v) if audio.is_none() && self.audio_input_on() && v.lacks => Some(
+                crate::degraded::lacks(&v.model, false, "audio", "transcript sent"),
+            ),
+            _ => None,
+        };
         let b = self.bound.as_ref()?;
         tokio::spawn(turn::run(turn::Job {
             state: self.state.clone(),
@@ -248,6 +257,7 @@ impl Core {
             speaking,
             hint,
             audio,
+            degraded,
         }));
         Some(stop)
     }

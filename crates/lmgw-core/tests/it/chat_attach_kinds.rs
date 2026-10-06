@@ -668,6 +668,58 @@ async fn audio_goes_natively_to_a_model_that_hears() {
     assert_eq!(transcriptions(&stt).await, 0, "no STT call");
 }
 
+/// An Anthropic alias whose override claims audio: the Anthropic API has
+/// no audio part, so the attachment's audio is transcribed at upload — the
+/// voice turn's predicate (`capabilities::hears`) decides attachments too
+/// (voice-audio-input review V7).
+#[tokio::test]
+async fn audio_for_an_anthropic_model_is_transcribed_whatever_its_override_says() {
+    let (chat, stt) = (chat_mock().await, stt_mock("hello from the memo").await);
+    let (state, gw) = setup(&chat, &stt).await;
+    settings_set(&state, patch(json!({ "chat_stt_alias": "my-asr" })))
+        .await
+        .unwrap();
+    let up = store::insert_upstream(
+        &state.db,
+        &NewUpstream {
+            name: "claude-up".into(),
+            protocol: Protocol::Anthropic,
+            kind: UpstreamKind::Generic,
+            base_url: chat.uri(),
+            api_key: Some("sk-up".into()),
+            extra_headers: vec![],
+            timeout_ms: 5_000,
+            enabled: true,
+            expose_all: false,
+            expose_prefix: String::new(),
+            supports_responses: false,
+        },
+    )
+    .await
+    .unwrap();
+    store::insert_alias(
+        &state.db,
+        &NewAlias {
+            alias: "claude".into(),
+            upstream_id: up,
+            upstream_model_id: "tgt".into(),
+            param_overrides: Default::default(),
+            enabled: true,
+            capabilities_override: Some(json!({ "capabilities": {
+                "task": "chat", "endpoints": ["/v1/messages"], "source": "owner",
+                "input_modalities": ["text", "audio"]
+            } })),
+        },
+    )
+    .await
+    .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let tid = new_thread(&gw, "claude", false).await;
+    let a = upload_ok(&gw, tid, "memo.wav", wav()).await;
+    assert_eq!(a["meta"]["transcript_alias"], "my-asr", "{a}");
+    assert_eq!(transcriptions(&stt).await, 1, "transcribed at upload");
+}
+
 #[tokio::test]
 async fn audio_for_a_model_that_does_not_hear_is_transcribed_at_upload() {
     let (chat, stt) = (chat_mock().await, stt_mock("hello from the memo").await);

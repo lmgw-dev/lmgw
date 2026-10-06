@@ -105,9 +105,14 @@ impl Off {
         match (self, protocol) {
             (Self::Omitted, _) => "no reasoning control".into(),
             (Self::Control, Protocol::Openai) => "reasoning_effort: \"none\"".into(),
+            (Self::Control, Protocol::LlamaCpp) => {
+                "chat_template_kwargs: {enable_thinking: false}".into()
+            }
             (Self::Control, Protocol::Anthropic) => "thinking: {type: \"disabled\"}".into(),
             (Self::Control, Protocol::Gemini) => "thinkingBudget: 0".into(),
-            (Self::Lowest(l), Protocol::Openai) => format!("reasoning_effort: \"{l}\""),
+            (Self::Lowest(l), Protocol::Openai | Protocol::LlamaCpp) => {
+                format!("reasoning_effort: \"{l}\"")
+            }
             (Self::Lowest(l), Protocol::Anthropic) => format!("output_config.effort: \"{l}\""),
             (Self::Lowest(l), Protocol::Gemini) => format!("thinkingLevel: \"{l}\""),
         }

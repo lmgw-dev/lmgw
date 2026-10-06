@@ -90,6 +90,7 @@ pub fn apply_update(
     if let Some(lmgw) = patch.get_mut("lmgw") {
         strict_lmgw(lmgw)?;
     }
+    super::mcp_tools::reuse_definitions(&mut patch, current);
 
     let mut merged = serde_json::to_value(current).map_err(|e| ErrorObject {
         kind: "server_error".into(),
@@ -265,7 +266,8 @@ fn validate(s: &Session) -> Result<(), ErrorObject> {
     check_speed(
         audio.and_then(|a| a.output.as_ref()).and_then(|o| o.speed),
         "session.audio.output.speed",
-    )
+    )?;
+    super::mcp_tools::check(s.tools.as_deref().unwrap_or_default(), "session.tools")
 }
 
 /// The GA range of `audio.output.speed` (package B review 10).

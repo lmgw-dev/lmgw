@@ -12,6 +12,11 @@ use crate::ir::{
 };
 use crate::sse::SseEvent;
 
+/// Why an audio part cannot go to the Anthropic API: it has no block for
+/// one. A heard voice turn's responder reads it as lmgw's own refusal of
+/// the audio (`realtime::thread::turn::audio::refusal`).
+pub const NO_AUDIO_BLOCK: &str = "audio input has no Anthropic block type";
+
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Anthropic requires max_tokens; the last resort when neither the client, the
 /// alias, nor the provider's own catalog states one (§5.4 — the handler
@@ -138,9 +143,7 @@ fn content_blocks(parts: &[ContentPart]) -> Result<Vec<Value>, GatewayError> {
                 }),
             }),
             ContentPart::Audio { .. } => {
-                return Err(GatewayError::Unsupported(
-                    "audio input has no Anthropic block type".into(),
-                ));
+                return Err(GatewayError::Unsupported(NO_AUDIO_BLOCK.into()));
             }
             ContentPart::ToolUse { id, name, args } => {
                 out.push(json!({"type": "tool_use", "id": id, "name": name, "input": args}));

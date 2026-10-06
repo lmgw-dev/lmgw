@@ -24,15 +24,20 @@
 //! one cold model produce exactly one `podman run`, and N requests for N
 //! models produce N concurrent `podman run`s.
 //!
-//! **Every claim is released, including a cancelled one.** The claim is an
-//! RAII token: if the acquiring future is dropped mid-start (client hung up),
-//! its `Drop` unclaims the entry and wakes the waiters so one of them takes
-//! over, instead of leaving a model wedged in `starting` until restart. Same
-//! discipline as [`crate::vram::LocalHold`], one level lower.
+//! **A start outlives the request that asked for it.** The start sequence
+//! runs as a task the registry spawns (`owned.rs`), and the acquiring future
+//! only waits for its verdict: a client that hangs up mid-load drops the
+//! wait, never the start, so the model ends `ready` and idle instead of as a
+//! running container no entry names. Stops run the same way. The claim is
+//! still an RAII token — if the start task itself is torn down, its `Drop`
+//! unclaims the entry and wakes the waiters instead of leaving the model
+//! wedged in `starting` until restart.
 //!
 //! **Boot reconciliation lives here too** (§3.4): [`Registry::reconcile`]
 //! rebuilds this map from `podman ps` at startup, adopting containers that
-//! still match what lmgw would render for them and removing everything else.
+//! still match what lmgw would render for them and removing everything else;
+//! [`Registry::readopt`] asks the same of every running container the map
+//! does not hold, for as long as lmgw runs.
 //! The policy *around* it — which models to warm-start, when to reap, the
 //! legacy sweep — is [`super::lifecycle`]'s; this module only owns the podman
 //! verbs and the map.
@@ -63,12 +68,15 @@ mod command;
 mod errors;
 mod inputs;
 mod lease;
+mod llama_props;
+mod owned;
 mod podman_ops;
 mod raii;
 mod reconcile;
 mod sdcpp;
 mod state;
 mod stop;
+mod unheld;
 
 use acquire::Started;
 pub use command::{
@@ -77,11 +85,13 @@ pub use command::{
 };
 pub use errors::RuntimeError;
 pub use inputs::{AcquireSpec, StartSpec};
+pub use llama_props::{unknown_until, LlamaEntry, Refresh};
 pub use podman_ops::log_excerpt_of;
 pub use raii::AcquireGuard;
 pub use reconcile::{Presence, PsEntry, ReconcileReport, HOST_PID_FORMAT};
 use state::{next_generation, Entry, Key, Phase};
 pub use state::{RuntimeState, RuntimeView};
+pub use unheld::{PassLimits, PassWait, ReadoptReport, Unheld};
 
 /// A generation for a container this registry does not hold — a benchmark
 /// run's (benchmark design §3.4) — drawn from the entries' own counter, so
@@ -111,7 +121,9 @@ const HEALTH_POLL: Duration = Duration::from_millis(250);
 /// starting" (§10.3). The port cannot tell a slow load from a dead one; podman
 /// can. Also a sampling rate, not a bound: a `podman inspect` costs a process
 /// spawn, which the 250 ms health poll should not pay each time, and a crash
-/// is then reported at most this late.
+/// is then reported at most this late. One llama or audio readiness probe
+/// may take this long and no longer, so a connection that hangs cannot hold
+/// the next look back (`Registry::await_health`).
 const CONTAINER_EXIT_POLL: Duration = Duration::from_secs(2);
 
 /// `podman stop -t` grace, in seconds (§3.6).
@@ -173,7 +185,19 @@ pub struct Registry {
     /// ([`Registry::set_gpu_lease`], `lease.rs`). Only ever read or written
     /// with [`Self::map`] held.
     gpu_lease: Mutex<Option<Arc<crate::bench::lease::GpuLease>>>,
+    /// The lmgw instance this registry starts containers for
+    /// ([`Registry::set_owner`], `unheld.rs`).
+    owner: std::sync::OnceLock<String>,
+    /// What a settled start tells the rest of lmgw
+    /// ([`Registry::set_on_started`], `owned.rs`).
+    on_started: std::sync::OnceLock<OnStarted>,
+    /// The reconciliation pass after boot: one at a time, and what it
+    /// remembers from one to the next (`unheld.rs`).
+    pass: tokio::sync::Mutex<unheld::PassMemory>,
 }
+
+/// [`Registry::set_on_started`]'s hook.
+pub type OnStarted = Box<dyn Fn() + Send + Sync>;
 
 fn is_no_such_container(stderr: &str) -> bool {
     let low = stderr.to_ascii_lowercase();

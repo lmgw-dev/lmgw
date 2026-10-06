@@ -189,7 +189,7 @@ async fn without_spoken_parts_the_requests_are_todays() {
 }
 
 // ---------------------------------------------------------------------------
-// Privacy: audio goes only to a model this lmgw runs
+// Capability: audio goes only to a model that takes it, wherever it runs
 // ---------------------------------------------------------------------------
 
 fn audio() -> crate::ir::ContentPart {
@@ -210,14 +210,8 @@ fn heard() -> (TurnOpts, tokio::sync::watch::Sender<Option<UserRow>>) {
     (opts, row)
 }
 
-/// The turn's frames, its `error` code, and that nothing reached `mock` —
-/// no chat body, and on the tool path no catalog read either (WP2 review
-/// #8: its refusal comes before the reasoning fit).
-async fn refused_unsent(
-    state: &SharedState,
-    thread: &ChatThread,
-    mock: &MockServer,
-) -> Vec<(String, Value)> {
+/// A heard turn's frames, to its end.
+async fn heard_frames(state: &SharedState, thread: &ChatThread) -> Vec<(String, Value)> {
     let (opts, _row) = heard();
     let (tx, mut rx) = mpsc::channel(64);
     let mode = TurnMode::Fresh {
@@ -234,9 +228,21 @@ async fn refused_unsent(
     )
     .await
     .unwrap();
-    let frames = rest(&mut rx).await;
+    rest(&mut rx).await
+}
+
+/// The turn's frames, its `error` code, and that nothing reached `mock` but
+/// the capability lookup's catalog read — no chat body, and on the tool
+/// path not the reasoning fit's catalog read either (WP2 review #8: its
+/// refusal comes before the fit).
+async fn refused_unsent(
+    state: &SharedState,
+    thread: &ChatThread,
+    mock: &MockServer,
+) -> Vec<(String, Value)> {
+    let frames = heard_frames(state, thread).await;
     let error = frames.iter().find(|(e, _)| e == "error").expect("an error");
-    assert_eq!(error.1["code"], AUDIO_NOT_LOCAL, "{frames:?}");
+    assert_eq!(error.1["code"], AUDIO_NOT_HEARD, "{frames:?}");
     assert_eq!(
         frames.last().unwrap(),
         &("done".into(), json!({"aborted": true}))
@@ -249,9 +255,57 @@ async fn refused_unsent(
         .iter()
         .map(|r| format!("{} {}", r.method, r.url.path()))
         .collect();
-    assert!(reached.is_empty(), "nothing at all reached it: {reached:?}");
+    assert!(
+        reached.iter().all(|r| r == "GET /models"),
+        "only the capability lookup reached it: {reached:?}"
+    );
     assert!(!frames.iter().any(|(e, _)| e == "turn"), "{frames:?}");
     frames
+}
+
+/// Say that alias `m` (the seam world's cloud model) has the capabilities
+/// `caps`; `None`: nothing, so lmgw cannot tell.
+async fn m_says(state: &SharedState, caps: Option<Value>) {
+    sqlx::query("UPDATE models SET capabilities_override = ?1 WHERE alias = 'm'")
+        .bind(caps.map(|c| json!({ "capabilities": c }).to_string()))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    state.reload_snapshot().await.unwrap();
+}
+
+/// A local model `gemma` that takes audio, under the GPU hold, whose
+/// fallback is `m`.
+async fn held_gemma(state: &SharedState, thread: &mut ChatThread) {
+    store::insert_local_model(
+        &state.db,
+        &store::NewLocalModel {
+            model_id: "gemma".into(),
+            gguf_path: "gemma.gguf".into(),
+            params: Default::default(),
+            args: vec![],
+            idle_seconds: 0,
+            enabled: true,
+            public: true,
+            image: None,
+            extra_run_args: None,
+            warm_start: false,
+            hold_fallback_mode: Default::default(),
+            hold_fallback: None,
+            capabilities_override: Some(json!({ "capabilities": {
+                "task": "chat", "input_modalities": ["text", "audio"]
+            } })),
+            ladder: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let mut settings = state.snapshot().settings.clone();
+    settings.hold.active = true;
+    settings.hold.fallback_alias = Some("m".into());
+    store::save_settings(&state.db, &settings).await.unwrap();
+    state.reload_snapshot().await.unwrap();
+    thread.model_alias = "gemma".into();
 }
 
 /// The request rows the turn wrote: `(ingress_proto, status, error_kind)`.
@@ -272,19 +326,28 @@ async fn one_refusal_row(state: &SharedState, kind: &str) {
     let proto = if kind == "admin" { "admin" } else { "chat" };
     assert_eq!(
         request_rows(state).await,
-        [(proto.to_string(), 400, Some(AUDIO_NOT_LOCAL.to_string()))],
+        [(proto.to_string(), 400, Some(AUDIO_NOT_HEARD.to_string()))],
         "{kind}"
     );
 }
 
-/// A cloud model never gets a turn's audio: the plain stream and the tool
-/// loop refuse its route before a byte leaves, and save nothing.
+/// A model lmgw cannot judge never gets a turn's audio (decision D1): the
+/// plain stream and the tool loop refuse its route before a byte leaves,
+/// and save nothing. A model that reads text only alike.
 #[tokio::test]
-async fn a_cloud_route_is_refused_the_audio_before_anything_is_sent() {
-    for kind in ["chat", "admin"] {
+async fn a_route_whose_model_cannot_hear_is_refused_the_audio_before_anything_is_sent() {
+    for (kind, caps) in [
+        ("chat", None),
+        ("admin", None),
+        (
+            "chat",
+            Some(json!({ "task": "chat", "input_modalities": ["text"] })),
+        ),
+    ] {
         let mock = MockServer::start().await;
         answers(&mock, &[said("never")]).await;
         let (state, thread) = spoken_world(&mock.uri(), kind).await;
+        m_says(&state, caps).await;
         refused_unsent(&state, &thread, &mock).await;
         one_refusal_row(&state, kind).await;
         let rows = store::list_chat_messages(&state.db, thread.id)
@@ -298,51 +361,73 @@ async fn a_cloud_route_is_refused_the_audio_before_anything_is_sent() {
     }
 }
 
-/// A local model the GPU hold hands to a cloud fallback: the swap the gate
-/// makes after the verdict, refused on the route it settled on — the plain
-/// stream and the tool loop alike.
+/// A local model the GPU hold hands to a cloud fallback that takes audio
+/// (changed 2026-10-06: the configured fallback is always used, and hears
+/// the turn when it can) — the plain stream and the tool loop alike: the
+/// fallback gets the turn's audio, and the reply is saved after the row.
 #[tokio::test]
-async fn the_holds_cloud_fallback_is_refused_the_audio() {
+async fn the_holds_cloud_fallback_that_hears_gets_the_audio() {
+    for kind in ["chat", "admin"] {
+        let mock = MockServer::start().await;
+        answers(&mock, &[said("Morgen wird es sonnig.")]).await;
+        let (state, mut thread) = spoken_world(&mock.uri(), kind).await;
+        m_says(
+            &state,
+            Some(json!({ "task": "chat", "input_modalities": ["text", "audio"] })),
+        )
+        .await;
+        held_gemma(&state, &mut thread).await;
+        let frames = heard_frames(&state, &thread).await;
+        assert!(
+            !frames.iter().any(|(e, _)| e == "error"),
+            "{kind}: {frames:?}"
+        );
+        let got = bodies(&mock).await;
+        assert_eq!(got.len(), 1, "{kind}: {got:?}");
+        let last = got[0]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        let audio_parts = last["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["type"] == "input_audio")
+            .count();
+        assert_eq!(audio_parts, 1, "{kind}: {last}");
+        let rows = store::list_chat_messages(&state.db, thread.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.last().unwrap().content,
+            "Morgen wird es sonnig.",
+            "{kind}: the reply is saved"
+        );
+    }
+}
+
+/// The same fallback, reading text only: the swap the gate makes after
+/// the verdict is refused the audio on the route it settled on, named by
+/// the fallback's upstream — the plain stream and the tool loop alike.
+#[tokio::test]
+async fn the_holds_fallback_that_reads_text_only_is_refused_the_audio() {
     for kind in ["chat", "admin"] {
         let mock = MockServer::start().await;
         answers(&mock, &[said("never")]).await;
         let (state, mut thread) = spoken_world(&mock.uri(), kind).await;
-        store::insert_local_model(
-            &state.db,
-            &store::NewLocalModel {
-                model_id: "gemma".into(),
-                gguf_path: "gemma.gguf".into(),
-                params: Default::default(),
-                args: vec![],
-                idle_seconds: 0,
-                enabled: true,
-                public: true,
-                image: None,
-                extra_run_args: None,
-                warm_start: false,
-                hold_fallback_mode: Default::default(),
-                hold_fallback: None,
-                capabilities_override: Some(json!({ "capabilities": {
-                    "task": "chat", "input_modalities": ["text", "audio"]
-                } })),
-                ladder: vec![],
-            },
+        m_says(
+            &state,
+            Some(json!({ "task": "chat", "input_modalities": ["text"] })),
         )
-        .await
-        .unwrap();
-        let mut settings = state.snapshot().settings.clone();
-        settings.hold.active = true;
-        settings.hold.fallback_alias = Some("m".into());
-        store::save_settings(&state.db, &settings).await.unwrap();
-        state.reload_snapshot().await.unwrap();
-        thread.model_alias = "gemma".into();
+        .await;
+        held_gemma(&state, &mut thread).await;
         let frames = refused_unsent(&state, &thread, &mock).await;
         let error = &frames.iter().find(|(e, _)| e == "error").unwrap().1;
-        assert!(
-            error["message"]
-                .as_str()
-                .unwrap()
-                .contains("(upstream 'test-up')"),
+        assert_eq!(
+            error["message"],
+            "m does not take audio input (upstream 'test-up'), so nothing was sent",
             "{kind}: {error}"
         );
         one_refusal_row(&state, kind).await;

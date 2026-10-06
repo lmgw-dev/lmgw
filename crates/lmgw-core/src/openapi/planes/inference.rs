@@ -414,12 +414,42 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 semantic_vad and manual turns, barge-in with a word check, session.update, \
                 input_audio_buffer.append/commit/clear, conversation.item.create/retrieve/\
                 truncate/delete, response.create and response.cancel, client-side function \
-                tools. Refused with an error naming what is missing: transcription sessions, \
+                tools, and MCP tools the gateway runs itself on a session not bound to a Chat \
+                thread. An MCP session tool {\"type\": \"mcp\", \"server_label\"} names one of \
+                this gateway's own MCP servers (by its tool prefix or name) or a built-in \
+                toolset (docs, kb, and lmgw for an owner credential while the self-admin tools \
+                are on), resolved as on /v1/responses under the key's tool scope; GET \
+                /v1/mcp/servers lists the labels a caller may use and GET \
+                /v1/mcp/servers/{label} one label's tools. server_url, connector_id, headers, \
+                authorization and server_description are accepted and never used: lmgw dials \
+                no URL a client names, and echoes authorization and header values as \
+                [redacted]. allowed_tools takes a name list or {tool_names}; read_only and a \
+                require_approval that would gate a tool are refused (approvals are not built \
+                here yet: leave it out or send \"never\"); one entry per server_label. The \
+                session lists a label's tools as an mcp_list_tools item \
+                (mcp_list_tools.in_progress, then .completed or .failed — a failed label also \
+                gets an error with code mcp_list_tools_failed saying why, and a later \
+                session.update naming it lists it again), and a response waits for the \
+                listings in flight. A model's call to one of those tools is an mcp_call item \
+                (server_label, name — the server's own tool name — arguments, output, error, \
+                always present), streamed as response.mcp_call_arguments.delta and .done, then \
+                run by the gateway before response.done (response.mcp_call.in_progress, then \
+                .completed with the output or .failed with a tool_execution_error). The call \
+                ends the response: the client sends response.create for the answer, as \
+                OpenAI's Realtime API has it (@openai/agents does so by itself, once per \
+                response). A cancel or barge-in abandons a running call, which then fails \
+                saying it may or may not have run. A response's tools may narrow to a label \
+                the session has listed, and tool_choice takes {\"type\": \"mcp\", \
+                \"server_label\"} with an optional name. A client may replay mcp_call items as \
+                history; \
+                mcp_list_tools and the approval items are refused. Each call writes a \
+                realtime-tool usage row. \
+                Refused with an error naming what is missing: transcription sessions, \
                 G.711 formats, output_audio_buffer.clear (WebRTC only) and an input_audio item \
                 without its transcript. Accepted and echoed but not applied: noise_reduction, \
                 and truncation (lmgw.resolved.truncation says \"disabled\"; an overflow is an \
                 error). Not served at all: WebRTC, SIP, ephemeral client secrets, live partial \
-                transcripts, out-of-band responses and server-side (MCP) tools. \
+                transcripts and out-of-band responses. \
                 Credentials as on every /v1 route; a browser, which cannot set headers on a \
                 WebSocket, may offer its key as the subprotocol \
                 `openai-insecure-api-key.<key>` alongside `realtime` — accepted on this route \
@@ -468,11 +498,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 silently (\"Code block, rust.\", \"Table.\"; in the thread's language for en, de, \
                 fr, es and it), and the dashboard's read-aloud of a reply speaks the same way. \
                 No audio is stored: a spoken turn is kept as text. \
-                With chat_voice_audio_input local (Settings, or the thread's voice.audio_input), \
-                a turn whose chat model is a model this lmgw runs that takes audio input goes to \
-                it as audio at the commit, while the speech-to-text model transcribes it beside \
-                (a cloud model or a server lmgw does not run never gets the audio: such a route \
-                is refused before anything is sent, and the turn goes again as its transcript); \
+                With chat_voice_audio_input on (Settings, or the thread's voice.audio_input), a \
+                turn whose answering model takes audio input — the thread's chat model, or the \
+                fallback a GPU hold, a benchmark run, an outside-VRAM verdict or a candidate \
+                alias hands it to, wherever it runs — goes to it as audio at the commit, while \
+                the speech-to-text model transcribes it beside (a model that does not take \
+                audio input, one whose capabilities lmgw cannot read, or one lmgw cannot send \
+                audio to, such as an Anthropic upstream, is refused it before anything is sent, \
+                and the turn goes again as its transcript); \
                 the reply is held until the transcript is in, then plays (a thread with no \
                 speech-to-text model that resolves always goes as its transcript: only the \
                 transcript tells words from noise). A turn that came back \
@@ -497,14 +530,16 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 state, error, done; reasoning is shown, stored with the reply and never \
                 spoken, and done's reasoning_note says in a sentence when the model reasoned \
                 although the turn asked for reasoning off — a voice turn does unless the \
-                thread sets reasoning; no off ends in an error), lmgw.chat.user ({message_id, content, voice, \
+                thread sets reasoning; no off ends in an error — and its images_note when a \
+                fallback that cannot see answered and got the turn's images as placeholders), \
+                lmgw.chat.user ({message_id, content, voice, \
                 response_id}: response_id when that response heard the turn as audio, whose \
                 user message is written once the turn is transcribed, after the reply may have \
                 started — the page puts it before that reply), lmgw.chat.input ({response_id, \
                 input: audio or transcript, why}: how a response's turns reach the chat model \
                 and why the transcript, sent at each launch, when an audio attempt was \
-                refused, and when a server that went away under the audio sends the session's \
-                later turns to it as text; never with chat_voice_audio_input off), \
+                refused, and when a llama-server that went away under the audio sends the \
+                session's later turns to it as text; never with chat_voice_audio_input off), \
                 lmgw.chat.reply ({message_id, content, unheard, voice}, {message_id, \
                 removed: true} or {message_id, skipped, voice}), lmgw.model.state ({stage, alias, \
                 state, ms, …}: the connect warm's and each turn's model loading), \
@@ -571,6 +606,35 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI, endpoint_group::ANTHROPIC],
             ..base("GET", "/v1/models/{*id}", "openai", "Retrieve a model")
+        },
+        // -- MCP labels (realtime-server-tools design §1.4) --------------------------
+        DocRoute {
+            description: "The labels this caller may put into a {\"type\": \"mcp\", \
+                \"server_label\"} tool on /v1/realtime or /v1/responses, for a tool picker. \
+                Connects nothing: read from the configuration under the caller's tool scope — \
+                enabled servers only, and the lmgw self-admin toolset only for an owner \
+                credential while the self-admin tools are on.",
+            response: Resp::Json(mcp::servers_list),
+            dialect: Dialect::OpenAi,
+            endpoints: &[endpoint_group::OTHER],
+            ..base("GET", "/v1/mcp/servers", "mcp", "List the MCP labels")
+        },
+        DocRoute {
+            description: "One label's tools, exactly as a /v1/realtime session's \
+                mcp_list_tools item lists them (the server's own tool names, description \
+                always a string), under the caller's tool scope and the owner's per-tool \
+                switches. Connects that one server if it is not up (up to the lazy-list \
+                budget). 404 for a label this caller may not use, naming the available ones; \
+                502 when the server cannot be listed.",
+            response: Resp::Json(mcp::server_detail),
+            dialect: Dialect::OpenAi,
+            endpoints: &[endpoint_group::OTHER],
+            ..base(
+                "GET",
+                "/v1/mcp/servers/{label}",
+                "mcp",
+                "List one MCP label's tools",
+            )
         },
         // -- This document itself ----------------------------------------------------
         DocRoute {

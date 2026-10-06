@@ -85,8 +85,9 @@ pub async fn insert_kept_chat_thread(
         let new_id = sqlx::query(
             "INSERT INTO chat_messages
                (thread_id, role, content, reasoning, prompt_tokens, completion_tokens,
-                ir_messages, created_at, kb_refs, context, model, answered_by, voice)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                ir_messages, created_at, kb_refs, context, model, answered_by, voice,
+                images_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(thread_id)
         .bind(&m.role)
@@ -101,6 +102,7 @@ pub async fn insert_kept_chat_thread(
         .bind(&m.model)
         .bind(&m.answered_by)
         .bind(super::chat_voice::message_voice_json(m.voice.as_ref()))
+        .bind(&m.images_note)
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();

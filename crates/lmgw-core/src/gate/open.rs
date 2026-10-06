@@ -38,7 +38,7 @@ use axum::response::Response;
 
 use super::candidate::{self, CandidateCtx, CandidateReq};
 use super::ladder::{RungTag, RUNG_HEADER};
-use crate::candidates::{Facet, FacetSet};
+use crate::candidates::FacetSet;
 use crate::config::{FallbackRoute, Route, Snapshot};
 use crate::error::GatewayError;
 use crate::state::SharedState;
@@ -104,8 +104,6 @@ pub struct AdmissionPolicy {
     /// The site's route check — what a fallback must pass to answer this
     /// request ([`fallback_serves`]).
     pub check: RouteCheck,
-    /// The request carries image parts ([`Routed::carrying_images`]).
-    pub images: bool,
     /// The candidate alias this request came through, and the candidates it
     /// already found could not take it — `None` for every other request.
     pub candidate: Option<Arc<CandidateCtx>>,
@@ -147,7 +145,8 @@ impl RouteCheck {
             Self::Text(endpoint) => Ok(crate::proxy::refuse_media_route(route, alias, endpoint)?),
             Self::LegacyCompletions => {
                 crate::proxy::refuse_media_route(route, alias, "/v1/completions")?;
-                if route.upstream.protocol == crate::config::Protocol::Openai {
+                // llama-server serves /v1/completions as well.
+                if route.upstream.protocol.speaks_openai_http() {
                     Ok(())
                 } else {
                     Err(GatewayError::Unsupported(
@@ -357,8 +356,6 @@ pub struct Routed {
     /// ([`fallback_serves`]): that route is judged exactly as if the client
     /// had named it.
     check: RouteCheck,
-    /// The request carries image parts ([`Self::carrying_images`]).
-    images: bool,
     /// `Some` when the name is a candidate alias: admission walks its list
     /// ([`super::candidate`]) instead of admitting [`Self::resolved`].
     candidate: Option<CandidateReq>,
@@ -379,31 +376,16 @@ impl Routed {
         &self.headers
     }
 
-    /// Say that the request carries image parts (a chat site, from
-    /// [`crate::gate::media_parts`]). A fallback whose exposed capabilities
-    /// say it cannot see images (`vision: false`) is then not one the
-    /// outside-VRAM swap may answer with (review finding 7): today's path
-    /// would have waited for the local model instead of sending the images to
-    /// a model that answers them with a 400. Unknown (`None`) stays usable.
-    /// The hold's swap in [`resolve`] is not affected — under the hold there
-    /// is no local model to wait for.
-    pub fn carrying_images(mut self, images: bool) -> Self {
-        self.images = images;
-        self
-    }
-
     /// Say which capability facets the request uses
     /// ([`super::request_facets`], [`super::legacy_facets`]) — what a site
-    /// that parses a body calls before admission, in place of
-    /// [`Self::carrying_images`] (it sets that too, from `vision`).
+    /// that parses a body calls before admission.
     ///
     /// For a **candidate alias** it is also the contract check (candidate-
     /// aliases design §4.6 "Requests", §9): a facet the alias does not
     /// enable is refused here with a `400` naming it — before anything is
     /// started, and under the hold as much as without it. Every other name
     /// is never refused by it.
-    pub fn using(mut self, uses: FacetSet) -> Result<Self, OpenFailed> {
-        self.images = uses.contains(Facet::Vision);
+    pub fn using(self, uses: FacetSet) -> Result<Self, OpenFailed> {
         if let Some(req) = &self.candidate {
             let missing = uses.minus(req.enabled);
             if !missing.is_empty() {
@@ -532,7 +514,6 @@ pub async fn resolve(
         headers: picked.headers,
         alias: alias.to_string(),
         check,
-        images: false,
         candidate: picked.candidate,
     })
 }
@@ -636,7 +617,6 @@ async fn admit_or_fall_back(
         headers,
         alias,
         check,
-        images,
         candidate,
     } = routed;
     if candidate.is_some() {
@@ -658,9 +638,9 @@ async fn admit_or_fall_back(
                 headers,
             });
         }
-        return candidate::walk(state, &alias, None, check, images, Vec::new(), None).await;
+        return candidate::walk(state, &alias, None, check, Vec::new(), None).await;
     }
-    admit_route(state, route, headers, &alias, check, images, at, None).await
+    admit_route(state, route, headers, &alias, check, at, None).await
 }
 
 /// [`admit_or_fall_back`] for one route: stage 5 as its doc comment says —
@@ -675,7 +655,6 @@ pub(super) async fn admit_route(
     mut headers: GateHeaders,
     alias: &str,
     check: RouteCheck,
-    images: bool,
     at: AtAdmission,
     candidate: Option<Arc<CandidateCtx>>,
 ) -> Result<Opened, OpenFailed> {
@@ -690,8 +669,7 @@ pub(super) async fn admit_route(
     };
     let admitted = match fallback {
         Some((fb, fb_route)) => {
-            let facets = candidate.as_deref().map(|c| c.enabled(&state.snapshot()));
-            let serves = fallback_serves(state, &fb, &fb_route, &alias, check, images, facets);
+            let serves = fallback_serves(state, &fb, &fb_route, &alias, check);
             let admission = crate::vram::admit_or_external(
                 state,
                 &route,
@@ -720,13 +698,9 @@ pub(super) async fn admit_route(
             // A local model answers on the port `acquire` just started, not on
             // the class-wide router port the route was resolved against (§5).
             if let Some(h) = &mut hold {
-                route.upstream.base_url = h.endpoint();
+                h.point(&mut route);
                 if at == AtAdmission::MayFallBack {
-                    h.set_policy(AdmissionPolicy {
-                        check,
-                        images,
-                        candidate,
-                    });
+                    h.set_policy(AdmissionPolicy { check, candidate });
                 }
             }
             Ok(Opened {
@@ -812,21 +786,18 @@ fn usable_fallback_for(
 ///   fallback for legacy `/v1/completions`, a chat alias for an image route)
 ///   counts as none, rather than turning a request that would have waited
 ///   into an error (§12 entry 28).
-/// - A request that carries images ([`Routed::carrying_images`]) and a
-///   fallback whose exposed capabilities say `vision: false` (review finding
-///   7): the local model may still take the images, so the request waits for
-///   it. Unknown vision stays usable — absent means unknown.
-/// - the request came through a **candidate alias** and the fallback does
-///   not positively support every facet it enables (§4.6: "the fallback is
-///   treated as none") — `facets`, the enabled set the caller carries
-///   ([`CandidateCtx::enabled`], so an alias disabled or deleted mid-flight
-///   still holds its fallback to it, §12 entry 86), or else the enabled set
-///   of the candidate alias `alias` names. Every path a candidate alias's
-///   fallback answers on comes through here — the outside-VRAM swap, a
-///   climb's, the hold's during a climb, the background walk's — so the rule
-///   is one place. Other names are unchanged. The fallback's own
-///   capabilities are read live here, from the catalog cache, on every
-///   call: nothing about them is cached with the candidate pick.
+///
+/// What the request carries plays no part, and neither do the fallback's
+/// capabilities (the owner's ruling, 2026-10-06: a configured fallback is
+/// always used; only capability shapes what it is sent). *Changed
+/// 2026-10-06:* a request with images used to count a fallback whose
+/// exposed capabilities say `vision: false` as none and wait for the local
+/// model (review finding 7), and a candidate alias's fallback that did not
+/// positively support every facet the alias enables counted as none
+/// (§4.6). Both now answer; what such a fallback cannot take goes to it
+/// degraded — images as placeholders ([`super::fallback_images`]), a Chat
+/// PDF's pages as its text, a voice turn as its transcript — and its
+/// request row says so (`request_logs.degraded`).
 ///
 /// `false` means today's path: the request queues for the local model.
 ///
@@ -838,8 +809,6 @@ pub(crate) async fn fallback_serves(
     fb_route: &Route,
     alias: &str,
     check: RouteCheck,
-    images: bool,
-    facets: Option<FacetSet>,
 ) -> bool {
     let snap = state.snapshot();
     if let Err(r) = check.run(state, &snap, fb_route, alias).await {
@@ -849,33 +818,6 @@ pub(crate) async fn fallback_serves(
             r.error
         );
         return false;
-    }
-    let enabled = facets.or_else(|| {
-        snap.candidate_alias(alias)
-            .map(|ca| FacetSet::from_names(&ca.capabilities_enabled).unwrap_or_default())
-    });
-    if let Some(enabled) = enabled {
-        if let Err(f) = crate::candidates::derive::fallback_supports(state, fb, enabled).await {
-            tracing::warn!(
-                "fallback '{fb}' of candidate alias '{alias}' lacks {}, which the alias enables \
-                 — it counts as none",
-                f.as_str()
-            );
-            return false;
-        }
-    }
-    if images {
-        let vision = crate::capabilities::exposed::exposed_entry(state, fb)
-            .await
-            .and_then(|e| e.capabilities)
-            .and_then(|c| c.vision);
-        if vision == Some(false) {
-            tracing::debug!(
-                "fallback '{fb}' of '{alias}' cannot see images and this request carries some \
-                 — admission waits for room instead"
-            );
-            return false;
-        }
     }
     true
 }

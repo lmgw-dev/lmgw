@@ -1,0 +1,67 @@
+{
+  "parsed": [
+    {
+      "body": "{\"choices\":[{\"message\":{\"content\":\"\",\"tool_calls\":[{\"id\":\"c\",\"function\":{\"name\":\"f\",\"arguments\":\"not json\"}}]},\"finish_reason\":\"length\"}]}",
+      "parsed": {
+        "content": [
+          {
+            "args": "not json",
+            "id": "c",
+            "name": "f",
+            "type": "tool_use"
+          }
+        ],
+        "finish_reason": "length",
+        "model": "",
+        "reasoning": "",
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": null
+        }
+      }
+    },
+    {
+      "body": "{\"choices\":[{\"message\":{\"content\":\"hi\"}}],\"timings\":{\"predicted_n\":1}}",
+      "parsed": {
+        "content": [
+          {
+            "text": "hi",
+            "type": "text"
+          }
+        ],
+        "finish_reason": "stop",
+        "model": "",
+        "reasoning": "",
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": null
+        }
+      }
+    },
+    {
+      "body": "{\"choices\":[{\"message\":{\"content\":null},\"finish_reason\":\"content_filter\"}],\"usage\":{\"prompt_tokens\":1}}",
+      "parsed": {
+        "content": [],
+        "finish_reason": "content_filter",
+        "model": "",
+        "reasoning": "",
+        "usage": {
+          "completion_tokens": null,
+          "prompt_tokens": 1
+        }
+      }
+    },
+    {
+      "body": "{\"choices\":[]}",
+      "parsed": {
+        "error": "Transport(\"upstream response without choices\")"
+      }
+    },
+    {
+      "body": "not json",
+      "parsed": {
+        "error": "Transport(\"invalid upstream JSON: expected ident at line 1 column 2\")"
+      }
+    }
+  ]
+}

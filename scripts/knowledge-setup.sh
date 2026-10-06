@@ -23,5 +23,5 @@ op() { # op NAME JSON -> prints the answer; "already there" is fine
     esac
 }
 
-op upstream_set "{\"action\":\"create\",\"name\":\"fake\",\"protocol\":\"openai\",\"kind\":\"llama_server\",\"base_url\":\"http://127.0.0.1:$PORT/v1\"}"
+op upstream_set "{\"action\":\"create\",\"name\":\"fake\",\"protocol\":\"llama_cpp\",\"base_url\":\"http://127.0.0.1:$PORT/v1\"}"
 op model_set '{"action":"create","alias":"fake-embed","upstream":"fake","upstream_model":"embed-bow"}'

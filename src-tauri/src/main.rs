@@ -5,10 +5,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio_out;
+#[cfg(target_os = "linux")]
+mod context_menu;
+mod desktop_palette;
 mod dev_guard;
 mod gateway;
 #[cfg(target_os = "linux")]
 mod media;
+#[cfg(target_os = "linux")]
+mod reveal;
 mod updater;
 
 use std::net::SocketAddr;
@@ -79,6 +84,8 @@ fn show_main_window(app: &tauri::AppHandle) {
     gw.set_window_origin(Some(gateway::origin_of(addr)));
     let shared: SharedState = (*state).clone();
     let webview_dir = dev_guard::webview_data_dir(&state.data_dir, cfg!(debug_assertions));
+    // The colour scheme's title-bar shade, which the sidebar takes up.
+    let desktop = desktop_palette::Desktop::read();
     let mut builder = WebviewWindowBuilder::new(
         app,
         "main",
@@ -88,8 +95,8 @@ fn show_main_window(app: &tauri::AppHandle) {
     .inner_size(1440.0, 960.0)
     // The UI links out to the backend containers' own web UIs
     // (target="_blank"). Inside the shell those must go to the system
-    // browser — the window is undecorated, so a navigation away from the
-    // gateway UI would strand the user with no back button.
+    // browser — the window has no browser chrome, so a navigation away from
+    // the gateway UI would strand the user with no back button.
     .on_new_window(|url, _features| {
         // Only web and mail links may leave for the system browser; a
         // file:, data:, javascript: or custom-scheme URL is dropped.
@@ -116,20 +123,53 @@ fn show_main_window(app: &tauri::AppHandle) {
     // only saves a file when a download handler decides its destination —
     // without one the download is cancelled and the click does nothing.
     .on_download(handle_download)
-    // The web UI's nav bar doubles as the title bar (drag region + window
-    // controls, see assets/titlebar.js); resizing is provided by the JS
-    // edge-resize handler since undecorated Linux windows have no native
-    // resize borders.
-    .decorations(false);
+    // Before the first paint, and again after every load: a reload keeps
+    // the reading and focus of the moment, not the window's first ones.
+    .initialization_script(desktop.init_script())
+    .on_page_load({
+        let desktop = desktop.clone();
+        move |window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let focused = window.is_focused().unwrap_or(true);
+                let _ = window.eval(desktop.apply_js(focused));
+            }
+        }
+    })
+    // The desktop draws the frame: KWin's title bar, shadow, outline and
+    // resize borders, like every other window. An undecorated window had none
+    // of them and read as a picture pasted onto the screen.
+    .decorations(true);
+    // Hidden until the frame is settled (below): GTK picks client- or
+    // server-side decorations when the window is realized, which showing it
+    // does. And then until the app has drawn itself (reveal.rs).
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.visible(false);
+    }
     if let Some(dir) = webview_dir {
         builder = builder.data_directory(dir);
     }
     match builder.build() {
         // The microphone for the voice features (chat-voice §13.1).
         #[cfg(target_os = "linux")]
-        Ok(window) => media::install(&window, media_serving),
+        Ok(window) => {
+            // tao gives every Wayland window its own GtkHeaderBar, and a
+            // window with a custom titlebar is client-decorated: GTK draws
+            // the title bar and the shadow itself, in its theme's sizes. With
+            // no titlebar GTK asks the compositor to decorate (KDE's
+            // server-decoration protocol), so KWin draws the same frame as
+            // on every other window: its title bar, buttons, window menu.
+            if let Ok(gtk_window) = window.gtk_window() {
+                use gtk::prelude::GtkWindowExt;
+                gtk_window.set_titlebar(None::<&gtk::Widget>);
+            }
+            desktop_palette::follow(&window, desktop);
+            context_menu::install(&window);
+            reveal::when_mounted(&window);
+            media::install(&window, media_serving)
+        }
         #[cfg(not(target_os = "linux"))]
-        Ok(_) => {}
+        Ok(window) => desktop_palette::follow(&window, desktop),
         Err(e) => {
             gw.set_window_origin(None);
             tracing::error!("failed to create window: {e}");
@@ -682,7 +722,7 @@ fn main() {
                             });
                         }
                         "hold" => {
-                            // Same op the dashboard titlebar pill and MCP
+                            // Same op the dashboard's GPU pill and MCP
                             // drive (§6) — no second toggle path for the
                             // tray. Sync runs only on success so a failed
                             // toggle leaves the tray showing the state it

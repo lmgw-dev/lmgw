@@ -19,10 +19,21 @@
 //! claim is never let go under a model call in flight. A turn whose tools
 //! may not run, and is stopped, makes no further call and takes nothing
 //! again.
+//!
+//! **A block switched on meanwhile** (the GPU hold, a benchmark run) refuses
+//! the regain, as it refuses any start. The call then goes where any request
+//! goes under that block — the configured fallback, through the gate's own
+//! resolve and admission ([`under_block`]) — rather than failing the turn
+//! after its tool frames (review V12, the owner's ruling of 2026-10-06:
+//! configured fallbacks always apply). A fallback that cannot take the
+//! turn's audio gets its transcript (`unheard`).
 
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::GatewayError;
+use crate::gate::{OpenFailed, Opened, RouteCheck};
+use crate::ir::ChatRequest;
+use crate::state::SharedState;
 use crate::vram::{LetGo, LocalHold};
 
 /// The loop's claim (module doc).
@@ -68,4 +79,20 @@ impl LoopClaim {
             |s| &s.hold,
         ))
     }
+}
+
+/// Where a call of the loop for `ir` goes while a GPU block refuses its
+/// claim's regain (module doc): the gate's resolve and admission, as for any
+/// request — the block's fallback, or its refusal when there is none. The
+/// candidate alias's facets are asked as at the loop's own admission.
+pub(super) async fn under_block(
+    state: &SharedState,
+    ir: &ChatRequest,
+) -> Result<Opened, OpenFailed> {
+    let uses = crate::gate::request_facets(ir, None).insert(crate::candidates::Facet::ToolCalls);
+    crate::gate::resolve(state, &ir.model_alias, RouteCheck::None)
+        .await?
+        .using(uses)?
+        .admit(state)
+        .await
 }

@@ -34,6 +34,12 @@ const KEY: &str = "lmgw-ui-scale";
 /// behind the user's back.
 const STEPS: [i32; 13] = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
 
+/// The app window's scale until one is picked, and what Ctrl+0 returns to:
+/// 125%: the window is read from further away than a browser tab, beside
+/// apps in the desktop's own sizes. index.html's first-paint script carries
+/// the same number.
+const DEFAULT: i32 = 125;
+
 pub fn steps() -> &'static [i32] {
     &STEPS
 }
@@ -139,7 +145,7 @@ fn stored() -> i32 {
         .and_then(|s| s.get_item(KEY).ok().flatten())
         .and_then(|v| v.parse::<i32>().ok())
         .map(clamp)
-        .unwrap_or(100)
+        .unwrap_or(DEFAULT)
 }
 
 /// The shell's IPC entry point, as `(this, invoke)` — absent in a browser.
@@ -194,7 +200,7 @@ fn install_gestures(scale: UiScale) {
                 "+" | "=" => scale.nudge(1),
                 "-" | "_" => scale.nudge(-1),
                 "0" => {
-                    scale.set(100);
+                    scale.set(DEFAULT);
                     scale.flash();
                 }
                 _ => return,

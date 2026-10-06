@@ -1,0 +1,26 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"Why is the sky blue?\",\"role\":\"user\"}],\"model\":\"the-model\",\"reasoning\":{\"enabled\":false,\"exclude\":true,\"max_tokens\":100}}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "Why is the sky blue?",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "reasoning": {
+        "enabled": false,
+        "exclude": true,
+        "max_tokens": 100
+      }
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

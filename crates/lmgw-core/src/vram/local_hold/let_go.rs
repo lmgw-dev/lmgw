@@ -20,7 +20,9 @@
 //!
 //! **The regain is the hold's own rule**, on the same model — never another
 //! route, so a loop's later calls do not move to a fallback for having
-//! waited:
+//! waited. (A GPU block that refuses it is no such move: the tool loop then
+//! sends that call where the gate sends any request under the block, its
+//! configured fallback — `web::agentchat::claim::under_block`, review V12.)
 //! - [`Restart::Admit`]: admission as for any start — a model still up is
 //!   joined at once; one evicted meanwhile queues, evicts and starts like any
 //!   request, and the GPU hold or a benchmark refuses it;

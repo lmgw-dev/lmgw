@@ -277,10 +277,10 @@ impl Podman {
 // Container mocks
 // ---------------------------------------------------------------------------
 
-/// A container that answers `/health` (and audio's `/v1/models`) with `status`.
+/// A container that answers `/health`, audio's `/v1/models` and llama's `/props` with `status`.
 async fn container_at(status: u16) -> MockServer {
     let server = MockServer::start().await;
-    for p in ["/health", "/v1/models"] {
+    for p in ["/health", "/v1/models", "/props"] {
         Mock::given(method("GET"))
             .and(path(p))
             .respond_with(ResponseTemplate::new(status).set_body_string(r#"{"status":"ok"}"#))
@@ -1875,6 +1875,7 @@ async fn a_row_without_a_ladder_keeps_its_runtime_frame() {
             "container_name",
             "in_flight",
             "last_used_age_seconds",
+            "llama_props",
             "model_id",
             "port",
             "started_at_age_seconds",

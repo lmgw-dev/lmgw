@@ -6,45 +6,48 @@
 //!
 //! | row | fails with |
 //! |---|---|
-//! | the setting is `local` | "audio input is off (…)" |
+//! | the setting is `on` | "audio input is off (…)" |
 //! | no knowledge bases in auto mode | they search with the turn's words |
 //! | a speech-to-text alias that resolves | no speech recognition is set up |
 //! | `gate::resolve` settles a route (hold and benchmark swaps, a candidate alias's fallback) | the resolve's own error |
-//! | that route is a chat model this lmgw runs (`vram::classify`) | a model lmgw does not run, or a server lmgw does not run |
-//! | a candidate alias's walk does not end at its fallback by design (a background alias, a primary it cannot use) | it may go to a model lmgw does not run |
 //! | no context guard (a ladder row, a guarded pool; every routable candidate of a candidate alias) | it guards its context |
-//! | its `input_modalities` include `audio` | it does not, or lmgw cannot tell |
+//! | the model that answers hears ([`crate::capabilities::hears`]: an egress with an audio part, a chat model whose `input_modalities` include `audio`, a server that did not say it loaded no audio projector) | it does not, or lmgw cannot tell |
 //!
-//! **Local means run by this lmgw** (decision 5): `vram::classify(&route)
-//! .is_some()`, not `Snapshot::is_local_upstream`, which is true for any
-//! llama-server wherever it runs (right for pricing, wrong here; it only
-//! picks the words for a server lmgw does not run).
+//! **Capability, not locality** (changed 2026-10-06, the owner's ruling):
+//! where the model runs plays no role. A configured fallback is always
+//! used, and hears the turn when it takes audio, wherever it runs.
 //!
 //! **What it foresees.** The swaps `gate::resolve` makes: under the GPU hold
 //! (or a benchmark's lease) a model, a candidate alias too, is judged by the
-//! fallback it hands the turn to, so the page never says the model hears the
-//! user while a cloud model would answer. And a candidate alias whose walk
-//! goes to its alias fallback by design — background traffic, which takes the
-//! fallback whenever its primary is not loaded, or a primary it cannot use at
-//! all — is judged by that fallback too, from the gate's own pick
-//! (`candidates::derive::cached_pick`). **What it cannot foresee:** a swap
+//! fallback it hands the turn to, and by nothing else — the page never says
+//! the model hears the user while a fallback that does not would answer.
+//! With no block live, the verdict that block would bring is computed beside
+//! ([`AudioInput::blocked`]), for the page that sees a block before it asks
+//! again. A candidate alias's walk needs no forecast: with the Audio facet
+//! on, every candidate and its fallback take audio as published
+//! (candidate-aliases §4.6), and with it off the alias does not. The verdict
+//! and the send agree in the common case; a mismatch (a pick whose server
+//! says otherwise) is refused at the send and retried as the transcript. **What it cannot foresee:** a swap
 //! the gate makes later, at admission (§4.7's outside-VRAM verdict), in a
 //! climb or in the walk over loaded candidates, and a hold switched on after
-//! the verdict. It is a prediction, never a permission: `fit_route`'s
-//! `local_only` refuses such a route before a byte leaves, and the turn goes
-//! again as its transcript (§3.4, §3.5). Unknown is no.
+//! the verdict. It is a prediction, never a permission: `fit_route` asks the
+//! same predicate of the model that answers before a byte leaves
+//! (`spoken::may_hear`), and a turn refused there goes again as its
+//! transcript (§3.4, §3.5). Unknown is no.
 //!
-//! Nothing is started: `gate::resolve` claims nothing, and the capability
+//! Nothing is started: `gate::resolve` claims nothing, the capability
 //! lookup is the one attachments make (`capabilities::exposed`), for the
-//! name the resolve settled on. The session-only row — the model's server
-//! refused audio this session (§3.5) — is the bound session's, on top of
-//! this ([`AudioInput::after_refusal`]).
+//! name the resolve settled on, and a managed server's facts are read from
+//! the container that is up, if one is. The session-only row — the model's
+//! server refused audio this session (§3.5) — is the bound session's, on top
+//! of this ([`AudioInput::after_refusal`]).
 
 use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::config::{Route, Snapshot};
+use crate::capabilities::hears::{self, Hears};
+use crate::config::{FallbackRoute, Route, Snapshot};
 use crate::gate::{self, FallbackReason, RouteCheck};
 use crate::runtime::Class;
 use crate::state::SharedState;
@@ -66,13 +69,31 @@ pub(crate) struct AudioInput {
     pub model: String,
     /// Why the transcript, in the page's words; `None` on the audio path.
     pub why: Option<String>,
+    /// What handed the turn to `model` when the resolve swapped ("under the
+    /// GPU hold", "while a benchmark run holds the GPU"): the page says the
+    /// verdict after it, and knows the verdict is the block's already.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead: Option<&'static str>,
+    /// The verdict a GPU block would bring (decision D3, 2026-10-06): its
+    /// fallback's, or the refusal when there is none. Computed only when no
+    /// block is live now and one would hand the turn elsewhere (a chat model
+    /// lmgw runs, a candidate alias), after the thread's own rows passed;
+    /// the page shows it while it sees a block before it asks again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<Box<AudioInput>>,
     /// The models an audio turn may reach, as a turn names who answered
     /// (`chat_turn::answered_by`, else the thread's model): the model
-    /// itself, or a candidate alias's routable candidates by their public
-    /// names. What the session's refusal memory is matched against
-    /// ([`Self::after_refusal`]); never shown.
+    /// itself, a swap's fallback, or a candidate alias's routable candidates
+    /// by their public names. What the session's refusal memory is matched
+    /// against ([`Self::after_refusal`]); never shown.
     #[serde(skip)]
     pub via: Vec<String>,
+    /// The transcript is because the model it goes to lacks audio input,
+    /// or refused it this session: what the turn's request rows then say
+    /// (`request_logs.degraded`). `false` for any other reason (a guard,
+    /// a thread row, a model list still being read).
+    #[serde(skip)]
+    pub lacks: bool,
 }
 
 /// The bound session's memory of the models whose server refused a heard
@@ -86,7 +107,10 @@ impl AudioInput {
             path: InputPath::Transcript,
             model: model.to_string(),
             why: Some(why),
+            lead: None,
+            blocked: None,
             via: Vec::new(),
+            lacks: false,
         }
     }
 
@@ -95,14 +119,25 @@ impl AudioInput {
     /// failed on it (`refused`, the bound session's memory by model), its
     /// later turns go as their transcript. A model that did not — the
     /// thread's model changed since, or a candidate alias may still pick
-    /// one that did not — still hears.
-    pub(crate) fn after_refusal(self, refused: &Refusals) -> Self {
+    /// one that did not — still hears. The block's verdict
+    /// ([`Self::blocked`]) is held to the same memory.
+    pub(crate) fn after_refusal(mut self, refused: &Refusals) -> Self {
+        self.blocked = self
+            .blocked
+            .take()
+            .map(|b| Box::new(b.after_refusal(refused)));
         if self.path != InputPath::Audio || self.via.is_empty() {
             return self;
         }
         let whys: Option<Vec<&String>> = self.via.iter().map(|m| refused.get(m)).collect();
         match whys.as_deref() {
-            Some([why, ..]) => Self::transcript(&self.model, (*why).clone()),
+            Some([why, ..]) => Self {
+                path: InputPath::Transcript,
+                why: Some((*why).clone()),
+                via: Vec::new(),
+                lacks: true,
+                ..self
+            },
             _ => self,
         }
     }
@@ -120,12 +155,12 @@ pub(crate) struct Shown {
 
 /// The thread's audio-input setting: its own, else Settings → Chat →
 /// Voice's (a value that does not parse is `off`, as the load normalises
-/// it).
+/// it; a stored `local`, the value's name before 2026-10-06, is `on`).
 pub(crate) fn setting(snap: &Snapshot, thread: &ChatThread) -> (AudioInputMode, Source) {
     match thread.voice.audio_input {
         Some(m) => (m, Source::Thread),
         None => (
-            AudioInputMode::parse(&snap.settings.chat_voice_audio_input).unwrap_or_default(),
+            AudioInputMode::parse_stored(&snap.settings.chat_voice_audio_input).unwrap_or_default(),
             Source::Chat,
         ),
     }
@@ -156,50 +191,186 @@ pub(crate) async fn verdict(state: &SharedState, thread: &ChatThread) -> AudioIn
         Err(e) => return AudioInput::transcript(alias, e.error.to_string()),
     };
     let headers = routed.headers();
-    let model = headers.fallback().unwrap_or(alias);
     let route = routed.resolved();
-    if let Some(why) = not_run_here(&snap, route, model, headers.fallback_reason()) {
-        return AudioInput::transcript(model, why);
+    // The resolve swapped (the hold, a benchmark's lease, a CPU row's GPU
+    // container): only the fallback answers, so only it is judged — no
+    // candidate walk, no candidate's guard.
+    if let Some(fallback) = headers.fallback() {
+        let lead = lead(headers.fallback_reason());
+        return judge(state, &snap, fallback, route, None, Said::After(lead)).await;
     }
-    // A candidate alias the resolve did not swap: the walk's own fallback,
-    // and the candidates it may pick (the gate's pick, as its walk reads it).
+    // A candidate alias the resolve did not swap: the candidates its walk
+    // may pick, and its fallback (the gate's pick, as its walk reads it).
     let walk = match snap.candidate_alias(alias) {
         Some(ca) => Some(candidate::Walk::read(state, &snap, ca).await),
         None => None,
     };
-    if let Some(why) = walk.as_ref().and_then(|w| w.may_fall_back(&snap)) {
-        return AudioInput::transcript(model, why);
-    }
-    let guarded = match &walk {
-        Some(w) => w.guard(&snap),
-        None => guard(&snap, &route.upstream_model),
+    let mut v = judge(state, &snap, alias, route, walk.as_ref(), Said::Own).await;
+    v.blocked = blocked(state, &snap, alias, route, walk.as_ref())
+        .await
+        .map(Box::new);
+    v
+}
+
+/// How a verdict's `why` names the model it judged.
+#[derive(Debug, Clone, Copy)]
+enum Said {
+    /// The thread's own model: "{name} does not take audio input".
+    Own,
+    /// A swap the resolve made: "{lead} this goes to {name}, which …".
+    After(&'static str),
+    /// A block's forecast ([`AudioInput::blocked`]), which the page puts its
+    /// own words for the block in front of: "this goes to {name}, which …".
+    Forecast,
+}
+
+/// The verdict for `name` answering on `route`: a context guard (a
+/// candidate alias's `walk` judges its candidates'), then the capability
+/// predicate.
+async fn judge(
+    state: &SharedState,
+    snap: &Snapshot,
+    name: &str,
+    route: &Route,
+    walk: Option<&candidate::Walk>,
+    said: Said,
+) -> AudioInput {
+    let lead = match said {
+        Said::After(lead) => Some(lead),
+        Said::Own | Said::Forecast => None,
+    };
+    let guarded = match walk {
+        Some(w) => w.guard(snap),
+        None => crate::vram::classify(route)
+            .filter(|t| t.class == Class::Chat)
+            .and_then(|t| guard(snap, &t.model_id)),
     };
     if let Some(why) = guarded {
-        return AudioInput::transcript(model, why);
+        return AudioInput {
+            lead,
+            ..AudioInput::transcript(name, why)
+        };
     }
     // The capabilities of the name the resolve settled on — not resolved
     // again, which a hold switched on meanwhile would hand to its fallback.
-    let audio = crate::capabilities::exposed::exposed_entry(state, model)
-        .await
-        .and_then(|e| e.capabilities)
-        .and_then(|c| c.input_modalities)
-        .map(|m| m.iter().any(|x| x == "audio"));
-    match audio {
-        Some(true) => AudioInput {
+    // The thread view never waits on a provider (review V9): a catalog is
+    // read from the cache alone, a cold one in the background, and until it
+    // is in the model is not known yet — the transcript, saying so. The send
+    // reads it in full and stays the authority.
+    let facts = hears::server_facts(state, None, route);
+    let asked = hears::hears(state, hears::Model::Named(name), route, facts.as_deref());
+    let (heard, unread) = crate::catalog::cached_only(asked).await;
+    let why = match (heard, unread) {
+        (Hears::Unknown, true) => Some(match said {
+            Said::Own => format!(
+                "lmgw is still reading the model list {name} is in, so it cannot tell yet \
+                 whether it takes audio"
+            ),
+            Said::After(lead) => {
+                format!("{lead} this goes to {name}, whose model list lmgw is still reading")
+            }
+            Said::Forecast => {
+                format!("this goes to {name}, whose model list lmgw is still reading")
+            }
+        }),
+        _ => match said {
+            Said::Own => heard.why(name),
+            Said::After(lead) => heard.goes_to(name).map(|w| format!("{lead} {w}")),
+            Said::Forecast => heard.goes_to(name),
+        }
+        .map(|w| with_hint(snap, name, heard, w)),
+    };
+    match why {
+        None => AudioInput {
             path: InputPath::Audio,
-            model: model.to_string(),
+            model: name.to_string(),
             why: None,
-            via: match &walk {
-                Some(w) => w.via(&snap),
-                None => vec![model.to_string()],
+            lead,
+            blocked: None,
+            via: match walk {
+                Some(w) => w.via(snap),
+                None => vec![name.to_string()],
             },
+            lacks: false,
         },
-        Some(false) => AudioInput::transcript(model, format!("{model} does not take audio input")),
-        None => AudioInput::transcript(
-            model,
-            format!("lmgw cannot tell whether {model} takes audio"),
-        ),
+        Some(why) => AudioInput {
+            lead,
+            lacks: matches!(heard, Hears::No(_)),
+            ..AudioInput::transcript(name, why)
+        },
     }
+}
+
+/// How the owner makes a model hear that lmgw cannot judge (decision D1),
+/// said after the `why` of an unknown, in the words for where `name` lives
+/// (review V5): an alias's or a local row's capabilities override — with
+/// the task, which an override needs when the catalog says nothing — and
+/// for a passthrough model, which has no override of its own, an alias.
+fn with_hint(snap: &Snapshot, name: &str, heard: Hears, why: String) -> String {
+    if heard != Hears::Unknown {
+        return why;
+    }
+    let row = snap
+        .local_models
+        .iter()
+        .any(|m| snap.local_public_name(&m.model_id) == name);
+    let hint = if snap.aliases.contains_key(name) {
+        "if it does, give its alias a capabilities override with task chat and input \
+         modalities text and audio"
+    } else if row {
+        "if it does, list audio in the input modalities of its row's capabilities override"
+    } else {
+        "if it does, make it an alias whose capabilities override says task chat and input \
+         modalities text and audio (a passthrough model has no override of its own)"
+    };
+    format!("{why}: {hint}")
+}
+
+/// The words a swap of `reason` is said with.
+fn lead(reason: Option<FallbackReason>) -> &'static str {
+    match reason {
+        Some(FallbackReason::Benchmark) => "while a benchmark run holds the GPU",
+        Some(FallbackReason::Hold) | None => "under the GPU hold",
+        Some(_) => "as a fallback",
+    }
+}
+
+/// The verdict a GPU block would bring for `alias`, resolved to `route`
+/// with no block live ([`AudioInput::blocked`]): `None` for a route no
+/// block touches (a model lmgw does not run). The block hands the turn to
+/// the fallback the gate's swap takes (`Snapshot::request_fallback`, a
+/// candidate alias's own included), judged by itself; with none usable the
+/// turn is refused. The page puts its own words for the block in front.
+async fn blocked(
+    state: &SharedState,
+    snap: &Snapshot,
+    alias: &str,
+    route: &Route,
+    walk: Option<&candidate::Walk>,
+) -> Option<AudioInput> {
+    let target = crate::vram::classify(route).filter(|t| t.class == Class::Chat)?;
+    let refused = |why: String| Some(AudioInput::transcript(alias, why));
+    let (fallback, route) = match snap.request_fallback(alias, &target) {
+        FallbackRoute::None => {
+            return refused(format!("{alias} has no fallback, so the turn is refused"))
+        }
+        FallbackRoute::Unusable { alias: fb, why } => {
+            return refused(format!(
+                "{alias}'s fallback {fb} {why}, so the turn is refused"
+            ))
+        }
+        // A candidate alias's fallback that the walk could not use (it does
+        // not resolve, or is local). One that lacks a facet the alias
+        // enables is used (changed 2026-10-06): a turn it cannot hear goes
+        // to it as its transcript, which `judge` says.
+        FallbackRoute::Usable { alias: fb, .. } if walk.is_some_and(|w| !w.fallback_usable()) => {
+            return refused(format!(
+                "{alias}'s fallback {fb} cannot be used, so the turn is refused"
+            ))
+        }
+        FallbackRoute::Usable { alias: fb, route } => (fb, route),
+    };
+    Some(judge(state, snap, &fallback, &route, None, Said::Forecast).await)
 }
 
 /// The rows a thread decides without a route: the setting, and auto-mode
@@ -208,7 +379,7 @@ pub(crate) async fn verdict(state: &SharedState, thread: &ChatThread) -> AudioIn
 /// responder re-reads these two before each turn (§3.5).
 pub(crate) fn thread_rows(snap: &Snapshot, thread: &ChatThread) -> Option<String> {
     match setting(snap, thread) {
-        (AudioInputMode::Local, _) => {}
+        (AudioInputMode::On, _) => {}
         (AudioInputMode::Off, Source::Thread) => {
             return Some("audio input is off (this thread)".into());
         }
@@ -237,40 +408,6 @@ fn no_asr(snap: &Snapshot, thread: &ChatThread) -> Option<String> {
             .map(|e| format!("its speech recognition {asr} does not resolve ({e}), and {TELLS}")),
     }
 }
-
-/// Why `route` (answering as `model`) is no chat model this lmgw runs, or
-/// `None` when it is one. A fallback is named with what handed the turn to
-/// it.
-fn not_run_here(
-    snap: &Snapshot,
-    route: &Route,
-    model: &str,
-    swapped: Option<FallbackReason>,
-) -> Option<String> {
-    let (what, tail) = match crate::vram::classify(route) {
-        Some(t) if t.class == Class::Chat => return None,
-        Some(_) => ("not a chat model", ""),
-        None if snap.is_local_upstream(route.upstream.id) => (
-            "served by a server this lmgw does not run",
-            ": your voice goes only to models lmgw runs",
-        ),
-        // A cloud provider, or any other server on the network: lmgw cannot
-        // tell them apart, and neither gets the audio.
-        None => (NOT_RUN, STAYS),
-    };
-    let lead = match swapped {
-        None => return Some(format!("{model} is {what}{tail}")),
-        Some(FallbackReason::Hold) => "under the GPU hold this goes to",
-        Some(FallbackReason::Benchmark) => "while a benchmark run holds the GPU this goes to",
-        Some(_) => "this goes to its fallback",
-    };
-    Some(format!("{lead} {model}, {what}{tail}"))
-}
-
-/// What a model the audio never goes to is called (§2.2).
-const NOT_RUN: &str = "a model lmgw does not run";
-/// …and what that means for the voice.
-const STAYS: &str = ": your voice stays on this machine";
 
 /// Why local chat row `id` guards its context — a ladder row or a guarded
 /// shared KV pool, which cannot bound an audio part

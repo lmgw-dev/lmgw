@@ -21,6 +21,7 @@ fn upstream(protocol: Protocol, base: &str) -> Upstream {
         expose_all: false,
         expose_prefix: String::new(),
         supports_responses: false,
+        llama: None,
     }
 }
 
@@ -238,7 +239,7 @@ fn a_different_400_body_is_not_mistaken_for_context_exceeded() {
 
 #[test]
 fn parse_exceed_context_reads_the_verbatim_body() {
-    use lmgw_core::egress::openai::parse_exceed_context;
+    use lmgw_core::egress::llama_cpp::parse_exceed_context;
     let body = br#"{"error":{"code":400,"message":"request (8010 tokens) exceeds the available context size (4096 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":8010,"n_ctx":4096}}"#;
     let ec = parse_exceed_context(body).expect("parses the exceed_context_size_error shape");
     assert_eq!(ec.n_prompt_tokens, 8010);
@@ -247,7 +248,7 @@ fn parse_exceed_context_reads_the_verbatim_body() {
 
 #[test]
 fn parse_exceed_context_ignores_the_shared_pool_overflow_shape() {
-    use lmgw_core::egress::openai::parse_exceed_context;
+    use lmgw_core::egress::llama_cpp::parse_exceed_context;
     // Fact 3's *other* body: same family of error, no n_prompt_tokens/n_ctx —
     // must not be misread as the over-long-prompt refusal.
     let body = br#"{"error":{"code":500,"message":"Context size has been exceeded.",
@@ -270,10 +271,7 @@ fn chat_body_matches_what_build_chat_posts() {
         .unwrap()
         .build()
         .unwrap();
-    assert_eq!(
-        body_of(&req),
-        chat_body(&ir, "real-model", &p, true, UpstreamKind::Generic)
-    );
+    assert_eq!(body_of(&req), chat_body(&ir, "real-model", &p, true));
 }
 
 #[test]
@@ -663,9 +661,9 @@ fn count_request(plan: CountPlan) -> reqwest::Request {
 #[test]
 fn openai_llama_count_tokens_is_native_tokenize() {
     let http = reqwest::Client::new();
-    let mut up = upstream(Protocol::Openai, "http://h:1/v1");
+    let mut up = upstream(Protocol::LlamaCpp, "http://h:1/v1");
     up.kind = UpstreamKind::LlamaServer;
-    let plan = for_protocol(Protocol::Openai)
+    let plan = for_protocol(up.protocol)
         .build_count_tokens(&http, &up, "local-model", "hello world")
         .unwrap();
     let req = count_request(plan);
@@ -678,7 +676,7 @@ fn openai_llama_count_tokens_is_native_tokenize() {
     assert_eq!(body["model"], "local-model");
 
     // response: count = number of returned token ids
-    let n = for_protocol(Protocol::Openai)
+    let n = for_protocol(up.protocol)
         .parse_count(br#"{"tokens":[1,2,3,4]}"#)
         .unwrap();
     assert_eq!(n, 4);
@@ -1333,7 +1331,7 @@ fn reasoning_body(up: &Upstream, ir: &ChatRequest, params: &Params) -> Value {
 
 fn llama_body(c: ReasoningControl) -> Value {
     reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::LlamaServer),
+        &kinded(Protocol::LlamaCpp, UpstreamKind::LlamaServer),
         &sample_ir(),
         &reasoning_params(c),
     )
@@ -1406,7 +1404,7 @@ fn llama_server_deep_merges_chat_template_kwargs() {
             .unwrap()
             .clone();
     let b = reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::LlamaServer),
+        &kinded(Protocol::LlamaCpp, UpstreamKind::LlamaServer),
         &ir,
         &reasoning_params(effort("high")),
     );
@@ -1427,7 +1425,7 @@ fn llama_server_strips_a_passthrough_level_when_off() {
         .unwrap()
         .clone();
     let b = reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::LlamaServer),
+        &kinded(Protocol::LlamaCpp, UpstreamKind::LlamaServer),
         &ir,
         &reasoning_params(enabled(false)),
     );
@@ -1511,7 +1509,7 @@ fn a_llama_route_still_gets_the_scalar_beside_an_openrouter_object() {
         .unwrap()
         .clone();
     let b = reasoning_body(
-        &kinded(Protocol::Openai, UpstreamKind::LlamaServer),
+        &kinded(Protocol::LlamaCpp, UpstreamKind::LlamaServer),
         &ir,
         &reasoning_params(effort("high")),
     );
@@ -1603,7 +1601,7 @@ fn gemini_maps_effort_and_budget() {
 #[test]
 fn an_empty_control_changes_no_body() {
     for (proto, kind) in [
-        (Protocol::Openai, UpstreamKind::LlamaServer),
+        (Protocol::LlamaCpp, UpstreamKind::LlamaServer),
         (Protocol::Openai, UpstreamKind::Generic),
         (Protocol::Anthropic, UpstreamKind::Generic),
         (Protocol::Gemini, UpstreamKind::Generic),
@@ -1630,8 +1628,8 @@ fn an_empty_control_changes_no_body() {
 /// The "ignored" cells of the table, as the handler computes them.
 #[test]
 fn reasoning_ignored_names_what_the_route_cannot_say() {
-    fn ignored(p: Protocol, k: UpstreamKind, c: &ReasoningControl) -> Vec<&'static str> {
-        lmgw_core::proxy::reasoning_ignored(p, k, c, false)
+    fn ignored(p: Protocol, c: &ReasoningControl) -> Vec<&'static str> {
+        lmgw_core::proxy::reasoning_ignored(p, c, false)
     }
     let both = ReasoningControl {
         enabled: Some(true),
@@ -1640,38 +1638,26 @@ fn reasoning_ignored_names_what_the_route_cannot_say() {
     };
 
     // llama-server speaks all three.
-    assert!(ignored(Protocol::Openai, UpstreamKind::LlamaServer, &both).is_empty());
+    assert!(ignored(Protocol::LlamaCpp, &both).is_empty());
     // A generic OpenAI provider knows `reasoning_effort` and nothing else.
-    assert_eq!(
-        ignored(Protocol::Openai, UpstreamKind::Generic, &both),
-        vec!["enabled", "budget"]
-    );
+    assert_eq!(ignored(Protocol::Openai, &both), vec!["enabled", "budget"]);
     // An effort expresses "on", so `enabled` is no longer dropped.
     assert_eq!(
-        ignored(Protocol::Openai, UpstreamKind::Generic, &effort("high")),
+        ignored(Protocol::Openai, &effort("high")),
         Vec::<&str>::new()
     );
-    assert_eq!(
-        ignored(Protocol::Openai, UpstreamKind::Generic, &enabled(true)),
-        vec!["enabled"]
-    );
+    assert_eq!(ignored(Protocol::Openai, &enabled(true)), vec!["enabled"]);
     // …but when the client brought OpenRouter's own object, the egress writes
     // `enabled` into it, so claiming it was dropped would be a lie.
     assert_eq!(
-        lmgw_core::proxy::reasoning_ignored(
-            Protocol::Openai,
-            UpstreamKind::Generic,
-            &enabled(true),
-            true,
-        ),
+        lmgw_core::proxy::reasoning_ignored(Protocol::Openai, &enabled(true), true,),
         Vec::<&str>::new()
     );
     // Anthropic expresses everything — but not a level *and* a budget at once.
-    assert!(ignored(Protocol::Anthropic, UpstreamKind::Generic, &both).is_empty());
+    assert!(ignored(Protocol::Anthropic, &both).is_empty());
     assert_eq!(
         ignored(
             Protocol::Anthropic,
-            UpstreamKind::Generic,
             &ReasoningControl {
                 enabled: Some(true),
                 effort: Some("high".into()),
@@ -1681,18 +1667,11 @@ fn reasoning_ignored_names_what_the_route_cannot_say() {
         vec!["effort"]
     );
     // Gemini has a budget but no bare on/off, and takes one of level/budget.
-    assert_eq!(
-        ignored(Protocol::Gemini, UpstreamKind::Generic, &both),
-        Vec::<&str>::new()
-    );
-    assert_eq!(
-        ignored(Protocol::Gemini, UpstreamKind::Generic, &enabled(true)),
-        vec!["enabled"]
-    );
+    assert_eq!(ignored(Protocol::Gemini, &both), Vec::<&str>::new());
+    assert_eq!(ignored(Protocol::Gemini, &enabled(true)), vec!["enabled"]);
     assert_eq!(
         ignored(
             Protocol::Gemini,
-            UpstreamKind::Generic,
             &ReasoningControl {
                 enabled: Some(true),
                 effort: Some("high".into()),
@@ -1702,12 +1681,7 @@ fn reasoning_ignored_names_what_the_route_cannot_say() {
         vec!["effort"]
     );
     // Nothing asked for, nothing reported.
-    assert!(ignored(
-        Protocol::Gemini,
-        UpstreamKind::Generic,
-        &ReasoningControl::default()
-    )
-    .is_empty());
+    assert!(ignored(Protocol::Gemini, &ReasoningControl::default()).is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1820,7 +1794,7 @@ fn llama_server_reconciles_the_other_budget_spelling() {
         .as_object()
         .unwrap()
         .clone();
-    let up = kinded(Protocol::Openai, UpstreamKind::LlamaServer);
+    let up = kinded(Protocol::LlamaCpp, UpstreamKind::LlamaServer);
 
     // A header raised the budget: both spellings carry the new number.
     let b = reasoning_body(&up, &ir, &reasoning_params(budget(8192)));

@@ -75,22 +75,24 @@ pub(super) const OPS: &[OpDoc] = &[
     OpDoc {
         name: "voice_transcribe",
         tag: TAG,
-        summary: "Transcribe voice-library clips with a local speech-to-text model",
+        summary: "Transcribe voice-library clips with a speech-to-text model",
         description: Some(
             "Writes a voice-library clip's transcript (the library's prompt_text, which \
              audio.cpp hands a cloning model as reference_text when a request's voice names \
              the clip): one clip (replaced if it had one), or every clip without one. The \
              model is the alias given, else the setting audio.voice_transcribe_alias; it must \
-             be a local speech-to-text (asr) row — a cloud alias is refused, and so is the \
-             GPU hold's fallback: the hold refuses the call instead, so the owner's voice never \
-             leaves the machine. The answer names the clips and their transcript lengths, not \
-             the text. The same function lmgw__voice_transcribe calls.",
+             be a speech-to-text (asr) model, wherever it runs, and so must the fallback a GPU \
+             hold or an outside-VRAM verdict hands the clip to (a configured fallback is always \
+             used; asr_required before anything is sent otherwise). The answer names the clips, \
+             their transcript lengths and the model that wrote each (a fallback named as one: \
+             answered_by, fallback_reason), not the text. The same function \
+             lmgw__voice_transcribe calls.",
         ),
         tool: Some("lmgw__voice_transcribe"),
         args: OpArgs::Tool,
         response: Resp::Untyped(
-            "{ok, transcribed: [{clip, chars, transcript_source}], failed: [{clip, error}], \
-             already, message}",
+            "{ok, transcribed: [{clip, chars, transcript_source, answered_by, fallback_reason, \
+             by}], failed: [{clip, error}], already, message}",
         ),
         writes: true,
         reveals_secret: false,

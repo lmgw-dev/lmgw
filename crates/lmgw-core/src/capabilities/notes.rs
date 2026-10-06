@@ -665,7 +665,7 @@ pub fn notes_for_catalog(
                 format!(" (levels: {})", r.levels.join("|"))
             };
             match protocol {
-                Protocol::Openai => out.push(format!(
+                Protocol::Openai | Protocol::LlamaCpp => out.push(format!(
                     "Reasoning: set body reasoning_effort or header x-lmgw-reasoning-effort{levels}; \
                      {off} The catalog does not state the default state."
                 )),

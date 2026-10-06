@@ -1,0 +1,28 @@
+{
+  "requests": [
+    {
+      "body": "{\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}],\"model\":\"chat-model\",\"stream\":true,\"stream_options\":{\"include_usage\":true},\"top_k\":20}",
+      "body_json": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "chat-model",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "top_k": 20
+      },
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "status": 200
+}

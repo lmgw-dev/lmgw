@@ -58,6 +58,7 @@ mod inbox;
 mod input;
 mod lifecycle;
 mod liveness;
+mod mcp_tools;
 pub mod merge;
 mod output;
 pub mod pacing;

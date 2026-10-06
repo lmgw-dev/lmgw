@@ -166,6 +166,7 @@ impl ActionEnv {
                     if r.role == "assistant" {
                         m.model.set(r.model.clone());
                         m.answered_by.set(r.answered_by.clone());
+                        m.images_note.set(r.images_note.clone());
                     }
                     if m.voice.with_untracked(|v| *v != r.voice) {
                         m.voice.set(r.voice.clone());

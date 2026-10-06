@@ -668,7 +668,6 @@ fn climb_fallback(state: &SharedState, snap: &Snapshot, hold: &LocalHold) -> Opt
     else {
         return None;
     };
-    let facets = crate::gate::candidate::fallback_facets(snap, hold);
     let serves = {
         let (state, alias, route, requested) = (
             state.clone(),
@@ -676,18 +675,7 @@ fn climb_fallback(state: &SharedState, snap: &Snapshot, hold: &LocalHold) -> Opt
             route.clone(),
             hold.alias.clone(),
         );
-        async move {
-            fallback_serves(
-                &state,
-                &alias,
-                &route,
-                &requested,
-                policy.check,
-                policy.images,
-                facets,
-            )
-            .await
-        }
+        async move { fallback_serves(&state, &alias, &route, &requested, policy.check).await }
     };
     Some(ClimbFallback {
         alias,
@@ -698,8 +686,7 @@ fn climb_fallback(state: &SharedState, snap: &Snapshot, hold: &LocalHold) -> Opt
 
 /// The GPU hold is on: no climb (ladder design §3.1 "GPU hold active") — the
 /// request's fallback answers, as the hold's swap would have at resolve time
-/// (so the route check runs, and the image rule does not, §12 entry 43 of the
-/// unified-KV spec), or it is refused with `gpu_hold`. Pinned and direct
+/// (so the route check runs), or it is refused with `gpu_hold`. Pinned and direct
 /// callers never fall back. A benchmark's lease is answered the same way
 /// (reason `benchmark`, `gpu_benchmark`; benchmark design §3.2).
 async fn held(
@@ -717,20 +704,9 @@ async fn held(
     // A candidate alias's own fallback, never its candidate's row fallback
     // (candidate-aliases §4.1): the hold swap answers both alias kinds with it,
     // even if the alias went away mid-flight (§12 entry 86).
-    let facets = crate::gate::candidate::fallback_facets(snap, hold);
     match crate::gate::candidate::request_fallback(snap, hold) {
         FallbackRoute::Usable { alias, route } => {
-            if fallback_serves(
-                state,
-                &alias,
-                &route,
-                &hold.alias,
-                policy.check,
-                false,
-                facets,
-            )
-            .await
-            {
+            if fallback_serves(state, &alias, &route, &hold.alias, policy.check).await {
                 Ok(Climbed::Fallback {
                     alias,
                     route,

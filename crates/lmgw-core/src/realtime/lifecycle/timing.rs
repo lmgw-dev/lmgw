@@ -34,9 +34,22 @@
 //! `create_response` off or committed by the client — when its transcript
 //! comes in without words (A2 review 5).
 //!
+//! **A response that waited for MCP listings** (realtime-server-tools
+//! §1.2) says how long, as `MCP listing N ms` (`tools_list_ms`): from its
+//! creation, or the listing that started while it waited, to the last
+//! listing's end — or to its own end, for one cancelled while it waited.
+//!
+//! **A response that ran server-side calls** (realtime-server-tools §2.4)
+//! says how long they ran and how many, as `MCP tools N ms (k calls)`
+//! (`tools_ms`, `tool_calls`): from the first call's start to the last
+//! one's end, as the responder clocked them — in speech mode the core
+//! hears of them behind the audio, which is not their run time. A call
+//! refused unrun (its arguments no JSON object) is no call.
+//!
 //! **"First … at" is what reached the client**: the first text delta or
-//! function call of a text response; the first audio or function call of a
-//! spoken one, whose text goes out only with its audio. A spoken response
+//! call of a text response; the first audio or call of a spoken one, whose
+//! text goes out only with its audio. A call is named for what it is: a
+//! client's `function call`, or a server-side `MCP call`. A spoken response
 //! that produced tokens but no audio (cancelled first) says so, rather than
 //! naming a first text the client never got.
 //!
@@ -87,8 +100,9 @@ pub(super) struct Timing {
     first_reasoning: Option<Instant>,
     /// The first text delta the core sent the client.
     first_text: Option<Instant>,
-    /// The first function call the core announced to the client.
-    first_call: Option<Instant>,
+    /// The first call the core announced to the client, and what it was
+    /// (module doc).
+    first_call: Option<(Instant, &'static str)>,
     first_clause: Option<Instant>,
     first_audio: Option<Instant>,
     /// It heard the user's audio and started held (`held`): when.
@@ -97,6 +111,15 @@ pub(super) struct Timing {
     pub released: Option<Instant>,
     /// When its first output arrived while it was held.
     held_first: Option<Instant>,
+    /// It waited for the session's MCP listings: since when, and when the
+    /// last of them was in (module doc).
+    tools_wait: Option<Instant>,
+    tools_listed: Option<Instant>,
+    /// Its server-side calls (module doc): the first start, the last end,
+    /// and how many ran.
+    tools_from: Option<Instant>,
+    tools_to: Option<Instant>,
+    tool_calls: u32,
 }
 
 impl Timing {
@@ -115,6 +138,11 @@ impl Timing {
             held_at: None,
             released: None,
             held_first: None,
+            tools_wait: None,
+            tools_listed: None,
+            tools_from: None,
+            tools_to: None,
+            tool_calls: 0,
         }
     }
 
@@ -135,10 +163,23 @@ impl Timing {
         self.first_text.get_or_insert_with(Instant::now);
     }
 
-    /// A function call was announced to the client.
-    pub fn call(&mut self) {
+    /// A call was announced to the client: a server-side one of an MCP
+    /// tool (`mcp`), or a client's function call.
+    pub fn call(&mut self, mcp: bool) {
         self.token();
-        self.first_call.get_or_insert_with(Instant::now);
+        let what = if mcp { "MCP call" } else { "function call" };
+        self.first_call.get_or_insert((Instant::now(), what));
+    }
+
+    /// A server-side call started `at`.
+    pub fn tool_running(&mut self, at: Instant) {
+        self.tool_calls += 1;
+        self.tools_from = Some(self.tools_from.map_or(at, |f| f.min(at)));
+    }
+
+    /// A server-side call ended `at`.
+    pub fn tool_done(&mut self, at: Instant) {
+        self.tools_to = Some(self.tools_to.map_or(at, |t| t.max(at)));
     }
 
     /// A synthesized clause arrived: the first is the first audio.
@@ -183,7 +224,10 @@ impl Timing {
         // earliest, and none of it did while it was never released.
         let reached = |at: Instant| self.released.map_or(at, |r| at.max(r));
         let unreleased = self.held_at.is_some() && self.released.is_none();
-        let first = [output, ("function call", self.first_call)]
+        let call = self
+            .first_call
+            .map_or(("function call", None), |(at, what)| (what, Some(at)));
+        let first = [output, call]
             .into_iter()
             .filter_map(|(what, at)| Some((what, reached(at?))))
             .filter(|_| !unreleased)
@@ -192,6 +236,9 @@ impl Timing {
         Stages {
             end_of_turn_ms: turn.and_then(|t| Some(ms(t.speech_end?, t.committed))),
             asr_ms: turn.and_then(|t| Some(ms(t.committed, t.transcribed?))),
+            tools_list_ms: self
+                .tools_wait
+                .map(|w| ms(w, self.tools_listed.unwrap_or(end))),
             first_token_ms: self.launched.zip(self.first_token).map(|(l, f)| ms(l, f)),
             // Part of the first token's wait: from the first reasoning to the
             // first token, or to the end when no token came.
@@ -206,6 +253,11 @@ impl Timing {
                 .first_clause
                 .zip(self.first_audio)
                 .map(|(c, a)| ms(c, a)),
+            // To the response's end for calls a cancel cut off.
+            tools_ms: self
+                .tools_from
+                .map(|f| ms(f, self.tools_to.filter(|t| *t >= f).unwrap_or(end))),
+            tool_calls: self.tool_calls,
             first,
             no_audio: first.is_none() && self.speaks && self.first_token.is_some(),
             total_ms: ms(start, end),
@@ -233,6 +285,9 @@ impl Timing {
         if let Some(ms) = st.asr_ms {
             parts.push(format!("ASR {ms} ms"));
         }
+        if let Some(ms) = st.tools_list_ms {
+            parts.push(format!("MCP listing {ms} ms"));
+        }
         if let Some(ms) = st.first_token_ms {
             parts.push(format!("LLM first token {ms} ms"));
         }
@@ -244,6 +299,11 @@ impl Timing {
         }
         if let Some(ms) = st.first_audio_ms {
             parts.push(format!("TTS first audio {ms} ms"));
+        }
+        if let Some(ms) = st.tools_ms {
+            let n = st.tool_calls;
+            let calls = if n == 1 { "call" } else { "calls" };
+            parts.push(format!("MCP tools {ms} ms ({n} {calls})"));
         }
         let mut out = format!("{status:?}").to_lowercase();
         if !parts.is_empty() {
@@ -274,12 +334,18 @@ impl Timing {
 pub(super) struct Stages {
     pub end_of_turn_ms: Option<u64>,
     pub asr_ms: Option<u64>,
+    /// How long it waited for the session's MCP listings.
+    pub tools_list_ms: Option<u64>,
     pub first_token_ms: Option<u64>,
     /// How long the chat model reasoned: part of `first_token_ms`.
     pub reasoning_ms: Option<u64>,
     pub first_clause_ms: Option<u64>,
     /// TTS: the first clause to its audio.
     pub first_audio_ms: Option<u64>,
+    /// How long its server-side calls ran, first start to last end.
+    pub tools_ms: Option<u64>,
+    /// How many ran.
+    pub tool_calls: u32,
     /// What reached the client first, and when, from [`Self::from`].
     pub first: Option<(&'static str, u64)>,
     /// A spoken response that produced tokens and no audio.
@@ -340,6 +406,34 @@ impl Core {
             active.timing.line(status, end)
         );
         self.bound_ended(active, status, end);
+    }
+
+    /// An MCP listing is in flight: a response not launched yet waits for
+    /// it (realtime-server-tools §1.2) — from now, unless it already did.
+    pub(in crate::realtime) fn timing_tools_waiting(&mut self) {
+        if let Some(t) = self
+            .active
+            .as_mut()
+            .filter(|a| !a.phase.launched())
+            .map(|a| &mut a.timing)
+        {
+            t.tools_wait.get_or_insert_with(Instant::now);
+            t.tools_listed = None;
+        }
+    }
+
+    /// The session's listings are all in: a response that waited for them
+    /// stops waiting now.
+    pub(in crate::realtime) fn timing_tools_listed(&mut self) {
+        if let Some(t) = self
+            .active
+            .as_mut()
+            .filter(|a| !a.phase.launched())
+            .map(|a| &mut a.timing)
+            .filter(|t| t.tools_wait.is_some())
+        {
+            t.tools_listed = Some(Instant::now());
+        }
     }
 
     /// `item_id`'s transcript is in: its turn's moment, wherever its timing
@@ -427,6 +521,70 @@ mod tests {
         );
     }
 
+    /// realtime-server-tools §1.2: the wait for MCP listings is a stage of
+    /// its own, between the turn and the model call.
+    #[test]
+    fn a_wait_for_mcp_listings_is_timed() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let waited = Timing {
+            tools_wait: Some(at(0)),
+            tools_listed: Some(at(840)),
+            launched: Some(at(841)),
+            first_token: Some(at(900)),
+            first_text: Some(at(900)),
+            ..timing(None, false, at(0))
+        };
+        assert_eq!(waited.stages(at(1000)).tools_list_ms, Some(840));
+        assert_eq!(
+            waited.line(ResponseStatus::Completed, at(1000)),
+            "completed — MCP listing 840 ms, LLM first token 59 ms; first text at 900 ms; total \
+             1000 ms from response.created"
+        );
+        // Cancelled while it waited: up to its end.
+        let cut = Timing {
+            tools_wait: Some(at(10)),
+            ..timing(None, false, at(0))
+        };
+        assert_eq!(cut.stages(at(300)).tools_list_ms, Some(290));
+        // A response that never waited says nothing of it.
+        assert_eq!(timing(None, false, at(0)).stages(at(9)).tools_list_ms, None);
+    }
+
+    /// realtime-server-tools §2.4: the server-side calls' run, first start
+    /// to last end, and how many ran.
+    #[test]
+    fn server_side_calls_are_timed() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut ran = Timing {
+            launched: Some(at(1)),
+            first_token: Some(at(40)),
+            first_call: Some((at(40), "MCP call")),
+            ..timing(None, false, at(0))
+        };
+        ran.tool_running(at(60));
+        ran.tool_running(at(61));
+        ran.tool_done(at(300));
+        ran.tool_done(at(180));
+        let st = ran.stages(at(400));
+        assert_eq!((st.tools_ms, st.tool_calls), (Some(240), 2));
+        assert_eq!(
+            ran.line(ResponseStatus::Completed, at(400)),
+            "completed — LLM first token 39 ms, MCP tools 240 ms (2 calls); first MCP call at \
+             40 ms; total 400 ms from response.created"
+        );
+        // Cut off running: up to the end.
+        let mut cut = timing(None, false, at(0));
+        cut.tool_running(at(10));
+        assert_eq!(cut.stages(at(50)).tools_ms, Some(40));
+        assert!(cut
+            .line(ResponseStatus::Cancelled, at(50))
+            .contains("MCP tools 40 ms (1 call)"));
+        // None ran: nothing said.
+        assert_eq!(timing(None, false, at(0)).stages(at(9)).tools_ms, None);
+    }
+
     #[test]
     fn reasoning_is_timed_within_the_first_token() {
         let t0 = Instant::now();
@@ -465,7 +623,7 @@ mod tests {
         let called = Timing {
             launched: Some(at(1)),
             first_token: Some(at(40)),
-            first_call: Some(at(40)),
+            first_call: Some((at(40), "function call")),
             ..timing(None, true, at(0))
         };
         assert_eq!(
@@ -487,7 +645,7 @@ mod tests {
         let typed_call = Timing {
             launched: Some(at(1)),
             first_token: Some(at(30)),
-            first_call: Some(at(30)),
+            first_call: Some((at(30), "function call")),
             ..timing(None, false, at(0))
         };
         assert!(typed_call

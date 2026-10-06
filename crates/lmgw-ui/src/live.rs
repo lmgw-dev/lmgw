@@ -1,5 +1,5 @@
 //! SSE → signal bridge. One EventSource on `/api/events` feeds every live
-//! surface (titlebar pulse, overview tiles, feeds, runtime badges); pages
+//! surface (sidebar pulse, overview tiles, feeds, runtime badges); pages
 //! read the slices they care about instead of opening their own streams.
 //!
 //! The browser's EventSource reconnects on its own; frames that fail to

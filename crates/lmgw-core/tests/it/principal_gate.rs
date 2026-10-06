@@ -411,3 +411,40 @@ async fn an_agent_token_is_forbidden_on_the_admin_plane() {
     assert!(message.contains("admin"), "{message}");
     assert!(message.contains("labeler"), "{message}");
 }
+
+/// A browser client with a bearer gets past the preflight: the Fetch standard
+/// never counts `Authorization` under an `Access-Control-Allow-Headers: *`,
+/// so the layer has to name the headers the preflight asked for.
+#[tokio::test]
+async fn a_preflight_for_a_bearer_names_authorization() {
+    let state = AppState::init_for_tests().await.unwrap();
+    let gw = serve(state).await;
+
+    let resp = gw
+        .anon()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{gw}/v1/chat/completions"),
+        )
+        .header("origin", "https://client.example")
+        .header("access-control-request-method", "POST")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    let allowed = header("access-control-allow-headers");
+    assert!(allowed.contains("authorization"), "{allowed}");
+    assert!(allowed.contains("content-type"), "{allowed}");
+    assert_eq!(header("access-control-allow-origin"), "*");
+}

@@ -1,9 +1,9 @@
 //! §2.2's table, row by row (voice-audio-input design §7): each row's
-//! failure gives the transcript and names why, a llama-server lmgw does not
-//! run is remote, the hold and a benchmark's lease judge a model (a
-//! candidate alias too) by its fallback, a candidate alias whose walk ends
-//! at its fallback by design is judged by it as well, and a guarded row
-//! never hears.
+//! failure gives the transcript and names why; a model that takes audio
+//! hears wherever it runs (changed 2026-10-06: capability, not locality);
+//! the hold and a benchmark's lease judge a model (a candidate alias too)
+//! by its fallback alone; a block's verdict is forecast beside; and a
+//! guarded row never hears.
 
 use std::collections::HashMap;
 
@@ -18,6 +18,7 @@ use crate::state::AppState;
 
 const CLOUD: i64 = 10;
 const LAN: i64 = 11;
+const CLAUDE: i64 = 12;
 
 fn local(model_id: &str, modalities: Option<&[&str]>) -> LocalModel {
     LocalModel {
@@ -44,7 +45,12 @@ fn upstream(id: i64, name: &str, kind: UpstreamKind) -> Upstream {
     Upstream {
         id,
         name: name.into(),
-        protocol: Protocol::Openai,
+        // A llama-server speaks llama_cpp (llama.cpp egress design §5).
+        protocol: if kind == UpstreamKind::LlamaServer {
+            Protocol::LlamaCpp
+        } else {
+            Protocol::Openai
+        },
         kind,
         // A closed port: a catalog probe is refused at once.
         base_url: "http://127.0.0.1:9/v1".into(),
@@ -55,6 +61,7 @@ fn upstream(id: i64, name: &str, kind: UpstreamKind) -> Upstream {
         expose_all: false,
         expose_prefix: String::new(),
         supports_responses: false,
+        llama: None,
     }
 }
 
@@ -101,19 +108,21 @@ fn candidate(name: &str, candidates: &[&str], fallback: Option<&str>) -> (String
 /// take audio), `texty` (one that does not), `unsure` (a projector lmgw
 /// cannot read), `laddered` and `pooled` (context guards), `pooled-off` (a
 /// disabled guard), `gone-off` (a disabled row that would hear), a cloud
-/// alias `openai/gpt`, a llama-server elsewhere `lan-model` (it takes audio
-/// by its override), and the candidate aliases — all enabling audio, as the
+/// alias `openai/gpt`, a llama-server elsewhere `lan-model` (both take audio
+/// by their overrides), an Anthropic alias `claude/x` whose override claims
+/// audio, and the candidate aliases — all enabling audio, as the
 /// save rules require of their candidates: `pick` (`hears`, `hears-too`;
 /// fallback `openai/gpt`), `pick-guarded` (`hears`, `pooled`),
 /// `pick-guard-off` (`hears`, `pooled-off`), `pick-lost` (`gone-off`, then
 /// `hears`; fallback `openai/gpt`), `pick-bg` (background, `hears`; fallback
-/// `openai/gpt`) and `pick-bg-alone` (background, no fallback). The hold's
-/// chat fallback is `openai/gpt`; speech-to-text is `openai/whisper`; the
-/// setting is `local` unless `f` says otherwise.
+/// `openai/gpt`), `pick-bg-alone` (background, no fallback) and
+/// `pick-guarded-fb` (`hears`, `pooled`; fallback `openai/gpt`). The hold's
+/// chat fallback is `openai/gpt`; speech-to-text is `openai/whisper` (task
+/// `asr`); the setting is `on` unless `f` says otherwise.
 async fn gateway(f: impl FnOnce(&mut crate::config::Snapshot)) -> SharedState {
     let state = AppState::init_for_tests().await.unwrap();
     let mut snap = (*state.snapshot()).clone();
-    snap.settings.chat_voice_audio_input = "local".into();
+    snap.settings.chat_voice_audio_input = "on".into();
     snap.settings.hold.fallback_alias = Some("openai/gpt".into());
     snap.settings.chat_stt_alias = "openai/whisper".into();
     let mut unsure = local("unsure", None);
@@ -143,14 +152,22 @@ async fn gateway(f: impl FnOnce(&mut crate::config::Snapshot)) -> SharedState {
         pooled_off,
         gone_off,
     ];
+    let mut claude = upstream(CLAUDE, "claude", UpstreamKind::Generic);
+    claude.protocol = Protocol::Anthropic;
     snap.upstreams = HashMap::from([
         (CLOUD, upstream(CLOUD, "cloud", UpstreamKind::Generic)),
         (LAN, upstream(LAN, "lan", UpstreamKind::LlamaServer)),
+        (CLAUDE, claude),
     ]);
+    let mut whisper = alias("openai/whisper", CLOUD);
+    whisper.1.capabilities_override = Some(json!({
+        "capabilities": { "task": "asr", "input_modalities": ["audio"] }
+    }));
     snap.aliases = HashMap::from([
         alias("openai/gpt", CLOUD),
-        alias("openai/whisper", CLOUD),
+        whisper,
         alias("lan-model", LAN),
+        alias("claude/x", CLAUDE),
     ]);
     let background = |(name, mut ca): (String, CandidateAlias)| {
         ca.background = true;
@@ -163,6 +180,8 @@ async fn gateway(f: impl FnOnce(&mut crate::config::Snapshot)) -> SharedState {
         candidate("pick-lost", &["gone-off", "hears"], Some("openai/gpt")),
         background(candidate("pick-bg", &["hears"], Some("openai/gpt"))),
         background(candidate("pick-bg-alone", &["hears"], None)),
+        candidate("pick-guarded-fb", &["hears", "pooled"], Some("openai/gpt")),
+        candidate("pick-claude", &["hears"], Some("claude/x")),
     ]);
     f(&mut snap);
     state.set_snapshot_for_tests(snap);
@@ -182,6 +201,29 @@ async fn why(state: &SharedState, t: &ChatThread) -> String {
     v.why.unwrap()
 }
 
+/// `openai/gpt` reads text only.
+fn text_only(s: &mut crate::config::Snapshot) {
+    s.aliases
+        .get_mut("openai/gpt")
+        .unwrap()
+        .capabilities_override = Some(json!({
+        "capabilities": { "task": "chat", "input_modalities": ["text"] }
+    }));
+}
+
+/// A verdict that hears `model`, reached as `via`, after `lead`.
+fn heard(model: &str, via: &[&str], lead: Option<&'static str>) -> AudioInput {
+    AudioInput {
+        path: InputPath::Audio,
+        model: model.into(),
+        why: None,
+        lead,
+        blocked: None,
+        via: via.iter().map(|m| m.to_string()).collect(),
+        lacks: false,
+    }
+}
+
 #[tokio::test]
 async fn a_local_model_that_takes_audio_hears_the_turn() {
     let state = gateway(|_| {}).await;
@@ -189,17 +231,16 @@ async fn a_local_model_that_takes_audio_hears_the_turn() {
     assert_eq!(
         v,
         AudioInput {
-            path: InputPath::Audio,
-            model: "hears".into(),
-            why: None,
-            via: vec!["hears".into()],
+            blocked: Some(Box::new(heard("openai/gpt", &["openai/gpt"], None))),
+            ..heard("hears", &["hears"], None)
         }
     );
     let shown = serde_json::to_value(shown(&state, &thread("hears")).await).unwrap();
     assert_eq!(
         shown,
-        json!({ "value": "local", "source": "chat", "path": "audio", "model": "hears",
-                "why": null })
+        json!({ "value": "on", "source": "chat", "path": "audio", "model": "hears",
+                "why": null,
+                "blocked": { "path": "audio", "model": "openai/gpt", "why": null } })
     );
 }
 
@@ -211,11 +252,11 @@ async fn off_at_either_level_is_the_first_row_and_names_the_level() {
         why(&state, &t).await,
         "audio input is off (Settings → Chat → Voice)"
     );
-    t.voice.audio_input = Some(AudioInputMode::Local);
+    t.voice.audio_input = Some(AudioInputMode::On);
     assert_eq!(verdict(&state, &t).await.path, InputPath::Audio);
     assert_eq!(
         setting(&state.snapshot(), &t),
-        (AudioInputMode::Local, Source::Thread)
+        (AudioInputMode::On, Source::Thread)
     );
 
     let state = gateway(|_| {}).await;
@@ -286,53 +327,75 @@ async fn a_route_that_does_not_settle_gives_its_own_error() {
     assert!(w.contains("hold"), "{w}");
 }
 
+/// Capability, not locality (the owner's ruling, 2026-10-06): a cloud
+/// model and a llama-server elsewhere that take audio hear the turn.
 #[tokio::test]
-async fn only_a_model_this_lmgw_runs_is_local() {
+async fn a_model_that_takes_audio_hears_wherever_it_runs() {
     let state = gateway(|_| {}).await;
-    let v = verdict(&state, &thread("openai/gpt")).await;
-    assert_eq!(v.model, "openai/gpt");
     assert_eq!(
-        v.why.as_deref(),
-        Some("openai/gpt is a model lmgw does not run: your voice stays on this machine")
+        verdict(&state, &thread("openai/gpt")).await,
+        heard("openai/gpt", &["openai/gpt"], None),
+        "no block touches a cloud model: nothing forecast"
     );
-    // A llama-server elsewhere takes audio by its override, and is still
-    // not one lmgw runs.
     assert_eq!(
-        why(&state, &thread("lan-model")).await,
-        "lan-model is served by a server this lmgw does not run: your voice goes only to \
-         models lmgw runs"
+        verdict(&state, &thread("lan-model")).await,
+        heard("lan-model", &["lan-model"], None)
     );
-    // Not a chat model: a route lmgw runs of another class.
-    let snap = state.snapshot();
-    let mut route = snap.chat_local_route("hears");
-    route.upstream.id = crate::config::AUDIO_UPSTREAM_ID;
     assert_eq!(
-        not_run_here(&snap, &route, "audio/parakeet", None).as_deref(),
-        Some("audio/parakeet is not a chat model")
+        why(&state, &thread("openai/whisper")).await,
+        "openai/whisper is not a chat model"
+    );
+    // N2: an override cannot give the Anthropic API an audio part.
+    assert_eq!(
+        why(&state, &thread("claude/x")).await,
+        "claude/x is served over the Anthropic API, which has no audio input part"
     );
 }
 
 #[tokio::test]
-async fn under_the_hold_the_fallback_is_judged_a_candidate_aliases_too() {
+async fn under_the_hold_the_fallback_alone_is_judged_a_candidate_aliases_too() {
     let state = gateway(|s| s.settings.hold.active = true).await;
+    let hold = Some("under the GPU hold");
+    assert_eq!(
+        verdict(&state, &thread("hears")).await,
+        heard("openai/gpt", &["openai/gpt"], hold),
+        "the model that answers hears: no forecast under a live block"
+    );
+    // A model that does not hear itself hands the turn to one that does.
+    assert_eq!(
+        verdict(&state, &thread("texty")).await,
+        heard("openai/gpt", &["openai/gpt"], hold)
+    );
+    // N3: the candidate alias hands the turn to its own fallback, judged
+    // alone — no candidate's guard, no candidate in `via`.
+    assert_eq!(
+        verdict(&state, &thread("pick")).await,
+        heard("openai/gpt", &["openai/gpt"], hold)
+    );
+    assert_eq!(
+        verdict(&state, &thread("pick-guarded-fb")).await,
+        heard("openai/gpt", &["openai/gpt"], hold)
+    );
+    // An Anthropic fallback has no audio part whatever its override says.
+    // Changed 2026-10-06 (the owner's ruling: a configured fallback is
+    // always used): for an alias that enables audio it no longer counts as
+    // none — the hold hands the turn to it, as its transcript.
+    assert_eq!(
+        why(&state, &thread("pick-claude")).await,
+        "under the GPU hold this goes to claude/x, served over the Anthropic API, which has no \
+         audio input part"
+    );
+    // A fallback that reads text only: the transcript, named after the swap.
+    let state = gateway(|s| {
+        s.settings.hold.active = true;
+        text_only(s);
+    })
+    .await;
     let v = verdict(&state, &thread("hears")).await;
-    assert_eq!(v.model, "openai/gpt", "the model that answers: {v:?}");
+    assert_eq!((v.model.as_str(), v.lead), ("openai/gpt", hold));
     assert_eq!(
         v.why.as_deref(),
-        Some(
-            "under the GPU hold this goes to openai/gpt, a model lmgw does not run: your voice \
-             stays on this machine"
-        )
-    );
-    // The candidate alias hands the turn to its own fallback under the hold:
-    // never "hears you" while a cloud model would answer.
-    let v = verdict(&state, &thread("pick")).await;
-    assert_eq!(v.model, "openai/gpt", "{v:?}");
-    assert!(
-        v.why
-            .unwrap()
-            .starts_with("under the GPU hold this goes to openai/gpt"),
-        "candidate alias under the hold"
+        Some("under the GPU hold this goes to openai/gpt, which does not take audio input")
     );
     // Without the hold the candidate alias hears: every candidate takes
     // audio and none guards its context.
@@ -346,77 +409,107 @@ async fn under_the_hold_the_fallback_is_judged_a_candidate_aliases_too() {
 }
 
 #[tokio::test]
-async fn a_benchmark_run_and_a_fallback_lmgw_does_not_run_are_named() {
+async fn a_benchmark_run_and_a_fallback_on_the_network_are_judged_alike() {
     // A benchmark run's lease swaps a local model as the hold does.
-    let state = gateway(|_| {}).await;
+    let state = gateway(text_only).await;
     state.set_gpu_lease(Some(std::sync::Arc::new(crate::bench::lease::GpuLease {
         run_id: 7,
         model_id: "texty".into(),
     })));
     assert_eq!(
         why(&state, &thread("hears")).await,
-        "while a benchmark run holds the GPU this goes to openai/gpt, a model lmgw does not \
-         run: your voice stays on this machine"
+        "while a benchmark run holds the GPU this goes to openai/gpt, which does not take audio \
+         input"
     );
-    // A llama-server elsewhere as the hold's fallback is no model lmgw runs.
+    // A llama-server elsewhere as the hold's fallback hears like any other.
     let state = gateway(|s| {
         s.settings.hold.active = true;
         s.settings.hold.fallback_alias = Some("lan-model".into());
     })
     .await;
-    let v = verdict(&state, &thread("hears")).await;
-    assert_eq!(v.model, "lan-model");
     assert_eq!(
-        v.why.as_deref(),
-        Some(
-            "under the GPU hold this goes to lan-model, served by a server this lmgw does not \
-             run: your voice goes only to models lmgw runs"
-        )
+        verdict(&state, &thread("hears")).await,
+        heard("lan-model", &["lan-model"], Some("under the GPU hold"))
     );
 }
 
-/// A candidate alias whose walk ends at its fallback by design (WP1 review
-/// M1): background traffic takes it whenever its primary is not loaded, and
-/// an owner alias whose primary it cannot use takes it whenever no other
-/// candidate is loaded — neither is a swap `gate::resolve` makes.
+/// A candidate alias whose walk may end at its fallback by design (WP1
+/// review M1, superseded 2026-10-06): the verdict judges the candidates the
+/// walk picks from, which hear.
 #[tokio::test]
-async fn a_candidate_alias_that_may_go_to_its_fallback_gets_the_transcript() {
+async fn a_candidate_aliases_walk_to_its_fallback_hears_when_the_fallback_does() {
     let state = gateway(|_| {}).await;
-    let v = verdict(&state, &thread("pick-bg")).await;
-    assert_eq!(v.model, "pick-bg", "not certain: the alias is named");
-    assert_eq!(
-        v.why.as_deref(),
-        Some(
-            "as background traffic this may go to openai/gpt, a model lmgw does not run: your \
-             voice stays on this machine"
-        )
-    );
-    assert_eq!(
-        why(&state, &thread("pick-lost")).await,
-        "its primary 'gone-off' is disabled, so this may go to openai/gpt, a model lmgw does \
-         not run: your voice stays on this machine"
-    );
-    // With no fallback the walk may take, a background alias's audio stays
-    // with its candidates.
-    assert_eq!(
-        verdict(&state, &thread("pick-bg-alone")).await.path,
-        InputPath::Audio
-    );
-    // A fallback that does not take audio counts as none for an alias that
-    // enables it (candidate-aliases §4.6).
-    let state = gateway(|s| {
-        s.aliases
-            .get_mut("openai/gpt")
-            .unwrap()
-            .capabilities_override = Some(json!({
-            "capabilities": { "task": "chat", "input_modalities": ["text"] }
-        }));
-    })
-    .await;
+    for name in ["pick-bg", "pick-lost", "pick-bg-alone"] {
+        let v = verdict(&state, &thread(name)).await;
+        assert_eq!(
+            (v.path, v.model.as_str()),
+            (InputPath::Audio, name),
+            "{v:?}"
+        );
+    }
+    // A fallback that does not take audio leaves that verdict alone; a turn
+    // the walk does hand to it goes as its transcript (changed 2026-10-06:
+    // a fallback lacking an enabled facet is used).
+    let state = gateway(text_only).await;
     assert_eq!(
         verdict(&state, &thread("pick-bg")).await.path,
         InputPath::Audio
     );
+}
+
+/// N4 (decision D3): with no block live, the verdict a block would bring —
+/// the fallback's own, or the refusal — and none for a model no block
+/// touches.
+#[tokio::test]
+async fn the_verdict_forecasts_what_a_block_would_bring() {
+    let state = gateway(|_| {}).await;
+    let forecast = |v: AudioInput| v.blocked.map(|b| *b);
+    // A model that reads the transcript itself, whose fallback hears.
+    let v = verdict(&state, &thread("texty")).await;
+    assert_eq!(v.why.as_deref(), Some("texty does not take audio input"));
+    assert_eq!(
+        forecast(v),
+        Some(heard("openai/gpt", &["openai/gpt"], None))
+    );
+    assert_eq!(
+        forecast(verdict(&state, &thread("pick")).await),
+        Some(heard("openai/gpt", &["openai/gpt"], None))
+    );
+    assert_eq!(forecast(verdict(&state, &thread("openai/gpt")).await), None);
+    let no_fallback = forecast(verdict(&state, &thread("pick-bg-alone")).await).unwrap();
+    assert_eq!(
+        no_fallback.why.as_deref(),
+        Some("pick-bg-alone has no fallback, so the turn is refused")
+    );
+    // A fallback that reads text only: said as what follows the page's
+    // words for the block.
+    let state = gateway(text_only).await;
+    let b = forecast(verdict(&state, &thread("hears")).await).unwrap();
+    assert_eq!((b.path, b.lead), (InputPath::Transcript, None));
+    assert_eq!(
+        b.why.as_deref(),
+        Some("this goes to openai/gpt, which does not take audio input")
+    );
+    // With no hold fallback at all, and one that does not resolve.
+    let state = gateway(|s| s.settings.hold.fallback_alias = None).await;
+    assert_eq!(
+        forecast(verdict(&state, &thread("hears")).await)
+            .unwrap()
+            .why
+            .as_deref(),
+        Some("hears has no fallback, so the turn is refused")
+    );
+    let state = gateway(|s| s.settings.hold.fallback_alias = Some("gone".into())).await;
+    assert_eq!(
+        forecast(verdict(&state, &thread("hears")).await)
+            .unwrap()
+            .why
+            .as_deref(),
+        Some("hears's fallback gone does not resolve, so the turn is refused")
+    );
+    // The thread's own rows decide first: nothing to forecast.
+    let state = gateway(|s| s.settings.chat_voice_audio_input = "off".into()).await;
+    assert_eq!(forecast(verdict(&state, &thread("hears")).await), None);
 }
 
 #[tokio::test]
@@ -458,18 +551,40 @@ async fn the_capability_is_audio_input_and_unknown_is_no() {
     );
     assert_eq!(
         why(&state, &thread("unsure")).await,
-        "lmgw cannot tell whether unsure takes audio"
+        "lmgw cannot tell whether unsure takes audio: if it does, list audio in the input \
+         modalities of its row's capabilities override"
+    );
+    // Worded by where the model lives (review V5): an alias, and a
+    // passthrough model, which has no override of its own.
+    let state = gateway(|s| {
+        s.aliases
+            .get_mut("openai/gpt")
+            .unwrap()
+            .capabilities_override = None;
+    })
+    .await;
+    // The catalog read first: the view reads it from the cache alone.
+    let cloud = state.snapshot().upstreams[&CLOUD].clone();
+    let _ = crate::catalog::upstream_models(&state, &cloud).await;
+    assert!(why(&state, &thread("openai/gpt")).await.ends_with(
+        "if it does, give its alias a capabilities override with task chat and input \
+                    modalities text and audio"
+    ));
+    let hint = with_hint(
+        &state.snapshot(),
+        "cloud/omni",
+        Hears::Unknown,
+        String::new(),
+    );
+    assert!(
+        hint.contains("a passthrough model has no override of its own"),
+        "{hint}"
     );
 }
 
 #[test]
 fn a_server_that_refused_this_session_gets_the_transcript_from_then_on() {
-    let hears = AudioInput {
-        path: InputPath::Audio,
-        model: "hears".into(),
-        why: None,
-        via: vec!["hears".into()],
-    };
+    let hears = heard("hears", &["hears"], None);
     let mut refused = Refusals::new();
     assert_eq!(hears.clone().after_refusal(&refused), hears);
     refused.insert(
@@ -510,6 +625,25 @@ fn a_server_that_refused_this_session_gets_the_transcript_from_then_on() {
     // A transcript verdict keeps its own why.
     let off = AudioInput::transcript("hears", "audio input is off (this thread)".into());
     assert_eq!(off.clone().after_refusal(&refused), off);
+    // A block's forecast is held to the same memory, whatever the verdict.
+    let texty = AudioInput {
+        blocked: Some(Box::new(heard("hears-too", &["hears-too"], None))),
+        ..AudioInput::transcript("texty", "texty does not take audio input".into())
+    };
+    let after = texty.after_refusal(&refused);
+    assert_eq!(
+        after.why.as_deref(),
+        Some("texty does not take audio input")
+    );
+    let b = after.blocked.unwrap();
+    assert_eq!(
+        (b.path, b.model.as_str()),
+        (InputPath::Transcript, "hears-too")
+    );
+    assert_eq!(
+        b.why.as_deref(),
+        Some("its server failed on the audio this session: reset")
+    );
 }
 
 /// Who an audio turn may reach, as the session's memory names them: the

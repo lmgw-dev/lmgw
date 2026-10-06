@@ -1051,7 +1051,7 @@ fn Notices(lab: Lab, on_retry: impl Fn() + Copy + Send + Sync + 'static) -> impl
                             "Local models are paused. A request either answers from this row's "
                             "fallback alias or refuses with "
                             <span class="mono-sm">"gpu_hold"</span>
-                            " — release the hold in the titlebar to render here."
+                            " — release the hold from the HOLD pill at the foot of the sidebar to render here."
                         </div>
                     }
                 })

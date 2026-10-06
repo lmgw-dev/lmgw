@@ -11,7 +11,7 @@
 
 use sqlx::SqlitePool;
 
-use super::{migration_applied, table_exists};
+use super::{has_column, migration_applied, table_exists};
 
 /// Version of `0055_empty_run_args_inherit.sql`.
 const EMPTY_RUN_ARGS_MIGRATION: i64 = 55;
@@ -62,16 +62,4 @@ pub(in crate::store) async fn empty_run_args_notice(pool: &SqlitePool) -> anyhow
         }
     }
     Ok(())
-}
-
-/// `table` exists and has `column`.
-async fn has_column(pool: &SqlitePool, table: &str, column: &str) -> anyhow::Result<bool> {
-    if !table_exists(pool, table).await? {
-        return Ok(false);
-    }
-    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?1)")
-        .bind(table)
-        .fetch_all(pool)
-        .await?;
-    Ok(names.iter().any(|n| n == column))
 }

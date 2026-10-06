@@ -1,0 +1,20 @@
+{
+  "requests": [
+    {
+      "body": "{\"content\":\"Be brief.\\n\\nchart\\nA weather chart.\\n{\\\"properties\\\":{},\\\"type\\\":\\\"object\\\"}\\n\\nuser: Hello, world!\",\"model\":\"chat-gguf\"}",
+      "body_json": {
+        "content": "Be brief.\n\nchart\nA weather chart.\n{\"properties\":{},\"type\":\"object\"}\n\nuser: Hello, world!",
+        "model": "chat-gguf"
+      },
+      "headers": {
+        "accept": "*/*",
+        "authorization": "<set>",
+        "content-type": "application/json",
+        "x-extra": "one"
+      },
+      "method": "POST",
+      "path": "/tokenize"
+    }
+  ],
+  "status": 200
+}

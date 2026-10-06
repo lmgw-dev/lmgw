@@ -1,0 +1,49 @@
+{
+  "deltas": [
+    [],
+    [],
+    [],
+    [
+      {
+        "tool_call_args": {
+          "fragment": "{\"a\"",
+          "index": 3
+        }
+      }
+    ],
+    [
+      {
+        "tool_call_start": {
+          "id": "call_3",
+          "index": 3,
+          "name": "lookup"
+        }
+      },
+      {
+        "tool_call_args": {
+          "fragment": ":1}",
+          "index": 3
+        }
+      }
+    ],
+    [],
+    [
+      {
+        "stop": "length"
+      }
+    ],
+    [
+      {
+        "stop": "content_filter"
+      }
+    ],
+    [
+      {
+        "stop": {
+          "other": "eos_token"
+        }
+      }
+    ],
+    []
+  ]
+}

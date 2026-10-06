@@ -586,6 +586,7 @@ fn log<'a>(
         max_tokens_clamped: None,
         fallback: headers.fallback_reason(),
         rung: None,
+        degraded: None,
     }
 }
 

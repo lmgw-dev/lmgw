@@ -162,6 +162,10 @@ pub(super) struct LogParams<'a> {
     /// request a fallback answered, and for anything that never reached the
     /// gate's per-send half.
     pub(super) rung: Option<i64>,
+    /// What the request's content lost on its way to a model that lacks a
+    /// capability (`request_logs.degraded`, [`crate::degraded`]): the send's
+    /// [`crate::gate::TurnLease::degraded`]. `None` for anything else.
+    pub(super) degraded: Option<String>,
 }
 
 pub(super) async fn record(
@@ -191,7 +195,15 @@ pub(super) async fn record(
     // Folding those in would make `model_calls` a count of HTTP requests under
     // a name that promises model turns, and a run that mistyped its alias forty
     // times would read as forty model calls that cost nothing.
-    if let Some(run) = p.ctx.run.filter(|_| p.route.is_some() && error.is_none()) {
+    //
+    // Nor a row that is no model call at all ([`RequestClass::Tool`]): a token
+    // count that had to load its model reached an upstream and came back,
+    // and is still no model turn.
+    if let Some(run) = p
+        .ctx
+        .run
+        .filter(|_| p.route.is_some() && error.is_none() && p.class != RequestClass::Tool)
+    {
         p.state
             .agent_meters
             .note_model_call(run, &usage, priced.cost.total_micro);
@@ -224,38 +236,11 @@ pub(super) async fn record(
         max_tokens_clamped: p.max_tokens_clamped,
         fallback_reason: p.fallback.map(|r| r.as_str().to_string()),
         rung: p.rung,
+        degraded: p.degraded,
     };
-    let log_id = store::insert_request_log(&p.state.db, &row)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("failed to write request log: {e}");
-            0
-        });
-    p.state.telemetry.request_finished(RequestSummary {
-        log_id,
-        ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        client_key: row.client_key,
-        ingress_proto: row.ingress_proto,
-        requested_alias: row.requested_alias,
-        upstream_name: row.upstream_name,
-        upstream_model: row.upstream_model,
-        egress_proto: row.egress_proto,
-        status,
-        ttfb_ms: row.ttfb_ms,
-        total_ms: row.total_ms,
-        prompt_tokens: row.prompt_tokens,
-        completion_tokens: row.completion_tokens,
-        cached_in_tokens: row.cached_in_tokens,
-        cache_write_tokens: row.cache_write_tokens,
-        streamed: row.streamed,
-        error_kind: row.error_kind,
-        error_msg: row.error_msg,
-        cost_micro: row.cost.total_micro,
-        class: row.class.as_str().to_string(),
-        key_id: row.key_id,
-        fallback_reason: row.fallback_reason,
-        rung: row.rung,
-    });
+    // Its own task: a handler dropped mid-insert neither loses the row nor
+    // leaves the gauge open (`recording/write.rs`).
+    write::write_row(p.state, row, status).await;
 }
 
 /// Identity + price for one logged call (usage-analytics §2.2, §4.4).
@@ -349,8 +334,21 @@ pub(super) async fn policy_or_refuse(
     started: Instant,
     class: RequestClass,
 ) -> Option<Response> {
+    let e = policy_refusal(state, ctx, alias).await?;
+    record_refusal(state, proto, ctx, alias, started, class, &e).await;
+    Some(error_response(proto, &e))
+}
+
+/// [`policy_or_refuse`]'s check alone, for a handler that writes the
+/// refusal's row itself — one holding an [`super::Unanswered`], which has to
+/// hand the row over right before it is written.
+pub(super) async fn policy_refusal(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    alias: &str,
+) -> Option<GatewayError> {
     let snap = state.snapshot();
-    let e = crate::policy::check_alias(
+    crate::policy::check_alias(
         &state.policy,
         &state.db,
         &snap,
@@ -358,9 +356,7 @@ pub(super) async fn policy_or_refuse(
         alias,
     )
     .await
-    .err()?;
-    record_refusal(state, proto, ctx, alias, started, class, &e).await;
-    Some(error_response(proto, &e))
+    .err()
 }
 
 /// [`policy_or_refuse`]'s check and row, for a caller that answers the
@@ -487,6 +483,7 @@ pub(super) async fn record_refusal(
             max_tokens_clamped: None,
             fallback: None,
             rung: None,
+            degraded: None,
         },
         e.http_status().as_u16(),
         None,
@@ -536,6 +533,13 @@ pub const MAX_TOKENS_RAISED_HEADER: &str = "x-lmgw-max-tokens-raised";
 /// is invisible in the body otherwise.
 pub const MAX_TOKENS_CLAMPED_HEADER: &str = "x-lmgw-max-tokens-clamped";
 
+/// How many of the request's images went to the fallback that answered as
+/// text placeholders, because its capabilities say it cannot see
+/// ([`crate::gate::fallback_images`]). Stamped next to `x-lmgw-fallback`,
+/// which says who answered: the placeholders themselves reach the model,
+/// not the client.
+pub const IMAGES_OMITTED_HEADER: &str = "x-lmgw-images-omitted";
+
 /// Why a token counter's answer is not exactly what the backend would count
 /// (api-docs design §5.1): comma-separated `Approx::as_str()` values, e.g.
 /// `flattened,tokenizer_guess`. Absent when the count is exact.
@@ -559,11 +563,10 @@ pub const COUNT_APPROXIMATE_HEADER: &str = "x-lmgw-count-approximate";
 /// reached the upstream.
 pub fn reasoning_ignored(
     protocol: crate::config::Protocol,
-    kind: crate::config::UpstreamKind,
     c: &crate::ir::ReasoningControl,
     has_reasoning_object: bool,
 ) -> Vec<&'static str> {
-    use crate::config::{Protocol, UpstreamKind};
+    use crate::config::Protocol;
     let mut out = Vec::new();
     if c.is_empty() {
         return out;
@@ -574,7 +577,7 @@ pub fn reasoning_ignored(
     // expresses nothing.
     match protocol {
         // llama-server understands all three.
-        Protocol::Openai if kind == UpstreamKind::LlamaServer => {}
+        Protocol::LlamaCpp => {}
         // A generic OpenAI-protocol provider knows `reasoning_effort` and
         // nothing else — unless the client brought OpenRouter's object, which
         // carries `enabled` natively.
@@ -627,6 +630,11 @@ pub(crate) struct Annotations {
     /// before its first turn, [`crate::gate::planned_clamp`]). `None` on every
     /// row the gate does not guard.
     pub max_tokens_clamped: Option<u32>,
+    /// How many images went to the answering fallback as placeholders,
+    /// because it cannot see ([`crate::gate::fallback_images`]): the send's
+    /// [`crate::gate::TurnLease::images_omitted`] (on `/v1/responses`, the
+    /// images the run opened with). `None` when none were left out.
+    pub images_omitted: Option<usize>,
 }
 
 impl Annotations {
@@ -635,6 +643,7 @@ impl Annotations {
             && self.max_tokens_defaulted.is_none()
             && self.max_tokens_raised.is_none()
             && self.max_tokens_clamped.is_none()
+            && self.images_omitted.is_none()
     }
 }
 
@@ -669,6 +678,12 @@ pub(crate) fn with_annotations(mut resp: Response, a: &Annotations) -> Response 
     if let Some(n) = a.max_tokens_clamped {
         resp.headers_mut().insert(
             header::HeaderName::from_static(MAX_TOKENS_CLAMPED_HEADER),
+            header::HeaderValue::from(n),
+        );
+    }
+    if let Some(n) = a.images_omitted {
+        resp.headers_mut().insert(
+            header::HeaderName::from_static(IMAGES_OMITTED_HEADER),
             header::HeaderValue::from(n),
         );
     }
@@ -857,6 +872,7 @@ pub(crate) async fn record_middleware_refusal(
             max_tokens_clamped: None,
             fallback: None,
             rung: None,
+            degraded: None,
         },
         e.http_status().as_u16(),
         None,
@@ -896,6 +912,7 @@ pub(crate) async fn record_request_failure(
         false,
         e.http_status().as_u16(),
         Some((e.kind().to_string(), e.to_string())),
+        None,
     )
     .await;
 }
@@ -915,6 +932,7 @@ pub(crate) async fn record_passthrough(
     streamed: bool,
     status: u16,
     error: Option<(String, String)>,
+    degraded: Option<String>,
 ) {
     state.telemetry.request_started();
     record_free_form(
@@ -929,6 +947,7 @@ pub(crate) async fn record_passthrough(
         streamed,
         status,
         error,
+        degraded,
     )
     .await;
 }
@@ -950,6 +969,7 @@ async fn record_free_form(
     streamed: bool,
     status: u16,
     error: Option<(String, String)>,
+    degraded: Option<String>,
 ) {
     let priced = price_call(
         state,
@@ -979,6 +999,7 @@ async fn record_free_form(
         error_msg: error.as_ref().map(|(_, m)| m.clone()),
         key_id: priced.key_id,
         fallback_reason: fallback.map(|r| r.as_str().to_string()),
+        degraded,
         // Free-form rows are the audio/task passthroughs and early refusals:
         // no usage was ever reported, so there is nothing to price. They land
         // in the unpriced remainder, which is exactly what they are.
@@ -1014,8 +1035,11 @@ async fn record_free_form(
         key_id: row.key_id,
         fallback_reason: row.fallback_reason,
         rung: row.rung,
+        degraded: row.degraded,
     });
 }
+
+mod write;
 
 #[cfg(test)]
 mod tests;

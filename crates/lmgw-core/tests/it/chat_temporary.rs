@@ -279,7 +279,7 @@ async fn a_temporary_thread_cannot_be_pinned_or_archived_and_delete_discards_it(
 async fn message_actions_work_on_a_temporary_thread() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "ok then", 4, 2).await;
-    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::Openai).await;
+    let (state, gw) = gateway(&mock, UpstreamKind::LlamaServer, Protocol::LlamaCpp).await;
     let tid = temporary(&gw).await["id"].as_i64().unwrap();
     let send = |q: &'static str| {
         let gw = &gw;

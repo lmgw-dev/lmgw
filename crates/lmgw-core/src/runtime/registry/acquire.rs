@@ -11,7 +11,7 @@ use crate::gate::facts::GateFacts;
 
 use super::raii::StartClaim;
 use super::*;
-use crate::runtime::argv::{podman_run_argv, render_image_args, EngineArgs};
+use crate::runtime::argv::{podman_run_argv, render_image_args, stamp_owner, EngineArgs};
 use crate::runtime::container_name;
 use crate::runtime::descriptor::ModelRuntime;
 use crate::runtime::image::ImageCapabilities;
@@ -37,6 +37,9 @@ impl Registry {
             sdcpp_help: Mutex::new(HashMap::new()),
             owner_waits: AtomicUsize::new(0),
             gpu_lease: Mutex::new(None),
+            owner: std::sync::OnceLock::new(),
+            on_started: std::sync::OnceLock::new(),
+            pass: tokio::sync::Mutex::new(Default::default()),
         }
     }
 
@@ -65,8 +68,8 @@ impl Registry {
     /// Ready → the in-flight count goes up under the same lock that answered
     /// "it is up", so no reaper or eviction can slip between the two.
     /// Starting → park on the claiming task's channel and re-decide when it
-    /// lands. Absent → claim it and run the start sequence with the lock
-    /// released.
+    /// lands. Absent → claim it, spawn the start sequence as the registry's
+    /// own task (`owned.rs`), and wait for the claim it hands back.
     ///
     /// The owner's claim ([`Origin::Owner`]) — every caller but a background
     /// candidate alias's start, which is [`Self::acquire_as`].
@@ -160,6 +163,7 @@ impl Registry {
                                 phase: phase.clone(),
                                 warnings: Vec::new(),
                                 capabilities: None,
+                                llama: None,
                                 gate: None,
                                 charge: spec.runtime.rung_charge(),
                                 resident_key: spec.runtime.resident_key(),
@@ -199,14 +203,12 @@ impl Registry {
                     })
                 }
                 Decision::Wait(parked_on, rx) => self.await_phase(&key, parked_on, rx).await?,
+                // The start runs as the registry's task, not inside this
+                // future (`owned.rs`): a caller dropped here — the client hung
+                // up mid-load — leaves the start to finish, the model `ready`
+                // and idle, instead of a container nothing holds.
                 Decision::Start(claim) => {
-                    return match self.start_container(spec, &claim.container_name).await {
-                        Ok(started) => claim.ready(started).await,
-                        Err(err) => {
-                            claim.fail(&err);
-                            Err(err)
-                        }
-                    }
+                    return self.spawn_start(claim, StartSpec::of(spec)).outcome().await
                 }
             }
         }
@@ -310,6 +312,10 @@ impl Registry {
         // container really has (second review, finding 1). Once per start,
         // not per port attempt.
         let gate = GateFacts::of_start(runtime, spec.models_dir).await;
+        // The row's projector advisory goes on the entry beside what the
+        // server says about itself (llama egress design §8.2): the start
+        // row's, read from the same descriptor, once per start.
+        let advisory = llama_props::ubatch_advisory(runtime, spec.models_dir).await;
         // A start on the CPU says so once: no VRAM figure will ever show for
         // it, and the thread count is the one setting that matters there.
         if let (Some(m), Some(engine)) = (&runtime.audio, &runtime.audio_settings) {
@@ -358,7 +364,11 @@ impl Registry {
                 }
             }
 
-            let outcome = self.podman_argv(&podman_run_argv(&render)).await;
+            let argv = match self.owner() {
+                Some(owner) => stamp_owner(podman_run_argv(&render), owner),
+                None => podman_run_argv(&render),
+            };
+            let outcome = self.podman_argv(&argv).await;
             let (status, stderr) = match outcome {
                 Ok(out) if out.ok() => {
                     // `podman run -d` returned; the model is still uploading.
@@ -373,7 +383,12 @@ impl Registry {
                                     warnings.extend(caps.warnings(row));
                                 }
                             }
-                            for w in &warnings {
+                            let llama = ready.props.map(|props| LlamaEntry {
+                                props,
+                                ubatch_advisory: advisory.clone(),
+                            });
+                            let unread = llama.as_ref().and_then(|l| l.props.as_ref().err());
+                            for w in warnings.iter().chain(unread) {
                                 tracing::warn!(
                                     container = %name,
                                     "{class} model '{model_id}' started with a warning: {w}"
@@ -383,6 +398,7 @@ impl Registry {
                                 port,
                                 warnings,
                                 capabilities: ready.capabilities,
+                                llama,
                                 gate,
                             })
                         }
@@ -457,16 +473,23 @@ impl Registry {
                     "no HTTP 200 from {url} within vram.load_timeout_seconds ({load_timeout:?})"
                 ));
             }
-            // The remaining budget *is* the per-probe timeout: a hung probe
-            // then costs exactly the wall clock the poll was allowed anyway,
-            // so there is no second, invented bound to explain.
-            if let Ok(resp) = self.http.get(&url).timeout(left).send().await {
+            // One probe may take until the next look at the container's own
+            // state is due — [`CONTAINER_EXIT_POLL`], the interval this poll
+            // already keeps — and never past the load budget. With the whole
+            // remaining budget as its timeout, one connection that hung
+            // (accepted, never answered) stalled the poll and the exit check
+            // behind it until `vram.load_timeout_seconds` ran out. These
+            // routes answer at once when the model is up; a probe cut short
+            // is "still starting", the next one goes out a `HEALTH_POLL`
+            // later.
+            let probe = CONTAINER_EXIT_POLL.min(left);
+            if let Ok(resp) = self.http.get(&url).timeout(probe).send().await {
                 if resp.status().as_u16() == 200 {
                     return Ok(());
                 }
             }
             if let Some(dead) = self.exited_since(name, &mut next_state_check).await {
-                return Err(format!("{dead} before {url} answered 200"));
+                return Err(format!("{dead}, before {url} answered 200"));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -496,10 +519,21 @@ impl Registry {
         load_timeout: Duration,
     ) -> Result<Ready, String> {
         if !matches!(render.engine, EngineArgs::Image(_)) {
-            return self
-                .await_health(name, port, render.health_path, load_timeout)
-                .await
-                .map(|()| Ready::default());
+            let deadline = Instant::now() + load_timeout;
+            self.await_health(name, port, render.health_path, load_timeout)
+                .await?;
+            // llama-server says what it is once it is up (llama egress design
+            // §4.2), as sd-server does below: once per start and climb, in
+            // what is left of the same budget. A read that fails is a warning
+            // on the entry, never a failed start.
+            let props = match render.engine {
+                EngineArgs::Llama(_) => Some(self.read_llama_props_by(port, deadline).await),
+                _ => None,
+            };
+            return Ok(Ready {
+                props,
+                ..Ready::default()
+            });
         }
         let url = format!("http://127.0.0.1:{port}{}", render.health_path);
         // What this poll is waiting for, said in full: for this engine a 5xx
@@ -517,6 +551,10 @@ impl Registry {
             if left.is_zero() {
                 return Err(timed_out());
             }
+            // The remaining budget, not `await_health`'s per-probe bound: this
+            // route is the capabilities document, read from a LoRA and
+            // upscaler scan that can take its time on a large directory, and
+            // cutting it short would turn a slow answer into no answer.
             if let Ok(resp) = self.http.get(&url).timeout(left).send().await {
                 let status = resp.status().as_u16();
                 // The server sets this header on the 500 it throws, and it is
@@ -535,25 +573,24 @@ impl Registry {
                         Ok(body) => match ImageCapabilities::parse(&body) {
                             Ok(caps) => Ready {
                                 capabilities: Some(caps),
-                                warnings: Vec::new(),
+                                ..Ready::default()
                             },
                             Err(e) => Ready {
-                                capabilities: None,
                                 warnings: vec![format!(
                                     "the capabilities body could not be read ({e}) — this \
                                      model's samplers, limits and supported modes are unknown"
                                 )],
+                                ..Ready::default()
                             },
                         },
                         Err(e) => Ready {
-                            capabilities: None,
                             warnings: vec![format!("the capabilities body could not be read: {e}")],
+                            ..Ready::default()
                         },
                     });
                 }
                 if (500..600).contains(&status) {
                     return Ok(Ready {
-                        capabilities: None,
                         warnings: vec![format!(
                             "{} answered HTTP {status}: {} — the model generates, but its \
                              capabilities (samplers, limits, supported modes) could not be read",
@@ -564,13 +601,14 @@ impl Registry {
                                 &what
                             }
                         )],
+                        ..Ready::default()
                     });
                 }
                 // Anything else (a connection reset for the first ~0.6 s, a
                 // 404 from something else on the port) is "not yet".
             }
             if let Some(dead) = self.exited_since(name, &mut next_state_check).await {
-                return Err(format!("{dead} before {url} answered"));
+                return Err(format!("{dead}, before {url} answered"));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -589,6 +627,9 @@ pub(super) struct Started {
     pub(super) port: u16,
     pub(super) warnings: Vec<String>,
     pub(super) capabilities: Option<ImageCapabilities>,
+    /// What a llama-server said about itself, and its start row's projector
+    /// advisory ([`LlamaEntry`]). `None` for every other engine.
+    pub(super) llama: Option<LlamaEntry>,
     pub(super) gate: Option<Arc<GateFacts>>,
 }
 
@@ -597,6 +638,9 @@ pub(super) struct Started {
 #[derive(Default)]
 struct Ready {
     capabilities: Option<ImageCapabilities>,
+    /// llama-server's `GET /props`, read once it answered `/health`: the
+    /// facts or why there are none. `None` for every other engine.
+    props: Option<Result<Arc<crate::egress::llama_cpp::props::LlamaFacts>, String>>,
     warnings: Vec<String>,
 }
 

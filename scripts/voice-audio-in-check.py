@@ -9,7 +9,7 @@ Each run is a fresh thread on MODEL (temperature 0, a short-answer prompt,
 language de) bound to a voice session with server VAD, one TTS-generated
 German clip streamed into it in real time (100 ms appends) followed by
 silence, until the response's `lmgw.response.timing`. The same clips run
-under `audio_input: local` and then `off` (the thread's override), after one
+under `audio_input: on` and then `off` (the thread's override), after one
 warm-up run each. Per path it reports commit → first token and commit →
 first audio as the client saw them, and the server's own `first_token_ms`,
 `asr_ms`, `transcript_wait_ms` and prompt tokens: median, min and max, for
@@ -24,6 +24,14 @@ Only TTS-generated speech (the probe's corpus, piper voices on synthetic
 text) and synthetic noise and silence: never a recording of a person. The
 reply audio is counted, never played or kept. The threads are deleted at the
 end.
+
+It calls no cloud model (design §7). Since 2026-10-06 a configured fallback
+hears a turn wherever it runs, so the check refuses to start unless MODEL is
+a local chat row with no fallback at all: its hold_fallback_mode `none`, or
+`inherit` with no global hold fallback. Nothing can then hand a turn on —
+not the GPU hold, a benchmark run or a busy card, whenever they come. As a
+backstop it still checks the verdict at start and stops at the first
+response a fallback answered.
 """
 import argparse
 import asyncio
@@ -31,6 +39,7 @@ import base64
 import json
 import statistics
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import wave
@@ -73,6 +82,60 @@ class Gateway:
     def rows(self, tid):
         v = self.call("GET", f"/chat/api/threads/{tid}")
         return v.get("messages") or []
+
+    def verdict(self, tid):
+        v = self.call("GET", f"/chat/api/threads/{tid}")
+        return ((v.get("thread") or {}).get("voice_resolved") or {}).get("audio_input") or {}
+
+
+def no_fallback(gw, model):
+    """Refuse to start unless MODEL has no fallback configured at all (module
+    doc): the check calls no cloud model, and a configured fallback is always
+    used."""
+    q = urllib.parse.urlencode({"model_id": model, "target": "chat"})
+    try:
+        row = gw.call("GET", f"/api/local-model?{q}")
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"refusing: {model} is no local chat row of this dev copy ({e}); "
+                         "the live check runs on one with no fallback")
+    mode = row.get("hold_fallback_mode")
+    glob = ((gw.call("GET", "/api/settings-full") or {}).get("hold") or {}).get("fallback_alias")
+    named = {"alias": row.get("hold_fallback"), "inherit": glob}.get(mode)
+    if mode not in ("none", "inherit", "alias") or (named or "").strip():
+        raise SystemExit(
+            f"refusing: {model} has a fallback ({mode}: {named!r}); a configured fallback is "
+            "always used, and the live check calls no other model. Set its hold fallback to "
+            "none on the dev copy first.")
+    tid = gw.thread(model, "on")
+    try:
+        v = gw.verdict(tid)
+    finally:
+        gw.call("POST", f"/chat/api/threads/{tid}/delete")
+    if v.get("model") != model or v.get("lead"):
+        raise SystemExit(
+            f"refusing: a turn to {model} would go to {v.get('model')!r} "
+            f"({v.get('lead') or v.get('why') or 'a fallback'}); the live check calls no "
+            "other model. Release the GPU hold or wait for the benchmark run.")
+
+
+def answered_by(turn):
+    """The model a fallback answered with in `turn`'s chat frames, if any."""
+    for e in turn["events"]:
+        if e.get("type") == "lmgw.chat.frame" and e.get("event") == "done":
+            who = (e.get("data") or {}).get("answered_by")
+            if who:
+                return who
+    return None
+
+
+def first_party(turns):
+    """Stop the check at the first response a fallback answered (module doc)."""
+    for t in turns:
+        who = answered_by(t)
+        if who:
+            raise SystemExit(f"stopped: {t['clip']} was answered by the fallback {who}, not "
+                             "the model under test; the live check calls no other model")
+    return turns
 
 
 def pcm(corpus, name):
@@ -215,7 +278,7 @@ async def runs(gw, model, path, clips, silence_ms, tids):
     for name, audio in clips:
         tid = gw.thread(model, path)
         tids.append(tid)
-        turn = (await session(gw, tid, [(name, audio)], silence_ms))[0]
+        turn = first_party(await session(gw, tid, [(name, audio)], silence_ms))[0]
         m = measure(turn)
         rows = gw.rows(tid)
         m["rows"] = [(r["role"], r["content"], (r.get("voice") or {}).get("input"),
@@ -243,6 +306,7 @@ def main():
     if url.hostname != "127.0.0.1" or url.port in (None, 8001):
         raise SystemExit(f"refusing: {a.base} is not a dev copy on 127.0.0.1 (8001 is the app's)")
     gw = Gateway(a.base, Path(a.token_file).read_text().strip())
+    no_fallback(gw, a.model)
     corpus = a.corpus
     short = [(n, pcm(corpus, n)) for n in SHORT[: a.runs]]
     long = [(f"long_{i}", long_turn(corpus)) for i in range(a.long_runs)]
@@ -253,13 +317,13 @@ def main():
     async def checked(path, clips, silence_ms):
         tid = gw.thread(a.model, path)
         tids.append(tid)
-        turns = [measure(t) for t in await session(gw, tid, clips, silence_ms)]
+        turns = [measure(t) for t in first_party(await session(gw, tid, clips, silence_ms))]
         rows = [(r["role"], r["content"], (r.get("voice") or {}).get("input"))
                 for r in gw.rows(tid)]
         return {"turns": turns, "rows": rows}
 
     async def go():
-        for path in ("local", "off"):
+        for path in ("on", "off"):
             print(f"{path}: warm-up", flush=True)
             await runs(gw, a.model, path, short[:1], 700, tids)
             r = {}
@@ -293,8 +357,8 @@ def main():
         summary[path] = s
     # Prompt tokens per second of audio: the same clip, heard against read.
     per_s = []
-    local, off = result["paths"]["local"], result["paths"]["off"]
-    for lm, om in zip(local.get("short", []) + local.get("long", []),
+    heard, off = result["paths"]["on"], result["paths"]["off"]
+    for lm, om in zip(heard.get("short", []) + heard.get("long", []),
                       off.get("short", []) + off.get("long", [])):
         if lm["prompt_tokens"] and om["prompt_tokens"]:
             secs = next(len(au) / 48000 for n, au in short + long if n == lm["clip"])

@@ -41,7 +41,7 @@ async fn bound() -> (
     };
     let bind = state.chat_live.bind_voice(thread.id);
     let mut audio_input = bound::audio_input(&state, &thread).await;
-    audio_input.value = crate::store::AudioInputMode::Local;
+    audio_input.value = crate::store::AudioInputMode::On;
     audio_input.verdict.path = InputPath::Audio;
     audio_input.verdict.why = None;
     let binding = super::super::super::thread::Binding {

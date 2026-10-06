@@ -98,6 +98,7 @@ async fn rich_thread(state: &SharedState, title: &str) -> i64 {
             ir_messages: Some(ir.into()),
             model: Some("m-earlier".into()),
             answered_by: Some("cloud-fb".into()),
+            images_note: None,
             voice: None,
         },
     )

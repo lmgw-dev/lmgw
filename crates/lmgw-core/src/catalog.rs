@@ -6,7 +6,10 @@
 //! `docs/design/2026-09-17-model-capabilities-design.md` §4: a
 //! field the catalog does not publish is absent (`None`), never defaulted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -108,6 +111,59 @@ type CacheEntry = (Instant, Result<Vec<ModelInfo>, String>);
 #[derive(Default)]
 pub struct CatalogCache {
     inner: RwLock<HashMap<i64, CacheEntry>>,
+    /// Upstreams whose catalog a background read is fetching now
+    /// ([`cached_only`]): one read each, however many ask.
+    refreshing: std::sync::Mutex<HashSet<i64>>,
+}
+
+tokio::task_local! {
+    /// Set inside [`cached_only`]: a catalog read is served from the cache
+    /// alone, and a read it could not serve is recorded here.
+    static CACHED_ONLY: Arc<AtomicBool>;
+}
+
+/// Run `f` with every upstream catalog read served from the cache alone
+/// (voice-audio-input review V9): what is cached answers, a stale entry
+/// too; what is not cached is read in the background, and `f` sees that
+/// catalog as not read yet. The second value says whether that happened, so
+/// a caller can say "not known yet" rather than guess. For a page that must
+/// not wait on a provider: no time limit of its own, nothing dropped — the
+/// background read is the normal one, and its answer is cached for the next
+/// look.
+pub async fn cached_only<F: Future>(f: F) -> (F::Output, bool) {
+    let missed = Arc::new(AtomicBool::new(false));
+    let out = CACHED_ONLY.scope(missed.clone(), f).await;
+    (out, missed.load(Ordering::Relaxed))
+}
+
+/// Read `u`'s catalog into the cache behind the caller's back, once at a
+/// time per upstream ([`cached_only`]).
+fn refresh_in_background(state: &SharedState, u: &Upstream) {
+    let fresh = state
+        .catalog
+        .refreshing
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(u.id);
+    if !fresh {
+        return;
+    }
+    let (state, u) = (state.clone(), u.clone());
+    tokio::spawn(async move {
+        let fetched = fetch_models(&state, &u).await;
+        state
+            .catalog
+            .inner
+            .write()
+            .await
+            .insert(u.id, (Instant::now(), fetched));
+        state
+            .catalog
+            .refreshing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&u.id);
+    });
 }
 
 impl CatalogCache {
@@ -118,11 +174,22 @@ impl CatalogCache {
 
 /// Model catalog served by an upstream, through the cache.
 pub async fn upstream_models(state: &SharedState, u: &Upstream) -> Result<Vec<ModelInfo>, String> {
+    let cached_only = CACHED_ONLY.try_with(Arc::clone).ok();
     if let Some((at, cached)) = state.catalog.inner.read().await.get(&u.id) {
         let ttl = if cached.is_ok() { TTL } else { ERR_TTL };
         if at.elapsed() < ttl {
             return cached.clone();
         }
+        // Inside `cached_only`: the stale answer now, a fresh one later.
+        if cached_only.is_some() {
+            refresh_in_background(state, u);
+            return cached.clone();
+        }
+    }
+    if let Some(missed) = cached_only {
+        missed.store(true, Ordering::Relaxed);
+        refresh_in_background(state, u);
+        return Err(format!("{}: models list not read yet", u.name));
     }
     let fetched = fetch_models(state, u).await;
     state
@@ -317,7 +384,8 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
     let base = u.base();
     let key = u.api_key.as_deref().filter(|k| !k.is_empty());
     let rb = match u.protocol {
-        Protocol::Openai => {
+        // llama-server lists its models the OpenAI way.
+        Protocol::Openai | Protocol::LlamaCpp => {
             let mut rb = state.http.get(format!("{base}/models"));
             if let Some(k) = key {
                 rb = rb.bearer_auth(k);
@@ -367,8 +435,8 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
     }
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     let mut out: Vec<ModelInfo> = match u.protocol {
-        // OpenAI: {data: [{id, context_window?, context_length?, ...}]}
-        Protocol::Openai => body["data"]
+        // OpenAI (and llama-server): {data: [{id, context_window?, context_length?, ...}]}
+        Protocol::Openai | Protocol::LlamaCpp => body["data"]
             .as_array()
             .map(|arr| arr.iter().filter_map(parse_openai_entry).collect())
             .unwrap_or_default(),

@@ -21,7 +21,6 @@ use super::*;
 /// `POST /v1/embeddings` (OpenAI shape in/out, §6).
 pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
     let started = Instant::now();
-    state.telemetry.request_started();
     let proto = ClientProto::OpenaiChat;
 
     let alias = body
@@ -29,13 +28,20 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
+    // Opens the in-flight gauge, and writes the `499` row should the client
+    // go away before the row is written (`unanswered.rs`).
+    let mut unanswered = Unanswered::open(&state, proto, &ctx, &alias, started, RequestClass::Aux);
 
-    if let Some(r) = policy_or_refuse(&state, proto, &ctx, &alias, started, RequestClass::Aux).await
-    {
-        return r;
+    if let Some(e) = policy_refusal(&state, &ctx, &alias).await {
+        unanswered.logging();
+        record_refusal(&state, proto, &ctx, &alias, started, RequestClass::Aux, &e).await;
+        return error_response(proto, &e);
     }
 
+    unanswered.stage("waiting for admission, or for the model's answer");
     let result = embeddings_inner(&state, &body).await;
+    // Every way on writes the row.
+    unanswered.logging();
     match result {
         Ok((route, headers, response_body, usage)) => {
             record(
@@ -52,6 +58,7 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     max_tokens_clamped: None,
                     fallback: headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 200,
                 None,
@@ -77,6 +84,7 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     max_tokens_clamped: None,
                     fallback: headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 e.http_status().as_u16(),
                 None,
@@ -346,7 +354,6 @@ pub(crate) async fn embed_once(
 /// `POST /v1/rerank` (Jina shape in/out — quickdoc §9a).
 pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
     let started = Instant::now();
-    state.telemetry.request_started();
     let proto = ClientProto::OpenaiChat;
 
     let alias = body
@@ -354,13 +361,21 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
+    // Opens the in-flight gauge, and writes the `499` row should the client
+    // go away before the row is written (`unanswered.rs`).
+    let mut unanswered = Unanswered::open(&state, proto, &ctx, &alias, started, RequestClass::Aux);
 
-    if let Some(r) = policy_or_refuse(&state, proto, &ctx, &alias, started, RequestClass::Aux).await
-    {
-        return r;
+    if let Some(e) = policy_refusal(&state, &ctx, &alias).await {
+        unanswered.logging();
+        record_refusal(&state, proto, &ctx, &alias, started, RequestClass::Aux, &e).await;
+        return error_response(proto, &e);
     }
 
-    match rerank_inner(&state, &body).await {
+    unanswered.stage("waiting for admission, or for the model's answer");
+    let result = rerank_inner(&state, &body).await;
+    // Every way on writes the row.
+    unanswered.logging();
+    match result {
         Ok((route, headers, response_body, usage)) => {
             record(
                 LogParams {
@@ -376,6 +391,7 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     max_tokens_clamped: None,
                     fallback: headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 200,
                 None,
@@ -401,6 +417,7 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     max_tokens_clamped: None,
                     fallback: headers.fallback_reason(),
                     rung: None,
+                    degraded: None,
                 },
                 e.http_status().as_u16(),
                 None,
@@ -627,6 +644,7 @@ async fn log_in_process_aux(
             max_tokens_clamped: None,
             fallback,
             rung: None,
+            degraded: None,
         },
         status,
         Some(started.elapsed().as_millis() as i64),

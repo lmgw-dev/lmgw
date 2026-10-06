@@ -1,0 +1,37 @@
+{
+  "completion": {
+    "content": [
+      {
+        "text": "Checking.",
+        "type": "text"
+      },
+      {
+        "args": {
+          "city": "Berlin"
+        },
+        "id": "call_a",
+        "name": "get_weather",
+        "type": "tool_use"
+      }
+    ],
+    "finish_reason": "tool_use",
+    "model": "gguf",
+    "reasoning": "Need the weather.",
+    "timings": {
+      "cache_n": 3,
+      "draft_n": 6,
+      "draft_n_accepted": 4,
+      "predicted_ms": 96.0,
+      "predicted_n": 12,
+      "predicted_per_second": 125.0,
+      "prompt_ms": 21.5,
+      "prompt_n": 17,
+      "prompt_per_second": 790.7
+    },
+    "usage": {
+      "cached_input_tokens": 3,
+      "completion_tokens": 12,
+      "prompt_tokens": 20
+    }
+  }
+}

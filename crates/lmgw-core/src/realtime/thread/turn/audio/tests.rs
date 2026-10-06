@@ -42,14 +42,18 @@ fn upstream(status: u16, message: &str) -> GatewayError {
 
 #[test]
 fn only_refusals_of_the_audio_go_again_as_the_transcript() {
-    let not_local = crate::web::chat_voice::bound::AUDIO_NOT_LOCAL;
+    let unheard = crate::web::chat_voice::bound::AUDIO_NOT_HEARD;
     let retried = [
         (
             GatewayError::InvalidRequest {
-                code: not_local,
+                code: unheard,
                 message: "x".into(),
             },
-            Refusal::NotLocal,
+            Refusal::Unheard,
+        ),
+        (
+            GatewayError::Unsupported(crate::egress::anthropic::NO_AUDIO_BLOCK.into()),
+            Refusal::Unheard,
         ),
         (
             GatewayError::Unsupported(crate::gate::count::AUDIO_UNBOUNDED.into()),
@@ -131,15 +135,26 @@ fn only_refusals_of_the_audio_go_again_as_the_transcript() {
     for e in not_retried {
         assert_eq!(refusal(&e, false), None, "{e:?}");
     }
-    // The server going away under the audio is no refusal: kept, not
-    // retried.
-    assert!(crashed(&GatewayError::Transport("connection reset".into())));
-    assert!(crashed(&upstream(
-        502,
-        "chat model 'gemma' stopped answering (reset) and could not be restarted: oom"
-    )));
-    assert!(!crashed(&upstream(502, "bad gateway")));
-    assert!(!crashed(&upstream(500, "CUDA error: out of memory")));
+    // A llama-server going away under the audio is no refusal: kept, not
+    // retried. Anywhere else a dropped connection says nothing about the
+    // audio (decision D5).
+    let reset = GatewayError::Transport("connection reset".into());
+    assert!(crashed(&reset, true));
+    assert!(!crashed(&reset, false), "a cloud route's drop");
+    // …which goes again as the transcript, once (review V4).
+    assert!(dropped(&reset, false));
+    assert!(!dropped(&reset, true), "a llama-server's drop is a crash");
+    assert!(!dropped(&upstream(502, "bad gateway"), false));
+    assert!(!dropped(&GatewayError::Timeout, false));
+    assert!(crashed(
+        &upstream(
+            502,
+            "chat model 'gemma' stopped answering (reset) and could not be restarted: oom"
+        ),
+        true
+    ));
+    assert!(!crashed(&upstream(502, "bad gateway"), true));
+    assert!(!crashed(&upstream(500, "CUDA error: out of memory"), true));
 }
 
 fn frame(event: &'static str) -> TurnFrame {
@@ -162,8 +177,8 @@ fn armed(tx: &responder::Tx) -> Attempt {
 fn a_refused_attempt_says_nothing_and_a_refusal_after_its_first_word_is_relayed() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let refused = GatewayError::InvalidRequest {
-        code: crate::web::chat_voice::bound::AUDIO_NOT_LOCAL,
-        message: "not here".into(),
+        code: crate::web::chat_voice::bound::AUDIO_NOT_HEARD,
+        message: "gpt does not take audio input".into(),
     };
     // Before any output: the refusal and the `done` behind it are held.
     let mut a = armed(&tx);
@@ -174,7 +189,7 @@ fn a_refused_attempt_says_nothing_and_a_refusal_after_its_first_word_is_relayed(
     );
     assert!(a.screen(TurnFrame::error(&refused)).is_empty());
     assert!(a.screen(frame("done")).is_empty());
-    assert_eq!(a.refused.as_ref().map(|r| r.kind), Some(Refusal::NotLocal));
+    assert_eq!(a.refused.as_ref().map(|r| r.kind), Some(Refusal::Unheard));
     // After a delta it is the turn's own error.
     let mut a = armed(&tx);
     assert_eq!(a.screen(frame("delta")).len(), 1);
@@ -195,9 +210,10 @@ fn a_refused_attempt_says_nothing_and_a_refusal_after_its_first_word_is_relayed(
 
 // -- the bound responder, end to end ----------------------------------------
 
-/// A gateway whose alias `m` is a cloud model answering `Es ist spät.`,
-/// with the audio-input setting at `setting`, and a thread on it whose
-/// history ends with a reply: the thread's id.
+/// A gateway whose alias `m` is a cloud model answering `Es ist spät.`
+/// whose catalog says nothing of audio (so lmgw cannot tell whether it
+/// takes it), with the audio-input setting at `setting`, and a thread on it
+/// whose history ends with a reply: the thread's id.
 async fn world(setting: &str) -> (crate::state::SharedState, MockServer, i64) {
     let mock = MockServer::start().await;
     let said = format!(
@@ -315,6 +331,7 @@ async fn respond_until(
             parts: spoken.into_iter().map(Spoken::Ready).collect(),
             user_row,
         }),
+        degraded: None,
     };
     let running = tokio::spawn(super::super::run(job));
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -386,7 +403,7 @@ fn events(said: &Said) -> Vec<&str> {
 
 #[tokio::test]
 async fn audio_refused_before_it_leaves_goes_again_as_the_row_with_no_turn_frame() {
-    let (state, mock, tid) = world("local").await;
+    let (state, mock, tid) = world("on").await;
     let said = respond(
         &state,
         tid,
@@ -404,12 +421,11 @@ async fn audio_refused_before_it_leaves_goes_again_as_the_row_with_no_turn_frame
     let why = &said.notes[0];
     assert_eq!(
         why,
-        "its route is a model lmgw does not run, so nothing was sent: your voice stays on \
-         this machine"
+        "lmgw cannot tell whether m takes audio (upstream 'cloud'), so nothing was sent"
     );
     assert!(
         said.remembered.is_empty(),
-        "a privacy refusal is never remembered"
+        "lmgw's own refusal is never remembered"
     );
     // The cloud got the transcript, once, and never the audio.
     let got = bodies(&mock).await;
@@ -455,7 +471,7 @@ async fn a_thread_whose_setting_is_off_by_now_skips_the_audio_and_waits_for_the_
 
 #[tokio::test]
 async fn a_refusal_and_a_failed_transcription_fail_with_transcription_failed() {
-    let (state, mock, tid) = world("local").await;
+    let (state, mock, tid) = world("on").await;
     let said = respond(&state, tid, vec![audio()], settles(UserRow::Failed)).await;
     let e = said.result.unwrap().unwrap_err();
     assert_eq!(e.code(), "transcription_failed", "{e}");
@@ -477,7 +493,7 @@ async fn a_refusal_and_a_failed_transcription_fail_with_transcription_failed() {
 
 #[tokio::test]
 async fn a_veto_while_the_refused_attempt_waits_ends_quietly() {
-    let (state, mock, tid) = world("local").await;
+    let (state, mock, tid) = world("on").await;
     let said = respond(&state, tid, vec![audio()], settles(UserRow::Veto)).await;
     assert_eq!(events(&said), ["done"], "no error: {:?}", said.frames);
     let e = said.result.unwrap().unwrap_err();

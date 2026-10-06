@@ -1,13 +1,17 @@
 //! Session and response tools (realtime design §2.2, §7.4): flat function
-//! tools and the `tool_choice` union.
+//! tools, server-side `mcp` tools (realtime-server-tools design §1), and the
+//! `tool_choice` union.
 //!
-//! Only `type: "function"` is a tool here. Server-side `mcp` tools are §19,
-//! and parsing them would mean accepting a tool the cascade then never offers
-//! the model — so an `mcp` tool fails to parse and the client gets an `error`
-//! naming the variant, rather than a session that quietly lost a tool.
+//! A function tool is offered to the model as it is; an `mcp` tool names a
+//! label whose tools the session lists and offers (realtime-server-tools
+//! §1.2, §2.1). Its rules beyond the shape — the shared `allowed_tools` /
+//! `require_approval` parser, one entry per label, no approvals yet — are
+//! checked where the tools arrive (`realtime::mcp_tools`).
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+use super::mcp::{McpChoice, McpTool};
 
 /// One session or response tool.
 ///
@@ -28,6 +32,18 @@ pub enum Tool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parameters: Option<Value>,
     },
+    /// Redacted as it is parsed ([`McpTool::redacted`]).
+    Mcp(McpTool),
+}
+
+impl Tool {
+    /// The `mcp` tool this is, if it is one.
+    pub fn as_mcp(&self) -> Option<&McpTool> {
+        match self {
+            Self::Mcp(t) => Some(t),
+            Self::Function { .. } => None,
+        }
+    }
 }
 
 /// [`Tool`] as the wire spells it once its `type` is filled in.
@@ -41,30 +57,36 @@ enum TaggedTool {
         #[serde(default)]
         parameters: Option<Value>,
     },
+    Mcp(McpTool),
 }
 
 impl<'de> Deserialize<'de> for Tool {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = super::with_default_type(Value::deserialize(d)?, "function");
-        let TaggedTool::Function {
-            name,
-            description,
-            parameters,
-        } = TaggedTool::deserialize(v).map_err(serde::de::Error::custom)?;
-        Ok(Self::Function {
-            name,
-            description,
-            parameters,
-        })
+        Ok(
+            match TaggedTool::deserialize(v).map_err(serde::de::Error::custom)? {
+                TaggedTool::Function {
+                    name,
+                    description,
+                    parameters,
+                } => Self::Function {
+                    name,
+                    description,
+                    parameters,
+                },
+                TaggedTool::Mcp(t) => Self::Mcp(t.redacted()),
+            },
+        )
     }
 }
 
-/// `tool_choice`: a mode, or one named function.
+/// `tool_choice`: a mode, one named function, or an `mcp` label's tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolChoice {
     Mode(ToolChoiceMode),
     Function(FunctionChoice),
+    Mcp(McpChoice),
 }
 
 /// `"auto"` | `"none"` | `"required"`.

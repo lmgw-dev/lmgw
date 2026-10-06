@@ -6,13 +6,16 @@ use serde_json::{json, Value};
 
 use crate::config::{AudioModel, ImageModel, LocalModel, Snapshot};
 use crate::runtime::descriptor::{model_runtime, model_runtimes};
-use crate::runtime::registry::RuntimeError;
+use crate::runtime::registry::{PassWait, RuntimeError};
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
 use crate::store::NewLocalModel;
 use crate::vram::Fit;
 
 use super::*;
+
+mod unheld;
+use unheld::model_stop_unheld;
 
 /// The refusal `container` gives `start` and `restart` while the hold is on
 /// (gpu-hold design §2).
@@ -169,6 +172,12 @@ async fn model_stop(
     model_id: &str,
     force: bool,
 ) -> Result<Value, String> {
+    // No entry is not "nothing running": a container the registry lost track
+    // of runs under the name this model renders (`registry/unheld.rs`), and
+    // only podman can say. Stopped by that name, and said so.
+    if !state.runtime().contains(class, model_id) {
+        return model_stop_unheld(state, class, model_id).await;
+    }
     match state.runtime().stop(class, model_id, force).await {
         Ok(()) => Ok(json!({
             "ok": true, "class": class.as_str(), "model_id": model_id,
@@ -228,8 +237,9 @@ async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Resul
     // A stop that *failed* while held is the one outcome that must not be
     // rounded up to the sentence below. Without a hold the `start_model` after
     // it is the recovery — the next start replaces the container by name — but
-    // under a hold nothing starts, nothing retries, and the container is still
-    // holding GPU memory the owner asked for back. Saying "was stopped" here
+    // under a hold nothing starts, and the container is still holding GPU
+    // memory the owner asked for back unless a later reconciliation pass
+    // takes it up again (`lifecycle::readopt`). Saying "was stopped" here
     // would be simply false.
     if held {
         if let Err(e) = &stopped {
@@ -239,8 +249,10 @@ async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Resul
                 "message": format!(
                     "'{model_id}' ({class}) could NOT be stopped ({e}), and lmgw is holding the \
                      GPU so it is not started again either — its container may still be holding \
-                     GPU memory, and nothing will retry it. The new configuration takes effect \
-                     at the first start after the hold is released."
+                     GPU memory. lmgw retries a container it started on later reaper ticks, \
+                     backing off while the stop keeps failing; `podman stop` it if it stays. \
+                     The new configuration takes effect at the first start after the hold is \
+                     released."
                 ),
             }));
         }
@@ -470,11 +482,12 @@ async fn recreate_one(state: &SharedState, class: Class, model_id: &str, held: b
         Err(RuntimeError::Busy { in_flight, .. }) => Recreated::Busy(in_flight),
         // A *failed* stop under a hold is not the hold doing its job: the
         // container is still on the card, the registry has already dropped its
-        // entry, and nothing retries it. Reporting it as `Held` — "stopped,
-        // starts again at release" — would be the exact opposite of what
-        // happened, so the error is reported as an error (gpu-hold design §2:
-        // hold refuses and stops, it never invents a success). No restart is
-        // attempted either; `start_model` would only answer `Fit::Held`.
+        // entry, and only a later tick's reconciliation pass takes it up again.
+        // Reporting it as `Held` — "stopped, starts again at release" — would
+        // be the exact opposite of what happened, so the error is reported as
+        // an error (gpu-hold design §2: hold refuses and stops, it never
+        // invents a success). No restart is attempted either; `start_model`
+        // would only answer `Fit::Held`.
         Err(e) if held => Recreated::Failed(format!("stopping it failed: {e}")),
         // Once a stop has failed, lmgw's belief about the container is
         // worthless (runtime/registry/stop.rs's own reasoning for dropping the
@@ -862,6 +875,18 @@ pub async fn container(
                 l.run_id
             ));
         }
+    }
+
+    // A verb that acts on what is running acts on all of it: a container the
+    // registry lost track of is adopted — or removed — first
+    // (`lifecycle::readopt`), so `apply` does not answer "not running" over a
+    // container that runs, and "stop all" reaches it. A per-model `stop` asks
+    // podman by name instead (`model_stop`).
+    //
+    // Waited for at most one reaper tick — a pass that takes longer is stuck
+    // on podman, and the verb goes ahead on what the registry holds.
+    if matches!(action, "restart" | "apply") || (model_class.is_none() && action == "stop") {
+        lifecycle::readopt(state, PassWait::Join, lifecycle::REAP_INTERVAL).await;
     }
 
     if let Some(class) = model_class {

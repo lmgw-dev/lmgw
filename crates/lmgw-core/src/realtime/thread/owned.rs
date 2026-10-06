@@ -191,6 +191,15 @@ mod tests {
             assert_eq!(e.code.as_deref(), Some("owned_by_thread"), "{patch}");
             assert_eq!(e.param.as_deref(), Some(param), "{patch}");
         }
+        // A server-side tool is a change of the thread's tools: its MCP
+        // tools run through the Chat's own turn (realtime-server-tools).
+        let e = update(
+            &s,
+            json!({"type": "realtime", "tools": [{"type": "mcp", "server_label": "docs"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code.as_deref(), Some("owned_by_thread"));
+        assert_eq!(e.param.as_deref(), Some("session.tools"));
         // `null` is a change too.
         let e = update(
             &s,

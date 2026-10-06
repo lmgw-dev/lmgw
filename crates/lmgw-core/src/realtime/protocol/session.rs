@@ -57,8 +57,9 @@ pub struct Session {
     pub output_modalities: Option<Vec<Modality>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioConfig>,
-    /// Flat function tools (§7.4). An explicit `[]` clears them; an absent
-    /// key leaves them as they were (§2.2).
+    /// Flat function tools (§7.4) and `mcp` tools (realtime-server-tools
+    /// §1). An explicit `[]` clears them; an absent key leaves them as they
+    /// were (§2.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

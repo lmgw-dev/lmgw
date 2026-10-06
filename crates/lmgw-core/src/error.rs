@@ -273,8 +273,8 @@ pub enum GatewayError {
     /// fact 14 / egress `map_error`'s backstop).
     ///
     /// `max_output` is `None` when it is not known at the point of refusal
-    /// (the llama-server backstop, `egress::openai::map_error`, only ever
-    /// learns the prompt count and the limit from the error body itself) —
+    /// (the llama-server backstop, the llama.cpp egress's `map_error`, only
+    /// ever learns the prompt count and the limit from the error body itself) —
     /// the message then states the prompt alone against the limit, rather
     /// than a sum that silently dropped a term.
     ///

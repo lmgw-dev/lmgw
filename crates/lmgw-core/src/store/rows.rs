@@ -74,6 +74,7 @@ pub(super) fn upstream_from_row(row: &sqlx::sqlite::SqliteRow) -> Upstream {
         expose_all: row.get::<i64, _>("expose_all") != 0,
         expose_prefix: row.get("expose_prefix"),
         supports_responses: row.get::<i64, _>("supports_responses") != 0,
+        llama: None,
     }
 }
 

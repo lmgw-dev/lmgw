@@ -78,7 +78,7 @@ pub(crate) async fn connect_stages(state: &SharedState, thread: &ChatThread) -> 
 #[cfg(test)]
 pub(crate) use super::super::chat_turn::SentAs;
 pub(crate) use super::super::chat_turn::{
-    RowWatch, TurnFrame, TurnLanguage, TurnOpts, UserRow, VoiceTurn, AUDIO_NOT_LOCAL,
+    RowWatch, TurnFrame, TurnLanguage, TurnOpts, UserRow, VoiceTurn, AUDIO_NOT_HEARD,
 };
 
 /// The languages of a bound turn of `thread` (§8.5, changed 2026-10-04,

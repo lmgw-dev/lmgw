@@ -86,8 +86,7 @@ pub struct ThreadVoice {
     /// `semantic_vad` | `server_vad` | `push_to_talk`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_detection: Option<String>,
-    /// `off` | `local`: whether a voice turn goes to the chat model as
-    /// audio.
+    /// `off` | `on`: whether a voice turn goes to the chat model as audio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_input: Option<String>,
     /// `Some("")`: no style for this thread (not inherited).
@@ -253,7 +252,7 @@ pub(super) struct VoiceDraft {
     pub read_aloud: RwSignal<String>,
     /// `""` inherit, or one of the three names.
     pub turn: RwSignal<String>,
-    /// `""` inherit, `"off"` or `"local"`.
+    /// `""` inherit, `"off"` or `"on"`.
     pub audio_input: RwSignal<String>,
     /// A seed "New voice" drew that the thread does not hold yet; `None`
     /// keeps the thread's own — the patch then leaves the seed out, so the

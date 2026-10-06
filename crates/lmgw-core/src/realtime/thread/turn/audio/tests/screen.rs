@@ -15,14 +15,14 @@ use super::{armed, events_of, frame, upstream};
 fn an_mcp_servers_error_frame_does_not_disarm_the_attempt() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mcp = || TurnFrame::new("error", r#"{"message":"MCP server 'kb' : down"}"#.into());
-    let not_local = GatewayError::InvalidRequest {
-        code: crate::web::chat_voice::bound::AUDIO_NOT_LOCAL,
-        message: "not here".into(),
+    let unheard = GatewayError::InvalidRequest {
+        code: crate::web::chat_voice::bound::AUDIO_NOT_HEARD,
+        message: "gpt does not take audio input".into(),
     };
     let mut a = armed(&tx);
     assert!(a.screen(mcp()).is_empty(), "held back");
     assert_eq!(events_of(&a.screen(frame("state"))), ["state"]);
-    assert!(a.screen(TurnFrame::error(&not_local)).is_empty());
+    assert!(a.screen(TurnFrame::error(&unheard)).is_empty());
     assert!(a.refused.is_some(), "still armed: the refusal is retried");
     assert!(a.screen(frame("done")).is_empty());
 
@@ -34,18 +34,33 @@ fn an_mcp_servers_error_frame_does_not_disarm_the_attempt() {
         ["error", "usage", "delta"],
         "in order once the model speaks"
     );
-    assert_eq!(a.screen(TurnFrame::error(&not_local)).len(), 1, "disarmed");
+    assert_eq!(a.screen(TurnFrame::error(&unheard)).len(), 1, "disarmed");
 }
 
-/// The server going away under the audio (WP2 review #4): the turn's own
-/// error, kept for the model that went away with a note; and a refusal is
-/// kept for the model the turn names as having answered.
+/// A llama-server going away under the audio (WP2 review #4): the turn's
+/// own error, kept for the model that went away with a note; elsewhere a
+/// dropped connection says nothing about the audio (decision D5): that turn
+/// goes again as its transcript, and nothing is kept (review V4); and a
+/// refusal is kept for the model the turn names as having answered.
 #[tokio::test]
 async fn a_crash_on_the_audio_is_kept_for_the_model_with_a_note() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut a = armed(&tx);
     let gone = GatewayError::Transport("connection reset by peer".into());
-    let out = a.screen(TurnFrame::error(&gone));
+    // Through a cloud API: held for the transcript retry, and nothing kept.
+    let mut a = armed(&tx);
+    let cloud = crate::web::chat_voice::bound::SentAs::default();
+    assert!(a.screen(TurnFrame::error_sent(&gone, cloud)).is_empty());
+    assert_eq!(a.refused.as_ref().map(|r| r.kind), Some(Refusal::Dropped));
+    assert!(Refusal::Dropped
+        .why(&gone)
+        .starts_with("the connection to the model dropped under the audio"));
+    assert!(rx.try_recv().is_err(), "a cloud route's drop is not kept");
+    let mut a = armed(&tx);
+    let llama = crate::web::chat_voice::bound::SentAs {
+        llama_server: true,
+        ..Default::default()
+    };
+    let out = a.screen(TurnFrame::error_sent(&gone, llama));
     assert_eq!(events_of(&out), ["error"], "the response's error");
     match rx.try_recv() {
         Ok((1, Msg::Refused { refused, note })) => {
@@ -65,7 +80,7 @@ async fn a_crash_on_the_audio_is_kept_for_the_model_with_a_note() {
     let mut a = armed(&tx);
     let sent = crate::web::chat_voice::bound::SentAs {
         answered_by: Some("gemma-b".into()),
-        images: false,
+        ..Default::default()
     };
     let refusal = upstream(400, "invalid audio part");
     assert!(a.screen(TurnFrame::error_sent(&refusal, sent)).is_empty());
@@ -78,8 +93,8 @@ async fn a_crash_on_the_audio_is_kept_for_the_model_with_a_note() {
     // refusal of the audio.
     let mut a = armed(&tx);
     let sent = crate::web::chat_voice::bound::SentAs {
-        answered_by: None,
         images: true,
+        ..Default::default()
     };
     let media = upstream(500, "Failed to load image or audio file");
     assert_eq!(a.screen(TurnFrame::error_sent(&media, sent)).len(), 1);

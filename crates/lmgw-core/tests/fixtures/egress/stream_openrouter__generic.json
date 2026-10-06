@@ -1,0 +1,33 @@
+{
+  "deltas": [
+    [
+      {
+        "reasoning": "Weighing it."
+      }
+    ],
+    [
+      {
+        "text": "Blue light"
+      }
+    ],
+    [
+      {
+        "text": " scatters."
+      },
+      {
+        "stop": "stop"
+      }
+    ],
+    [
+      {
+        "usage": {
+          "cached_input_tokens": 10,
+          "completion_tokens": 40,
+          "prompt_tokens": 30,
+          "reasoning_tokens": 25
+        }
+      }
+    ],
+    []
+  ]
+}

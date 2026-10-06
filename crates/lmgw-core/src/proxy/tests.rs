@@ -427,6 +427,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
             max_tokens_clamped: None,
             fallback: None,
             rung: None,
+            degraded: None,
         },
         200,
         Some(12),
@@ -454,6 +455,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
             max_tokens_clamped: None,
             fallback: None,
             rung: None,
+            degraded: None,
         },
         500,
         None,
@@ -505,4 +507,107 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
     assert_eq!(stats.total_errors, 1, "the 500 workflow row is an error");
     assert_eq!(stats.prompt_tokens, 31);
     assert_eq!(stats.completion_tokens, 9);
+}
+
+/// The in-process single call (`sample_once`: agent runs, knowledge and
+/// quickdoc helpers) on a fallback that cannot see sends the placeholder
+/// (`gate::fallback_images`, decided in `fit_chat` on every send): the
+/// route comes marked from `Snapshot::usable_fallback`, as every fallback's.
+#[tokio::test]
+async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "cmpl-1", "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1}
+        })))
+        .mount(&mock)
+        .await;
+    let state = AppState::init_for_tests().await.unwrap();
+    let up_id = insert_upstream(
+        &state.db,
+        &NewUpstream {
+            supports_responses: false,
+            name: "blind-up".into(),
+            protocol: Protocol::Openai,
+            kind: UpstreamKind::Generic,
+            base_url: mock.uri(),
+            api_key: None,
+            extra_headers: vec![],
+            timeout_ms: 5_000,
+            enabled: true,
+            expose_all: false,
+            expose_prefix: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    insert_alias(
+        &state.db,
+        &NewAlias {
+            alias: "blind".into(),
+            upstream_id: up_id,
+            upstream_model_id: "text-model".into(),
+            param_overrides: Default::default(),
+            enabled: true,
+            capabilities_override: Some(serde_json::json!({"capabilities": {
+                "task": "chat", "endpoints": ["/v1/chat/completions"],
+                "vision": false, "source": "owner",
+            }})),
+        },
+    )
+    .await
+    .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let route = state.snapshot().usable_fallback("blind").unwrap();
+    assert_eq!(route.fallback.as_deref(), Some("blind"));
+    let ir = ChatRequest {
+        model_alias: "local".into(),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentPart::text("what is this"),
+                ContentPart::Image {
+                    mime: "image/png".into(),
+                    source: crate::ir::ImageSource::Base64 {
+                        data: "iVBORw0KGgo=".into(),
+                    },
+                },
+            ],
+        }],
+        params: Default::default(),
+        tools: vec![],
+        tool_choice: None,
+        stream: false,
+        passthrough: Default::default(),
+        llama_kwargs_enabled: None,
+        anthropic_beta: Vec::new(),
+    };
+    sample_once(
+        &state,
+        None,
+        &route,
+        Some(crate::gate::FallbackReason::Hold),
+        &ir,
+        "agent",
+        None,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect("the fallback answers");
+    let reqs = mock.received_requests().await.unwrap();
+    let sent = reqs
+        .iter()
+        .rev()
+        .find(|r| r.url.path() == "/chat/completions")
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .expect("a chat call");
+    assert!(
+        sent.contains("omitted: the answering model cannot see images"),
+        "{sent}"
+    );
+    assert!(!sent.contains("iVBORw0KGgo="), "{sent}");
 }

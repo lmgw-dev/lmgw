@@ -28,6 +28,8 @@ use tokio::sync::{watch, Barrier};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod start_races;
+
 // ---------------------------------------------------------------------------
 // The fake podman
 // ---------------------------------------------------------------------------
@@ -60,6 +62,9 @@ struct Fake {
     /// What `podman inspect` prints; `None` keeps the old reply (`c0ffee`,
     /// which no JSON reader accepts — "podman could not say").
     inspect: Mutex<Option<String>>,
+    /// When set, `podman inspect` answers "no such container": the container
+    /// was removed from under the registry.
+    inspect_gone: Mutex<bool>,
     /// What `podman image inspect <ref>` prints, per reference: the ID and
     /// entrypoint every `--help` read resolves before it looks at its cache.
     /// Consumed front to back with the last reply sticking, so a test can
@@ -193,6 +198,14 @@ impl CommandRunner for Fake {
                     None => success(),
                 })
             }
+            "inspect" if *self.inspect_gone.lock().unwrap() => Ok(CmdOutput {
+                status: 125,
+                stdout: String::new(),
+                stderr: format!(
+                    "Error: no such container {}\n",
+                    args.last().cloned().unwrap_or_default()
+                ),
+            }),
             "inspect" => Ok(match self.inspect.lock().unwrap().clone() {
                 Some(json) => CmdOutput {
                     status: 0,

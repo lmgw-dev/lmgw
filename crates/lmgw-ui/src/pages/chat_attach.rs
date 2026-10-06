@@ -223,6 +223,29 @@ pub(super) fn vision_block_reason(model: &str) -> String {
     format!("'{model}' does not accept images — remove the image or switch models")
 }
 
+/// What the drafts become on the way, sent all the same: the server's
+/// `hints` (a GPU block's fallback that cannot see gets an image as a
+/// placeholder, a PDF's pages as its text). Deduplicated, in chip order.
+pub(super) fn select_hints(drafts: &[Attachment]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for h in drafts.iter().flat_map(|a| a.hints.iter().flatten()) {
+        if !out.contains(h) {
+            out.push(h.clone());
+        }
+    }
+    out
+}
+
+/// The composer's hints, tracked: read inside a `Signal::derive`.
+pub(super) fn draft_hints(chips: &[DraftChip]) -> Vec<String> {
+    let drafts: Vec<Attachment> = chips
+        .iter()
+        .filter(|c| c.id.get().is_some() && c.error.get().is_none())
+        .map(|c| c.att.get())
+        .collect();
+    select_hints(&drafts)
+}
+
 /// The composer's blockers, tracked: read inside a `Signal::derive`.
 pub(super) fn draft_blockers(chips: &[DraftChip], vision_no: bool, model: &str) -> Vec<String> {
     let drafts: Vec<Attachment> = chips
@@ -554,6 +577,21 @@ fn DraftChipView(
                 "✕"
             </button>
         </span>
+    }
+}
+
+/// What the drafts become on the way, under the chip row — amber like the
+/// GPU hold's other notes, and never blocking Send.
+#[component]
+pub(super) fn HintNote(#[prop(into)] hints: Signal<Vec<String>>) -> impl IntoView {
+    view! {
+        <Show when=move || !hints.with(Vec::is_empty)>
+            <div class="chip-row attach-hints">
+                <For each=move || hints.get() key=|h| h.clone() let:h>
+                    <div class="mini-note attach-hint">{h}</div>
+                </For>
+            </div>
+        </Show>
     }
 }
 

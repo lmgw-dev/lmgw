@@ -1,0 +1,28 @@
+{
+  "parsed": [
+    {
+      "body": "{\"tokens\":[1,15043,29892,3186]}",
+      "parsed": 4
+    },
+    {
+      "body": "{\"tokens\":[{\"id\":1,\"piece\":\"<s>\"},{\"id\":15043,\"piece\":\"Hello\"}]}",
+      "parsed": 2
+    },
+    {
+      "body": "{\"tokens\":[]}",
+      "parsed": 0
+    },
+    {
+      "body": "{\"count\":3}",
+      "parsed": {
+        "error": "Transport(\"tokenize response without 'tokens'\")"
+      }
+    },
+    {
+      "body": "not json",
+      "parsed": {
+        "error": "Transport(\"invalid upstream JSON: expected ident at line 1 column 2\")"
+      }
+    }
+  ]
+}

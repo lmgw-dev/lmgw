@@ -1,0 +1,22 @@
+{
+  "request": {
+    "body": "{\"messages\":[{\"content\":\"Why is the sky blue?\",\"role\":\"user\"}],\"model\":\"the-model\",\"reasoning_effort\":\"low\"}",
+    "body_json": {
+      "messages": [
+        {
+          "content": "Why is the sky blue?",
+          "role": "user"
+        }
+      ],
+      "model": "the-model",
+      "reasoning_effort": "low"
+    },
+    "headers": {
+      "authorization": "<set>",
+      "content-type": "application/json",
+      "x-extra": "one"
+    },
+    "method": "POST",
+    "url": "http://generic.test/v1/chat/completions"
+  }
+}

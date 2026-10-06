@@ -128,6 +128,12 @@ impl Output {
         }
     }
 
+    /// Whether any of its audio went to the writer: a response that never
+    /// did has nothing that could still play (realtime-server-tools §2.5).
+    pub fn spoke(&self) -> bool {
+        self.paced
+    }
+
     /// Whether `item_id` is an item of this response still being produced.
     pub fn producing(&self, item_id: &str) -> bool {
         self.items

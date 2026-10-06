@@ -12,6 +12,9 @@
 //!   then `.done`, `output_item.done` (`completed` — the only event that
 //!   says so for this call, since `@openai/agents` runs the tool on every
 //!   one that does, §2.3) and `conversation.item.done`;
+//! - a **server-side call** of an MCP tool the response offered: an
+//!   `mcp_call` item that stays open past the end of generation while the
+//!   gateway runs it (`mcp`, realtime-server-tools §2.2);
 //! - then `response.done`.
 //!
 //! Text the model writes before a call goes out as its own message item,
@@ -56,6 +59,7 @@ use super::writer::Outbox;
 
 mod audio;
 mod closing;
+mod mcp;
 mod usage;
 
 pub(crate) use audio::{AudioOut, DELTA_MS};
@@ -86,6 +90,8 @@ pub(crate) struct Output {
     /// A text delta went out: text output is never purgeable, so the
     /// client has it (§4.3 "heard", B3 review 1).
     text_sent: bool,
+    /// Its server-side calls (`mcp`).
+    mcp: mcp::McpCalls,
 }
 
 impl Output {
@@ -110,6 +116,7 @@ impl Output {
             audio,
             paced: false,
             text_sent: false,
+            mcp: mcp::McpCalls::default(),
         }
     }
 
@@ -199,7 +206,8 @@ impl Output {
     }
 
     /// A tool call began: whatever text came first is closed as its own
-    /// item, and the call's item opens with empty arguments.
+    /// item, and the call's item opens with empty arguments — an `mcp_call`
+    /// for a tool the response offered as one (`mcp`), which says `true`.
     pub fn call_start(
         &mut self,
         conv: &mut Conversation,
@@ -208,12 +216,32 @@ impl Output {
         index: usize,
         upstream_id: &str,
         name: &str,
-    ) {
+    ) -> bool {
         // The text before a call is its own item, closed first — except a
         // spoken one, which closes when its audio has played.
         if let Some(at) = self.text_at.take().filter(|_| !self.speaks()) {
             self.close(conv, ob, at, ItemStatus::Completed);
         }
+        let call_id = self.call_id(conv, ids, upstream_id, name);
+        if self.mcp_start(conv, ids, ob, (index, &call_id), name) {
+            return true;
+        }
+        let item = Item::FunctionCall(FunctionCallItem {
+            id: Some(conv.fresh_item_id(ids)),
+            object: Some(ITEM_OBJECT.into()),
+            status: Some(ItemStatus::InProgress),
+            call_id: Some(call_id),
+            name: name.to_string(),
+            arguments: String::new(),
+        });
+        let at = self.announce(conv, ob, item);
+        self.calls.insert(index, at);
+        false
+    }
+
+    /// The `call_id` a call of `name` goes by (module doc): the upstream's
+    /// own when this session has not seen it, minted otherwise.
+    fn call_id(&self, conv: &mut Conversation, ids: &Ids, upstream_id: &str, name: &str) -> String {
         let call_id = if !upstream_id.is_empty() && !conv.call_id_seen(upstream_id) {
             upstream_id.to_string()
         } else {
@@ -226,16 +254,7 @@ impl Output {
             minted
         };
         conv.note_call_id(&call_id);
-        let item = Item::FunctionCall(FunctionCallItem {
-            id: Some(conv.fresh_item_id(ids)),
-            object: Some(ITEM_OBJECT.into()),
-            status: Some(ItemStatus::InProgress),
-            call_id: Some(call_id),
-            name: name.to_string(),
-            arguments: String::new(),
-        });
-        let at = self.announce(conv, ob, item);
-        self.calls.insert(index, at);
+        call_id
     }
 
     /// A fragment of a call's arguments.
@@ -255,6 +274,9 @@ impl Output {
             );
             return;
         };
+        if self.mcp_args(conv, ob, at, delta) {
+            return;
+        }
         let item_id = self.items[at as usize].clone();
         let Some(Item::FunctionCall(c)) = conv.get_mut(&item_id) else {
             return;

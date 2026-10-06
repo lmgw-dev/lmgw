@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::{CandidateCtx, CandidateReq};
 use crate::bench::lease::GpuBlock;
-use crate::candidates::derive::{cached_pick, derive, fallback_supports, CandidatePick};
+use crate::candidates::derive::{cached_pick, derive, CandidatePick};
 use crate::config::{CandidateAlias, FallbackRoute, Route, Snapshot};
 use crate::error::GatewayError;
 use crate::gate::open::{
@@ -29,9 +29,11 @@ pub(crate) struct AtResolve {
 ///
 /// - **The GPU hold:** the alias fallback, reason `hold`, for both alias
 ///   kinds (§4.2–§4.3 "Hold active") — never a candidate's row fallback
-///   (§4.1). A fallback that is none, does not resolve, is local, or lacks a
-///   facet the alias enables (§4.6 "treated as none") is `gpu_hold`, naming
-///   why — the hold's refusal, logged `gpu_hold`, not a deferral. A
+///   (§4.1). A fallback that is none, does not resolve, or is local is
+///   `gpu_hold`, naming why — the hold's refusal, logged `gpu_hold`, not a
+///   deferral. One that lacks a facet the alias enables answers all the
+///   same (changed 2026-10-06, the owner's ruling: a configured fallback is
+///   always used), what it cannot take degraded and its row marked. A
 ///   benchmark's lease is answered the same way, with reason `benchmark` and
 ///   `gpu_benchmark` (benchmark design §3.2).
 /// - **Otherwise** a local chat route: the first routable candidate's, else
@@ -49,7 +51,7 @@ pub(crate) async fn at_resolve(
         enabled: pick.enabled,
     };
     if let Some(block) = snap.gpu_block() {
-        let (fb, route) = hold_fallback(state, snap, ca, &pick, &block).await?;
+        let (fb, route) = hold_fallback(snap, ca, &block)?;
         let mut headers = GateHeaders::default();
         headers.fall_back(fb, block.fallback_reason());
         return Ok(AtResolve {
@@ -79,11 +81,9 @@ pub(crate) async fn at_resolve(
 /// The alias fallback under the GPU hold (or a benchmark's lease), or the
 /// `gpu_hold` / `gpu_benchmark` refusal naming why there is none. The site's
 /// route check is the caller's.
-async fn hold_fallback(
-    state: &SharedState,
+fn hold_fallback(
     snap: &Snapshot,
     ca: &CandidateAlias,
-    pick: &CandidatePick,
     block: &GpuBlock,
 ) -> Result<(String, Route), GatewayError> {
     let refused = |detail: String| block.refusal(ca.alias.clone(), detail);
@@ -92,15 +92,7 @@ async fn hold_fallback(
         FallbackRoute::Unusable { alias, why } => {
             Err(refused(format!(" (fallback '{alias}' {why})")))
         }
-        FallbackRoute::Usable { alias, route } => {
-            match fallback_supports(state, &alias, pick.enabled).await {
-                Ok(()) => Ok((alias, route)),
-                Err(f) => Err(refused(format!(
-                    " (fallback '{alias}' lacks {}, which the alias enables, so it counts as none)",
-                    f.as_str()
-                ))),
-            }
-        }
+        FallbackRoute::Usable { alias, route } => Ok((alias, route)),
     }
 }
 
@@ -125,7 +117,6 @@ pub(crate) async fn walk(
     alias: &str,
     carried: Option<Arc<CandidateAlias>>,
     check: RouteCheck,
-    images: bool,
     excluded: Vec<String>,
     because: Option<String>,
 ) -> Result<Opened, OpenFailed> {
@@ -147,7 +138,6 @@ pub(crate) async fn walk(
         pick: &pick,
         alias,
         check,
-        images,
         excluded,
     };
     if snap.gpu_block().is_some() {
@@ -230,7 +220,6 @@ async fn repick_as(
         &ctx.alias,
         Some(Arc::clone(&ctx.row)),
         policy.check,
-        policy.images,
         excluded,
         Some(format!("'{model}' {why}")),
     )
@@ -305,7 +294,6 @@ struct Walk<'a> {
     pick: &'a CandidatePick,
     alias: &'a str,
     check: RouteCheck,
-    images: bool,
     excluded: Vec<String>,
 }
 
@@ -396,7 +384,6 @@ impl Walk<'_> {
             headers,
             self.alias,
             self.check,
-            self.images,
             AtAdmission::MayFallBack,
             Some(self.ctx()),
         )
@@ -534,24 +521,14 @@ impl Walk<'_> {
     /// The alias fallback, answering for `reason` — or, as `Err`, why it
     /// cannot: empty for none, else a clause naming the fallback. A fallback
     /// that does not resolve, is local, or does not take this request (the
-    /// site's route check, the enabled facets, §4.6) counts as none.
+    /// site's route check) counts as none; one that lacks a facet the alias
+    /// enables answers (changed 2026-10-06).
     async fn fallback_answer(&self, reason: FallbackReason) -> Result<Opened, String> {
         match self.snap.alias_fallback(self.ca) {
             FallbackRoute::None => Err(String::new()),
             FallbackRoute::Unusable { alias: fb, why } => Err(format!(" (fallback '{fb}' {why})")),
             FallbackRoute::Usable { alias: fb, route } => {
-                let facets = Some(self.pick.enabled);
-                if !fallback_serves(
-                    self.state,
-                    &fb,
-                    &route,
-                    self.alias,
-                    self.check,
-                    self.images,
-                    facets,
-                )
-                .await
-                {
+                if !fallback_serves(self.state, &fb, &route, self.alias, self.check).await {
                     return Err(format!(" (fallback '{fb}' cannot take this request)"));
                 }
                 let mut headers = GateHeaders::default();
@@ -610,15 +587,8 @@ impl Walk<'_> {
             .gpu_block()
             .or_else(|| self.snap.gpu_block())
             .unwrap_or(GpuBlock::Hold);
-        let (fb, route) = hold_fallback(self.state, self.snap, self.ca, self.pick, &block)
-            .await
-            .map_err(refused)?;
-        let facets = Some(self.pick.enabled);
-        if !fallback_serves(
-            self.state, &fb, &route, self.alias, self.check, false, facets,
-        )
-        .await
-        {
+        let (fb, route) = hold_fallback(self.snap, self.ca, &block).map_err(refused)?;
+        if !fallback_serves(self.state, &fb, &route, self.alias, self.check).await {
             return Err(refused(block.refusal(
                 self.alias,
                 format!(" (fallback '{fb}' cannot serve this endpoint)"),
@@ -656,10 +626,9 @@ impl Walk<'_> {
     /// The request is `id`'s: its route on the claimed container, the policy
     /// a later send or climb reads, and `x-lmgw-candidate`.
     fn chosen(&self, mut route: Route, mut hold: LocalHold, id: &str) -> Opened {
-        route.upstream.base_url = hold.endpoint();
+        hold.point(&mut route);
         hold.set_policy(AdmissionPolicy {
             check: self.check,
-            images: self.images,
             candidate: Some(self.ctx()),
         });
         let mut headers = GateHeaders::default();
