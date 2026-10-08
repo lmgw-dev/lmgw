@@ -187,5 +187,8 @@ async fn write(
             fallback_reason: None,
             rung: None,
             degraded: None,
+            audio_in_ms: None,
+            chars_in: None,
+            images_out: None,
         });
 }

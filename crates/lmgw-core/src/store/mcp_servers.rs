@@ -3,7 +3,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::config::{McpServer, McpTransport};
+use crate::config::{run_only_refusal, McpServer, McpTransport};
 
 use super::*;
 
@@ -60,7 +60,23 @@ fn mcp_json_cols(s: &NewMcpServer) -> DbResult<(String, String, String, String)>
     ))
 }
 
+/// A Podman-isolated row is not saved with a run flag its connect cannot
+/// pass ([`run_only_refusal`]: `--rmi`, `-d`, ...), and nothing of it is
+/// stored. Here, under every writer: the dashboard's op, the
+/// `lmgw__mcp_server_set` tool and whatever else saves one.
+fn refuse_run_only_flags(s: &NewMcpServer) -> DbResult<()> {
+    let isolated = s.transport.is_stdio()
+        && s.container_image
+            .as_deref()
+            .is_some_and(|i| !i.trim().is_empty());
+    match isolated.then(|| run_only_refusal(&s.extra_run_args)) {
+        Some(Some(why)) => Err(GatewayError::BadRequest(why)),
+        _ => Ok(()),
+    }
+}
+
 pub async fn insert_mcp_server(pool: &SqlitePool, s: &NewMcpServer) -> DbResult<i64> {
+    refuse_run_only_flags(s)?;
     let (args, env, extra, headers) = mcp_json_cols(s)?;
     let res = sqlx::query(
         "INSERT INTO mcp_servers (name, enabled, transport, command, args, env, cwd,
@@ -92,6 +108,7 @@ pub async fn insert_mcp_server(pool: &SqlitePool, s: &NewMcpServer) -> DbResult<
 }
 
 pub async fn update_mcp_server(pool: &SqlitePool, id: i64, s: &NewMcpServer) -> DbResult<()> {
+    refuse_run_only_flags(s)?;
     let (args, env, extra, headers) = mcp_json_cols(s)?;
     sqlx::query(
         "UPDATE mcp_servers SET name=?2, enabled=?3, transport=?4, command=?5, args=?6, env=?7,

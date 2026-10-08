@@ -4,6 +4,9 @@
 //! [`super::chat_stream`]. Assistant markdown is rendered with pulldown-cmark
 //! (single-user local app — same no-sanitizer trust model as the old UI).
 
+mod open;
+mod settings_rebase;
+
 use std::cell::Cell;
 
 use leptos::prelude::*;
@@ -30,16 +33,19 @@ use super::chat_retrieval::{cite_html, cite_target, KbContext, RetrievalView};
 use super::chat_sampling::{self, SamplingDraft, SamplingText};
 use super::chat_search::{install_reveal, MessageHits};
 use super::chat_settings::{draft_patch, DraftErrors, SettingsFields};
+use super::chat_sync::{self, Follow, ListRead, ModelPicks, OwnEdits, Rescue};
 use super::chat_temp::{self, TempBanner};
 use super::chat_turn::{run_turn, Turn, TurnEnv};
 use super::chat_voice::{self, MsgVoice, ThreadVoice, VoiceDraft, VoiceResolved};
 use super::knowledge_source::SourceModal;
-use crate::scope::Scope;
+use crate::scope::{Latest, Scope};
 pub use crate::widgets::tool_picker::ThreadMcp;
 use crate::widgets::{
     use_dirty_guard, use_slash_focus, use_toasts, MenuItem, Modal, ModalSize, ModelPicker, RowMenu,
     Side, SplitPane,
 };
+pub(super) use open::Opener;
+use open::{Landed, OpenEnv};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
@@ -134,13 +140,13 @@ pub(super) struct Attachment {
 /// a second round trip.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-struct ThreadsResponse {
-    threads: Vec<ChatThread>,
-    archived_count: i64,
+pub(super) struct ThreadsResponse {
+    pub(super) threads: Vec<ChatThread>,
+    pub(super) archived_count: i64,
     /// The in-memory temporary chats, in every mode (chat-complete §7).
-    temporary: Vec<ChatThread>,
+    pub(super) temporary: Vec<ChatThread>,
     /// Every folder with its thread counts, in every mode (§5).
-    folders: Vec<FolderInfo>,
+    pub(super) folders: Vec<FolderInfo>,
 }
 
 /// The open thread's settings as they are being edited. Held by the page,
@@ -457,6 +463,11 @@ fn tools_from_ir(raw: &str) -> Vec<IrTool> {
     calls
 }
 
+/// Whether a stored turn's IR holds any tool call.
+pub(super) fn has_tools(ir: &str) -> bool {
+    !tools_from_ir(ir).is_empty()
+}
+
 /// Render IR tool-result blocks down to the text the card shows. Binary blocks
 /// (image/audio/resource) are named, not inlined — same as the old app.
 fn flatten_tool_result(blocks: &Value) -> String {
@@ -473,17 +484,9 @@ fn flatten_tool_result(blocks: &Value) -> String {
         .join("\n")
 }
 
-/// Which thread a cold load opens: the `?t=` deep link always wins, even
-/// into a thread the (active-only) list just loaded does not carry — it may
-/// be archived, since a cold load only fetches the active list (review
-/// finding #7: this used to open the first active thread and rewrite the
-/// URL out from under an archived deep link) — else the first (most recently
-/// active) one, the old app's `firstUpdated` rule (chat-app.js:371-375). A
-/// deep link naming a thread that turns out not to exist at all still
-/// surfaces as `open_thread`'s own error toast rather than silently landing
-/// on some other conversation.
-fn seed_thread(param: Option<i64>, threads: &[ChatThread]) -> Option<i64> {
-    param.or_else(|| threads.first().map(|t| t.id))
+/// The open thread's id, untracked.
+fn current_id_now(current: RwSignal<Option<ChatThread>>) -> Option<i64> {
+    current.with_untracked(|c| c.as_ref().map(|t| t.id))
 }
 
 /// Keep the address bar on `/chat?t=<id>` (bare `/chat` with nothing open), so
@@ -491,7 +494,7 @@ fn seed_thread(param: Option<i64>, threads: &[ChatThread]) -> Option<i64> {
 /// rather than the router's `navigate`: this fires on every thread switch,
 /// including mid-stream, and must not re-run route matching — the router picks
 /// the location back up on `popstate`.
-fn sync_url(id: Option<i64>) {
+pub(super) fn sync_url(id: Option<i64>) {
     let url = match id {
         Some(id) => format!("/chat?t={id}"),
         None => "/chat".to_string(),
@@ -531,9 +534,9 @@ thread_local! {
 /// dropped along with its `.messages` pane.
 ///
 /// `force` (opening a thread, sending) always lands at the bottom. Otherwise
-/// the pane only follows while the reader is already within ~120px of it: past
-/// that they have deliberately scrolled up to read something, and yanking them
-/// back down every token is worse than letting the tail run on.
+/// the pane only follows while the reader is already within [`AT_END_PX`] of
+/// it: past that they have deliberately scrolled up to read something, and
+/// yanking them back down every token is worse than letting the tail run on.
 ///
 /// Measured inside a `requestAnimationFrame`, not at the call site: Leptos
 /// flushes the DOM on the microtask queue, so the element a token produced does
@@ -554,10 +557,25 @@ pub(super) fn scroll_down(force: bool) {
             return;
         };
         let height = pane.scroll_height();
-        if force || height - pane.scroll_top() - pane.client_height() < 120 {
+        if force || height - pane.scroll_top() - pane.client_height() < AT_END_PX {
             pane.set_scroll_top(height);
         }
     });
+}
+
+/// How close to the bottom of the transcript a reader counts as at its end,
+/// in CSS pixels: the tail follows them.
+const AT_END_PX: i32 = 120;
+
+/// Whether the reader is at the end of the transcript now, read before a
+/// change lands: what another writer appends follows such a reader with
+/// `scroll_down(true)`. Measured afterwards (as `scroll_down(false)` does),
+/// a message taller than [`AT_END_PX`] would read as the reader having
+/// scrolled up (review CL-1).
+pub(super) fn at_end() -> bool {
+    document()
+        .get_element_by_id("chat-scroll")
+        .is_some_and(|p| p.scroll_height() - p.scroll_top() - p.client_height() < AT_END_PX)
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -645,6 +663,11 @@ pub fn Chat() -> impl IntoView {
     // This window's audio devices and echo mode (chat-voice §2.4).
     chat_voice::provide_voice_devices();
     let draft_kbs = RwSignal::new(Vec::<i64>::new());
+    // A new chat the composer's draft waits in, its conversation deleted
+    // elsewhere: made only when the owner presses Send, and that Send under
+    // way (`chat_sync::gone`).
+    let rescue = RwSignal::new(Rescue::default());
+    let making = Memo::new(move |_| rescue.with(Rescue::making));
     let composer_ta: NodeRef<leptos::html::Textarea> = NodeRef::new();
     let composer_box: NodeRef<leptos::html::Div> = NodeRef::new();
     let kb_pick = KbPick::new(draft_kbs, composer, composer_ta);
@@ -680,6 +703,10 @@ pub fn Chat() -> impl IntoView {
     // UI's own state and actions are `folders`, made once the callbacks they
     // need exist.
     let folder_list = RwSignal::new(Vec::<FolderInfo>::new());
+    // An ongoing folder's draft: the picker is held on its model (review
+    // CF-2), as it is while a Send is under way.
+    let held = chat_sync::held_model(rescue, folder_list);
+    let picker_held = Signal::derive(move || making.get() || held.with(Option::is_some));
     // The open temporary chat's id (0 = none), readable from `on_cleanup`,
     // which must not touch signals the disposal may already have taken.
     let open_temp = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
@@ -720,30 +747,26 @@ pub fn Chat() -> impl IntoView {
         k
     };
 
-    // The active or the archived list, whichever the toolbar toggle shows.
-    let threads_url = move || {
-        if view_archived.get_untracked() {
-            "/chat/api/threads?archived=1"
-        } else {
-            "/chat/api/threads"
-        }
+    // The list's one read, shared with the follower (`chat_sync`): the
+    // newest read lands, and only what differs is set. A failed re-read
+    // keeps the list it had and says so above it.
+    let list = ListRead {
+        threads,
+        temporary: temp_threads,
+        folders: folder_list,
+        archived_count,
+        state: threads_state,
+        view_archived,
+        latest: Latest::new(),
+        out: StoredValue::new(0),
     };
-
-    // A failed re-read keeps the list it had and says so above it.
-    let refresh_threads = move || {
-        scope.spawn(async move {
-            match crate::api::get::<ThreadsResponse>(threads_url()).await {
-                Ok(r) => {
-                    threads.set(r.threads);
-                    temp_threads.set(r.temporary);
-                    folder_list.set(r.folders);
-                    archived_count.set(r.archived_count);
-                    threads_state.set(Some(Ok(())));
-                }
-                Err(e) => threads_state.set(Some(Err(e.to_string()))),
-            }
-        });
-    };
+    let refresh_threads = move || scope.spawn(list.read());
+    // A delete of the page's own under way: the follower leaves that one to
+    // it.
+    let deleting = StoredValue::new(None::<i64>);
+    // The page's own changes to the open transcript, counted: a read of it
+    // the follower made before one of them is dropped (`chat_sync`).
+    let own = OwnEdits::new();
 
     // Per-message signals are created here rather than in the calling task, so
     // they belong to the component and die with it (see `owner` above).
@@ -802,197 +825,135 @@ pub fn Chat() -> impl IntoView {
     };
     let load_msgs = move |rows: Vec<MsgRow>| msgs.set(msgs_of_rows(rows));
 
-    // A message to reveal (search hit, `?m=`) that the open transcript does
-    // not hold is dropped with a note, not waited for: a `focus` left set
-    // would skip the scroll-to-end of every later thread open.
-    let settle_focus = move || {
-        if let Some(mid) = focus.get_untracked() {
-            let has =
-                msgs.with_untracked(|v| v.iter().any(|m| m.db_id.get_untracked() == Some(mid)));
-            if !has {
-                focus.set(None);
-                toasts.warn("that message no longer exists");
+    // What an open read, shown: the open itself and what decides whether it
+    // lands are `open::Opener`'s.
+    let show = Callback::new(move |l: Landed| {
+        let Landed {
+            id,
+            detail: d,
+            left,
+            keep_draft,
+        } = l;
+        // A reply still streaming into the left chat is stopped first.
+        if let Some(left) = left {
+            if streaming.get_untracked() == Some(left) {
+                if let Some(a) = aborter.get_value() {
+                    a.abort();
+                }
             }
+            chat_temp::discard(left);
+            temp_threads.update(|v| v.retain(|t| t.id != left));
         }
-    };
-
-    let open_thread = move |id: i64| {
-        // Already open: a no-op rather than a re-fetch that would overwrite
-        // `draft_attachments` from the server's (upload-order) view of the
-        // thread's drafts — which does not yet know about a chip whose
-        // upload is still in flight, so clicking the open row dropped it
-        // until the next reopen (review nit).
-        if current.with_untracked(|c| c.as_ref().map(|t| t.id) == Some(id)) {
-            return;
-        }
-        // Leaving a temporary chat throws it away, without a question — that
-        // is what it is for. Only once the next thread has loaded: a failed
-        // read keeps showing the temporary chat, so it must still exist.
-        let left = current.with_untracked(|c| c.as_ref().filter(|t| t.temporary).map(|t| t.id));
-        scope.spawn(async move {
-            match crate::api::get::<ThreadDetail>(format!("/chat/api/threads/{id}")).await {
-                Ok(d) => {
-                    // A reply still streaming into the left chat is stopped
-                    // first.
-                    if let Some(left) = left {
-                        if streaming.get_untracked() == Some(left) {
-                            if let Some(a) = aborter.get_value() {
-                                a.abort();
-                            }
-                        }
-                        chat_temp::discard(left);
-                        temp_threads.update(|v| v.retain(|t| t.id != left));
-                    }
-                    model_sel.set(d.thread.model_alias.clone());
-                    current.set(Some(d.thread));
-                    // A settled reply's numbers belong to the visit; a reply
-                    // still streaming keeps its own until it is done.
-                    let keep = streaming.get_untracked();
-                    stats.update(|s| {
-                        if s.as_ref().is_some_and(|(t, _)| Some(*t) != keep) {
-                            *s = None;
-                        }
-                    });
-                    load_msgs(d.messages);
-                    // Back on the thread whose reply is streaming: the server
-                    // stores the reply when it is done, so until then the
-                    // live message is the only copy of it.
-                    if keep == Some(id) {
-                        if let Some((_, m)) = live.get_value().filter(|(t, _)| *t == id) {
-                            msgs.update(|v| v.push(m));
-                        }
-                    }
-                    // Reseed the composer's chips from this thread's own
-                    // drafts — signals belong to the component (see `owner`).
-                    let chips = in_owner(owner, || {
-                        d.draft_attachments
-                            .into_iter()
-                            .map(|a| draft_from_attachment(alloc_key(), a))
-                            .collect()
-                    });
-                    draft_attachments.set(chips.unwrap_or_default());
-                    draft_kbs.set(Vec::new());
-                    sync_url(Some(id));
-                    settle_focus();
-                    if focus.get_untracked().is_none() {
-                        scroll_down(true);
-                    }
-                }
-                Err(e) => {
-                    // A reveal aimed at this thread has nowhere to land; left
-                    // set it would skip the scroll of the next open.
-                    focus.set(None);
-                    toasts.err(e.to_string());
-                }
+        model_sel.set(d.thread.model_alias.clone());
+        current.set(Some(d.thread));
+        own.bump();
+        // A settled reply's numbers belong to the visit; a reply still
+        // streaming keeps its own until it is done.
+        let keep = streaming.get_untracked();
+        stats.update(|s| {
+            if s.as_ref().is_some_and(|(t, _)| Some(*t) != keep) {
+                *s = None;
             }
         });
-    };
-
+        load_msgs(d.messages);
+        // Back on the thread whose reply is streaming: the server stores the
+        // reply when it is done, so until then the live message is the only
+        // copy of it.
+        if keep == Some(id) {
+            if let Some((_, m)) = live.get_value().filter(|(t, _)| *t == id) {
+                msgs.update(|v| v.push(m));
+            }
+        }
+        // Reseed the composer's chips from this thread's own drafts —
+        // signals belong to the component (see `owner`).
+        if !keep_draft {
+            let chips = in_owner(owner, || {
+                d.draft_attachments
+                    .into_iter()
+                    .map(|a| draft_from_attachment(alloc_key(), a))
+                    .collect()
+            });
+            draft_attachments.set(chips.unwrap_or_default());
+            draft_kbs.set(Vec::new());
+        }
+        sync_url(Some(id));
+    });
     // Deep link: `/chat?t=<id>` opens that thread on a cold load, otherwise the
     // first one in the list. Read untracked — the URL is rewritten on every
-    // switch below, and re-reading it here would loop.
+    // switch, and re-reading it here would loop.
     let seed = use_query_map().with_untracked(|q| q.get("t").and_then(|v| v.parse::<i64>().ok()));
     focus.set(use_query_map().with_untracked(|q| q.get("m").and_then(|v| v.parse::<i64>().ok())));
-    let first_load = move || {
-        scope.spawn(async move {
-            match crate::api::get::<ThreadsResponse>(threads_url()).await {
-                Ok(r) => {
-                    let open = seed_thread(seed, &r.threads);
-                    threads.set(r.threads);
-                    temp_threads.set(r.temporary);
-                    folder_list.set(r.folders);
-                    archived_count.set(r.archived_count);
-                    threads_state.set(Some(Ok(())));
-                    match open {
-                        Some(id) => open_thread(id),
-                        None => sync_url(None),
-                    }
-                }
-                Err(e) => threads_state.set(Some(Err(e.to_string()))),
-            }
-        });
-    };
-    first_load();
-    // Retry: the first read again while nothing is open, else a re-read.
-    let retry_threads = Callback::new(move |()| {
-        if current.with_untracked(Option::is_none) {
-            first_load();
-        } else {
-            refresh_threads();
-        }
+    let opener = Opener::new(OpenEnv {
+        current,
+        msgs,
+        stats,
+        threads,
+        model_sel,
+        focus,
+        rescue,
+        own,
+        list,
+        seed,
+        scope,
+        toasts,
+        show,
+        refresh: Callback::new(move |()| refresh_threads()),
     });
+    opener.mount();
+    let retry_threads = Callback::new(move |()| opener.retry());
 
-    // `kind` is "chat" | "admin", or "temporary" for a chat that is never saved.
-    let new_thread = move |kind: &'static str| {
-        let alias = model_sel.get_untracked();
-        let body = if kind == "temporary" {
-            json!({ "model_alias": alias, "kind": "chat", "temporary": true })
-        } else {
-            json!({ "model_alias": alias, "kind": kind })
-        };
-        spawn_local(async move {
-            match crate::api::post::<ChatThread, _>("/chat/api/threads", &body).await {
-                Ok(t) => {
-                    let id = t.id;
-                    // The page was left before the answer: nothing will show
-                    // the chat, and a temporary one would never be discarded.
-                    if !scope.alive() {
-                        if id < 0 {
-                            chat_temp::discard(id);
-                        }
-                        return;
-                    }
-                    refresh_threads();
-                    open_thread(id);
-                }
-                Err(e) => toasts.err(e.to_string()),
-            }
-        });
+    // The open thread deleted elsewhere: a draft in the composer waits for
+    // a new chat made by its Send, never going into another conversation
+    // (`chat_sync::Gone`).
+    let gone = chat_sync::Gone {
+        current,
+        msgs,
+        stats,
+        composer,
+        chips: draft_attachments,
+        kbs: draft_kbs,
+        folders: folder_list,
+        model_sel,
+        rescue,
+        own,
+        toasts,
+        fall_through: Callback::new(move |id| opener.fall_through(id, opener.now())),
     };
-
-    // Deleting the open thread falls through to the next one (the old app's
-    // rule), and with none left the URL goes back to bare /chat.
     let delete_thread = move |id: i64| {
+        // The fall-through after it yields to an open started since (review
+        // CF-4).
+        let since = opener.now();
+        deleting.set_value(Some(id));
         scope.spawn(async move {
             if let Err(e) =
                 crate::api::post::<Value, _>(format!("/chat/api/threads/{id}/delete"), &json!({}))
                     .await
             {
+                deleting.try_set_value(None);
                 toasts.err(format!("deleting the conversation failed: {e}"));
                 return;
             }
-            let was_open = current.get_untracked().map(|t| t.id) == Some(id);
-            // A failed re-read keeps the list as it was, less the deleted
-            // row, rather than emptying it (code:A3).
-            let list = match crate::api::get::<ThreadsResponse>(threads_url()).await {
-                Ok(r) => {
-                    threads_state.set(Some(Ok(())));
-                    archived_count.set(r.archived_count);
-                    temp_threads.set(r.temporary);
-                    folder_list.set(r.folders);
-                    r.threads
-                }
-                Err(e) => {
-                    threads_state.set(Some(Err(e.to_string())));
-                    let mut left = threads.get_untracked();
-                    left.retain(|t| t.id != id);
-                    temp_threads.update(|v| v.retain(|t| t.id != id));
-                    left
-                }
+            let Some((ticket, read)) = list.fetch().await else {
+                return;
             };
-            let next = list.first().map(|t| t.id);
-            threads.set(list);
-            if was_open {
-                current.set(None);
-                msgs.set(Vec::new());
-                match next {
-                    Some(n) => open_thread(n),
-                    None => {
-                        stats.set(None);
-                        sync_url(None);
+            match read {
+                Ok(r) => {
+                    if list.latest.is(ticket) {
+                        list.take(r);
                     }
                 }
+                Err(e) => {
+                    // A failed re-read keeps the list as it was, less the
+                    // deleted row, rather than emptying it (code:A3).
+                    threads_state.set(Some(Err(e.to_string())));
+                    threads.update(|v| v.retain(|t| t.id != id));
+                    temp_threads.update(|v| v.retain(|t| t.id != id));
+                }
             }
+            deleting.set_value(None);
+            // Whether it is still open is read now: the follower may have
+            // moved on from it already.
+            opener.fall_through(id, since);
         });
     };
 
@@ -1047,58 +1008,78 @@ pub fn Chat() -> impl IntoView {
         });
     };
 
-    // A settings patch for the open thread. The thread is updated when the
-    // server has taken it, not before, and the list is re-read: a settings
-    // write moves the thread to the top and may change its model label and
-    // what the model filter finds (code:A4).
+    // A settings patch for thread `id` (`patch_thread`: the open one). The
+    // thread is updated when the server has taken it, not before, and only
+    // while it is the open one; the list is re-read: a settings write moves
+    // the thread to the top and may change its model label and what the
+    // model filter finds (code:A4). A refusal is the caller's to say.
+    let save_settings = move |id: i64, body: Value| async move {
+        let answer =
+            crate::api::post::<Value, _>(format!("/chat/api/threads/{id}/settings"), &body).await?;
+        if body.get("model_alias").is_none() {
+            toasts.ok("thread settings saved");
+        }
+        // `try_`: a no-op once the page is gone.
+        current.try_update(|c| {
+            if let Some(t) = c.as_mut().filter(|t| t.id == id) {
+                apply_settings(t, &body);
+                // The new model or reasoning may change whether the last
+                // reply can be continued.
+                if let Ok(c) = serde_json::from_value::<ContinueState>(answer["continue"].clone()) {
+                    t.cont = Some(c);
+                }
+                // The voice as the server took it, and what it resolves to
+                // now.
+                super::chat_voice::apply_answer(t, &answer);
+            }
+        });
+        if scope.alive() {
+            refresh_threads();
+        }
+        // The drafts' blockers depend on the model: re-read them.
+        if body.get("model_alias").is_some() && scope.alive() {
+            refresh_drafts(draft_attachments, scope, id, move |t| {
+                current.with_untracked(|c| c.as_ref().map(|x| x.id) == Some(t))
+            });
+        }
+        Ok::<(), crate::api::Error>(())
+    };
+    // The same, saying a refusal. Whether the server took it.
+    let post_settings = move |id: i64, body: Value| async move {
+        let saved = save_settings(id, body).await;
+        if let Err(e) = &saved {
+            toasts.err(format!("saving the thread settings failed: {e}"));
+        }
+        saved.is_ok()
+    };
     let patch_thread = move |body: Value| {
-        let Some(t) = current.get_untracked() else {
+        if let Some(id) = current_id_now(current) {
+            spawn_local(async move {
+                post_settings(id, body).await;
+            });
+        }
+    };
+    // The picker's picks, saved one at a time in the order made, so the last
+    // one is stored (`ModelPicks`, review CL-5).
+    let picks = StoredValue::new(ModelPicks::default());
+    let pick_model = move |tid: i64, model: String| {
+        let Some(first) = picks.try_update_value(|p| p.picked(tid, &model)).flatten() else {
             return;
         };
-        let id = t.id;
         spawn_local(async move {
-            let res =
-                crate::api::post::<Value, _>(format!("/chat/api/threads/{id}/settings"), &body)
-                    .await;
-            match res {
-                Ok(answer) => {
-                    if body.get("model_alias").is_none() {
-                        toasts.ok("thread settings saved");
-                    }
-                    // `try_`: a no-op once the page is gone.
-                    current.try_update(|c| {
-                        if let Some(t) = c.as_mut().filter(|t| t.id == id) {
-                            apply_settings(t, &body);
-                            // The new model or reasoning may change whether
-                            // the last reply can be continued.
-                            if let Ok(c) =
-                                serde_json::from_value::<ContinueState>(answer["continue"].clone())
-                            {
-                                t.cont = Some(c);
-                            }
-                            // The voice as the server took it, and what it
-                            // resolves to now.
-                            super::chat_voice::apply_answer(t, &answer);
-                        }
-                    });
-                    if scope.alive() {
-                        refresh_threads();
-                    }
-                    // The drafts' blockers depend on the model: re-read them.
-                    if body.get("model_alias").is_some() && scope.alive() {
-                        refresh_drafts(draft_attachments, scope, id, move |t| {
-                            current.with_untracked(|c| c.as_ref().map(|x| x.id) == Some(t))
-                        });
-                    }
-                }
-                Err(e) => toasts.err(format!("saving the thread settings failed: {e}")),
+            let mut next = Some(first);
+            while let Some((tid, model)) = next {
+                post_settings(tid, json!({ "model_alias": model })).await;
+                next = picks.try_update_value(ModelPicks::answered).flatten();
             }
         });
     };
     // A model picked for the open thread → persist immediately. Opening a
     // thread sets the picker to that thread's model too, and that is not a
     // pick: the thread is compared as well, so browsing writes nothing (a
-    // settings write also bumps the thread to the top of the list).
+    // settings write also bumps the thread to the top of the list). Nor is
+    // the picker following the stored model another writer set
+    // (`chat_sync`), which `ModelPicks` is told of.
     let current_id = Memo::new(move |_| current.with(|c| c.as_ref().map(|t| t.id)));
     let settings = SettingsDraft::new();
     Effect::new(move |prev: Option<Option<i64>>| {
@@ -1118,8 +1099,10 @@ pub fn Chat() -> impl IntoView {
         let sel = model_sel.get();
         let id = current_id.get();
         if let Some((prev_id, prev_sel)) = prev {
-            if id.is_some() && prev_id == id && prev_sel != sel && !sel.is_empty() {
-                patch_thread(json!({ "model_alias": sel }));
+            if prev_id != id {
+                picks.update_value(ModelPicks::left);
+            } else if let Some(tid) = id.filter(|_| prev_sel != sel && !sel.is_empty()) {
+                pick_model(tid, sel.clone());
             }
         }
         (id, sel)
@@ -1177,7 +1160,13 @@ pub fn Chat() -> impl IntoView {
     // under the page's owner (see `owner` above), not this closure's.
     let upload_file = move |file: web_sys::File| {
         let Some(t) = current.get_untracked() else {
-            toasts.err("open or create a chat first");
+            if rescue.with_untracked(|r| r.waiting.is_some()) {
+                toasts.warn(chat_sync::NO_FILES_YET);
+            } else if rescue.with_untracked(Rescue::opening) {
+                toasts.warn(chat_sync::OPENING);
+            } else {
+                toasts.err("open or create a chat first");
+            }
             return;
         };
         let tid = t.id;
@@ -1300,6 +1289,7 @@ pub fn Chat() -> impl IntoView {
         toasts,
         scope,
         voice: page_voice,
+        own,
     };
     let actions = ActionEnv {
         turn: turn_env,
@@ -1355,7 +1345,52 @@ pub fn Chat() -> impl IntoView {
         }
     };
 
+    let folders = FolderEnv::new(
+        folder_list,
+        scope,
+        model_sel,
+        current,
+        opener,
+        Callback::new(move |()| refresh_threads()),
+        Callback::new(delete_thread),
+        deleting,
+    );
+    // The Send of a draft's new chat (`chat_sync::gone`): it makes the chat
+    // as the folder's own New chat does, opens it with the draft, sets the
+    // model picked, then runs the ordinary send below, reached through
+    // `send_cb`.
+    let send_cb = StoredValue::new(None::<Callback<()>>);
+    let send_now = Callback::new(move |()| {
+        if let Some(s) = send_cb.get_value() {
+            s.run(());
+        }
+    });
+    let send_new = chat_sync::SendNew {
+        rescue,
+        folders,
+        model_sel,
+        scope,
+        toasts,
+        refresh: Callback::new(move |()| refresh_threads()),
+        open: Callback::new(move |(id, ticket)| opener.open_rescued(id, ticket)),
+    };
+    let landing = chat_sync::Landing {
+        rescue,
+        current,
+        model_sel,
+        picks,
+        scope,
+        toasts,
+        send: send_now,
+    };
+    opener.rescued_lands(Callback::new(move |(ticket, o)| {
+        chat_sync::rescued_open(landing, save_settings, ticket, o);
+    }));
     let send = move |_| {
+        // The rescued draft's Send is under way: this one waits for it.
+        if making.get_untracked() {
+            return;
+        }
         if let Some(busy) = streaming.get_untracked() {
             if current_id.get_untracked() != Some(busy) {
                 toasts.warn("a reply is still streaming in another conversation");
@@ -1387,7 +1422,13 @@ pub fn Chat() -> impl IntoView {
             return;
         }
         let Some(t) = current.get_untracked() else {
-            toasts.err("open or create a chat first");
+            if rescue.with_untracked(|r| r.waiting.is_some()) {
+                chat_sync::send_new(send_new);
+            } else if rescue.with_untracked(Rescue::opening) {
+                toasts.warn(chat_sync::OPENING);
+            } else {
+                toasts.err("open or create a chat first");
+            }
             return;
         };
         let ids: Vec<i64> = ready.iter().filter_map(|c| c.id.get_untracked()).collect();
@@ -1418,6 +1459,7 @@ pub fn Chat() -> impl IntoView {
         let tid = t.id;
         let user_db = user.db_id;
         let reply = assistant.clone();
+        own.bump();
         msgs.update(|m| {
             m.push(user);
             m.push(assistant);
@@ -1462,6 +1504,9 @@ pub fn Chat() -> impl IntoView {
         });
     };
 
+    send_cb.set_value(Some(Callback::new(move |()| send(()))));
+    chat_sync::watch_new_chat(rescue, folder_list, current_id, model_sel, held);
+
     // Stop and Send follow the thread on screen: rebuilt when that flips,
     // not with every delta.
     let streaming_here = Memo::new(move |_| {
@@ -1491,6 +1536,27 @@ pub fn Chat() -> impl IntoView {
         },
     );
     let voice_mode = page_voice.voice_mode;
+    // What other writers change shows here without leaving the page.
+    chat_sync::follow(Follow {
+        list,
+        scope,
+        current,
+        current_id,
+        msgs,
+        streaming,
+        voice_busy: Signal::derive(move || realtime.holds_transcript()),
+        own,
+        settings,
+        settings_unsaved,
+        model_sel,
+        picks,
+        drafts: draft_attachments,
+        make: Callback::new(msgs_of_rows),
+        load: Callback::new(load_msgs),
+        gone: Callback::new(move |id| gone.run(id)),
+        deleting,
+        toasts,
+    });
     let is_temporary =
         Memo::new(move |_| current.with(|c| c.as_ref().is_some_and(|t| t.temporary)));
     let is_admin =
@@ -1507,15 +1573,35 @@ pub fn Chat() -> impl IntoView {
                 .unwrap_or_default()
         })
     });
-    let folders = FolderEnv::new(
-        folder_list,
-        scope,
-        model_sel,
-        current,
-        Callback::new(open_thread),
-        Callback::new(move |()| refresh_threads()),
-        Callback::new(delete_thread),
-    );
+    // Deep link: `/chat?folder=<id>&settings=1` opens that folder's settings
+    // form once the list is loaded — where a client sends the owner to mark
+    // its folder as an ongoing conversation, give it a model or its own
+    // retention (client-apps design §3.7).
+    let folder_link = use_query_map().with_untracked(|q| {
+        (q.get("settings").as_deref() == Some("1"))
+            .then(|| q.get("folder").and_then(|v| v.parse::<i64>().ok()))
+            .flatten()
+    });
+    if let Some(id) = folder_link {
+        let pending = StoredValue::new(true);
+        Effect::new(move |_| {
+            if !matches!(threads_state.get(), Some(Ok(()))) || !pending.get_value() {
+                return;
+            }
+            pending.set_value(false);
+            // Handled once (review F-17): the link's query leaves the
+            // address bar, so a reload does not open the form again.
+            sync_url(current_id.get_untracked());
+            if folders.folder(id).is_some() {
+                folders.open_settings(id);
+            } else {
+                toasts.err(format!(
+                    "folder {id} from the link is not in the list: it was deleted, or the \
+                     link is another gateway's"
+                ));
+            }
+        });
+    }
     let query = RwSignal::new(String::new());
     let listed = Memo::new(move |_| {
         let today = today_local();
@@ -1547,16 +1633,9 @@ pub fn Chat() -> impl IntoView {
         };
         crate::fmt::of(shown, threads.with(Vec::len) + temps)
     });
-    let on_new = Callback::new(new_thread);
-    let on_open = Callback::new(open_thread);
-    let on_pick = Callback::new(move |(tid, mid): (i64, Option<i64>)| {
-        focus.set(mid);
-        open_thread(tid);
-        // Already open: `open_thread` returned at once, so settle here.
-        if current.with_untracked(|c| c.as_ref().map(|t| t.id) == Some(tid)) {
-            settle_focus();
-        }
-    });
+    let on_new = Callback::new(move |kind| opener.new_thread(kind));
+    let on_open = Callback::new(move |id| opener.open(id));
+    let on_pick = Callback::new(move |(tid, mid): (i64, Option<i64>)| opener.reveal(tid, mid));
     let on_delete = Callback::new(delete_thread);
     let on_pin = Callback::new(move |(id, pinned): (i64, bool)| pin_thread(id, pinned));
     let on_archive = Callback::new(move |(id, archived): (i64, bool)| archive_thread(id, archived));
@@ -1637,13 +1716,13 @@ pub fn Chat() -> impl IntoView {
                 }
             >
                 <Show
-                    when=move || current_id.get().is_some()
+                    when=move || current_id.get().is_some() || rescue.with(Rescue::holds_page)
                     fallback=move || {
                         view! {
                             <div class="chat-empty">
                                 <div class="empty">
                                     "Pick a conversation or start a new one."
-                                    <button class="btn primary" on:click=move |_| new_thread("chat")>
+                                    <button class="btn primary" on:click=move |_| opener.new_thread("chat")>
                                         "New chat"
                                     </button>
                                 </div>
@@ -1675,6 +1754,13 @@ pub fn Chat() -> impl IntoView {
                                                 unsaved=settings_unsaved
                                                 on_save=patch_thread
                                                 is_admin=is_admin.get_untracked()
+                                                current_of=Signal::derive(move || {
+                                                    let id = current
+                                                        .with(|t| t.as_ref().map(|t| t.id))?;
+                                                    folders
+                                                        .folders
+                                                        .with(|f| chat_folders::current_of(f, id))
+                                                })
                                             />
                                         }
                                     })
@@ -1711,7 +1797,12 @@ pub fn Chat() -> impl IntoView {
                             }
                         >
                             <div class="chat-head">
-                                <ModelPicker value=model_sel tasks=&["chat"] recent_key="chat"/>
+                                <ModelPicker value=model_sel tasks=&["chat"] recent_key="chat" disabled=picker_held/>
+                                <Show when=move || held.with(Option::is_some)>
+                                    <span class="type-badge held-badge" title=chat_sync::HELD>
+                                        "folder's model"
+                                    </span>
+                                </Show>
                                 <Show when=move || is_admin.get()>
                                     <span class="type-badge" title="self-admin tools attached">
                                         "admin"
@@ -1789,13 +1880,19 @@ pub fn Chat() -> impl IntoView {
                                     busy=keep_busy
                                     on_keep=Callback::new(move |()| {
                                         if let Some(id) = current_id.get_untracked() {
+                                            // The kept chat opens unless the
+                                            // owner did something meanwhile
+                                            // (review CF-4).
+                                            let since = opener.choose();
                                             chat_temp::keep(
                                                 id,
                                                 current,
                                                 keep_busy,
                                                 scope,
                                                 toasts,
-                                                on_open,
+                                                Callback::new(move |kept| {
+                                                    opener.follow(since, kept);
+                                                }),
                                                 Callback::new(move |()| refresh_threads()),
                                             );
                                         }
@@ -1823,6 +1920,7 @@ pub fn Chat() -> impl IntoView {
                                         }
                                     })
                             }}
+                            <chat_sync::NewChatStrip rescue=rescue folders=folder_list held=held/>
                             // The composer and what belongs to it, hidden (never
                             // dropped: its text, chips and dictation mark wait)
                             // while voice mode has its place.
@@ -1917,7 +2015,7 @@ pub fn Chat() -> impl IntoView {
                                         view! {
                                             <button
                                                 class="btn primary"
-                                                disabled=move || streaming_elsewhere.get() || !can_send.get()
+                                                disabled=move || streaming_elsewhere.get() || !can_send.get() || making.get()
                                                 title=move || send_disabled_reason.get()
                                                 on:click=move |_| send(())
                                             >
@@ -2547,6 +2645,16 @@ fn ThreadList(
                                                     </span>
                                                 }
                                             })}
+                                        <Show when=move || {
+                                            folders.folders.with(|f| super::chat_folders::is_current(f, id))
+                                        }>
+                                            <span
+                                                class="thread-current"
+                                                title="The current thread of this ongoing conversation: every client continues here"
+                                            >
+                                                "current"
+                                            </span>
+                                        </Show>
                                         <span class="thread-model" title=model_title>
                                             {model}
                                         </span>
@@ -2590,6 +2698,10 @@ fn ThreadList(
     }
 }
 
+/// The self-admin toolset's label: a thread that carries it drives the
+/// gateway's own configuration, and no paired device reaches it.
+const SELF_ADMIN_LABEL: &str = "lmgw";
+
 #[component]
 fn ThreadSettings(
     thread: RwSignal<Option<ChatThread>>,
@@ -2598,8 +2710,28 @@ fn ThreadSettings(
     unsaved: Memo<bool>,
     on_save: impl Fn(Value) + Copy + Send + Sync + 'static,
     is_admin: bool,
+    /// The ongoing folder this thread is the current thread of, by name.
+    #[prop(into)]
+    current_of: Signal<Option<String>>,
 ) -> impl IntoView {
     let toasts = use_toasts();
+    // Attaching the self-admin toolset to an ongoing conversation's current
+    // thread takes it out of every paired device's reach, and the
+    // conversation moves on for every client (client-apps design L3, review
+    // W5-3): said before Save.
+    let rolls_over = move || {
+        let attaching = draft
+            .picked
+            .with(|p| p.iter().any(|m| m.server_label.trim() == SELF_ADMIN_LABEL))
+            && !thread.with(|t| {
+                t.as_ref().is_some_and(|t| {
+                    t.mcp_tools
+                        .iter()
+                        .any(|m| m.server_label.trim() == SELF_ADMIN_LABEL)
+                })
+            });
+        current_of.get().filter(|_| attaching && !is_admin)
+    };
     // Why the overrides as typed cannot be saved; shown under them and
     // blocking Save, as the server would refuse them too.
     let errors = DraftErrors::of(draft);
@@ -2628,6 +2760,22 @@ fn ThreadSettings(
                     "System prompt"
                 }
             />
+            {move || {
+                rolls_over()
+                    .map(|folder| {
+                        view! {
+                            <div class="notice warn">
+                                {format!(
+                                    "This is the current thread of the ongoing conversation \
+                                     '{folder}'. With the self-admin tools attached, paired \
+                                     devices can no longer reach it: the conversation \
+                                     continues in a new thread for every client the next \
+                                     time one of them asks for it."
+                                )}
+                            </div>
+                        }
+                    })
+            }}
             <div class="chat-settings-save">
                 <Show when=move || unsaved.get()>
                     <span class="count attn">"unsaved"</span>
@@ -3018,13 +3166,6 @@ mod tests {
         assert!(!spelled.differs(&stored));
     }
 
-    fn thread(id: i64) -> ChatThread {
-        ChatThread {
-            id,
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn ir_tool_calls_pair_with_their_results_by_id() {
         let ir = serde_json::json!([
@@ -3149,28 +3290,5 @@ mod tests {
         assert_eq!(day_group("2026-08-31", today), "August 2026");
         assert_eq!(day_group("2025-12-31", "2026-01-02"), "Previous 7 days");
         assert_eq!(day_group("", today), "Undated");
-    }
-
-    #[test]
-    fn deep_link_opens_the_named_thread_when_it_exists() {
-        let list = vec![thread(7), thread(3)];
-        assert_eq!(seed_thread(Some(3), &list), Some(3));
-    }
-
-    #[test]
-    fn deep_link_opens_the_named_thread_even_off_the_active_list() {
-        // Not in the (active-only) list a cold load fetches — an archived
-        // thread, or one deleted since — still wins over the first active
-        // thread (finding #7).
-        let list = vec![thread(7), thread(3)];
-        assert_eq!(seed_thread(Some(99), &list), Some(99));
-    }
-
-    #[test]
-    fn no_deep_link_falls_back_to_the_first_thread() {
-        let list = vec![thread(7), thread(3)];
-        assert_eq!(seed_thread(None, &list), Some(7));
-        assert_eq!(seed_thread(Some(3), &[]), Some(3));
-        assert_eq!(seed_thread(None, &[]), None);
     }
 }

@@ -60,6 +60,12 @@ pub struct RequestSummary {
     /// capability — the stored row's `degraded` ([`crate::degraded`]).
     /// `None` = nothing.
     pub degraded: Option<String>,
+    /// What the request processed besides tokens — the stored row's
+    /// `audio_in_ms`, `chars_in` and `images_out` (billable-units design
+    /// §5.2). `None` = not measured, which is not zero.
+    pub audio_in_ms: Option<i64>,
+    pub chars_in: Option<i64>,
+    pub images_out: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +93,11 @@ pub enum Event {
     /// have changed — the check is periodic and in the background, and the
     /// dashboard polls nothing.
     Updates(lmgw_api_types::builds::UpdatesSummary),
+    /// A key's state moved without a request landing (client-apps design
+    /// §1.6): a device's connection opened or closed, or a key was disabled,
+    /// rotated or deleted — what the Keys page refetches on, instead of
+    /// polling.
+    Keys(lmgw_api_types::KeysChanged),
 }
 
 /// Live counters for the dashboard.
@@ -518,6 +529,15 @@ impl TelemetryBus {
         let _ = self.tx.send(Event::Updates(summary));
     }
 
+    /// Broadcast that key `key_id`'s state moved: `what` is
+    /// [`lmgw_api_types::KeysChanged::what`].
+    pub fn keys(&self, key_id: i64, what: &str) {
+        let _ = self.tx.send(Event::Keys(lmgw_api_types::KeysChanged {
+            key_id,
+            what: what.to_string(),
+        }));
+    }
+
     pub fn stats(&self) -> StatsView {
         self.stats_at(Instant::now())
     }
@@ -696,6 +716,9 @@ mod tests {
             fallback_reason: None,
             rung: None,
             degraded: None,
+            audio_in_ms: None,
+            chars_in: None,
+            images_out: None,
         });
         let s = bus.stats_at(t0 + ms(500));
         assert_eq!(s.completion_tokens, 400);

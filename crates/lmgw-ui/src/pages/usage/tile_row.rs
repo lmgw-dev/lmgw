@@ -46,6 +46,12 @@ pub(super) fn TileRow(
     series: Src<UsageSeriesResponse>,
     by_alias: Src<UsageSeriesResponse>,
     local: Src<UsageLocalResponse>,
+    /// "since 15 Jan 2026" while the window starts before quantities were
+    /// recorded ([`since_note`]).
+    since: Signal<Option<String>>,
+    /// The previous window starts before quantities were recorded: the
+    /// quantity tiles have nothing whole to compare against.
+    prev_unrecorded: Signal<bool>,
 ) -> impl IntoView {
     let currency = Memo::new(move |_| {
         series
@@ -134,7 +140,7 @@ pub(super) fn TileRow(
                     class="hero-unpriced"
                     title=move || {
                         let t = totals.get();
-                        unpriced_note(t.cost_unknown_requests, t.cost_unknown_tokens)
+                        unpriced_of(&t)
                             .map(|n| format!("{n} — their cost is unknown, not zero"))
                             .unwrap_or_else(|| "every request in this window was priced".into())
                     }
@@ -351,7 +357,128 @@ pub(super) fn TileRow(
                 </div>
                 <Spark vals=s_local color="var(--c3)"/>
             </div>
+
+            // What was processed besides tokens (billable units §8.3), each
+            // only when its window or the one before measured any: a
+            // chat-only gateway shows none.
+            <QtyTile
+                label="Audio transcribed"
+                what="input audio sent to speech-to-text models"
+                series=series
+                since=since
+                prev_unrecorded=prev_unrecorded
+                of=|c| c.audio_in_ms
+                unpriced=|c| c.cost_unknown_audio_in_ms
+                text=audio_text
+                color="var(--c2)"
+            />
+            <QtyTile
+                label="Text spoken"
+                what="characters sent to text-to-speech models"
+                series=series
+                since=since
+                prev_unrecorded=prev_unrecorded
+                of=|c| c.chars_in
+                unpriced=|c| c.cost_unknown_chars_in
+                text=|n| format!("{} chars", chars_text(n))
+                color="var(--c4)"
+            />
+            <QtyTile
+                label="Images generated"
+                what="images in image-generation answers"
+                series=series
+                since=since
+                prev_unrecorded=prev_unrecorded
+                of=|c| c.images_out
+                unpriced=|c| c.cost_unknown_images_out
+                text=|n| grouped(n.max(0) as u64)
+                color="var(--c5)"
+            />
         </div>
+    }
+}
+
+/// One measured quantity's tile (billable units §8.3): the window's total,
+/// labelled *measured* — and *since* the day recording started when the
+/// window reaches back before it — with the part of it no price covers, and
+/// a sparkline that starts where the counting did instead of drawing zeros
+/// nobody counted. Hidden while neither this window nor the previous one
+/// measured any.
+#[component]
+fn QtyTile(
+    label: &'static str,
+    /// What the figure counts, for the tooltip.
+    what: &'static str,
+    series: Src<UsageSeriesResponse>,
+    since: Signal<Option<String>>,
+    prev_unrecorded: Signal<bool>,
+    of: fn(&UsageCell) -> i64,
+    unpriced: fn(&UsageCell) -> i64,
+    text: fn(i64) -> String,
+    color: &'static str,
+) -> impl IntoView {
+    let now = Memo::new(move |_| {
+        series
+            .data
+            .with(|d| d.as_ref().map_or(0, |r| of(&r.totals)))
+    });
+    let was = Memo::new(move |_| {
+        series
+            .data
+            .with(|d| d.as_ref().and_then(|r| r.previous.as_ref().map(of)))
+    });
+    let open = Memo::new(move |_| now.get() > 0 || was.get().is_some_and(|v| v > 0));
+    let vals = Signal::derive(move || {
+        series.data.with(|d| {
+            let Some(r) = d.as_ref() else {
+                return Vec::new();
+            };
+            let g = Grid::build(r);
+            let per_bucket = g.totals.iter().map(|c| of(c) as f64).collect();
+            recorded_only(&g.buckets, per_bucket, r.units_since.as_deref())
+        })
+    });
+    let tip = move || {
+        let mut t = format!("{what}, as measured or reported — never estimated");
+        if let Some(s) = since.get() {
+            t.push_str(&format!("; recorded {s}, so earlier buckets are not drawn"));
+        }
+        t
+    };
+    view! {
+        <Show when=move || open.get()>
+            <div class="card tile qty anim-fade" title=tip>
+                <div class="tile-label">{label}</div>
+                <div class="tile-value">{move || text(now.get())}</div>
+                <div class="tile-sub">
+                    "measured"
+                    {move || since.get().map(|s| format!(" {s}"))}
+                    {move || {
+                        let left = series
+                            .data
+                            .with(|d| d.as_ref().map_or(0, |r| unpriced(&r.totals)));
+                        (left > 0).then(|| view! { " · " <b>{text(left)}</b> " unpriced" })
+                    }}
+                </div>
+                <div class="tile-sub">
+                    {move || {
+                        // A previous window reaching back before the recording
+                        // reads low because nobody counted part of it: no delta
+                        // against it.
+                        if prev_unrecorded.get() {
+                            return view! { <span class="dim">"previous window not recorded"</span> }
+                                .into_any();
+                        }
+                        delta_span(
+                            was.get().and_then(|w| ratio(now.get() as f64, w as f64)),
+                            None,
+                            "vs previous window",
+                        )
+                    }}
+                </div>
+                <Spark vals=vals color=color/>
+            </div>
+        </Show>
     }
 }
 

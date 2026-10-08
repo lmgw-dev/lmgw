@@ -13,6 +13,10 @@
 //! `rmcp` types are confined to this module boundary (§19) so a version bump is
 //! localized — `web/`, `config.rs`, and `store.rs` never name an `rmcp::` type.
 
+mod connect;
+/// A Podman-isolated stdio server's container, and the boot sweep of the
+/// ones a crash left (§9).
+pub mod container;
 /// `GET /v1/mcp/servers[/{label}]`: the labels a caller may attach
 /// (realtime-server-tools design §1.4).
 pub(crate) mod discovery;
@@ -31,15 +35,13 @@ pub mod selfadmin;
 pub mod spec;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use rmcp::model::Tool;
 use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::RoleClient;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::config::{McpServer, McpToolOverride, McpTransport, Snapshot};
@@ -147,6 +149,10 @@ pub struct McpConn {
     /// concrete [`GatewayClientHandler`] so Milestone 4 (sampling) is purely
     /// additive — the handler is already the real one, not a placeholder.
     pub running: Option<RunningService<RoleClient, GatewayClientHandler>>,
+    /// The container `running` is attached to, a Podman-isolated stdio
+    /// server's: stopped when the session is ([`container::close`]),
+    /// removed when the entry goes with it in.
+    container: Option<container::Container>,
     /// Tools discovered at connect (`list_all_tools`, paged internally — no cap).
     pub tools: Vec<Tool>,
     pub status: McpStatus,
@@ -160,6 +166,12 @@ pub struct McpConn {
     /// When the last connect attempt finished (success or failure), gating the
     /// next retry against the backoff window.
     last_attempt: Option<Instant>,
+    /// The number of the connect that holds this entry's `Connecting` claim
+    /// ([`McpManager::claims`]); `None` while no connect does. A connect
+    /// stores its outcome only while the claim is still its own: a stop, a
+    /// restart or a delete withdraws it, and a connect that settles after
+    /// that closes its session instead.
+    claim: Option<u64>,
     /// Set when this conn was stopped by the **idle reap** (§9) rather than by
     /// config/error — so the `Stopped` badge tooltip can say "idle-reaped;
     /// reconnects on next use" instead of looking like a never-started server
@@ -198,12 +210,14 @@ impl McpConn {
     fn stopped(config_hash: u64) -> Self {
         Self {
             running: None,
+            container: None,
             tools: Vec::new(),
             status: McpStatus::Stopped,
             last_used: Instant::now(),
             config_hash,
             consecutive_failures: 0,
             last_attempt: None,
+            claim: None,
             idle_reaped: false,
             in_flight: Arc::new(AtomicUsize::new(0)),
         }
@@ -696,6 +710,10 @@ impl std::fmt::Display for CallError {
 /// `Snapshot`.
 pub struct McpManager {
     conns: RwLock<HashMap<i64, McpConn>>,
+    /// The last claim number a connect took ([`McpConn::claim`]): one
+    /// counter for every server, so an entry deleted and made again never
+    /// hands out a number an older connect still holds.
+    claims: AtomicU64,
     /// Back-reference for the per-connection sampling handler (§8). Broken with
     /// `Weak` to avoid the `AppState → McpManager → conns → handler → AppState`
     /// cycle; set once after the `Arc<AppState>` exists via [`set_state`]. A
@@ -725,6 +743,7 @@ impl McpManager {
         let (tools_changed, _) = broadcast::channel(TOOLS_CHANGED_BUFFER);
         Self {
             conns: RwLock::new(HashMap::new()),
+            claims: AtomicU64::new(0),
             state: OnceLock::new(),
             tools_changed,
         }
@@ -873,145 +892,16 @@ impl McpManager {
         conns.get(&id).map(|c| Self::view_of(id, c, snap))
     }
 
-    /// Build the right `rmcp` transport for a server and `serve` it into a
-    /// running peer, then `list_all_tools` (paged internally — no cap, §7).
-    /// Returns the live service + discovered tools, or a human error string.
-    ///
-    /// **Spawn asymmetry (M1 review):** for the bare stdio case `stdio_argv`
-    /// returns just `(command, args)` and env/cwd are the spawner's job; for
-    /// the isolated case env is already in the argv as `-e` flags and cwd is
-    /// intentionally bare-only — so we apply `env`/`cwd` to the `Command` only
-    /// when `!is_isolated()`.
-    async fn connect(
-        &self,
-        server: &McpServer,
-    ) -> Result<(RunningService<RoleClient, GatewayClientHandler>, Vec<Tool>), String> {
-        let handler = self.handler_for(server);
-        let running = match server.transport {
-            McpTransport::Stdio => {
-                let (program, args) = server.stdio_argv();
-                if program.trim().is_empty() {
-                    return Err("stdio server has no command/container image".into());
-                }
-                let mut cmd = tokio::process::Command::new(&program);
-                cmd.args(&args);
-                if !server.is_isolated() {
-                    // Bare subprocess: env + cwd are the spawner's responsibility.
-                    if !server.env.is_empty() {
-                        cmd.envs(server.env.iter().map(|(k, v)| (k.clone(), v.clone())));
-                    }
-                    if let Some(cwd) = server.cwd.as_deref().filter(|c| !c.trim().is_empty()) {
-                        cmd.current_dir(cwd);
-                    }
-                }
-                let transport = TokioChildProcess::new(cmd)
-                    .map_err(|e| format!("spawning `{program}`: {e}"))?;
-                handler
-                    .serve(transport)
-                    .await
-                    .map_err(|e| format!("stdio handshake: {e}"))?
-            }
-            // rmcp 2.0 has no standalone legacy SSE client transport; the
-            // streamable-HTTP client handles servers that reply with
-            // `text/event-stream` too, so both `http` and `sse` route here.
-            McpTransport::Http | McpTransport::Sse => {
-                let url = server
-                    .url
-                    .as_deref()
-                    .filter(|u| !u.trim().is_empty())
-                    .ok_or_else(|| "http/sse server has no URL".to_string())?;
-                let transport = build_http_transport(url, &self.dial_headers(server))?;
-                handler
-                    .serve(transport)
-                    .await
-                    .map_err(|e| format!("http handshake: {e}"))?
-            }
-        };
-        let tools = running
-            .peer()
-            .list_all_tools()
-            .await
-            .map_err(|e| format!("list_tools: {e}"))?;
-        Ok((running, tools))
-    }
-
-    /// Connect one server and store the resulting conn (used by reconcile +
-    /// test-connection). Marks `Connecting` first so the badge reflects a cold
-    /// Podman pull, then `Ready`/`Error`. Honors the backoff window (§14): a
-    /// recently-failed conn within its backoff is left `Error` untouched.
-    async fn start_one(&self, server: &McpServer) {
-        let hash = connection_config_hash(server);
-
-        // Atomically *claim* the connect under one write lock so concurrent
-        // callers (lazy `tools/list`, the 5s tick, reconcile) can't each spawn a
-        // duplicate `podman run` for the same server:
-        // - already `Connecting` ⇒ an attempt is in flight, bail;
-        // - within the backoff window after an `Error` ⇒ bail (§14, no hot-loop);
-        // - otherwise mark `Connecting` and proceed (preserving the failure
-        //   counter for backoff).
-        {
-            let mut conns = self.conns.write().await;
-            let entry = conns
-                .entry(server.id)
-                .or_insert_with(|| McpConn::stopped(hash));
-            if matches!(entry.status, McpStatus::Connecting) {
-                return;
-            }
-            if let Some(last) = entry.last_attempt {
-                if matches!(entry.status, McpStatus::Error(_))
-                    && last.elapsed() < backoff_delay(entry.consecutive_failures)
-                {
-                    return;
-                }
-            }
-            entry.status = McpStatus::Connecting;
-            entry.config_hash = hash;
-        }
-
-        let result = self.connect(server).await;
-
-        let became_ready = {
-            let mut conns = self.conns.write().await;
-            let entry = conns
-                .entry(server.id)
-                .or_insert_with(|| McpConn::stopped(hash));
-            entry.last_attempt = Some(Instant::now());
-            entry.config_hash = hash;
-            match result {
-                Ok((running, tools)) => {
-                    entry.running = Some(running);
-                    entry.tools = tools;
-                    entry.status = McpStatus::Ready;
-                    entry.last_used = Instant::now();
-                    entry.consecutive_failures = 0;
-                    entry.idle_reaped = false; // alive again; clear the reaped marker
-                    true
-                }
-                Err(e) => {
-                    entry.running = None;
-                    entry.tools.clear();
-                    entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-                    entry.status = McpStatus::Error(e);
-                    false
-                }
-            }
-        };
-        // A newly-`Ready` server changed the aggregate composition (its tools now
-        // appear) — nudge every open `GET /mcp` subscriber to re-list (§8/§9). The
-        // signal is sent outside the conns lock.
-        if became_ready {
-            self.notify_tools_changed();
-        }
-    }
-
-    /// Tear down one connection (cancel the rmcp service) and mark it stopped,
-    /// or drop it entirely when the server no longer exists.
+    /// Tear down one connection (cancel the rmcp service, then stop its
+    /// container) and mark it stopped, or drop it entirely when the server
+    /// no longer exists.
     async fn stop_one(&self, id: i64, drop_entry: bool) {
-        let running = {
+        let (running, container) = {
             let mut conns = self.conns.write().await;
             match conns.get_mut(&id) {
                 Some(c) => {
                     let running = c.running.take();
+                    let container = c.container.take();
                     if drop_entry {
                         conns.remove(&id);
                     } else {
@@ -1019,16 +909,22 @@ impl McpManager {
                         c.status = McpStatus::Stopped;
                         c.consecutive_failures = 0;
                         c.last_attempt = None;
+                        // A connect in flight no longer holds the entry: its
+                        // outcome is closed when it settles.
+                        c.claim = None;
                     }
-                    running
+                    (running, container)
                 }
-                None => None,
+                None => (None, None),
             }
         };
-        // Cancel outside the lock; `RunningService::cancel` consumes it and
-        // closes the transport (kills the Podman child for stdio).
-        if let Some(running) = running {
-            let _ = running.cancel().await;
+        // Closed outside the lock: `RunningService::cancel` consumes the
+        // session and closes the transport (ends the attached podman client
+        // for stdio), and a container whose server ignored its stdin closing
+        // is stopped after it, with the server's `timeout_ms` to end.
+        let took_peer = running.is_some();
+        container::close(running, container).await;
+        if took_peer {
             // A torn-down live connection removed its tools from the aggregate —
             // nudge open `GET /mcp` subscribers to re-list (§8). Only when we
             // actually took a running peer (a no-op stop on an already-stopped
@@ -1098,10 +994,8 @@ impl McpManager {
         self.stop_one(id, false).await;
     }
 
-    /// Reconcile live connections against a snapshot (§9). Called after every
-    /// `reload_snapshot()` and once on boot. Diff is the pure
-    /// [`plan_reconcile`]; this method only performs the resulting IO.
-    pub async fn reconcile(&self, snap: &Snapshot) {
+    /// [`reconcile`](Self::reconcile)'s work, where it runs.
+    async fn reconcile_now(&self, snap: &Snapshot) {
         let desired: Vec<DesiredServer> = snap
             .mcp_servers
             .values()
@@ -1296,14 +1190,10 @@ impl McpManager {
         }
         // Fresh connect via a throwaway handler/transport — don't disturb the
         // managed conn map's backoff state, just report the outcome.
-        match self.connect(server).await {
-            Ok((running, tools)) => {
-                let n = tools.len();
-                let _ = running.cancel().await;
-                Ok(n)
-            }
-            Err(e) => Err(e),
-        }
+        let connected = self.connect(server).await?;
+        let n = connected.tools.len();
+        connected.close().await;
+        Ok(n)
     }
 
     // -----------------------------------------------------------------------
@@ -1366,12 +1256,14 @@ impl McpManager {
             id,
             McpConn {
                 running: None,
+                container: None,
                 tools,
                 status: McpStatus::Ready,
                 last_used: Instant::now(),
                 config_hash: 0,
                 consecutive_failures: 0,
                 last_attempt: None,
+                claim: None,
                 idle_reaped: false,
                 in_flight: Arc::new(AtomicUsize::new(0)),
             },
@@ -1576,27 +1468,6 @@ impl McpManager {
             Ok(Ok(result)) => Ok((result, server.name.clone())),
         }
     }
-}
-
-/// Build the streamable-HTTP client transport for a remote server, injecting
-/// the per-server headers (§5). Confined here so the `http`/`rmcp` header types
-/// never leak past the `mcp` boundary.
-fn build_http_transport(
-    url: &str,
-    headers: &[(String, String)],
-) -> Result<StreamableHttpClientTransport<reqwest::Client>, String> {
-    use reqwest::header::{HeaderName, HeaderValue};
-    let mut map: HashMap<HeaderName, HeaderValue> = HashMap::new();
-    for (name, value) in headers {
-        let hn = HeaderName::from_bytes(name.trim().as_bytes())
-            .map_err(|e| format!("invalid header name `{name}`: {e}"))?;
-        let hv = HeaderValue::from_str(value.trim())
-            .map_err(|e| format!("invalid value for header `{name}`: {e}"))?;
-        map.insert(hn, hv);
-    }
-    let config =
-        StreamableHttpClientTransportConfig::with_uri(url.trim().to_string()).custom_headers(map);
-    Ok(StreamableHttpClientTransport::from_config(config))
 }
 
 #[cfg(test)]

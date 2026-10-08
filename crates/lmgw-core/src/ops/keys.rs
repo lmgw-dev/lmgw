@@ -7,13 +7,13 @@ use crate::config::{ApiKey, ApiKeyKind, BudgetPeriod, KeyPolicy, ScopeMode};
 use crate::state::SharedState;
 use crate::store::{self};
 
-/// The **owner-set** half of one key's policy. Sparse like every other patch:
-/// a field left out keeps the value the row already has.
+/// The **settable** half of one key's policy. Sparse like every other
+/// patch: a field left out keeps the value the row already has.
 ///
 /// The other half is *derived* — an agent token's scope and enabled flag are
-/// written by lmgw from the agent's manifest and row (container-runtime §3.1)
-/// — and [`key_set`] refuses to change those rather than writing a value the
-/// next resync would silently take back.
+/// written by lmgw from the agent's manifest and row — and `key_set` refuses to
+/// change those rather than writing a value the next resync would silently take
+/// back.
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KeyPatch {
@@ -31,9 +31,34 @@ pub struct KeyPatch {
     pub tpm_limit: Option<i64>,
     pub concurrency_limit: Option<i64>,
     /// `YYYY-MM-DD` — which means the **whole** of that day, the same reading
-    /// `policy::expired` applies — or an RFC3339 timestamp. `""` clears it.
+    /// expiry enforcement applies — or an RFC3339 timestamp. `""` clears it.
     pub expires_at: Option<String>,
     pub note: Option<String>,
+    /// Device keys only: the label the device may host MCP tools under.
+    /// `""` clears the grant.
+    // The client-apps design record, §1.5.
+    pub hosts_label: Option<String>,
+    /// Device keys only: the device's level of lmgw's admin tools — `off`,
+    /// `read_only` or `full`. Above `off` it uses the Chat threads and
+    /// folders with the self-admin toolset and the `lmgw` label in its tool
+    /// scope; what the tools may do is this level capped by the self-admin
+    /// level in Settings.
+    // The client-apps design record, L3/L5 (2026-10-07); a level since the
+    // pre-merge review's P-3.
+    pub self_admin: Option<lmgw_api_types::AdminLevel>,
+}
+
+/// A device's admin-tools level as the wire carried it; a level this build
+/// does not know is refused, naming the ones it does.
+pub fn parse_device_admin(
+    v: &lmgw_api_types::AdminLevel,
+) -> Result<crate::config::DeviceAdmin, String> {
+    crate::config::DeviceAdmin::from_wire(v).ok_or_else(|| {
+        format!(
+            "unknown self_admin '{}' (off|read_only|full)",
+            v.as_str().trim()
+        )
+    })
 }
 
 fn parse_scope_mode(v: &str) -> Result<ScopeMode, String> {
@@ -176,6 +201,17 @@ pub fn owner_key_refusal(key: &ApiKey, p: &KeyPatch) -> Option<String> {
     {
         return Some(REFUSE_DOOR.to_string());
     }
+    if p.self_admin
+        .as_ref()
+        .and_then(crate::config::DeviceAdmin::from_wire)
+        .is_some_and(crate::config::DeviceAdmin::is_on)
+    {
+        return Some(format!(
+            "'{}' is an owner key, which uses lmgw's admin tools as the owner: the level is a \
+             paired device's",
+            key.name
+        ));
+    }
     let policy = &key.policy;
     let touched = p
         .scope_mode
@@ -229,6 +265,55 @@ pub fn validate_create_scope(p: &KeyPatch) -> Result<bool, String> {
         non_default |= !normalize_patterns(v).is_empty();
     }
     Ok(non_default)
+}
+
+/// A whole policy from a create's patch, over the defaults (`all`, no
+/// budget, no limits): `key_set`'s parsing, validation and normalisation,
+/// for a row that does not exist yet (client-apps design §1.4 — a device is
+/// created with its policy, never widened between the create and a first
+/// edit).
+pub fn policy_from_patch(p: &KeyPatch) -> Result<KeyPolicy, String> {
+    let mut policy = KeyPolicy::default();
+    if let Some(v) = p.scope_mode.as_deref() {
+        policy.scope_mode = parse_scope_mode(v)?;
+    }
+    if let Some(v) = p.scope_patterns.as_deref() {
+        policy.scope_patterns = normalize_patterns(v);
+    }
+    if let Some(v) = p.tool_scope_mode.as_deref() {
+        policy.tool_scope_mode = parse_mode_field("tool_scope_mode", v)?;
+    }
+    if let Some(v) = p.tool_scope_patterns.as_deref() {
+        policy.tool_scope_patterns = normalize_patterns(v);
+    }
+    if let Some(v) = p.budget_micro {
+        if v < 0 {
+            return Err("budget_micro cannot be negative — 0 means no budget".to_string());
+        }
+        policy.budget_micro = v;
+    }
+    if let Some(v) = p.budget_period.as_deref() {
+        policy.budget_period = parse_budget_period(v)?;
+    }
+    for (label, supplied) in [
+        ("rpm_limit", p.rpm_limit),
+        ("tpm_limit", p.tpm_limit),
+        ("concurrency_limit", p.concurrency_limit),
+    ] {
+        let Some(v) = supplied else { continue };
+        if v < 0 {
+            return Err(format!("{label} cannot be negative — 0 means no limit"));
+        }
+        match label {
+            "rpm_limit" => policy.rpm_limit = v,
+            "tpm_limit" => policy.tpm_limit = v,
+            _ => policy.concurrency_limit = v,
+        }
+    }
+    if let Some(v) = p.expires_at.as_deref() {
+        policy.expires_at = validate_expiry(v)?;
+    }
+    Ok(policy)
 }
 
 /// Write one key's policy (usage-analytics §4.1).
@@ -389,6 +474,47 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
         }
     }
 
+    // A device's hosting grant (client-apps design §1.5). Only a device
+    // hosts tools: every other kind is refused for trying, never for
+    // restating its empty label.
+    let mut hosts_label = key.hosts_label.clone();
+    if let Some(v) = p.hosts_label.as_deref() {
+        let wanted = Some(v.trim()).filter(|l| !l.is_empty()).map(str::to_string);
+        if wanted != hosts_label {
+            if key.kind != ApiKeyKind::Device {
+                return Err(format!(
+                    "'{}' is not a device key: only a paired device hosts tools under a label",
+                    key.name
+                ));
+            }
+            if let Some(label) = wanted.as_deref() {
+                if let Some(why) = crate::devices::label_refusal(&snap, label, Some(key.id)) {
+                    return Err(why);
+                }
+            }
+            hosts_label = wanted;
+            changed.push("hosts_label");
+        }
+    }
+
+    // A device's admin-tools level (client-apps design L3/L5, 2026-10-07; a
+    // level since the pre-merge review's P-3). Only a device takes it: every
+    // other kind is refused for trying, never for restating `off`.
+    let mut self_admin = key.self_admin;
+    if let Some(v) = p.self_admin.as_ref() {
+        let v = parse_device_admin(v)?;
+        if v != self_admin {
+            if key.kind != ApiKeyKind::Device {
+                return Err(format!(
+                    "'{}' is not a device key: only a paired device is allowed lmgw's admin tools",
+                    key.name
+                ));
+            }
+            self_admin = v;
+            changed.push("self_admin");
+        }
+    }
+
     if changed.is_empty() {
         return Ok(json!({
             "ok": true,
@@ -399,16 +525,63 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
         }));
     }
 
-    let rows = store::update_key_policy(&state.db, key.id, &policy, enabled, &note)
-        .await
-        .map_err(|e| e.to_string())?;
+    let reach_moved = changed.contains(&"self_admin");
+    let rows = store::update_key_policy(
+        &state.db,
+        key.id,
+        &policy,
+        enabled,
+        &note,
+        hosts_label.as_deref(),
+        (self_admin, reach_moved.then_some(key.self_admin)),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     if rows == 0 {
         return Err(format!(
             "key {} disappeared between reading it and writing it — nothing was changed",
             key.id
         ));
     }
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
+    // Raised whether or not the reload below succeeds (review W2-6): the
+    // row is written, and a revocation that waited for a snapshot would fail
+    // open. The snapshot is published first and the MCP reconcile comes
+    // last (the branch review's N-1, as `ops::hold_set` splits them): one
+    // unreachable autostart server stalls the reconcile for its connect
+    // timeout, and nothing below waits for it.
+    let published = state.publish_snapshot().await;
+    // A key switched off is cut off now, not at its next request (§1.6):
+    // its feed, voice sessions, Chat streams and tool link end with the
+    // reason — a device's, and since 2026-10-06 every kind's (Disable means
+    // disable). Raised after the publish, so a client that reconnects at
+    // once meets the gate's refusal — and raised when the reload failed
+    // too. A changed expiry re-arms every watch's timer.
+    if changed.contains(&"enabled") && !enabled {
+        if published.is_err() {
+            state.key_written(key.id, crate::state::KeyWritten::Disabled);
+        }
+        crate::devices::revoke(state, key.id, crate::devices::RevokeReason::Disabled);
+    }
+    if changed.contains(&"expires_at") {
+        state.devices.revocations.rearm();
+    }
+    // The level moved: the publish that says it plays it
+    // (`AppState::publish_over`) — the device's feed reads the record
+    // written with the row (above `off` or back, its threads and folders
+    // with the toolset come or go), its live state is sent again with the
+    // level, and turned off, its sessions bound to such a thread close now
+    // and its turns on such a thread are cancelled, as an attach of the
+    // toolset closes and cancels them (review P-8); its realtime sessions
+    // list their `lmgw` tools again, at the new level. A reload that failed
+    // lays the level over the published snapshot, which plays it the same
+    // way. A lowered level refuses the next write call of a turn still
+    // running. `/mcp` never serves the admin tools, so its lists do not
+    // move.
+    if reach_moved && published.is_err() {
+        state.key_written(key.id, crate::state::KeyWritten::SelfAdmin(self_admin));
+    }
+    let published = published.map_err(|e| e.to_string())?;
+    state.mcp.reconcile(&published).await;
     // A session this key holds on `/mcp` has its own copy of `tools/list`;
     // nudge it to re-list, as a per-tool switch does.
     if changed.iter().any(|c| c.starts_with("tool_scope")) {

@@ -104,6 +104,7 @@ async fn spoken_world(base: &str, kind: &str) -> (SharedState, ChatThread) {
         &[],
         &[],
         Some(&spoken_row()),
+        &crate::web::chat_caller::Caller::default(),
     )
     .await
     .unwrap();
@@ -115,6 +116,7 @@ async fn spoken_world(base: &str, kind: &str) -> (SharedState, ChatThread) {
         &[],
         &[],
         Some(&spoken_row()),
+        &crate::web::chat_caller::Caller::default(),
     )
     .await
     .unwrap();

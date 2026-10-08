@@ -29,7 +29,7 @@ const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0, 1, 2, 254, 255, 0];
 /// record.
 async fn rich_thread(state: &SharedState, title: &str) -> i64 {
     let db = &state.db;
-    let id = store::create_chat_thread_with_prompt(db, "m-alias", "chat", "Be ``` careful.")
+    let id = store::create_chat_thread_with_prompt(db, "m-alias", "chat", "Be ``` careful.", None)
         .await
         .unwrap();
     let mut t = store::get_chat_thread(db, id).await.unwrap().unwrap();
@@ -50,7 +50,7 @@ async fn rich_thread(state: &SharedState, title: &str) -> i64 {
     t.kb_ids = vec![7];
     t.kb_mode = KbMode::Tool;
     t.kb_budget_tokens = Some(1234);
-    store::update_chat_thread_settings(db, &t, store::SeedWrite::AsGiven)
+    store::update_chat_thread_settings(db, &t, store::SeedWrite::AsGiven, None)
         .await
         .unwrap();
 
@@ -200,10 +200,10 @@ async fn markdown_is_a_readable_transcript() {
 async fn json_is_lossless() {
     let (state, gw) = gw().await;
     let id = rich_thread(&state, "T").await;
-    let folder = store::create_chat_folder(&state.db, "Work", &ThreadDefaults::default())
+    let folder = store::create_chat_folder(&state.db, "Work", &ThreadDefaults::default(), None)
         .await
         .unwrap();
-    store::set_chat_thread_folder(&state.db, id, Some(folder))
+    store::set_chat_thread_folder(&state.db, id, Some(folder), None)
         .await
         .unwrap();
     let r = export(&gw, &format!("/chat/api/threads/{id}/export?format=json")).await;
@@ -369,18 +369,21 @@ async fn compressed_payloads_are_stored_in_a_zip() {
 #[tokio::test]
 async fn a_folder_zip_has_one_file_per_thread_and_honours_archived() {
     let (state, gw) = gw().await;
-    let folder = store::create_chat_folder(&state.db, "Work stuff", &ThreadDefaults::default())
-        .await
-        .unwrap();
+    let folder =
+        store::create_chat_folder(&state.db, "Work stuff", &ThreadDefaults::default(), None)
+            .await
+            .unwrap();
     let a = rich_thread(&state, "Alpha").await;
     let b = rich_thread(&state, "Beta").await;
     let outside = rich_thread(&state, "Outside").await;
     for id in [a, b] {
-        store::set_chat_thread_folder(&state.db, id, Some(folder))
+        store::set_chat_thread_folder(&state.db, id, Some(folder), None)
             .await
             .unwrap();
     }
-    store::archive_chat_thread(&state.db, b).await.unwrap();
+    store::archive_chat_thread(&state.db, b, None)
+        .await
+        .unwrap();
 
     let names = |bytes: &[u8]| -> Vec<String> {
         zip_entries(bytes)
@@ -442,12 +445,12 @@ async fn the_all_zip_has_everything_stored_and_a_readme() {
     let mock = MockServer::start().await;
     mount_openai_reply(&mock, "ok", 1, 1).await;
     let (state, gw) = gateway(&mock, UpstreamKind::Generic, Protocol::Openai).await;
-    let folder = store::create_chat_folder(&state.db, "F", &ThreadDefaults::default())
+    let folder = store::create_chat_folder(&state.db, "F", &ThreadDefaults::default(), None)
         .await
         .unwrap();
     let a = rich_thread(&state, "One").await;
     let b = rich_thread(&state, "Two").await;
-    store::set_chat_thread_folder(&state.db, b, Some(folder))
+    store::set_chat_thread_folder(&state.db, b, Some(folder), None)
         .await
         .unwrap();
     // A temporary thread is in memory and not part of the zip.

@@ -1,6 +1,6 @@
 use sqlx::{Row, SqlitePool};
 
-use crate::config::{PriceScope, Snapshot};
+use crate::config::{PriceScope, PriceUnit, Snapshot};
 use crate::ir::Timings;
 use crate::pricing::Cost;
 use crate::telemetry::RequestClass;
@@ -33,7 +33,7 @@ fn priced(micro: i64) -> Cost {
         in_micro: Some(micro),
         out_micro: Some(0),
         source: PriceSource::Catalog,
-        used: Prices::default(),
+        ..Default::default()
     }
 }
 
@@ -179,6 +179,17 @@ async fn a_rebuild_reproduces_exactly_what_the_write_path_produced() {
             r.status = 500;
             r.error_kind = Some("upstream".into());
         }
+        // Quantities, measured on some rows and not on others — one image
+        // count a measured 0 (billable-units §5.3).
+        if i % 3 == 0 {
+            r.audio_in_ms = Some(i * 1_000 + 7);
+        }
+        if i % 4 == 1 {
+            r.chars_in = Some(i * 11);
+        }
+        if i % 6 == 2 {
+            r.images_out = Some(i % 4);
+        }
         insert_request_log(&pool, &r).await.unwrap();
     }
     // A 200 carrying a non-refusal error_kind: the mid-stream failure, where
@@ -187,8 +198,21 @@ async fn a_rebuild_reproduces_exactly_what_the_write_path_produced() {
     let mut mid_stream = log("a", 50, 5, priced(10));
     mid_stream.error_kind = Some("upstream".into());
     insert_request_log(&pool, &mid_stream).await.unwrap();
+    // An upstream error that spent no tokens but transcribed audio: work the
+    // remainder counts, by its quantity alone.
+    let mut audio_only = log("b", 0, 0, Cost::unknown());
+    audio_only.prompt_tokens = None;
+    audio_only.completion_tokens = None;
+    audio_only.status = 502;
+    audio_only.error_kind = Some("upstream".into());
+    audio_only.audio_in_ms = Some(4_500);
+    insert_request_log(&pool, &audio_only).await.unwrap();
 
     let before = usage_totals(&pool, &window()).await.unwrap();
+    // Not vacuous: every quantity and its remainder holds something.
+    assert!(before.audio_in_ms > before.cost_unknown_audio_in_ms);
+    assert!(before.cost_unknown_audio_in_ms >= 4_500);
+    assert!(before.chars_in > 0 && before.images_out > 0);
     let p95_before = usage_percentiles(&pool, &window(), "total", &[0.95])
         .await
         .unwrap();
@@ -378,13 +402,14 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         &pool,
         PriceScope::Alias,
         "gpt-x",
-        "per_mtok",
+        PriceUnit::PerMtok,
         &Prices {
             price_in: Some(1.0),
             price_out: Some(2.0),
             source: PriceSource::Catalog,
             ..Default::default()
         },
+        None,
         None,
     )
     .await
@@ -393,13 +418,14 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         &pool,
         PriceScope::Alias,
         "gpt-x",
-        "per_mtok",
+        PriceUnit::PerMtok,
         &Prices {
             price_in: Some(9.0),
             price_out: Some(9.0),
             source: PriceSource::Manual,
             ..Default::default()
         },
+        None,
         Some("negotiated"),
     )
     .await
@@ -419,13 +445,14 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         &pool,
         PriceScope::Alias,
         "gpt-x",
-        "per_mtok",
+        PriceUnit::PerMtok,
         &Prices {
             price_in: Some(1.5),
             price_out: Some(2.5),
             source: PriceSource::Catalog,
             ..Default::default()
         },
+        None,
         None,
     )
     .await
@@ -439,7 +466,7 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
 
     // An unpriced alias is unpriced, not free.
     assert!(snap.prices_for("unknown-alias", None, None).is_none());
-    let c = crate::pricing::price_request(
+    let c = crate::pricing::price_tokens(
         &TokenUsage {
             prompt: Some(1000),
             completion: Some(10),
@@ -448,4 +475,241 @@ async fn manual_prices_win_over_catalog_and_local_is_always_free() {
         snap.prices_for("unknown-alias", None, None).as_ref(),
     );
     assert_eq!(c.total_micro, None);
+}
+
+/// A row that processed something besides tokens (billable-units §5.2,
+/// §5.3): a measured quantity reaches the row and the rollup, an unmeasured
+/// one stays NULL on the row and adds 0, and priced work stays out of the
+/// remainder.
+#[tokio::test]
+async fn quantities_reach_the_row_and_the_rollup_and_unmeasured_stays_null() {
+    let pool = db().await;
+    let no_tokens = |alias: &str, micro: i64| {
+        let mut r = log(alias, 0, 0, priced(micro));
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
+        r
+    };
+    let mut asr = no_tokens("whisper", 2_700);
+    asr.audio_in_ms = Some(27_000);
+    let asr_id = insert_request_log(&pool, &asr).await.unwrap();
+    let mut tts = no_tokens("tts-1", 18_510);
+    tts.chars_in = Some(1_234);
+    insert_request_log(&pool, &tts).await.unwrap();
+    let mut image = no_tokens("gpt-image", 80_000);
+    image.images_out = Some(2);
+    insert_request_log(&pool, &image).await.unwrap();
+    let chat_id = insert_request_log(&pool, &log("chat", 100, 10, priced(5)))
+        .await
+        .unwrap();
+
+    let t = usage_totals(&pool, &window()).await.unwrap();
+    assert_eq!(
+        (t.audio_in_ms, t.chars_in, t.images_out),
+        (27_000, 1_234, 2)
+    );
+    assert_eq!(
+        (
+            t.cost_unknown_requests,
+            t.cost_unknown_audio_in_ms,
+            t.cost_unknown_chars_in,
+            t.cost_unknown_images_out
+        ),
+        (0, 0, 0, 0),
+        "priced work is not in the remainder"
+    );
+
+    let asr = get_log(&pool, asr_id).await.unwrap().unwrap();
+    assert_eq!(asr.audio_in_ms, Some(27_000));
+    assert_eq!((asr.chars_in, asr.images_out), (None, None));
+    let chat = get_log(&pool, chat_id).await.unwrap().unwrap();
+    assert_eq!(
+        (chat.audio_in_ms, chat.chars_in, chat.images_out),
+        (None, None, None),
+        "not measured is NULL, never 0"
+    );
+    // The non-token cost part and its rates: NULL while no part is priced in
+    // another unit.
+    assert_eq!(asr.cost_units_micro, None);
+    assert_eq!(
+        (
+            asr.price_per_audio_minute,
+            asr.price_per_mchar,
+            asr.price_per_image,
+            asr.price_per_request
+        ),
+        (None, None, None, None)
+    );
+}
+
+/// The remainder (usage-analytics §2.3) carries the quantities of every
+/// request it counts, so it can say "2 unpriced requests (4.5 min audio)"
+/// instead of "(0 tokens)" — and a quantity is work, the way tokens are: an
+/// error that produced images is a hole in the total, a refusal that
+/// processed nothing is not, and neither is a measured zero.
+#[tokio::test]
+async fn the_remainder_carries_the_quantities_it_counts() {
+    let pool = db().await;
+    let unpriced = |status: i64, kind: Option<&str>| {
+        let mut r = log("cloud", 0, 0, Cost::unknown());
+        r.prompt_tokens = None;
+        r.completion_tokens = None;
+        r.status = status;
+        r.error_kind = kind.map(str::to_string);
+        r
+    };
+    let mut asr = unpriced(200, None);
+    asr.audio_in_ms = Some(270_000);
+    insert_request_log(&pool, &asr).await.unwrap();
+    let mut broken_image = unpriced(502, Some("upstream"));
+    broken_image.images_out = Some(2);
+    insert_request_log(&pool, &broken_image).await.unwrap();
+    let mut nothing_spoken = unpriced(502, Some("upstream"));
+    nothing_spoken.chars_in = Some(0);
+    insert_request_log(&pool, &nothing_spoken).await.unwrap();
+    insert_request_log(&pool, &unpriced(503, Some("gpu_hold")))
+        .await
+        .unwrap();
+
+    let t = usage_totals(&pool, &window()).await.unwrap();
+    assert_eq!(t.requests, 4);
+    assert_eq!(t.cost_unknown_requests, 2);
+    assert_eq!(t.cost_unknown_tokens, 0);
+    assert_eq!(t.cost_unknown_audio_in_ms, 270_000);
+    assert_eq!(t.cost_unknown_images_out, 2);
+    assert_eq!(t.cost_unknown_chars_in, 0);
+
+    rebuild_usage(&pool).await.unwrap();
+    assert_eq!(
+        usage_totals(&pool, &window()).await.unwrap(),
+        t,
+        "the rebuild applies the same rule"
+    );
+}
+
+/// One scope holds one row per unit (billable-units §2.2): tokens and a
+/// per-request fee side by side, each upserted on its own key. The table's
+/// CHECK keeps token rates off every other unit's row and `price` off a
+/// token row.
+#[tokio::test]
+async fn a_scope_holds_a_row_per_unit_and_the_check_keeps_their_shapes_apart() {
+    let pool = db().await;
+    let manual = Prices {
+        source: PriceSource::Manual,
+        ..Default::default()
+    };
+    let tokens = Prices {
+        price_in: Some(3.0),
+        price_out: Some(15.0),
+        ..manual
+    };
+    let alias = PriceScope::Alias;
+    upsert_price(
+        &pool,
+        alias,
+        "gpt-x",
+        PriceUnit::PerMtok,
+        &tokens,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    for (unit, price) in [
+        (PriceUnit::PerRequest, 0.005),
+        (PriceUnit::PerAudioMinute, 0.006),
+        // Keyed on the unit: this updates the fee rather than adding a row.
+        (PriceUnit::PerRequest, 0.004),
+    ] {
+        upsert_price(&pool, alias, "gpt-x", unit, &manual, Some(price), None)
+            .await
+            .unwrap();
+    }
+    let rows = list_prices(&pool).await.unwrap();
+    let shapes: Vec<_> = rows
+        .iter()
+        .map(|r| (r.unit, r.price_in, r.price_out, r.price))
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            (PriceUnit::PerAudioMinute, None, None, Some(0.006)),
+            (PriceUnit::PerMtok, Some(3.0), Some(15.0), None),
+            (PriceUnit::PerRequest, None, None, Some(0.004)),
+        ]
+    );
+
+    let token_row_with_price = upsert_price(
+        &pool,
+        alias,
+        "other",
+        PriceUnit::PerMtok,
+        &tokens,
+        Some(1.0),
+        None,
+    )
+    .await;
+    assert!(token_row_with_price.is_err(), "a token row has no price");
+    let image_fee_as_output_rate = upsert_price(
+        &pool,
+        alias,
+        "other",
+        PriceUnit::PerImage,
+        &Prices {
+            price_out: Some(0.04),
+            ..manual
+        },
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        image_fee_as_output_rate.is_err(),
+        "an image's rate is not an output-token rate"
+    );
+    assert_eq!(list_prices(&pool).await.unwrap().len(), 3);
+
+    // Pricing reads token rows alone until it learns the other units: a
+    // scope priced in another unit only is no token sheet, and the token row
+    // beside a fee still is one.
+    upsert_price(
+        &pool,
+        alias,
+        "tts-1",
+        PriceUnit::PerMchar,
+        &manual,
+        Some(15.0),
+        None,
+    )
+    .await
+    .unwrap();
+    let snap = Snapshot {
+        prices: list_prices(&pool).await.unwrap(),
+        ..Default::default()
+    };
+    assert!(snap.prices_for("tts-1", None, None).is_none());
+    assert_eq!(
+        snap.prices_for("gpt-x", None, None).unwrap().price_in,
+        Some(3.0)
+    );
+}
+
+/// Quantities start at the billable-units migration (§5.5), and the series
+/// says when: the moment sqlx recorded it, which on a database created now is
+/// now.
+#[tokio::test]
+async fn units_since_is_when_the_database_took_the_billable_units_migration() {
+    let pool = db().await;
+    let since = units_since(&pool)
+        .await
+        .unwrap()
+        .expect("a migrated database records it");
+    let at = chrono::DateTime::parse_from_rfc3339(&since)
+        .unwrap_or_else(|e| panic!("{since} is not RFC 3339: {e}"))
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    assert!(
+        at <= now && now - at < chrono::Duration::minutes(10),
+        "{since}"
+    );
 }

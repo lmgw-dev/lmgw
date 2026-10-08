@@ -84,8 +84,17 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "The live feed the dashboard opens once and keeps: stats, jobs, \
-                runtime, vram, mcp and updates frames on connect, then request/stats/mcp/jobs/\
-                vram/runtime/updates frames as they change. Never closes on its own.",
+                runtime, vram, mcp, updates and chat frames on connect, then request/stats/mcp/\
+                jobs/vram/runtime/updates frames as they change, a keys frame when a key's \
+                state moves without a request (a device's connection opened or closed, a key \
+                disabled, rotated or deleted), and a chat frame naming the threads, folders \
+                and messages any writer changed in the Chat (a device, an owner key, this or \
+                another dashboard window, the sweep): read them again. The first change of a \
+                burst waits a fixed 200 ms for the rest, then one read names everything \
+                changed up to it, so a stream sends at most one chat frame per 200 ms plus that \
+                read (but for one its keep-alive read finds). \
+                The chat frame on connect is a resync: read everything shown again, since \
+                frames are not replayed across a reconnect. Never closes on its own.",
             response: Resp::Sse(&[
                 ("stats", |g| g.root_schema_for::<dto::StatsView>()),
                 ("jobs", |g| g.root_schema_for::<Vec<dto::JobRow>>()),
@@ -98,6 +107,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                     g.root_schema_for::<dto::builds::UpdatesSummary>()
                 }),
                 ("request", |g| g.root_schema_for::<dto::RequestRow>()),
+                ("keys", |g| g.root_schema_for::<dto::KeysChanged>()),
+                ("chat", |g| g.root_schema_for::<dto::ChatChanged>()),
             ]),
             ..base("GET", "/api/events", "status", "Open the live event stream")
         },
@@ -306,7 +317,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Every dashboard-editable setting: bind address, self-admin mode + \
                 token, secrets (masked), and all three class definitions. Deliberately \
-                broader than what ops::settings_set exposes to the tool plane.",
+                broader than what the settings_set self-admin tool exposes.",
             response: Resp::Json(|g| g.root_schema_for::<dto::SettingsFull>()),
             ..base("GET", "/api/settings-full", "settings", "Get every setting")
         },

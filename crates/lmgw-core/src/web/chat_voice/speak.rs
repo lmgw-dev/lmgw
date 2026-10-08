@@ -36,6 +36,7 @@ use tokio::sync::mpsc;
 use crate::state::SharedState;
 
 use super::super::chat::err_json;
+use super::super::chat_caller::Caller;
 use super::super::chat_extract::ChatPath;
 use super::super::chat_repo::ChatRepo;
 use super::speech::{self, Feed};
@@ -43,11 +44,12 @@ use super::speech::{self, Feed};
 /// `POST /chat/api/threads/{id}/messages/{mid}/speak` (module doc).
 pub(crate) async fn speak(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
 ) -> Response {
     let started = Instant::now();
     let repo = ChatRepo::of(id);
-    let thread = match repo.thread(&state, id).await {
+    let thread = match repo.thread_as(&state, &caller, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found"),
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
@@ -86,12 +88,12 @@ pub(crate) async fn speak(
     let _ = feed.send(Feed::Text(text));
     drop(feed);
     // The page going away drops the reader, and that stops the speech.
-    let reader = speech::start(&state, repo, &thread, (started, None), false, fed);
+    let reader = speech::start(&state, &caller, repo, &thread, (started, None), false, fed);
     let events = futures::stream::unfold(reader, |mut reader| async move {
         let f = reader.recv().await?;
         Some((Ok::<_, Infallible>(f.into_sse()), reader))
     });
-    Sse::new(events)
+    Sse::new(caller.sse(&state, events))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -99,9 +101,10 @@ pub(crate) async fn speak(
 /// `POST /chat/api/threads/{id}/speech/stop` (module doc).
 pub(crate) async fn stop_speech(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
 ) -> Response {
-    match ChatRepo::of(id).thread(&state, id).await {
+    match ChatRepo::of(id).thread_as(&state, &caller, id).await {
         Ok(Some(_)) => {}
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found"),
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),

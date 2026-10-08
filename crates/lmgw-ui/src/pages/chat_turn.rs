@@ -21,6 +21,7 @@ use serde_json::Value;
 use super::chat::{scroll_down, ChatThread, Msg, Stats, ToolCard};
 use super::chat_reply::Finished;
 use super::chat_stream::{send_stream, ChatEvent};
+use super::chat_sync::OwnEdits;
 use super::chat_voice::PageVoice;
 use crate::scope::Scope;
 use crate::widgets::Toasts;
@@ -44,6 +45,9 @@ pub(super) struct TurnEnv {
     pub scope: Scope,
     /// Dictation, read-aloud and the voice status line (chat-voice WP7).
     pub voice: PageVoice,
+    /// The page's own changes to the transcript (`chat_sync`): a turn's
+    /// start and end count.
+    pub own: OwnEdits,
 }
 
 /// What to stream and where it lands.
@@ -102,6 +106,7 @@ pub(super) async fn run_turn(
         current,
         ..
     } = env;
+    env.own.bump();
     target.streaming.set(true);
     live.set_value(Some((tid, target.clone())));
     streaming.set(Some(tid));
@@ -367,6 +372,7 @@ pub(super) async fn run_turn(
     };
     a_streaming.set(false);
     streaming.set(None);
+    env.own.bump();
     live.try_set_value(None);
     aborter.try_set_value(None);
     let mut end = TurnEnd {

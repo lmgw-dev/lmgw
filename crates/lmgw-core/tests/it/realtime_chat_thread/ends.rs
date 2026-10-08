@@ -268,3 +268,56 @@ async fn a_last_transcript_that_never_comes_holds_the_end_for_one_ping_interval(
     );
     hold.notify_one();
 }
+
+/// RFC 6455 §5.5.1: the endpoint that receives a close answers with a close
+/// of its own, echoing the status code. A client's 1000 is answered 1000,
+/// not with an empty close a client reads as 1005.
+#[tokio::test]
+async fn a_client_s_close_is_answered_with_its_code() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::Message;
+
+    use crate::support::realtime_tts::{speech, wav};
+    let w = world(|_| {}).await;
+    let tid = w.thread("chatty", json!({})).await;
+    for (code, reason, mid_reply) in [
+        (CloseCode::Normal, "bye", false),
+        (CloseCode::Away, "", false),
+        (CloseCode::Normal, "bye", true),
+    ] {
+        let (mut ws, _) = w.bind(tid).await;
+        if mid_reply {
+            // A reply still paced out, and audio streaming in, at the close.
+            w.tts.set_default(wav(&speech(1000), 24_000));
+            manual(&mut ws, 300).await;
+            w.asr.push(Asr::Text("Erzähl was."));
+            w.chat
+                .push(Turn::text(&["Es war einmal ein König. ", "Er war alt."]));
+            say(&mut ws).await;
+            until(&mut ws, |e| e["type"] == "response.output_audio.delta").await;
+            for _ in 0..20 {
+                append(&mut ws, &silence(100)).await;
+            }
+        }
+        ws.close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        }))
+        .await
+        .unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Close(c))) => break c,
+                    Some(Ok(_)) => continue,
+                    other => panic!("expected the close's answer, got {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("the close is answered");
+        assert_eq!(end.map(|c| c.code), Some(code), "the client's code, echoed");
+    }
+}

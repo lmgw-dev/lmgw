@@ -39,7 +39,7 @@ async fn bound() -> (
         model_alias: "m".into(),
         ..Default::default()
     };
-    let bind = state.chat_live.bind_voice(thread.id);
+    let bind = state.chat_live.bind_voice(thread.id, "the dashboard");
     let mut audio_input = bound::audio_input(&state, &thread).await;
     audio_input.value = crate::store::AudioInputMode::On;
     audio_input.verdict.path = InputPath::Audio;
@@ -54,6 +54,7 @@ async fn bound() -> (
         warm: vec![],
         guard: Some(bind.guard),
         taken: bind.taken,
+        taken_by: bind.taken_by,
         fence: bind.fence,
     };
     let (sink, frames) = futures::channel::mpsc::unbounded();
@@ -66,6 +67,7 @@ async fn bound() -> (
         .await
         .unwrap();
     let init = SessionInit {
+        running: None,
         state,
         ctx: Default::default(),
         requested_model: None,

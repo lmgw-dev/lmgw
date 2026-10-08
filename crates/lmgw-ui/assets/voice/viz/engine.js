@@ -6,7 +6,17 @@
 //
 // A variant module is `export function mount(canvas, inputs)`, which calls
 // `run(canvas, inputs, factory)` here. `factory(canvas, opts)` makes the
-// renderer: `{kind, resize(w, h, dpr), render(F), lost?, release?()}`.
+// renderer: `{kind, resize(w, h, dpr), render(F), lost?, release?()}`;
+// `opts` is `{palette, transparent}`.
+//
+// `inputs`: `output` and `input` (the AnalyserNodes of what plays and of the
+// microphone, either may be null), `palette` (the role colours and `bg`),
+// `reducedMotion`, and `transparent` (boolean, default false): the canvas
+// keeps no background of its own, so what is behind it shows wherever the
+// variant draws nothing — an overlay on a desktop, say. ring.js honours it
+// (a context with alpha, cleared each frame instead of filled with `bg`);
+// ribbon.js and orb.js ignore it and paint their background as always.
+// Without it every variant draws exactly what it always has.
 //
 // The handle (§10): setState(state, info), setTiming(timing), resize(cssW,
 // cssH, dpr), destroy() — and setInputs({output, input}) for a microphone
@@ -339,7 +349,8 @@ export function run(canvas, inputs, factory) {
   micTap.attach(inputs.input || null);
 
   let cv = canvas;
-  let r = factory(cv, { palette: P });
+  const opts = { palette: P, transparent: !!inputs.transparent };
+  let r = factory(cv, opts);
   let muted = false;
   let timing = null;
   let raf = 0;

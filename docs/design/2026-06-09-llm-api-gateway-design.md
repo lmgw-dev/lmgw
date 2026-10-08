@@ -239,6 +239,20 @@ Access via `sqlx` (SQLite, async, compile-checked queries). DB file `0600`.
 Config is cached in-memory (`Arc<Snapshot>`), atomically swapped on edit so the
 hot path does no DB reads.
 
+*Changed 2026-10-08:* every write transaction takes the write lock at its BEGIN
+(`BEGIN IMMEDIATE`, `store::begin_write`), in the knowledge and corpus stores too.
+The file is in WAL mode with eight connections, and a deferred transaction that
+read before it wrote failed at once with "database is locked" when another
+connection committed in between; the busy timeout does not cover that, and a
+client saw a 500. Nothing slow runs inside a write transaction, since every other
+writer waits for its lock. The busy timeout is named (`store::BUSY_TIMEOUT`, 5 s,
+sqlx's default). Each wait for the write lock is logged at debug. A wait past half
+the busy timeout opens a contention episode with one warning that names the waiting
+caller (the holder is not tracked), and the episode lasts until no writer waits for
+that database any more; its end is logged with how many writers waited past the
+threshold, the longest wait and how many gave up, at info, or as a warning when one
+gave up. One slow holder used to warn once per writer queued behind it.
+
 ## 10. Observability (logs + live metrics)
 
 Every request produces a `request_logs` row and a push onto a

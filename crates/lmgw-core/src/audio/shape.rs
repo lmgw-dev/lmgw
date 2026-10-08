@@ -10,16 +10,22 @@
 //! route and the realtime path ([`crate::proxy::synthesize`]) call the same
 //! functions, so a voice name, a language, an instruction or a tag means
 //! the same on both. `input` is touched only for its inline tags
-//! ([`super::tags`]).
+//! ([`super::tags`]) and, on an lmgw audio row whose engine refuses a
+//! character its package lacks, for those characters ([`super::charset`]):
+//! each is replaced by an equivalent it says, or dropped. Any other route
+//! gets them as the client sent them.
 
 use axum::http::HeaderValue;
 use serde_json::{Map, Value};
 
+use super::charset::fit;
 use super::language::map_language;
 use super::profile::{InstructionsField, InstructionsMode, SpeechProfile, VoiceField};
 use super::tags::{shape_tags, TagMode};
 use super::voices::{RowVoices, VoiceKind};
 use crate::config::AudioModel;
+use listed::listed;
+pub use listed::HEADER_CODEPOINTS;
 
 /// One change shaping made.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +56,14 @@ pub enum ShapeChange {
     /// (`mapped`) or removed (`stripped`); tags kept as written are no
     /// change.
     Tags { mapped: u32, stripped: u32 },
+    /// Characters of `input` the row's engine cannot say
+    /// ([`super::charset::fit`]): `replaced` by an equivalent it says,
+    /// `dropped` where none is — codepoints, each once, in the order the
+    /// text has them.
+    Chars {
+        replaced: Vec<u32>,
+        dropped: Vec<u32>,
+    },
 }
 
 /// What [`shape_speech`] changed; empty when the body went as it came.
@@ -103,6 +117,16 @@ impl ShapeReport {
                     }
                     format!("tags={}", n.join(","))
                 }
+                ShapeChange::Chars { replaced, dropped } => {
+                    let mut n = Vec::new();
+                    if !replaced.is_empty() {
+                        n.push(format!("replaced:{}", listed(replaced)));
+                    }
+                    if !dropped.is_empty() {
+                        n.push(format!("dropped:{}", listed(dropped)));
+                    }
+                    format!("chars={}", n.join(","))
+                }
             })
             .collect();
         HeaderValue::from_str(&parts.join("; ")).ok()
@@ -122,7 +146,31 @@ pub fn shape_speech(
     shape_language(profile, body, &mut report);
     shape_expressive(&Expressive::of(profile), body, &mut report);
     over_row_description(row, body, &mut report);
+    shape_chars(profile, body, &mut report);
     report
+}
+
+/// `input` in the characters the row's engine says, when its package has a
+/// vocabulary ([`super::charset`]) — after the tags are shaped, on the text
+/// that is sent.
+fn shape_chars(profile: &SpeechProfile, body: &mut Map<String, Value>, report: &mut ShapeReport) {
+    if let Some(change) = body.get_mut("input").and_then(|t| fit_text(profile, t)) {
+        report.changes.push(change);
+    }
+}
+
+/// `text`, when it is a string, in the characters the row's engine says
+/// ([`super::charset::fit`]): the change, or `None` when its package has no
+/// vocabulary or the engine says every character. `input` here, a task's
+/// `text` on `/v1/tasks/*` (`crate::proxy::audio`).
+pub fn fit_text(profile: &SpeechProfile, text: &mut Value) -> Option<ShapeChange> {
+    let vocab = profile.char_vocab.as_deref()?;
+    let f = fit(text.as_str()?, vocab)?;
+    *text = Value::String(f.text);
+    Some(ShapeChange::Chars {
+        replaced: f.replaced,
+        dropped: f.dropped,
+    })
 }
 
 /// The expressive half of shaping (audio-class gap 9) on a route that is
@@ -479,6 +527,9 @@ fn set_option_value(body: &mut Map<String, Value>, key: &str, value: Value) -> b
         None => false,
     }
 }
+
+/// The codepoints of the header's `chars=` part, bounded where it says so.
+mod listed;
 
 #[cfg(test)]
 mod tests;

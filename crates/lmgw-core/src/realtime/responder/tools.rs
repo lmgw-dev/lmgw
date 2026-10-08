@@ -157,6 +157,10 @@ impl DeltaSink for Collect<'_> {
     fn billed(&mut self, usage: &Usage) {
         self.inner.billed(usage);
     }
+
+    fn billed_cost(&mut self, row: crate::pricing::RowCost) {
+        self.inner.billed_cost(row);
+    }
 }
 
 /// Where a call's reports go (module doc).
@@ -331,7 +335,9 @@ fn executor(
     ctx: &RequestCtx,
     tools: &ServerTools,
 ) -> ScopedExecutor<SplitExecutor> {
-    let docs = DocsExecutor::new(state.clone(), ctx.clone()).with_proto(REALTIME_TOOL_PROTO);
+    let docs = DocsExecutor::new(state.clone(), ctx.clone())
+        .with_proto(REALTIME_TOOL_PROTO)
+        .charged_to(crate::devices::charged(ctx));
     // `docs__request` tells the owner who asked: the session's key, as on
     // `/v1/responses`.
     let docs = match &ctx.client_key {

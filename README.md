@@ -227,9 +227,11 @@ in with the `owner:dashboard` key, copied from **Usage → Keys & budgets**.
 
 ### Voice conversations
 
-`ws://127.0.0.1:8787/v1/realtime` speaks OpenAI's GA Realtime protocol, so
-the OpenAI SDKs' realtime clients connect with the same base URL as above. No
-single model does the talking. lmgw runs a cascade: it detects the turns
+`ws://127.0.0.1:8787/v1/realtime` speaks OpenAI's GA Realtime protocol. The
+OpenAI Python SDK's realtime client connects with the same base URL as above
+(it turns `http` into `ws`); the JavaScript SDK insists on `wss:`, so there,
+pass the URL to a client that takes one, such as the Agents SDK's
+`OpenAIRealtimeWebSocket({ url })`. No single model does the talking. lmgw runs a cascade: it detects the turns
 itself (Silero VAD, and Smart Turn for `semantic_vad`), transcribes each turn
 with a speech-to-text alias, answers with a chat alias and speaks the answer
 with a text-to-speech alias. Local models come first, and any stage can be a

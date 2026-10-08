@@ -9,6 +9,8 @@ plan as shell assignments on stdout, which ci/check.sh evals:
   CHANGED_CRATES   packages the diff touches (cargo package names)
   CHANGED_ALL      1 when a workspace-wide file changed (Cargo.lock, ...)
   RUN_TRUNK        1 when the dashboard bundle has to be rebuilt
+  RUN_CLIENT_WASM  1 when lmgw-client (or the types it builds on) has to be
+                   checked for wasm32 on its own
   RUN_WORKLET      1 when the audio worklets changed
   RUN_PUBLISH      1 when scripts/publish-github.sh or its helpers changed
   NEXTEST_FILTER   the nextest filterset for the selected tests
@@ -31,6 +33,7 @@ IT_DIR = "crates/lmgw-core/tests/it"
 CORE = "lmgw-core"
 CORE_SRC = "crates/lmgw-core/src/"
 UI_DIR = "crates/lmgw-ui/"
+CLIENT_DIR = "crates/lmgw-client/"
 
 # Files that change how every crate builds: the selection is then everything.
 WORKSPACE_WIDE = ["Cargo.toml", "Cargo.lock", "clippy.toml", "rust-toolchain", "rust-toolchain.toml",
@@ -138,7 +141,7 @@ def dist_stale():
     if not os.path.exists(index):
         return "crates/lmgw-ui/dist/index.html does not exist"
     built = os.path.getmtime(index)
-    sources = git("ls-files", "crates/lmgw-ui", "crates/lmgw-api-types").split("\n")
+    sources = git("ls-files", "crates/lmgw-ui", "crates/lmgw-api-types", "crates/lmgw-client").split("\n")
     newer = [f for f in sources if f and os.path.exists(os.path.join(ROOT, f))
              and os.path.getmtime(os.path.join(ROOT, f)) > built]
     if newer:
@@ -282,7 +285,7 @@ def main():
             clauses.append(f"(package({CORE}) & binary(it) & ({' | '.join(alts)}))")
 
     # --- trunk and worklets ---------------------------------------------------------
-    ui = [f for f in files if f.startswith(UI_DIR) or f.startswith("crates/lmgw-api-types/")]
+    ui = [f for f in files if f.startswith((UI_DIR, CLIENT_DIR, "crates/lmgw-api-types/"))]
     stale = dist_stale()
     if wide:
         trunk, why = 1, f"{wide[0]} is workspace-wide"
@@ -291,8 +294,11 @@ def main():
     elif stale:
         trunk, why = 1, stale
     else:
-        trunk, why = 0, "no lmgw-ui / lmgw-api-types change and dist/ is fresh"
+        trunk, why = 0, "no lmgw-ui / lmgw-client / lmgw-api-types change and dist/ is fresh"
     say(f"\ntrunk build: {'yes' if trunk else 'skipped'} ({why})")
+    client = [f for f in files if f.startswith((CLIENT_DIR, "crates/lmgw-api-types/"))]
+    client_wasm = bool(wide or client)
+    say(f"lmgw-client wasm32 check: {'yes (' + (wide or client)[0] + ' changed)' if client_wasm else 'skipped (no lmgw-client / lmgw-api-types change)'}")
     voice = [f for f in files if f.startswith(UI_DIR + "assets/voice/")
              or f == "scripts/worklet-check.mjs"]
     say(f"worklet check: {'yes (' + voice[0] + ' changed)' if voice else 'skipped (no change under crates/lmgw-ui/assets/voice/)'}")
@@ -303,6 +309,7 @@ def main():
         "CHANGED_CRATES": " ".join(sorted(touched)),
         "CHANGED_ALL": "1" if wide else "0",
         "RUN_TRUNK": str(trunk),
+        "RUN_CLIENT_WASM": "1" if client_wasm else "0",
         "RUN_WORKLET": "1" if voice else "0",
         "RUN_PUBLISH": "1" if publish else "0",
         "NEXTEST_FILTER": " | ".join(clauses),

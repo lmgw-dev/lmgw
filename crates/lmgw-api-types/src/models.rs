@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModelsFull {
     pub aliases: Vec<AliasView>,
-    /// Candidate aliases (candidate-aliases design §4.1). Defaulted, like
+    /// Candidate aliases. Defaulted, like
     /// `image`, so a UI bundle newer than the gateway it is talking to still
     /// parses the payload.
     #[serde(default)]
@@ -17,7 +17,7 @@ pub struct ModelsFull {
     pub local: Vec<LocalModelView>,
     pub aux: Vec<AuxModelView>,
     pub audio: Vec<AudioModelView>,
-    /// The stable-diffusion.cpp class (image-generation design §4). Defaulted
+    /// The stable-diffusion.cpp class. Defaulted
     /// rather than required, so a UI bundle newer than the gateway it is
     /// talking to still parses the payload.
     #[serde(default)]
@@ -40,7 +40,8 @@ pub struct PassthroughUpstream {
     pub hidden: Vec<String>,
 }
 
-/// Mirror of `config::ModelAlias` + resolved upstream name.
+/// A model alias plus its resolved upstream name.
+// Mirror of `config::ModelAlias`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AliasView {
@@ -53,15 +54,15 @@ pub struct AliasView {
     #[serde(default)]
     pub param_overrides: Params,
     pub enabled: bool,
-    /// Owner override of the derived `/v1/models` capability facts
-    /// (model-capabilities design §7): a JSON object with optional keys
-    /// `capabilities`, `max_output_tokens`, `notes`. `None` = no override.
+    /// An alias's capabilities override for the derived `/v1/models` capability facts: a JSON
+    /// object with optional keys `capabilities`, `max_output_tokens`, `notes`. `None` = no
+    /// override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
 }
 
-/// Mirror of `ir::ReasoningControl` (per-request reasoning control: on/off,
-/// effort level, thinking-token budget).
+/// Per-request reasoning control: on/off, effort level, thinking-token budget.
+// Mirror of `ir::ReasoningControl`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReasoningControl {
@@ -73,7 +74,8 @@ pub struct ReasoningControl {
     pub budget_tokens: Option<i64>,
 }
 
-/// Mirror of `ir::Params` (alias-level request overrides).
+/// Alias-level request overrides.
+// Mirror of `ir::Params`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -98,7 +100,8 @@ pub struct Params {
     pub stop: Vec<String>,
 }
 
-/// Mirror of `config::LocalModel` plus its client-facing public name.
+/// A local chat model row plus its client-facing public name.
+// Mirror of `config::LocalModel`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LocalModelView {
@@ -120,40 +123,37 @@ pub struct LocalModel {
     pub idle_seconds: i64,
     pub enabled: bool,
     pub public: bool,
-    /// Per-model container image override (per-model-containers design §3.1);
+    /// Per-model container image override;
     /// `None` inherits the chat class settings' image.
     #[serde(default)]
     pub image: Option<String>,
-    /// Per-model `podman run` args override (§3.1); `None` inherits the chat
+    /// Per-model `podman run` args override; `None` inherits the chat
     /// class settings' `extra_run_args`.
     #[serde(default)]
     pub extra_run_args: Option<Vec<String>>,
-    /// Start this model's own container at app launch (§3.1, §3.4).
+    /// Start this model's own container at app launch.
     #[serde(default)]
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2): `inherit` | `none` |
-    /// `alias`. Mirror of `config::HoldFallbackMode::as_str()`.
+    /// GPU-hold fallback mode: `inherit` | `none` | `alias`.
     #[serde(default = "default_hold_fallback_mode")]
     pub hold_fallback_mode: String,
     /// The alias to route to while the GPU is held, meaningful only when
     /// `hold_fallback_mode` is `alias`.
     #[serde(default)]
     pub hold_fallback: Option<String>,
-    /// Owner override of the derived `/v1/models` capability facts
-    /// (model-capabilities design §7): a JSON object with optional keys
-    /// `capabilities`, `max_output_tokens`, `notes`. `None` = no override.
+    /// An alias's capabilities override for the derived `/v1/models` capability facts: a JSON
+    /// object with optional keys `capabilities`, `max_output_tokens`, `notes`. `None` = no
+    /// override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
-    /// Ladder rungs above the base (ladder design §4.1). Mirror of
-    /// `config::LocalModel::ladder`; empty = not a ladder. `#[serde(default)]`
-    /// so a frame from before this field existed still decodes.
+    /// Ladder rungs above the base; empty = not a ladder. Absent in frames from before this
+    /// field existed.
     #[serde(default)]
     pub ladder: Vec<Rung>,
 }
 
-/// Mirror of lmgw-core's `ladder::Rung` (ladder design §4.1): one rung above
-/// the base — its own weights and its own context. The base rung is never
-/// one of these; it stays `LocalModel::gguf_path` / `LlamaParams::ctx_size`.
+/// One ladder rung above the base — its own weights and its own context. The base rung is
+/// never one of these; it stays the row's own `gguf_path` and `ctx_size`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Rung {
@@ -167,7 +167,8 @@ pub(crate) fn default_hold_fallback_mode() -> String {
     "inherit".into()
 }
 
-/// Mirror of `config::LlamaParams` — the full llama-server param surface.
+/// The full llama-server parameter surface of a local model row.
+// Mirror of `config::LlamaParams`.
 /// `None`/`false` = flag omitted from the rendered preset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -229,8 +230,8 @@ pub struct AuxModelView {
     pub model: AuxModel,
 }
 
-/// Mirror of `config::AuxModel` — the aux container's models, embedders and
-/// rerankers alike.
+/// An aux container model row — embedders and rerankers alike.
+// Mirror of `config::AuxModel`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AuxModel {
@@ -248,18 +249,18 @@ pub struct AuxModel {
     pub args: Vec<String>,
     pub idle_seconds: i64,
     pub enabled: bool,
-    /// Per-model container image override (per-model-containers design §3.1);
+    /// Per-model container image override;
     /// `None` inherits the aux class settings' image.
     #[serde(default)]
     pub image: Option<String>,
-    /// Per-model `podman run` args override (§3.1); `None` inherits the aux
+    /// Per-model `podman run` args override; `None` inherits the aux
     /// class settings' `extra_run_args`.
     #[serde(default)]
     pub extra_run_args: Option<Vec<String>>,
-    /// Start this model's own container at app launch (§3.1, §3.4).
+    /// Start this model's own container at app launch.
     #[serde(default)]
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2): `inherit` | `none` |
+    /// GPU-hold fallback mode: `inherit` | `none` |
     /// `alias`. `inherit` means "no fallback" for this class — aux models
     /// never inherit the global chat alias.
     #[serde(default = "default_hold_fallback_mode")]
@@ -275,8 +276,8 @@ pub struct AuxModel {
 pub struct AudioModelView {
     pub public_name: String,
     pub model: AudioModel,
-    /// What the row is charged on the GPU and why, in one sentence (realtime
-    /// design §9.4): its learned residency, or the on-disk size it is charged
+    /// What the row is charged on the GPU and why, in one sentence: its learned residency, or the
+    /// on-disk size it is charged
     /// at instead — not learned yet, learned for a previous configuration, or
     /// not learnable on this host (and why).
     #[serde(default)]
@@ -303,7 +304,8 @@ pub struct AudioModelView {
     pub threads_source: String,
 }
 
-/// Mirror of `config::AudioModel` (JSON-map fields stay dynamic).
+/// An audio model row (JSON-map fields stay dynamic).
+// Mirror of `config::AudioModel`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AudioModel {
@@ -336,7 +338,7 @@ pub struct AudioModel {
     /// Request-option defaults applied to every call to this model.
     #[serde(default)]
     pub default_request_options: serde_json::Map<String, serde_json::Value>,
-    /// A `<family>.json` spec (or a directory of them) under the audio models
+    /// A `<family>.json` model spec (or a directory of them) under the audio models
     /// dir that replaces the container image's own catalog for this row.
     #[serde(default)]
     pub model_spec_override: Option<String>,
@@ -350,18 +352,18 @@ pub struct AudioModel {
     #[serde(default)]
     pub default_voice_preset: Option<serde_json::Value>,
     pub enabled: bool,
-    /// Per-model container image override (per-model-containers design §3.1);
+    /// Per-model container image override;
     /// `None` inherits the audio class settings' image.
     #[serde(default)]
     pub image: Option<String>,
-    /// Per-model `podman run` args override (§3.1); `None` inherits the audio
+    /// Per-model `podman run` args override; `None` inherits the audio
     /// class settings' `extra_run_args`.
     #[serde(default)]
     pub extra_run_args: Option<Vec<String>>,
-    /// Start this model's own container at app launch (§3.1, §3.4).
+    /// Start this model's own container at app launch.
     #[serde(default)]
     pub warm_start: bool,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2): `inherit` | `none` |
+    /// GPU-hold fallback mode: `inherit` | `none` |
     /// `alias`. `inherit` means "no fallback" for this class — audio models
     /// never inherit the global chat alias.
     #[serde(default = "default_hold_fallback_mode")]
@@ -371,7 +373,7 @@ pub struct AudioModel {
     #[serde(default)]
     pub hold_fallback: Option<String>,
     /// What this model's container was measured to hold on the GPU once it
-    /// had served a request (realtime design §9.4). Learned by the gateway,
+    /// had served a request. Learned by the gateway,
     /// never by the editor; `audio_model_set`'s `clear: "residency"` resets
     /// it. `None` = not learned, charged at the on-disk size.
     #[serde(default)]
@@ -397,8 +399,8 @@ pub struct ImageModelView {
     pub model: ImageModel,
 }
 
-/// Mirror of `config::ImageModel` — one stable-diffusion.cpp pipeline
-/// (image-generation design §4).
+/// An image model row — one stable-diffusion.cpp pipeline.
+// Mirror of `config::ImageModel`.
 ///
 /// The two JSON-map fields stay dynamic on purpose, exactly as the server
 /// types them: sd.cpp adds a model family and its flag every few weeks, and
@@ -442,11 +444,11 @@ pub struct ImageModel {
     pub hold_fallback_mode: String,
     #[serde(default)]
     pub hold_fallback: Option<String>,
-    /// Owner override of the derived `/v1/models` capability facts.
+    /// An alias's capabilities override for the derived `/v1/models` capability facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
     /// The learned transient peak: what one generation was measured to need
-    /// above this pipeline's idle residency (image-generation §9). Written by
+    /// above this pipeline's idle residency. Written by
     /// the gateway, not by the editor — a `files` or `args` change resets it
     /// to `None`, because a different pipeline has a different peak.
     #[serde(default)]

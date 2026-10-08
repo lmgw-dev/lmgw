@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{KeysResponse, PriceRowView, PricesResponse, UpstreamsResponse};
+use lmgw_api_types::{KeysResponse, PriceRowView, PriceUnit, PricesResponse, UpstreamsResponse};
 use serde_json::{json, Value};
 
 use crate::fmt::grouped;
@@ -11,14 +11,17 @@ use crate::widgets::{
     PageFrame, PageMode, Select,
 };
 
+use super::price_units;
 use super::*;
 
 /// Prices (`/usage/prices`): the price sheets decide how much of the spend on
 /// Charts is knowable at all, so the unpriced models sit with them — pinned
 /// first, each with its Price action.
 ///
-/// One fill table: a band per upstream (by name, with its count, and the
-/// kind and unit its rows all share), every row in the one scroller.
+/// One fill table: a band per upstream (by name, with its count and the
+/// kind its rows share), every row in the one scroller. Each row is one
+/// unit of one scope (billable-units design §8.1) and says which: a scope
+/// priced in tokens and per request is two rows whose parts add up.
 #[component]
 pub fn UsagePrices() -> impl IntoView {
     let toasts = use_toasts();
@@ -59,7 +62,34 @@ pub fn UsagePrices() -> impl IntoView {
     let p_out = RwSignal::new(String::new());
     let p_cr = RwSignal::new(String::new());
     let p_cw = RwSignal::new(String::new());
+    // A unit other than tokens has one rate (§8.1).
+    let p_price = RwSignal::new(String::new());
+    let unit = RwSignal::new(PriceUnit::PerMtok.as_str().to_string());
+    // A new row's unit follows its model's task until the owner picks one.
+    let unit_picked = RwSignal::new(false);
     let edit_id = RwSignal::new(0i64);
+    let catalog = crate::catalog::use_model_catalog();
+    // The unit a new row for `key` starts in: its model's task, where the
+    // gateway's catalog states one. An upstream-model key names the model
+    // after its upstream id, and the catalog by its public name.
+    let task_unit = move |key: &str| -> String {
+        let key = key.trim();
+        let model = key.split_once(':').map_or(key, |(_, m)| m);
+        let task = catalog.entries.with_untracked(|es| {
+            es.iter()
+                .find(|e| {
+                    e.id.eq_ignore_ascii_case(key)
+                        || e.id.eq_ignore_ascii_case(model)
+                        || e.id
+                            .to_lowercase()
+                            .ends_with(&format!("/{}", model.to_lowercase()))
+                })
+                .and_then(|e| e.task.clone())
+        });
+        price_units::default_unit(task.as_deref())
+            .as_str()
+            .to_string()
+    };
     // The editor shows prices as typed numbers: `fmt::price`, never the
     // float noise the sheet stores (0.7999999999999999).
     let num = |v: Option<f64>| v.map(crate::fmt::price).unwrap_or_default();
@@ -73,17 +103,24 @@ pub fn UsagePrices() -> impl IntoView {
                 p_out.set(num(r.price_out));
                 p_cr.set(num(r.price_cache_read));
                 p_cw.set(num(r.price_cache_write));
+                p_price.set(num(r.price));
+                unit.set(r.unit);
+                unit_picked.set(true);
             }
             None => {
                 edit_id.set(0);
                 scope_kind.set("alias".into());
+                unit.set(task_unit(&key));
+                unit_picked.set(false);
                 scope_key.set(key);
                 p_in.set(String::new());
                 p_out.set(String::new());
                 p_cr.set(String::new());
                 p_cw.set(String::new());
+                p_price.set(String::new());
             }
         }
+        catalog.refresh_if_older(crate::catalog::FRESH_SECS);
         open.set(true);
     };
     let edit = Callback::new(move |id: i64| {
@@ -120,36 +157,7 @@ pub fn UsagePrices() -> impl IntoView {
         spawn_local(async move {
             match crate::api::post::<Value, _>("/api/op/prices_sync", &json!({})).await {
                 Ok(v) => {
-                    let rows = v.get("rows_written").and_then(Value::as_i64).unwrap_or(0);
-                    let unpriced = v
-                        .get("unpriced_models")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0);
-                    // An upstream whose catalog fetch failed is named rather
-                    // than folded into the count: "0 rows" and "could not ask"
-                    // are different answers.
-                    let failed: Vec<String> = v
-                        .get("upstreams")
-                        .and_then(Value::as_array)
-                        .map(|us| {
-                            us.iter()
-                                .filter(|u| u.get("error").is_some_and(|e| !e.is_null()))
-                                .map(|u| {
-                                    u.get("upstream")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("upstream")
-                                        .to_string()
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let mut msg = format!(
-                        "{} price row(s) written · {unpriced} model(s) advertise no price",
-                        grouped(rows.max(0) as u64),
-                    );
-                    if !failed.is_empty() {
-                        msg.push_str(&format!(" · could not ask: {}", failed.join(", ")));
-                    }
+                    let msg = sync_message(&v);
                     toasts.ok(msg);
                     syncing.set(false);
                     refresh.update(|v| *v = v.wrapping_add(1));
@@ -162,32 +170,48 @@ pub fn UsagePrices() -> impl IntoView {
         });
     };
     let save = move |_| {
+        let Some(u) = price_units::parse(&unit.get_untracked()) else {
+            toasts.err(format!(
+                "unit \u{201c}{}\u{201d} is not one this dashboard can write",
+                unit.get_untracked()
+            ));
+            return;
+        };
         // Empty clears that price; anything else has to be one. Text that is
         // not a number used to go out as null — clearing the price — and
-        // toast "Price saved".
-        let parsed = [
-            ("input", p_in),
-            ("output", p_out),
-            ("cache read", p_cr),
-            ("cache write", p_cw),
-        ]
-        .map(|(label, sig)| price_field(label, &sig.get_untracked()));
-        if let Some(Err(e)) = parsed.iter().find(|r| r.is_err()) {
-            toasts.err(e.clone());
-            return;
+        // toast "Price saved". Only the boxes the unit shows are read.
+        let mut tokens = [None; 4];
+        let mut price = None;
+        if u.is_tokens() {
+            let parsed = [
+                ("input", p_in),
+                ("output", p_out),
+                ("cache read", p_cr),
+                ("cache write", p_cw),
+            ]
+            .map(|(label, sig)| price_field(label, &sig.get_untracked()));
+            if let Some(Err(e)) = parsed.iter().find(|r| r.is_err()) {
+                toasts.err(e.clone());
+                return;
+            }
+            tokens = parsed.map(Result::unwrap_or_default);
+        } else {
+            match price_field(u.label(), &p_price.get_untracked()) {
+                Ok(v) => price = v,
+                Err(e) => {
+                    toasts.err(e);
+                    return;
+                }
+            }
         }
-        let [p_in_v, p_out_v, p_cr_v, p_cw_v] = parsed.map(Result::unwrap_or_default);
-        let body = json!({
-            "id": edit_id.get_untracked(),
-            "scope_kind": scope_kind.get_untracked(),
-            "scope_key": scope_key.get_untracked(),
-            "unit": "per_mtok",
-            "price_in": p_in_v,
-            "price_out": p_out_v,
-            "price_cache_read": p_cr_v,
-            "price_cache_write": p_cw_v,
-            "source": "manual",
-        });
+        let body = price_units::price_body(
+            edit_id.get_untracked(),
+            &scope_kind.get_untracked(),
+            &scope_key.get_untracked(),
+            u,
+            tokens,
+            price,
+        );
         spawn_local(async move {
             match crate::api::post::<Value, _>("/api/op/price_set", &body).await {
                 Ok(_) => {
@@ -302,7 +326,7 @@ pub fn UsagePrices() -> impl IntoView {
     view! {
         <PageFrame
             title="Usage"
-            sub="what a token costs, per alias and per upstream model"
+            sub="what each unit costs, per alias and per upstream model"
             mode=PageMode::Fill
             head_extra=move || view! { <UsageTabs keys=keys prices=prices/> }
             actions=move || {
@@ -338,8 +362,10 @@ pub fn UsagePrices() -> impl IntoView {
                 persist="usage.explain.prices"
             >
                 "An upstream that publishes no prices — Gemini, for one — needs a manual row for "
-                "each model it serves. Leave a field empty and it stays unknown rather than "
-                "becoming a zero. Sync prices re-reads every catalog; it never overwrites a "
+                "each model it serves. A model can be priced in several units — tokens, minutes of "
+                "input audio, input characters, generated images, requests — one row each, and a "
+                "request costs the sum of its rows. Leave a field empty and it stays unknown rather "
+                "than becoming a zero. Sync prices re-reads every catalog; it never overwrites a "
                 "manual row."
             </Explain>
             <CardErr err=prices.err/>
@@ -348,6 +374,7 @@ pub fn UsagePrices() -> impl IntoView {
                     <thead>
                         <tr>
                             {sort_th("Model", "model", "")}
+                            {sort_th("Unit", "unit", "")}
                             {sort_th("In", "in", "num-h")}
                             {sort_th("Out", "out", "num-h")}
                             {sort_th("Cache read", "cr", "num-h col-p2")}
@@ -385,6 +412,9 @@ pub fn UsagePrices() -> impl IntoView {
                 <div class="form">
                     <div class="row">
                         <span class="lbl">"scope"</span>
+                        // Scope and unit are an existing row's key: the op
+                        // writes by them, so changing either would write a
+                        // second row and leave this one standing (§8.1).
                         <Select
                             value=scope_kind
                             options=Signal::derive(|| {
@@ -393,24 +423,87 @@ pub fn UsagePrices() -> impl IntoView {
                                     ("upstream_model".into(), "upstream model".into()),
                                 ]
                             })
+                            disabled=Signal::derive(move || edit_id.get() != 0)
                         />
                         <input
                             class="input mono"
                             style="flex:1"
                             placeholder="claude-opus-5"
+                            prop:disabled=move || edit_id.get() != 0
                             prop:value=move || scope_key.get()
-                            on:input=move |ev| scope_key.set(event_target_value(&ev))
+                            on:input=move |ev| {
+                                let key = event_target_value(&ev);
+                                // A new row's unit follows the model it names
+                                // until the owner picks one.
+                                if edit_id.get_untracked() == 0 && !unit_picked.get_untracked() {
+                                    unit.set(task_unit(&key));
+                                }
+                                scope_key.set(key);
+                            }
                         />
                     </div>
-                    <div class="field-grid" style="--field-min:120px; margin-top:12px">
-                        <PriceField label="in" value=p_in/>
-                        <PriceField label="out" value=p_out/>
-                        <PriceField label="cache read" value=p_cr/>
-                        <PriceField label="cache write" value=p_cw/>
+                    <div class="row price-unit-row">
+                        <span class="lbl">"unit"</span>
+                        // A row's unit is part of its key (§8.1): editing one
+                        // in place would leave the old row standing, so an
+                        // existing row's is fixed and another unit is a new row.
+                        <span class="price-unit-pick" on:change=move |_| unit_picked.set(true)>
+                            <Select
+                                value=unit
+                                options=Signal::derive(price_units::unit_options)
+                                disabled=Signal::derive(move || edit_id.get() != 0)
+                            />
+                        </span>
+                        <span class="dim mini-note price-unit-note">
+                            {move || {
+                                if edit_id.get() != 0 {
+                                    "scope and unit are fixed for an existing row — Add price writes another beside it"
+                                        .to_string()
+                                } else {
+                                    price_units::parse(&unit.get())
+                                        .map(|u| format!("priced {}", u.scale()))
+                                        .unwrap_or_default()
+                                }
+                            }}
+                        </span>
                     </div>
+                    {move || {
+                        match price_units::parse(&unit.get()) {
+                            Some(u) if !u.is_tokens() => {
+                                view! {
+                                    <div class="field-grid" style="--field-min:220px; margin-top:12px">
+                                        <PriceField label=u.scale() value=p_price/>
+                                    </div>
+                                }
+                                    .into_any()
+                            }
+                            _ => {
+                                view! {
+                                    <div class="field-grid" style="--field-min:120px; margin-top:12px">
+                                        <PriceField label="in" value=p_in/>
+                                        <PriceField label="out" value=p_out/>
+                                        <PriceField label="cache read" value=p_cr/>
+                                        <PriceField label="cache write" value=p_cw/>
+                                    </div>
+                                }
+                                    .into_any()
+                            }
+                        }
+                    }}
                     <div class="mini-note dim">
-                        {move || format!("Per Mtok, in {}. ", cur.get())}
-                        "A manual row always wins over a catalog row for the same scope; leave a field empty and it stays unknown rather than becoming a zero."
+                        {move || {
+                            let cur = cur.get();
+                            match price_units::parse(&unit.get()) {
+                                Some(u) if !u.is_tokens() => {
+                                    format!(
+                                        "One rate, {}, in {cur}. A model's rows add up: this is paid on top of any other unit priced for it. ",
+                                        u.scale(),
+                                    )
+                                }
+                                _ => format!("Per 1M tokens, in {cur}. "),
+                            }
+                        }}
+                        "A manual row always wins over a catalog row for the same scope and unit; leave a field empty and it stays unknown rather than becoming a zero."
                     </div>
                     <ModalFooter>
                         <button class="btn ghost" on:click=move |_| open.set(false)>
@@ -426,10 +519,90 @@ pub fn UsagePrices() -> impl IntoView {
     }
 }
 
-const PRICE_COLS: u32 = 7;
+const PRICE_COLS: u32 = 8;
 
-/// One price box as the sheet stores it, per Mtok: empty is no price (null),
-/// a decimal comma is a point, anything else must be a finite number ≥ 0.
+/// The toast a price sync answers with: rows written, models that
+/// advertise no price, catalog fee rows removed because the catalog stopped
+/// publishing them, the advertised fields not synced ([`not_synced`]), and
+/// every upstream it could not ask — each said, never folded into a count.
+fn sync_message(v: &Value) -> String {
+    let rows = v.get("rows_written").and_then(Value::as_i64).unwrap_or(0);
+    let unpriced = v
+        .get("unpriced_models")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let mut msg = format!(
+        "{} price row(s) written · {unpriced} model(s) advertise no price",
+        grouped(rows.max(0) as u64),
+    );
+    // A catalog fee the provider stopped publishing is removed rather than
+    // left to bill: said, not done silently.
+    let removed = v.get("rows_removed").and_then(Value::as_i64).unwrap_or(0);
+    if removed > 0 {
+        msg.push_str(&format!(
+            " · {} catalog fee row(s) removed, no longer published",
+            grouped(removed as u64)
+        ));
+    }
+    // Advertised fields the sync does not carry (billable-units §6): counted,
+    // never silently dropped.
+    let skipped = not_synced(v);
+    if !skipped.is_empty() {
+        msg.push_str(&format!(" · not synced: {skipped}"));
+    }
+    // An upstream whose catalog fetch failed is named rather than folded into
+    // the count: "0 rows" and "could not ask" are different answers.
+    let failed: Vec<&str> = v
+        .get("upstreams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|u| u.get("error").is_some_and(|e| !e.is_null()))
+        .map(|u| {
+            u.get("upstream")
+                .and_then(Value::as_str)
+                .unwrap_or("upstream")
+        })
+        .collect();
+    if !failed.is_empty() {
+        msg.push_str(&format!(" · could not ask: {}", failed.join(", ")));
+    }
+    msg
+}
+
+/// What `prices_sync` did not sync — the advertised price fields it has no
+/// unit for, with how many models publish each: "image 12, web_search 37"
+/// (billable-units §6). The summary's own total when it has one, else the
+/// upstreams' summed. Read without a typed shape, so a gateway that does not
+/// report it shows nothing rather than failing the toast.
+fn not_synced(v: &Value) -> String {
+    let mut by: std::collections::BTreeMap<String, i64> = Default::default();
+    let maps: Vec<&serde_json::Map<String, Value>> =
+        match v.get("not_synced").and_then(Value::as_object) {
+            Some(total) => vec![total],
+            None => v
+                .get("upstreams")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|u| u.get("not_synced").and_then(Value::as_object))
+                .collect(),
+        };
+    for map in maps {
+        for (field, n) in map {
+            *by.entry(field.clone()).or_default() += n.as_i64().unwrap_or(0);
+        }
+    }
+    by.into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(f, n)| format!("{f} {}", grouped(n as u64)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One price box as the sheet stores it, per its unit's scale: empty is no
+/// price (null), a decimal comma is a point, anything else must be a finite
+/// number ≥ 0.
 fn price_field(label: &str, text: &str) -> Result<Option<f64>, String> {
     let t = text.trim().replace(',', ".");
     if t.is_empty() {
@@ -469,6 +642,12 @@ struct PriceLine {
     id: i64,
     model: String,
     title: String,
+    /// What the row counts ([`PriceUnit::label`]), and its scale in full.
+    unit: String,
+    unit_title: String,
+    /// A unit other than tokens: its one rate and what it is per. `None` on
+    /// a token row, whose four rates follow.
+    rate: Option<(String, &'static str)>,
     price_in: String,
     price_out: String,
     cache_read: String,
@@ -567,6 +746,7 @@ impl PriceSheet {
             Some(k) => (k, true),
             None => (sort, false),
         };
+        let unit_rank = |r: &PriceRowView| price_units::rank(&r.unit);
         let num_key = |r: &PriceRowView| match key {
             "in" => r.price_in,
             "out" => r.price_out,
@@ -616,37 +796,50 @@ impl PriceSheet {
                         (None, None) => Equal,
                     },
                     "source" => a.source.cmp(&b.source),
+                    "unit" => unit_rank(a).cmp(&unit_rank(b)),
                     _ => Equal,
                 };
                 let o = if desc { o.reverse() } else { o };
                 o.then_with(|| {
                     let o = band(a).2.to_lowercase().cmp(&band(b).2.to_lowercase());
-                    if desc && !matches!(key, "in" | "out" | "cr" | "cw" | "source") {
+                    if desc && !matches!(key, "in" | "out" | "cr" | "cw" | "source" | "unit") {
                         o.reverse()
                     } else {
                         o
                     }
                 })
+                // One scope's rows sit together, tokens first: parts that
+                // add up (§8.1).
+                .then_with(|| unit_rank(a).cmp(&unit_rank(b)))
             });
-            // The kind and unit every row of the band shares go in its head;
-            // a band that mixes them says so, and each row's title has its own.
+            // The kind every row of the band shares goes in its head, with
+            // the currency; each row says its own unit (§8.1).
             let kinds: std::collections::BTreeSet<&str> =
                 rows.iter().map(|r| r.scope_kind.as_str()).collect();
-            let units: std::collections::BTreeSet<&str> =
-                rows.iter().map(|r| r.unit.as_str()).collect();
             let kind = match kinds.iter().next() {
                 Some(k) if kinds.len() == 1 => k.replace('_', " "),
                 _ => "mixed kinds".into(),
-            };
-            let unit = match units.iter().next() {
-                Some(&"per_mtok") if units.len() == 1 => format!("{} per Mtok", p.currency),
-                Some(u) if units.len() == 1 => u.to_string(),
-                _ => "mixed units".into(),
             };
             let lines = rows
                 .iter()
                 .map(|r| {
                     let model = band(r).2;
+                    let u = price_units::parse(&r.unit);
+                    let (unit, unit_title) = match u {
+                        Some(u) => (
+                            u.label().to_string(),
+                            format!("{} — {}", u.as_str(), u.scale()),
+                        ),
+                        None => (
+                            r.unit.clone(),
+                            format!("{} — a unit this dashboard does not know", r.unit),
+                        ),
+                    };
+                    let rate = match u {
+                        Some(u) if u.is_tokens() => None,
+                        Some(u) => Some((fmt(r.price), price_units::rate_suffix(u))),
+                        None => Some((fmt(r.price), "")),
+                    };
                     PriceLine {
                         id: r.id,
                         title: format!(
@@ -654,6 +847,9 @@ impl PriceSheet {
                             r.scope_key, r.scope_kind, r.unit, r.source, r.updated_at
                         ),
                         model,
+                        unit,
+                        unit_title,
+                        rate,
                         price_in: fmt(r.price_in),
                         price_out: fmt(r.price_out),
                         cache_read: fmt(r.price_cache_read),
@@ -666,7 +862,7 @@ impl PriceSheet {
                 id: id.clone(),
                 label,
                 count: crate::fmt::of(lines.len(), total),
-                meta: format!("{kind} · {unit}"),
+                meta: format!("{kind} · rates in {}", p.currency),
                 unpriced: Vec::new(),
                 rows: lines,
             });
@@ -683,13 +879,36 @@ impl PriceSheet {
 #[component]
 fn PriceRow(r: PriceLine, edit: Callback<i64>, delete: Callback<i64>) -> impl IntoView {
     let id = r.id;
-    view! {
-        <tr>
-            <td class="clip mono-sm" title=r.title>{r.model}</td>
+    // A unit other than tokens has one rate: it takes the In and Out cells,
+    // and the two cache cells stay empty (and fold with their headers at a
+    // narrow width, so the columns keep their places).
+    let rates = match r.rate {
+        Some((rate, per)) => {
+            let tip = r.unit_title.clone();
+            view! {
+                <td class="price-rate" colspan="2" title=tip>
+                    <span class="num-v">{rate}</span>
+                    " "
+                    <span class="dim">{per}</span>
+                </td>
+                <td class="col-p2"></td>
+                <td class="col-p2"></td>
+            }
+            .into_any()
+        }
+        None => view! {
             <td class="num">{r.price_in}</td>
             <td class="num">{r.price_out}</td>
             <td class="num col-p2">{r.cache_read}</td>
             <td class="num col-p2">{r.cache_write}</td>
+        }
+        .into_any(),
+    };
+    view! {
+        <tr>
+            <td class="clip mono-sm" title=r.title>{r.model}</td>
+            <td class="dim price-unit" title=r.unit_title>{r.unit}</td>
+            {rates}
             <td class="dim col-p3">{r.source}</td>
             <td class="actions">
                 <div class="row-acts">
@@ -718,11 +937,14 @@ fn UnpricedRow(u: UnpricedLine, price: Callback<String>) -> impl IntoView {
             <td class="clip mono-sm" title=format!("{} — no price sheet covers it", u.name)>
                 {u.name.clone()}
             </td>
-            <td class="num" colspan="4">
+            <td></td>
+            <td class="num" colspan="2">
                 <span class="chip warn">
                     {format!("{} req unpriced", grouped(u.requests.max(0) as u64))}
                 </span>
             </td>
+            <td class="col-p2"></td>
+            <td class="col-p2"></td>
             <td class="col-p3"></td>
             <td class="actions">
                 <div class="row-acts">
@@ -753,5 +975,50 @@ mod tests {
             .contains("output"));
         assert!(price_field("input", "-1").is_err());
         assert!(price_field("input", "inf").is_err());
+    }
+
+    #[test]
+    fn the_sync_toast_says_what_was_removed_skipped_and_unreachable() {
+        let v = serde_json::json!({
+            "rows_written": 12,
+            "unpriced_models": 3,
+            "rows_removed": 2,
+            "not_synced": {"web_search": 37},
+            "upstreams": [
+                {"upstream": "kilo", "not_synced": {"web_search": 37}},
+                {"upstream": "gemini", "error": "connection refused"}
+            ]
+        });
+        assert_eq!(
+            sync_message(&v),
+            "12 price row(s) written · 3 model(s) advertise no price · 2 catalog fee row(s) \
+             removed, no longer published · not synced: web_search 37 · could not ask: gemini"
+        );
+        // An older summary without the new fields reads as it always did.
+        let v = serde_json::json!({"rows_written": 0, "unpriced_models": 0, "upstreams": []});
+        assert_eq!(
+            sync_message(&v),
+            "0 price row(s) written · 0 model(s) advertise no price"
+        );
+    }
+
+    #[test]
+    fn the_sync_toast_sums_what_each_upstream_did_not_sync() {
+        let v = serde_json::json!({
+            "upstreams": [
+                {"upstream": "kilo", "not_synced": {"web_search": 30, "image": 12}},
+                {"upstream": "or", "not_synced": {"web_search": 7}},
+                {"upstream": "old"}
+            ]
+        });
+        assert_eq!(not_synced(&v), "image 12, web_search 37");
+        assert_eq!(not_synced(&serde_json::json!({"upstreams": []})), "");
+        // The summary's total, when it carries one, is the figure: the
+        // upstreams' maps are its parts, not more of it.
+        let v = serde_json::json!({
+            "not_synced": {"web_search": 37, "image": 12},
+            "upstreams": [{"upstream": "kilo", "not_synced": {"web_search": 30, "image": 12}}]
+        });
+        assert_eq!(not_synced(&v), "image 12, web_search 37");
     }
 }

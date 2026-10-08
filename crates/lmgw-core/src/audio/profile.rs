@@ -8,7 +8,8 @@
 //!    the catalog snapshot's family ([`crate::web::audio`]'s cached catalog,
 //!    never fetched here), else the spec the package GGUF embeds;
 //! 2. the package GGUF's embedded files ([`crate::gguf::embedded`]):
-//!    Supertonic's `voice_style_*` sources, Qwen3-TTS's `config.json`
+//!    Supertonic's `voice_style_*` sources and `unicode_indexer` (the
+//!    characters its engine says, [`super::charset`]), Qwen3-TTS's `config.json`
 //!    speakers, languages and variant, Nemotron ASR's language prompts
 //!    ([`super::families`]); a SanoTTS or Kroko package's `config.json`
 //!    (embedded, else beside the GGUF) for its one language;
@@ -17,10 +18,11 @@
 //!
 //! The profile is cached in [`ProfileCache`] per row, keyed by everything it
 //! is computed from: the row's model id, family, path, task, weight id,
-//! spec override and `language` load option, the catalog's fetch time, and
-//! the selected GGUF's path, length and modification time. A change to any
-//! of them computes it again; the computation runs on the blocking pool (a
-//! directory walk and a GGUF header read).
+//! spec override and `language` load option, the catalog's fetch time, the
+//! selected GGUF's path, length and modification time, and the same of each
+//! package file it read from beside the GGUF ([`SpeechProfile::beside`]). A
+//! change to any of them computes it again; the computation runs on the
+//! blocking pool (a directory walk and a GGUF header read).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::charset::CharVocab;
 use super::families::TakesLanguage;
 use super::tags::TagMode;
 use super::{families, parse_spec, ModelSpec};
@@ -240,14 +243,66 @@ pub struct SpeechProfile {
     /// What it does with a request that names no voice
     /// ([`families::unvoiced`]).
     pub unvoiced: Unvoiced,
+    /// The characters its engine says, for a family that refuses one its
+    /// package lacks ([`families::char_vocabulary`]): read from the
+    /// package (`char_vocab`). `None` for every other family, and for one
+    /// whose package does not have it (a problem then): its `input` goes as
+    /// it came.
+    #[serde(skip)]
+    pub char_vocab: Option<Arc<CharVocab>>,
+    /// The package files read from beside the GGUF, or looked for there:
+    /// the cache computes the profile again when one of them changes, is
+    /// added or goes ([`ProfileCache`]). Each is kept with its stamp, taken
+    /// where the file was first looked at, before it was read: an edit
+    /// during the computation then shows. Only [`Self::note_beside`] adds
+    /// to it, so a path never goes without its stamp.
+    #[serde(skip)]
+    pub(crate) beside: Beside,
     /// What the facts above were read from, for a log line or a dashboard.
     pub sources: Vec<String>,
     /// Facts that could not be read, and why (a corrupt GGUF, an embedded
     /// file over the bound). Logged once per computation.
     pub problems: Vec<String>,
+    /// What the engine does to a text that its package's vocabulary cannot
+    /// follow (`char_vocab`): the facts above are all used, so these are no
+    /// problems of the profile. Logged once per computation.
+    pub notes: Vec<String>,
+}
+
+/// The package files a profile read from beside its GGUF, each with its
+/// stamp. The list is private: [`SpeechProfile::note_beside`] is the only
+/// way in, so a path never goes without its stamp.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Beside(Vec<(PathBuf, FileStamp)>);
+
+impl Beside {
+    /// The noted paths, in order.
+    #[cfg(test)]
+    pub(crate) fn paths(&self) -> Vec<&Path> {
+        self.0.iter().map(|(p, _)| p.as_path()).collect()
+    }
+
+    /// The stamp noted for `path`, if it was noted.
+    #[cfg(test)]
+    pub(crate) fn stamp_of(&self, path: &Path) -> Option<FileStamp> {
+        self.0.iter().find(|(p, _)| p == path).map(|(_, s)| *s)
+    }
 }
 
 impl SpeechProfile {
+    /// Notes `path`, a package file beside the GGUF the profile reads or
+    /// looks for, and its stamp as it is now ([`Self::beside`]).
+    pub(crate) fn note_beside(&mut self, path: PathBuf) {
+        let stamp = stamp(&path);
+        self.beside.0.push((path, stamp));
+    }
+
+    /// Whether every package file noted in [`Self::beside`] still has its
+    /// stamp.
+    pub(crate) fn beside_unchanged(&self) -> bool {
+        self.beside.0.iter().all(|(path, was)| stamp(path) == *was)
+    }
+
     /// `name` as a native voice, compared without case: its canonical
     /// spelling. Engines differ (Qwen3 lowercases, Magpie compares exactly),
     /// so lmgw accepts any case and sends the spelling the package uses.
@@ -312,6 +367,7 @@ pub fn compute(row: &AudioModel, spec: Option<&ModelSpec>, gguf: Option<&Path>) 
         }
     }
     package_language::read(&mut p, row, index.as_ref(), gguf);
+    char_vocab::read(&mut p, embedded_spec.as_ref(), index.as_ref(), gguf);
     // What no spec says: the tags a tokenizer renders, and for a Qwen3
     // package the GGUF could not tell, the row's own task (a VoiceDesign
     // row runs `vdes`).
@@ -549,8 +605,22 @@ struct ProfileKey {
 /// its key changes — so the map never holds more than one entry per row.
 #[derive(Debug, Default)]
 pub struct ProfileCache {
-    rows: Mutex<HashMap<String, (ProfileKey, Arc<SpeechProfile>)>>,
+    rows: Mutex<HashMap<String, Cached>>,
     computed: std::sync::atomic::AtomicU64,
+}
+
+/// A row's profile, with its key; the stamps of the files it read from
+/// beside its GGUF are the profile's own ([`SpeechProfile::beside`]).
+type Cached = (ProfileKey, Arc<SpeechProfile>);
+
+/// A file's length and modification time; `None` when it is not there.
+pub(crate) type FileStamp = Option<(u64, Option<SystemTime>)>;
+
+/// The [`FileStamp`] of `path` as it is now.
+fn stamp(path: &Path) -> FileStamp {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()))
 }
 
 impl ProfileCache {
@@ -618,9 +688,11 @@ fn profile_blocking(
         gguf: gguf.clone(),
         load_language: package_language::load_option(row).map(str::to_string),
     };
-    if let Some((k, p)) = cache.rows.lock().unwrap().get(&row.model_id) {
-        if *k == key {
-            return p.clone();
+    // Cloned out, so the files are not looked at under the lock.
+    let cached = cache.rows.lock().unwrap().get(&row.model_id).cloned();
+    if let Some((k, p)) = cached {
+        if k == key && p.beside_unchanged() {
+            return p;
         }
     }
     let over = spec_override
@@ -632,6 +704,9 @@ fn profile_blocking(
         spec.as_ref(),
         gguf.as_ref().map(|g| g.0.as_path()),
     ));
+    for note in &profile.notes {
+        tracing::warn!("audio: speech profile of '{}': {note}", row.model_id);
+    }
     for problem in &profile.problems {
         tracing::warn!(
             "audio: speech profile of '{}': {problem} — the facts it carries are not used",
@@ -676,6 +751,9 @@ mod prompts;
 
 /// The one language of a package that speaks or hears only its own.
 mod package_language;
+
+/// The characters an engine that refuses the rest says, from its package.
+mod char_vocab;
 
 #[cfg(test)]
 mod tests;

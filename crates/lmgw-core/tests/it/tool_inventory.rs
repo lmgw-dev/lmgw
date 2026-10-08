@@ -1566,6 +1566,7 @@ async fn the_run_executor_reads_the_keys_scope_at_each_call() {
             name: "ci".into(),
             kind: ApiKeyKind::Key,
             agent_id: None,
+            fingerprint: String::new(),
         },
         client_key: Some("ci".into()),
         ..RequestCtx::default()

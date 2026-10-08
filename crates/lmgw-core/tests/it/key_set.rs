@@ -454,6 +454,29 @@ async fn the_unpriced_worklist_sees_the_passthrough_models_usage_shows() {
         unpriced,
         vec![("kilo/deepseek/deepseek-v4-flash-0731".to_string(), 14)]
     );
+
+    // A sheet in a unit other than tokens prices a model too (billable-units
+    // §8.2): a per-request fee alone takes the other one off the list.
+    let (status, v) = {
+        let base = serve(st.clone()).await;
+        op(
+            &base,
+            "price_set",
+            json!({
+                "scope_kind": "upstream_model",
+                "scope_key": format!("{up_id}:deepseek/deepseek-v4-flash-0731"),
+                "unit": "per_request",
+                "price": 0.002,
+            }),
+        )
+        .await
+    };
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(
+        ops::unpriced_models(&st).await.unwrap(),
+        Vec::<(String, i64)>::new(),
+        "a unit-only sheet is a price"
+    );
 }
 
 /// `key_create` takes the four scope fields `key_set` takes, normalises them

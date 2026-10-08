@@ -15,40 +15,49 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use lmgw_api_types::chat::ThreadList;
 use lmgw_api_types::ApiError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::agentchat::ADMIN_KIND;
+use super::chat_caller::Caller;
 use super::chat_extract::{ChatJson, ChatPath, ChatQuery};
+use super::chat_folders::retention::PurgeDays;
 use super::chat_repo::ChatRepo;
 use super::chat_turn::{self, Reply, Turn, TurnMode, NOT_SAVED};
-use super::{
-    chat_attach_gate, chat_attach_ingest, chat_attach_retry, chat_knowledge, chat_reasoning,
-    chat_sampling,
-};
+use super::chat_wire;
+use super::{chat_attach_gate, chat_attach_ingest, chat_attach_retry, chat_knowledge};
 use crate::config::{Route, UpstreamKind};
 use crate::egress::Egress;
 use crate::error::GatewayError;
 use crate::ir::{ChatRequest, Params, StreamDelta, Usage};
 use crate::proxy::{self, drive_upstream};
 use crate::state::SharedState;
-use crate::store::{self, ChatThread, ThreadMcp};
+use crate::store::{self, ChatThread};
 
+mod rows;
+mod settings;
 mod stopped;
+
+pub use rows::thread_rows;
+pub use settings::update_thread;
+pub(super) use settings::{
+    apply_settings_patch, present, restore_flag, same_thread, Attaching, SettingsReq,
+};
 
 // ---------------------------------------------------------------------------
 // Thread JSON API
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize, Default)]
+// `archived`: any non-empty, non-`"0"` value switches to the archived-only
+// list (chat-archive-pin-attachments design §1); `all` returns both (review
+// finding 1: the Agent Runs tab needs an agent's archived threads too).
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub struct ListThreadsQuery {
-    /// Any non-empty, non-`"0"` value switches to the archived-only list
-    /// (chat-archive-pin-attachments design §1) — `?archived=1` is what the
-    /// UI's Chat page sends. The exact value `?archived=all` returns active
-    /// *and* archived threads together (review finding 1: the Agent Runs tab
-    /// needs an agent's archived threads too, and it filters this same list
-    /// client-side by `agent_id`). Absent = active only.
+    /// `1` lists the archived threads instead, the most recently archived
+    /// first; `all` lists active and archived threads together, in the
+    /// active list's order. Absent (or `0`): the active threads.
     #[serde(default)]
     archived: String,
 }
@@ -68,8 +77,12 @@ pub struct ListThreadsQuery {
 /// design §7), most recently active first, in their own array — they are
 /// never archived or pinned, and the sidebar lists them in a group of their
 /// own.
+///
+/// A device's list, its `archived_count` and its folders' counts carry no
+/// Admin Chat thread (client-apps design L3).
 pub async fn list_threads(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatQuery(q): ChatQuery<ListThreadsQuery>,
 ) -> Response {
     let mode = match q.archived.as_str() {
@@ -77,26 +90,30 @@ pub async fn list_threads(
         "" | "0" => store::ThreadListMode::Active,
         _ => store::ThreadListMode::Archived,
     };
-    let threads = ChatRepo::stored_threads(&state, mode)
+    let threads = ChatRepo::stored_threads(&state, &caller, mode)
         .await
         .unwrap_or_default();
-    let archived_count = ChatRepo::archived_count(&state).await.unwrap_or(0);
+    let archived_count = ChatRepo::archived_count(&state, &caller).await.unwrap_or(0);
+    let purge = PurgeDays::load(&state).await;
     let snap = state.snapshot();
-    let out: Vec<Value> = threads.iter().map(|t| thread_row_json(t, &snap)).collect();
-    let temporary: Vec<Value> = ChatRepo::temporary_threads(&state)
-        .iter()
-        .map(|t| thread_row_json(t, &snap))
+    let temporary: Vec<_> = ChatRepo::temporary_threads(&state)
+        .into_iter()
+        .filter(|t| caller.sees(&snap, t))
         .collect();
+    let all: Vec<&_> = threads.iter().chain(temporary.iter()).collect();
+    let last = chat_wire::last_messages(&state, &all).await;
+    let row = |t: &_| chat_wire::thread_row(t, &purge, last.get(&t.id).copied());
+    let temporary = temporary.iter().map(row).collect();
     // Folders ride along in every mode (with their thread counts), so the
     // sidebar needs one request.
-    let folders = store::list_chat_folders(&state.db)
+    let folders = store::list_chat_folders(&state.db, caller.reach(&snap))
         .await
         .unwrap_or_default();
-    Json(json!({
-        "threads": out,
-        "archived_count": archived_count,
-        "temporary": temporary,
-        "folders": folders,
+    Json(chat_wire::wire(&ThreadList {
+        threads: threads.iter().map(row).collect(),
+        archived_count,
+        temporary,
+        folders: folders.iter().map(chat_wire::folder).collect(),
     }))
     .into_response()
 }
@@ -125,11 +142,39 @@ pub struct CreateReq {
 /// copy; an Admin Chat thread has its built-in prompt already, and starts
 /// with nothing of the thread's own to append to it. `{temporary: true}`
 /// creates a temporary one, with a negative id; `{folder_id}` starts it from
-/// that folder's defaults.
+/// that folder's defaults. A device asking for an Admin Chat thread is a
+/// `403 forbidden` (client-apps design L3).
 pub async fn create_thread(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatJson(req): ChatJson<CreateReq>,
 ) -> Response {
+    if req.kind == ADMIN_KIND && caller.is_device() {
+        return err_json(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            format!(
+                "an Admin Chat thread drives the gateway's own configuration, which {} never \
+                 reaches — create a chat thread",
+                caller.named()
+            ),
+        );
+    }
+    // A device's model is within its alias scope (review W3-4). In a
+    // folder the check is `create_in_folder`'s, under the folder's lock:
+    // the folder's defaults may name the model, which the thread then
+    // takes, and a folder the device cannot see answers as one that is not
+    // there, before the alias check (reviews W4-16, W5-12).
+    if req.folder_id.is_none() {
+        if let Err(refused) = super::chat_tool_write::check_aliases(
+            &state,
+            &caller,
+            &[Some(req.model_alias.as_str())],
+            &[],
+        ) {
+            return refused;
+        }
+    }
     let kind = if req.kind == ADMIN_KIND && !req.temporary {
         ADMIN_KIND
     } else {
@@ -159,7 +204,7 @@ pub async fn create_thread(
             folder_id,
             &req.model_alias,
             kind,
-            prompt,
+            &caller,
         )
         .await
         {
@@ -168,7 +213,7 @@ pub async fn create_thread(
         };
     }
     match repo
-        .create_thread(&state, &req.model_alias, kind, prompt)
+        .create_thread(&state, &req.model_alias, kind, prompt, &caller)
         .await
     {
         Ok(t) => Json(thread_json(&state, &t).await).into_response(),
@@ -176,36 +221,10 @@ pub async fn create_thread(
     }
 }
 
-/// A [`ChatThread`] as the wire shape, plus the fields that aren't columns:
-/// `purge_at` (`archived_at + chat_purge_days`), computed here rather than
-/// stored so changing the setting reprices every archived thread's deadline
-/// immediately instead of only the next time it is archived. `None` when
-/// active, pinned, or purging is switched off (design §1) — a pinned thread
-/// cannot really carry both flags at once (pinning restores), but the guard
-/// costs nothing and keeps the promise literal either way. `temporary`:
-/// whether the thread lives only in memory (chat-complete design §7). And
-/// `voice_resolved`: what its voice resolves to now, field by field with
-/// each value's source (chat-voice design §2.3), its speech style the one
-/// its speech uses.
+/// A [`ChatThread`] as the API answers it: its row with `voice_resolved`
+/// ([`chat_wire::thread`]), written as the Chat API writes its bodies.
 pub(super) async fn thread_json(state: &SharedState, t: &ChatThread) -> Value {
-    let mut v = thread_row_json(t, &state.snapshot());
-    v["voice_resolved"] = json!(super::chat_voice::resolve_shown(state, t).await);
-    v
-}
-
-/// [`thread_json`] as the thread list carries it: without
-/// `voice_resolved`, which only an open thread shows, so a list refresh
-/// resolves nothing.
-fn thread_row_json(t: &ChatThread, snap: &crate::config::Snapshot) -> Value {
-    let purge_days = snap.settings.chat_purge_days;
-    let mut v = serde_json::to_value(t).expect("ChatThread always serializes");
-    let purge_at = (!t.pinned && purge_days > 0)
-        .then_some(t.archived_at.as_deref())
-        .flatten()
-        .and_then(|a| store::chat_thread_purge_at(a, purge_days));
-    v["purge_at"] = json!(purge_at);
-    v["temporary"] = json!(ChatRepo::of(t.id).is_temp());
-    v
+    chat_wire::wire(&chat_wire::thread(state, t).await)
 }
 
 /// The refusal of a stored-thread-only action (pin, archive) on a temporary
@@ -224,13 +243,31 @@ fn temporary_refusal(what: &str) -> Response {
 /// `draft_attachments` (chat-archive-pin-attachments design §2). The thread
 /// carries `continue: {ok, reason}` — whether its last reply can be continued
 /// (chat-complete design §3).
-pub async fn get_thread(State(state): State<SharedState>, ChatPath(id): ChatPath<i64>) -> Response {
+///
+/// A 404 `not_found` means the thread is not there (or not the caller's to
+/// see); a read that failed is a 500 `internal`, never a 404 nor an empty
+/// history: the Chat page reads the open thread again on every change
+/// another writer makes, and takes a 404 for "deleted elsewhere" and the
+/// rows for what is stored (`chat_sync`).
+pub async fn get_thread(
+    State(state): State<SharedState>,
+    caller: Caller,
+    ChatPath(id): ChatPath<i64>,
+) -> Response {
     let repo = ChatRepo::of(id);
-    let Ok(Some(thread)) = repo.thread(&state, id).await else {
-        return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
+    let thread = match repo.thread_as(&state, &caller, id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found"),
+        Err(e) => return read_failed("the thread", e),
     };
-    let messages = repo.messages(&state, id).await.unwrap_or_default();
-    let mut atts = repo.attachments_meta(&state, id).await.unwrap_or_default();
+    let messages = match repo.messages(&state, id).await {
+        Ok(m) => m,
+        Err(e) => return read_failed("the thread's messages", e),
+    };
+    let mut atts = match repo.attachments_meta(&state, id).await {
+        Ok(a) => a,
+        Err(e) => return read_failed("the thread's attachments", e),
+    };
     chat_attach_gate::annotate_drafts(&state, &thread, &mut atts).await;
     let mut by_message: HashMap<i64, Vec<&store::ChatAttachmentMeta>> = HashMap::new();
     let mut drafts: Vec<&store::ChatAttachmentMeta> = Vec::new();
@@ -250,10 +287,10 @@ pub async fn get_thread(State(state): State<SharedState>, ChatPath(id): ChatPath
         })
         .collect();
     let snap = state.snapshot();
-    let mut thread_v = thread_json(&state, &thread).await;
-    thread_v["continue"] = json!(chat_turn::continue_state(&snap, &thread, last));
+    let mut thread_v = chat_wire::thread(&state, &thread).await;
+    thread_v.continue_state = Some(chat_turn::continue_state(&snap, &thread, last));
     Json(json!({
-        "thread": thread_v,
+        "thread": chat_wire::wire(&thread_v),
         "messages": messages,
         "draft_attachments": drafts,
     }))
@@ -269,20 +306,48 @@ pub struct PinReq {
 /// restores it (design §1).
 pub async fn pin_thread(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatJson(req): ChatJson<PinReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
-    if repo.thread(&state, id).await.ok().flatten().is_none() {
-        return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
-    }
+    let held = match reach_held(&state, &caller, id).await {
+        Ok(held) => held,
+        Err(r) => return r,
+    };
     if repo.is_temp() {
         return temporary_refusal("pinned");
     }
-    if let Err(e) = repo.set_pinned(&state, id, req.pinned).await {
+    if let Err(e) = repo.set_pinned(&state, id, req.pinned, &caller).await {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string());
     }
-    respond_with_thread(&state, id).await
+    drop(held);
+    respond_with_thread(&state, &caller, id).await
+}
+
+/// The thread's reach for `caller`, checked twice (review W6-6): first
+/// without the thread's lock, so an id out of reach is the 404 of a
+/// missing thread at once (the answer's timing says nothing of a thread a
+/// device may not see); then again under the lock, which the caller holds
+/// across its write. An attach of the self-admin toolset holds the same
+/// lock, so it lands before the re-check or after the write, and a device
+/// never writes a thread that left its reach between its check and its
+/// write.
+pub(super) async fn reach_held(
+    state: &SharedState,
+    caller: &Caller,
+    id: i64,
+) -> Result<crate::web::chat_live::HistoryWrite, Response> {
+    let repo = ChatRepo::of(id);
+    let missing = || err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
+    if !matches!(repo.thread_as(state, caller, id).await, Ok(Some(_))) {
+        return Err(missing());
+    }
+    let held = state.chat_live.hold(id).await;
+    if !matches!(repo.thread_as(state, caller, id).await, Ok(Some(_))) {
+        return Err(missing());
+    }
+    Ok(held)
 }
 
 #[derive(Deserialize)]
@@ -295,214 +360,62 @@ pub struct ArchiveReq {
 /// `updated_at` — design §1).
 pub async fn archive_thread(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatJson(req): ChatJson<ArchiveReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
-    if repo.thread(&state, id).await.ok().flatten().is_none() {
-        return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
-    }
+    let held = match reach_held(&state, &caller, id).await {
+        Ok(held) => held,
+        Err(r) => return r,
+    };
     if repo.is_temp() {
         return temporary_refusal("archived");
     }
-    let res = repo.set_archived(&state, id, req.archived).await;
+    let res = repo.set_archived(&state, id, req.archived, &caller).await;
     if let Err(e) = res {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string());
     }
-    respond_with_thread(&state, id).await
+    drop(held);
+    respond_with_thread(&state, &caller, id).await
 }
 
 /// The updated thread, re-read after a pin/archive write — simpler than
 /// hand-tracking what each mutation changed, and correct even when
 /// [`store::set_chat_thread_pinned`]'s implicit restore fired underneath it.
-async fn respond_with_thread(state: &SharedState, id: i64) -> Response {
-    match ChatRepo::of(id).thread(state, id).await {
-        Ok(Some(t)) => Json(thread_json(state, &t).await).into_response(),
-        _ => err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "the thread vanished immediately after being updated",
-        ),
-    }
-}
-
-/// A **patch**: an absent field leaves that setting alone.
+/// Read as `caller` reads it (review W5-5): a device's thread in a folder it
+/// cannot see is in no folder for it, here as everywhere.
 ///
-/// The page patches this endpoint from two places with different halves — the
-/// header's model picker sends only `model_alias`, the settings drawer sends
-/// everything but — so "absent" has to mean "unchanged" or each save blanks
-/// what the other owns. The sampling fields are doubly wrapped because `null`
-/// is meaningful for them: absent keeps the value, `null` clears it back to the
-/// upstream's own default.
-#[derive(Deserialize)]
-pub struct SettingsReq {
-    model_alias: Option<String>,
-    system_prompt: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    temperature: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    max_tokens: Option<Option<i64>>,
-    /// Registered MCP servers this thread attaches.
-    mcp_tools: Option<Vec<ThreadMcp>>,
-    /// The reasoning overrides ([`super::chat_reasoning`]), wrapped like the
-    /// sampling fields: `null` clears one back to the route's default.
-    #[serde(default, deserialize_with = "present")]
-    reasoning_enabled: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "present")]
-    reasoning_effort: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
-    reasoning_budget: Option<Option<i64>>,
-    /// The sampling overrides ([`super::chat_sampling`]), wrapped the same
-    /// way; `stop` is the whole list (`[]` clears it).
-    #[serde(default, deserialize_with = "present")]
-    top_p: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    top_k: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "present")]
-    min_p: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    repeat_penalty: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    presence_penalty: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    frequency_penalty: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    seed: Option<Option<i64>>,
-    stop: Option<Vec<String>>,
-    /// Knowledge bases ([`super::chat_knowledge`]): the whole selection
-    /// (`[]` clears it), `"auto"` | `"tool"`, and the retrieval budget
-    /// (`null` = the `chat_kb_budget_tokens` setting).
-    kb_ids: Option<Vec<i64>>,
-    kb_mode: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    kb_budget_tokens: Option<Option<i64>>,
-    /// The voice overrides as a whole object (chat-voice design §2.2,
-    /// [`super::chat_voice::apply_thread_voice`]); `null` clears them.
-    #[serde(default, deserialize_with = "present")]
-    voice: Option<Value>,
-}
-
-/// `Some(value)` for a field that was sent — including one sent as `null`,
-/// which a bare `Option<Option<T>>` would flatten into "absent" and so make
-/// clearing a sampling setting impossible.
-fn present<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    T::deserialize(de).map(Some)
-}
-
-/// `POST /chat/api/threads/{id}/settings` — patch model + sampling settings,
-/// the reasoning overrides, the thread's attached MCP servers, its
-/// knowledge bases and its voice (the title is preserved; it auto-names on first send). Overrides that contradict each
-/// other are a 400 `bad_request`, and nothing is written. Answers `{ok,
-/// continue, voice, voice_resolved}`: the thread's `continue` re-judged under
-/// the new settings (a model switch or reasoning toggle changes it), its
-/// voice as stored and what that resolves to now.
-pub async fn update_thread(
-    State(state): State<SharedState>,
-    ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<SettingsReq>,
-) -> Response {
-    let repo = ChatRepo::of(id);
-    let Ok(Some(mut t)) = repo.thread(&state, id).await else {
-        return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
-    };
-    if let Some(v) = req.model_alias {
-        t.model_alias = v;
-    }
-    if let Some(v) = req.system_prompt {
-        t.system_prompt = v;
-    }
-    if let Some(v) = req.temperature {
-        t.temperature = v;
-    }
-    if let Some(v) = req.max_tokens {
-        t.max_tokens = v;
-    }
-    if let Some(v) = req.mcp_tools {
-        t.mcp_tools = v;
-    }
-    if let Some(v) = req.reasoning_enabled {
-        t.reasoning_enabled = v;
-    }
-    if let Some(v) = req.reasoning_effort {
-        t.reasoning_effort = v;
-    }
-    if let Some(v) = req.reasoning_budget {
-        t.reasoning_budget = v;
-    }
-    if let Some(v) = req.top_p {
-        t.top_p = v;
-    }
-    if let Some(v) = req.top_k {
-        t.top_k = v;
-    }
-    if let Some(v) = req.min_p {
-        t.min_p = v;
-    }
-    if let Some(v) = req.repeat_penalty {
-        t.repeat_penalty = v;
-    }
-    if let Some(v) = req.presence_penalty {
-        t.presence_penalty = v;
-    }
-    if let Some(v) = req.frequency_penalty {
-        t.frequency_penalty = v;
-    }
-    if let Some(v) = req.seed {
-        t.seed = v;
-    }
-    if let Some(v) = req.stop {
-        t.stop = v;
-    }
-    if let Err(msg) = chat_reasoning::check(&mut t).and_then(|()| chat_sampling::check(&mut t)) {
-        return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
-    }
-    if let Err(msg) = chat_knowledge::apply_settings(
-        &state,
-        &mut t,
-        req.kb_ids,
-        req.kb_mode,
-        req.kb_budget_tokens,
-    )
-    .await
-    {
-        return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
-    }
-    let seed = match super::chat_voice::apply_thread_voice(&state, &mut t, req.voice).await {
-        Ok(seed) => seed,
-        Err(msg) => return err_json(StatusCode::BAD_REQUEST, "bad_request", msg),
-    };
-    match repo.update_settings(&state, &t, seed).await {
-        Ok(voice) => {
-            t.voice = voice;
-            let last = repo.last_message(&state, id).await.ok().flatten();
-            let snap = state.snapshot();
-            let verdict = chat_turn::continue_state(&snap, &t, last.as_ref());
-            Json(json!({
-                "ok": true,
-                "continue": verdict,
-                "voice": t.voice,
-                "voice_resolved": super::chat_voice::resolve_shown(&state, &t).await,
-            }))
-            .into_response()
-        }
-        // The thread went away between the read above and this write (a
-        // delete in another tab, a temporary chat discarded or kept): the
-        // 404 of any missing thread.
-        Err(GatewayError::NotFound(msg)) => err_json(StatusCode::NOT_FOUND, "not_found", msg),
+/// A thread that is not there for `caller` by now — deleted, or out of a
+/// device's reach since the write — is the 404 of any missing thread
+/// (review W6-6), not a 500.
+pub(super) async fn respond_with_thread(state: &SharedState, caller: &Caller, id: i64) -> Response {
+    match ChatRepo::of(id).thread_as(state, caller, id).await {
+        Ok(Some(t)) => Json(thread_json(state, &t).await).into_response(),
+        Ok(None) => err_json(StatusCode::NOT_FOUND, "not_found", "thread not found"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
     }
 }
 
-/// `POST /chat/api/threads/{id}/delete`.
+/// `POST /chat/api/threads/{id}/delete`. A device's delete of a thread it
+/// cannot reach — gone, or Admin Chat (client-apps design L3) — is a 404.
 pub async fn delete_thread(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
 ) -> Response {
-    let _ = ChatRepo::of(id).delete_thread(&state, id).await;
+    let repo = ChatRepo::of(id);
+    if !caller.is_device() {
+        let _ = repo.delete_thread(&state, id, &caller).await;
+        return Json(json!({ "ok": true })).into_response();
+    }
+    // A device's reach, re-checked under the thread's lock it deletes
+    // under (review W6-6).
+    let held = match reach_held(&state, &caller, id).await {
+        Ok(held) => held,
+        Err(r) => return r,
+    };
+    let _ = repo.delete_thread_held(&state, id, &caller, held).await;
     Json(json!({ "ok": true })).into_response()
 }
 
@@ -529,6 +442,18 @@ pub(super) fn err_json(
         }),
     )
         .into_response()
+}
+
+/// A read of `what` that failed: a 500 `internal`, logged. Never answered as
+/// "not there": a client acts on a 404 (the Chat page leaves a thread it
+/// takes for deleted).
+fn read_failed(what: &str, e: impl std::fmt::Display) -> Response {
+    tracing::warn!("chat: reading {what} failed: {e}");
+    err_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        format!("reading {what} failed: {e}"),
+    )
 }
 
 /// The flat `body_limit` refusal (review findings 2 and 8): same code,
@@ -601,13 +526,14 @@ pub struct UploadQuery {
 /// route's flat `ApiError` (review findings 2, 8).
 pub async fn upload_attachment(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatQuery(q): ChatQuery<UploadQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     let repo = ChatRepo::of(id);
-    let Some(thread) = repo.thread(&state, id).await.ok().flatten() else {
+    let Some(thread) = repo.thread_as(&state, &caller, id).await.ok().flatten() else {
         return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
     };
     let max_mb = state.snapshot().settings.max_body_mb;
@@ -627,7 +553,7 @@ pub async fn upload_attachment(
     }
     let name = q.name.trim();
     let name = if name.is_empty() { "untitled" } else { name };
-    let new = match chat_attach_ingest::ingest(&state, &thread, name, body).await {
+    let new = match chat_attach_ingest::ingest(&state, &caller, &thread, name, body).await {
         Ok(n) => n,
         Err((status, code, msg)) => return err_json(status, code, msg),
     };
@@ -644,8 +570,12 @@ pub async fn upload_attachment(
 /// `POST /chat/api/attachments/{id}/delete` — drafts only; 409 once sent.
 pub async fn delete_attachment(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
 ) -> Response {
+    if let Some(refused) = unreachable_attachment(&state, &caller, id).await {
+        return refused;
+    }
     match ChatRepo::of(id).delete_draft(&state, id).await {
         Ok(store::DeleteAttachmentOutcome::Deleted) => Json(json!({ "ok": true })).into_response(),
         Ok(store::DeleteAttachmentOutcome::NotFound) => {
@@ -665,8 +595,12 @@ pub async fn delete_attachment(
 /// (design §2) even though it is served from it.
 pub async fn get_attachment(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
 ) -> Response {
+    if let Some(refused) = unreachable_attachment(&state, &caller, id).await {
+        return refused;
+    }
     let att = match ChatRepo::of(id).attachment(&state, id).await {
         Ok(Some(a)) => a,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "not_found", "attachment not found"),
@@ -691,6 +625,32 @@ pub async fn get_attachment(
         HeaderValue::from_static("sandbox"),
     );
     resp
+}
+
+/// The 404 an attachment route answers when `caller` may not reach the
+/// attachment's thread (client-apps design L3) — as for one that is not
+/// there; `None` when it may go on.
+pub(super) async fn unreachable_attachment(
+    state: &SharedState,
+    caller: &Caller,
+    id: i64,
+) -> Option<Response> {
+    match ChatRepo::of(id)
+        .attachment_reachable(state, caller, id)
+        .await
+    {
+        Ok(true) => None,
+        Ok(false) => Some(err_json(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "attachment not found",
+        )),
+        Err(e) => Some(err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            e.to_string(),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -724,6 +684,7 @@ pub struct SendReq {
 /// body with `fetch` + a stream reader.
 pub async fn send(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatJson(req): ChatJson<SendReq>,
 ) -> Response {
@@ -749,9 +710,16 @@ pub async fn send(
         Some(Err(msg)) => return err_json(StatusCode::BAD_REQUEST, "bad_request", msg),
     };
     let repo = ChatRepo::of(id);
-    let Ok(Some(thread)) = repo.thread(&state, id).await else {
+    let Ok(Some(thread)) = repo.thread_as(&state, &caller, id).await else {
         return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
     };
+    // The device's reach first, then whether the bases exist: a device out
+    // of the knowledge tools learns neither (review W3-5).
+    if let Err(refused) =
+        super::chat_tool_write::check_kbs(&state, &caller, &req.kb_refs, &[]).await
+    {
+        return refused;
+    }
     let kb_refs = match chat_knowledge::check_kb_ids(&state, &req.kb_refs, &[]).await {
         Ok(ids) => ids,
         Err(msg) => return err_json(StatusCode::BAD_REQUEST, "bad_request", msg),
@@ -806,7 +774,7 @@ pub async fn send(
     // that cannot see them, audio nothing can hear or transcribe): the same
     // predicate the draft chips show as `blockers`.
     let mut new_atts = new_atts;
-    chat_attach_retry::retry_failed(&state, &thread, &mut new_atts, caps).await;
+    chat_attach_retry::retry_failed(&state, &caller, &thread, &mut new_atts, caps).await;
     let stt_set = super::chat_voice::asr_alias(&state.snapshot(), &thread).is_some();
     let blocked: Vec<String> = new_atts
         .iter()
@@ -836,6 +804,7 @@ pub async fn send(
             &attachment_ids,
             &kb_refs,
             voice.as_ref(),
+            &caller,
         )
         .await
     {
@@ -848,6 +817,11 @@ pub async fn send(
                  message was saved — a concurrent send may have already used them",
             );
         }
+        // Out of a device's reach since the route resolved it (review
+        // W4-3): the 404 of any thread that is not there.
+        Err(GatewayError::NotFound(_)) => {
+            return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
+        }
         Err(e) => {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string());
         }
@@ -859,7 +833,7 @@ pub async fn send(
             new_atts.first().map(|a| a.name.clone()).unwrap_or_default()
         };
         let _ = repo
-            .set_title(&state, id, &derive_title(&title_source))
+            .set_title(&state, id, &derive_title(&title_source), &caller)
             .await;
     }
 
@@ -869,7 +843,7 @@ pub async fn send(
         user_message_id: Some(user_message_id),
     };
     let speak = req.speak.then(super::chat_voice::ReadAloud::default);
-    chat_turn::start_turn(&state, repo, &thread, mode, caps, speak).await
+    chat_turn::start_turn(&state, &caller, repo, &thread, mode, caps, speak).await
 }
 
 /// Open the upstream chat stream through the gate's send. A failure is the
@@ -893,6 +867,7 @@ async fn open_upstream(
     prompt_sent: &std::sync::atomic::AtomicBool,
     fitted: &mut proxy::reasoning_fit::Fitted,
     fallback: Option<crate::gate::FallbackReason>,
+    key: proxy::KeyRef,
 ) -> Result<crate::gate::Sent, (u16, GatewayError)> {
     // The connect goes through the shared dead-container retry (§3.2); the
     // relay that follows is the client's stream and is not replayable. On a
@@ -912,7 +887,7 @@ async fn open_upstream(
         Some(prompt_sent),
         fitted,
         proxy::reasoning_fit::RowAs::InProcess {
-            key: proxy::KeyRef::default(),
+            key,
             ingress_proto: "chat",
             alias: &ir.model_alias,
             fallback,
@@ -957,6 +932,22 @@ pub(super) async fn run_send(
         let tx = tx.clone();
         async move { tx.send(chat_turn::TurnFrame::new(ev, data)).await.is_ok() }
     };
+
+    // A device's turn runs as its key (client-apps design L4): the call
+    // passes the key's policy first, and a refusal — its row written — ends
+    // the turn with the gateway error it was.
+    if let Err(e) = turn
+        .caller()
+        .check(
+            &state,
+            crate::ingress::ClientProto::Chat,
+            &ir.model_alias,
+            crate::telemetry::RequestClass::Chat,
+        )
+        .await
+    {
+        return chat_turn::refuse(&tx, &e).await;
+    }
 
     // Resolve the alias exactly like an API client would — including the GPU
     // hold's re-route to a fallback, or its refusal (gpu-hold design §2: the
@@ -1010,6 +1001,7 @@ pub(super) async fn run_send(
             if let Some(route) = &f.route {
                 record_chat_call(
                     &state,
+                    turn.key(),
                     &ir.model_alias,
                     route,
                     f.headers.fallback_reason(),
@@ -1022,6 +1014,7 @@ pub(super) async fn run_send(
                     None,
                     Some((e.kind(), e.to_string())),
                     None,
+                    Default::default(),
                 )
                 .await;
             } else {
@@ -1147,6 +1140,7 @@ where
         Err(e) => {
             record_chat_call(
                 state,
+                turn.key(),
                 &ir.model_alias,
                 &route,
                 headers.fallback_reason(),
@@ -1159,6 +1153,7 @@ where
                 None,
                 Some((e.kind(), e.to_string())),
                 None,
+                Default::default(),
             )
             .await;
             chat_turn::refuse_sent(tx, &e, sent_as).await;
@@ -1210,6 +1205,7 @@ where
                 &prompt_sent,
                 &mut fitted,
                 headers.fallback_reason(),
+                turn.key(),
             )
             .await;
             Ok::<_, crate::gate::FitRefusal>((lease, opened))
@@ -1222,6 +1218,7 @@ where
             // refused — this row must still carry it (review finding 7).
             record_chat_call(
                 state,
+                turn.key(),
                 &ir.model_alias,
                 &route,
                 headers.fallback_reason(),
@@ -1234,6 +1231,7 @@ where
                 f.rung.as_ref().map(crate::gate::RungTag::log),
                 Some((f.error.kind(), f.error.to_string())),
                 None,
+                Default::default(),
             )
             .await;
             chat_turn::refuse_sent(tx, &f.error, sent_as).await;
@@ -1246,6 +1244,7 @@ where
                 let (usage, note) = proxy::unanswered_usage(ir);
                 record_chat_call(
                     state,
+                    turn.key(),
                     &ir.model_alias,
                     &route,
                     headers.fallback_reason(),
@@ -1258,6 +1257,7 @@ where
                     None,
                     Some(("canceled", note)),
                     route_degraded.clone(),
+                    Default::default(),
                 )
                 .await;
             } else {
@@ -1293,6 +1293,7 @@ where
             };
             record_chat_call(
                 state,
+                turn.key(),
                 &ir.model_alias,
                 &route,
                 f.headers.fallback_reason(),
@@ -1305,6 +1306,7 @@ where
                 None,
                 Some((e.kind(), e.to_string())),
                 None,
+                Default::default(),
             )
             .await;
             chat_turn::refuse_sent(tx, &e, sent_as).await;
@@ -1313,6 +1315,7 @@ where
         Err((status, e)) => {
             record_chat_call(
                 state,
+                turn.key(),
                 &ir.model_alias,
                 &route,
                 headers.fallback_reason(),
@@ -1325,6 +1328,7 @@ where
                 rung,
                 Some((e.kind(), e.to_string())),
                 degraded.clone(),
+                Default::default(),
             )
             .await;
             chat_turn::refuse_sent(tx, &e, sent_as).await;
@@ -1423,6 +1427,7 @@ where
     };
     record_chat_call(
         state,
+        turn.key(),
         &ir.model_alias,
         &route,
         headers.fallback_reason(),
@@ -1435,6 +1440,9 @@ where
         rung,
         row_error,
         degraded,
+        // The stream began: answered, a stop or a failure mid-stream
+        // included (billable-units §4.5).
+        crate::pricing::Quantities::answered(),
     )
     .await;
 
@@ -1518,10 +1526,13 @@ pub(super) fn derive_title(s: &str) -> String {
 }
 
 /// Log a chat turn so it shows up in the Logs tab alongside API traffic.
-/// Mirrors the proxy's request log with ingress proto `chat`.
+/// Mirrors the proxy's request log with ingress proto `chat`, charged to
+/// `key`: the turn's caller (`Turn::key`) — a device's key, or nobody
+/// (`internal:chat`) for the owner.
 #[allow(clippy::too_many_arguments)]
 async fn record_chat_call(
     state: &SharedState,
+    key: proxy::KeyRef,
     model: &str,
     route: &Route,
     fallback: Option<crate::gate::FallbackReason>,
@@ -1534,6 +1545,7 @@ async fn record_chat_call(
     rung: Option<i64>,
     error: Option<(&str, String)>,
     degraded: Option<String>,
+    quantities: crate::pricing::Quantities,
 ) {
     // The chat *stream* itself can't yet share `proxy::sample_once` (that helper
     // is non-streaming; chat is SSE) — but its **log row** routes through the
@@ -1542,7 +1554,7 @@ async fn record_chat_call(
     // unify the streaming call path too if/when sample_once grows a stream mode.
     proxy::record_in_process(
         proxy::InProcessLog {
-            key: proxy::KeyRef::default(),
+            key,
             ingress_proto: "chat",
             alias: model,
             route,
@@ -1554,6 +1566,7 @@ async fn record_chat_call(
             fallback,
             rung,
             degraded,
+            quantities,
         },
         status,
         ttfb_ms,

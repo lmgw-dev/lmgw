@@ -298,7 +298,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "capabilities_override",
                     str_p(
-                        "Owner-set capability facts merged over what lmgw derives for \
+                        "Capability facts set on the row, merged over what lmgw derives for \
                          /v1/models: a JSON object with optional keys capabilities \
                          (deep-merged; e.g. {\"input_modalities\":[\"text\",\"image\"],\
                          \"reasoning\":{\"kind\":\"levels\",\"levels\":[\"low\",\"high\"]}}), \
@@ -630,7 +630,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "capabilities_override",
                     str_p(
-                        "Owner override of the derived /v1/models facts for this row, as a \
+                        "An override of the derived /v1/models facts for this row, as a \
                          JSON object (keys: capabilities, max_output_tokens, notes). Empty \
                          clears it.",
                     ),

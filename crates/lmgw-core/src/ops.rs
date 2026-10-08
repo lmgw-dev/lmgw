@@ -39,6 +39,10 @@ mod reads;
 pub use reads::*;
 mod routing;
 pub use routing::*;
+/// A stored credential follows its host: the move check `upstream_set` and
+/// `mcp_server_set` run on the row they are about to write.
+mod credential_move;
+pub use credential_move::RowWriter;
 mod upstream_settle;
 pub use upstream_settle::*;
 mod ladder_checks;
@@ -71,6 +75,8 @@ mod settings_patch;
 pub use settings_patch::*;
 mod chat_voice_settings;
 pub use chat_voice_settings::*;
+mod chat_feed_settings;
+pub use chat_feed_settings::*;
 mod realtime_settings;
 pub use realtime_settings::*;
 mod realtime_budget;

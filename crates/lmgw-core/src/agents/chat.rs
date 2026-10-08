@@ -185,6 +185,7 @@ pub async fn open(
     )
     .await
     .map_err(|e| e.to_string())?;
+    state.chat_feed.wake();
 
     Ok(json!({
         "ok": true,

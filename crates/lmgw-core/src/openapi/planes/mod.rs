@@ -7,6 +7,7 @@
 //! `openapi`, not descendants of it) call each plane's `routes()` directly.
 
 pub(crate) mod agents;
+pub(crate) mod chat;
 pub(crate) mod dashboard;
 pub(crate) mod docs;
 pub(crate) mod inference;

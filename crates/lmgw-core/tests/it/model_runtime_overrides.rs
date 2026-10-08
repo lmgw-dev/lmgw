@@ -17,7 +17,8 @@ use lmgw_core::store::{self, NewAuxModel, NewLocalModel};
 async fn db_at_version(version: i64) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")
         .unwrap()
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(lmgw_core::store::BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)

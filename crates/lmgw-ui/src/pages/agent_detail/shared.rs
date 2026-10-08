@@ -132,6 +132,34 @@ pub fn duration_text(ms: Option<i64>) -> String {
     format!("{} m {:02} s", secs / 60, secs % 60)
 }
 
+/// A run with no cost because it made no model call and spent no tokens: it
+/// had nothing to price, which is not a missing price. A run with no model
+/// call can still have spent — a classify stage that aborted on failures
+/// after their tokens were priced, a container whose calls were all stopped —
+/// and then has a cost or tokens to show.
+pub fn no_model_call(
+    model_calls: Option<u64>,
+    tokens: Option<u64>,
+    cost_micro: Option<i64>,
+) -> bool {
+    cost_micro.is_none() && model_calls == Some(0) && tokens.unwrap_or(0) == 0
+}
+
+/// [`no_model_call`] for a run as the Runs tab lists it.
+pub fn made_no_model_call(r: &AgentRunSummary) -> bool {
+    no_model_call(r.model_calls, r.tokens, r.cost_micro)
+}
+
+/// Why a run's cost reads "—", for the cell's tooltip — or `None` when it
+/// has a cost, or nothing is known yet. A run that spent tokens, or whose
+/// model call count is not known, has a model nobody priced.
+pub fn cost_note(r: &AgentRunSummary) -> Option<&'static str> {
+    if made_no_model_call(r) {
+        return Some("no model call was made");
+    }
+    (r.cost_micro.is_none() && r.tokens.is_some()).then_some("no price is known for this model")
+}
+
 /// The settled group's heading (its count is the pill beside it).
 /// "Classified" is a claim about the rows, so it is only made when every one
 /// of them carries an answer: a list-only run and a run still in flight both

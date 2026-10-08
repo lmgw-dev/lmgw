@@ -137,6 +137,10 @@ Resolved from the `api_keys` table:
 | `owner` | `owner:dashboard`, `owner:self-admin` | yes | bearer or cookie | everything |
 | `internal` | `internal:<x>` | — (`key_hash = ''`) | **never** | — |
 
+*Amended 2026-10-06 by the client-apps design (`2026-10-06-client-apps-design.md` §1.1):* a fifth
+kind, `device`, named `device:<name>`, its plaintext not stored (shown once, in its pairing link),
+bearer only. It holds `Inference` and `Chat` under its policy row, and nothing else.
+
 `internal` rows are attribution identities, not credentials. The resolver
 skips them by kind before it compares hashes; `policy::admit`'s existing
 refusal of `Internal` stays as the second backstop.
@@ -165,6 +169,17 @@ pub enum Cap { Public, Inference, Ledger, AgentSelf, Admin }
 | `Ledger` | `POST /api/agents/{id}/runs`, `POST /api/agents/runs/{job}/events`, `POST /api/agents/runs/{job}/close` | no | no | own runs only (the handlers' existing ownership checks, reading the principal) | no |
 | `AgentSelf` | `GET /api/agents/{id}`, `GET /api/agents/{id}/runs`, `GET /api/agents/runs/{job}` — **rendered as the container sees them** (§3.10) | no | no | own id / own runs only | yes |
 | `Admin` | every other route: `/api/*` reads and `/api/op/*`, `/api/connect`, `/api/logs`, `/api/jobs`, `/api/vram`, `/api/usage/*`, `/api/settings-full`, `/api/responses*`, `/api/audio/catalog`, `/api/agents/import` and `/export`, `/api/docs/*`, `/chat/api/*`, `/audio-lab/api/*`, `/image-lab/api/*`, `/api/events`, `/api/status`, `/agents/{id}/mcp*`, `POST /mcp/admin` | no | no | no | yes |
+
+*Amended 2026-10-06 by the client-apps design (`2026-10-06-client-apps-design.md` §1.2):*
+- **A sixth capability, `Chat`, gates every `/chat/api/*` route**, so those routes leave the
+  `Admin` row. The Audio and Image labs stay `Admin`.
+- **Who holds `Chat`:** owner keys, and the new `device` keys. A device holds `Public`,
+  `Inference` and `Chat`, and nothing of the admin plane. An agent does not hold `Chat`.
+- **Every arm of `holds` now names what it grants**, so a capability added later is held by
+  nobody until an arm says so.
+- **The gate checks a key's expiry on `Chat` routes too.**
+
+That record's §1.2 has the full table.
 
 The table is a code artifact — a list of `(method, path, cap)` beside the
 router — and §10's route-walk test fails on any registered route that is not

@@ -346,11 +346,194 @@ async fn a_local_row_reaches_its_own_container() {
         .any(|e| e.model_id == "z-image-turbo" && e.port == mock.address().port());
     assert!(up, "admission should have started the model's container");
 
-    // Free, because it ran on our own hardware.
+    // Free, because it ran on our own hardware — a real 0 — and its images
+    // are counted all the same, for the statistics (billable-units §4.7).
     let l = logs(&state).await;
     assert_eq!(l.len(), 1);
     assert_eq!(l[0].upstream_name.as_deref(), Some("sdcpp"));
     assert_eq!(l[0].class, Some("image".to_string()));
+    assert_eq!(l[0].images_out, Some(1));
+    assert_eq!(l[0].cost_micro, Some(0));
+    assert_eq!(l[0].price_source.as_deref(), Some("free_local"));
+}
+
+// ---------------------------------------------------------------------------
+// Images out (billable-units design §4.4)
+// ---------------------------------------------------------------------------
+
+/// A manual `per_image` price of `rate` on `alias`.
+async fn price_per_image(state: &SharedState, alias: &str, rate: f64) {
+    let sheet = lmgw_core::pricing::Prices {
+        source: lmgw_core::pricing::PriceSource::Manual,
+        ..Default::default()
+    };
+    store::upsert_price(
+        &state.db,
+        lmgw_core::config::PriceScope::Alias,
+        alias,
+        lmgw_core::config::PriceUnit::PerImage,
+        &sheet,
+        Some(rate),
+        None,
+    )
+    .await
+    .unwrap();
+    state.reload_snapshot().await.unwrap();
+}
+
+async fn generate_json(base: &str, body: Value) -> reqwest::Response {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/images/generations"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    resp
+}
+
+/// The images in the answer are counted, never the request's `n`: two
+/// generated images at 0.04 are 80 000 micro, whatever was asked for.
+#[tokio::test]
+async fn a_cloud_answer_is_priced_per_image_it_holds() {
+    let mock = MockServer::start().await;
+    let two = json!({"created": 1, "data": [{"b64_json": "aVZCT1J3MEs="},
+        {"b64_json": "QUJD", "revised_prompt": "a \"data\": [cat]"}],
+        "usage": {"input_tokens": 50, "output_tokens": 4000}});
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(two.clone()))
+        .mount(&mock)
+        .await;
+    let (state, base) = setup_cloud(&mock).await;
+    price_per_image(&state, "my-image", 0.04).await;
+
+    let resp = generate_json(
+        &base,
+        json!({"model": "my-image", "prompt": "a cat", "n": 3}),
+    )
+    .await;
+    assert_eq!(
+        resp.json::<Value>().await.unwrap(),
+        two,
+        "relayed untouched"
+    );
+    let l = logs(&state).await;
+    assert_eq!(l[0].images_out, Some(2));
+    assert_eq!(l[0].cost_micro, Some(80_000), "{:?}", l[0]);
+    assert_eq!(l[0].cost_units_micro, Some(80_000));
+    assert_eq!(l[0].price_per_image, Some(0.04));
+    assert_eq!(
+        (l[0].prompt_tokens, l[0].completion_tokens),
+        (None, None),
+        "a gpt-image usage is not read (§4.8)"
+    );
+}
+
+/// The edits route is counted the same way.
+#[tokio::test]
+async fn an_edit_answer_is_counted_too() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/edits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(one_png()))
+        .mount(&mock)
+        .await;
+    let (state, base) = setup_cloud(&mock).await;
+    price_per_image(&state, "my-edit", 0.04).await;
+
+    let form = reqwest::multipart::Form::new()
+        .text("model", "my-edit")
+        .text("prompt", "make it night")
+        .part(
+            "image",
+            reqwest::multipart::Part::bytes(b"\x89PNGfake".to_vec()).file_name("in.png"),
+        );
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/images/edits"))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    resp.bytes().await.unwrap();
+    let l = logs(&state).await;
+    assert_eq!(l[0].images_out, Some(1));
+    assert_eq!(l[0].cost_micro, Some(40_000));
+}
+
+/// An answer with no `data` array to count is unknown, and NULL on a scope
+/// priced per image — never 0.
+#[tokio::test]
+async fn an_answer_without_data_is_unpriced_not_free() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"created": 1})))
+        .mount(&mock)
+        .await;
+    let (state, base) = setup_cloud(&mock).await;
+    price_per_image(&state, "my-image", 0.04).await;
+
+    generate_json(&base, json!({"model": "my-image", "prompt": "a cat"}))
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    let l = logs(&state).await;
+    assert_eq!(l[0].images_out, None);
+    assert_eq!(l[0].cost_micro, None, "{:?}", l[0]);
+}
+
+fn image_event(kind: &str) -> String {
+    let data = json!({"type": kind, "b64_json": "aVZCT1J3MEs=", "created_at": 1,
+        "partial_image_index": 0, "output_format": "png"});
+    format!("event: {kind}\ndata: {data}\n\n")
+}
+
+/// `stream: true`: each final-image event is one image, a partial image is
+/// none, and a stream in which no final event is recognised is unknown.
+#[tokio::test]
+async fn an_image_stream_counts_its_final_events() {
+    let mock = MockServer::start().await;
+    let two = [
+        image_event("image_generation.partial_image"),
+        image_event("image_generation.completed"),
+        image_event("image_generation.partial_image"),
+        image_event("image_generation.completed"),
+    ]
+    .concat();
+    let partial_only = image_event("image_generation.partial_image");
+    for (prompt, stream) in [("two", two.clone()), ("none", partial_only)] {
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"prompt": prompt}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(stream, "text/event-stream"))
+            .mount(&mock)
+            .await;
+    }
+    let (state, base) = setup_cloud(&mock).await;
+    price_per_image(&state, "my-image", 0.04).await;
+
+    let body = |prompt: &str| json!({"model": "my-image", "prompt": prompt, "stream": true});
+    let resp = generate_json(&base, body("two")).await;
+    assert_eq!(resp.text().await.unwrap(), two, "relayed byte for byte");
+    let l = logs(&state).await;
+    assert!(l[0].streamed);
+    assert_eq!(l[0].images_out, Some(2));
+    assert_eq!(l[0].cost_micro, Some(80_000));
+
+    generate_json(&base, body("none"))
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    let l = logs(&state).await;
+    assert_eq!(l.len(), 2);
+    assert_eq!(l[0].images_out, None, "partial images never count");
+    assert_eq!(l[0].cost_micro, None);
 }
 
 // ---------------------------------------------------------------------------

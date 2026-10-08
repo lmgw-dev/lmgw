@@ -201,6 +201,8 @@ fn arg_usize(args: &Map<String, Value>, key: &str) -> Result<Option<usize>, Stri
 ///
 /// `client_name` is the MCP client's `initialize` name when the transport knew
 /// one; `docs__request` records it so the owner's queue says who asked.
+/// `charged`: whose request a query's embedder and reranker run for — a
+/// device's Chat turn (client-apps design L4); `None` for the gateway's own.
 /// `Err(CallError)` means "not one of these tools" — everything else is an
 /// `isError` result the calling model can read and act on.
 pub async fn call(
@@ -208,12 +210,13 @@ pub async fn call(
     name: &str,
     args: Option<Map<String, Value>>,
     client_name: Option<&str>,
+    charged: Option<&crate::proxy::RequestCtx>,
 ) -> Result<Value, CallError> {
     let a = args.unwrap_or_default();
     let out = match name {
         "docs__resolve" => resolve(state, &a).await,
         "docs__query" => {
-            return Ok(query_tool(state, &a)
+            return Ok(query_tool(state, &a, charged)
                 .await
                 .unwrap_or_else(|e| err_result(&e)))
         }
@@ -355,7 +358,11 @@ async fn resolve(state: &SharedState, args: &Map<String, Value>) -> Result<Value
 // docs__query
 // ---------------------------------------------------------------------------
 
-async fn query_tool(state: &SharedState, args: &Map<String, Value>) -> Result<Value, String> {
+async fn query_tool(
+    state: &SharedState,
+    args: &Map<String, Value>,
+    charged: Option<&crate::proxy::RequestCtx>,
+) -> Result<Value, String> {
     let corpus_id = arg_str(args, "corpus_id")?
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -383,7 +390,7 @@ async fn query_tool(state: &SharedState, args: &Map<String, Value>) -> Result<Va
         params.budget_tokens = (b > 0).then_some(b);
     }
 
-    let retriever = query::open_retriever(state, &corpus)
+    let retriever = query::open_retriever_as(state, &corpus, charged)
         .await
         .map_err(|e| e.to_string())?;
     let result = retriever

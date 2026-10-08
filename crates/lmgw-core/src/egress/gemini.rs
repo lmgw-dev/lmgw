@@ -277,16 +277,30 @@ fn parse_usage(v: Option<&Value>) -> Usage {
     match v {
         Some(u) => {
             let n = |k: &str| u.get(k).and_then(Value::as_u64);
+            let candidates = n("candidatesTokenCount");
+            let thoughts = n("thoughtsTokenCount");
             Usage {
                 // `promptTokenCount` already includes the cached content, like
-                // OpenAI's and unlike Anthropic's.
+                // OpenAI's and unlike Anthropic's. `toolUsePromptTokenCount`
+                // stays out: Google documents it as a count, not as billed
+                // input, and `totalTokenCount` (prompt + thoughts + candidates)
+                // does not include it either.
                 prompt_tokens: n("promptTokenCount"),
-                completion_tokens: n("candidatesTokenCount"),
+                // Thinking is *not* inside `candidatesTokenCount`: Google
+                // reports the two side by side (`totalTokenCount` is prompt +
+                // thoughts + candidates) and bills output as their sum. The IR's
+                // completion includes reasoning, as OpenAI's `completion_tokens`
+                // and Anthropic's `output_tokens` do, so the two are added here.
+                // Either may be absent; both absent stays unknown.
+                completion_tokens: match (candidates, thoughts) {
+                    (None, None) => None,
+                    (c, t) => Some(c.unwrap_or(0) + t.unwrap_or(0)),
+                },
                 cached_input_tokens: n("cachedContentTokenCount"),
                 cache_write_tokens: None,
-                // Gemini bills thinking inside the candidates count and reports
-                // it separately for information, exactly like the IR field.
-                reasoning_tokens: n("thoughtsTokenCount"),
+                // The thinking share of that completion, for information only,
+                // exactly like the IR field.
+                reasoning_tokens: thoughts,
             }
         }
         None => Usage::default(),

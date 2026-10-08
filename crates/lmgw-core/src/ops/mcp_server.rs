@@ -8,6 +8,7 @@ use crate::runtime::argv;
 use crate::state::SharedState;
 use crate::store::{self, NewMcpServer};
 
+use super::credential_move::{self, RowWriter};
 use super::*;
 
 /// Sparse patch for a southbound MCP server. List-valued fields arrive as
@@ -71,7 +72,37 @@ pub(super) fn validate_tool_prefix(prefix: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn mcp_server_set(state: &SharedState, p: McpServerPatch) -> Result<Value, String> {
+/// A paired device's hosting label is its tools' prefix (client-apps design
+/// §1.5), so no server may take it as its prefix or its name — the same
+/// uniqueness the label was checked for when it was granted.
+pub(crate) fn reject_device_label(
+    snap: &crate::config::Snapshot,
+    word: &str,
+) -> Result<(), String> {
+    if word.is_empty() {
+        return Ok(());
+    }
+    match snap.api_keys.iter().find(|k| {
+        k.hosts_label
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(word))
+    }) {
+        Some(k) => Err(format!(
+            "'{word}' is device '{}''s hosting label — its tools are named '{word}__…' — pick \
+             another",
+            crate::devices::short_name(&k.name)
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `writer` is who asks: a self-admin tool's move of a row with headers to
+/// another address must restate them ([`RowWriter`]).
+pub async fn mcp_server_set(
+    state: &SharedState,
+    p: McpServerPatch,
+    writer: RowWriter,
+) -> Result<Value, String> {
     let snap = state.snapshot();
     let id_of = || p.id.ok_or_else(|| format!("'{}' requires id", p.action));
 
@@ -106,6 +137,8 @@ pub async fn mcp_server_set(state: &SharedState, p: McpServerPatch) -> Result<Va
             }
             let tool_prefix = opt(&p.tool_prefix).unwrap_or_default();
             validate_tool_prefix(&tool_prefix)?;
+            reject_device_label(&snap, &tool_prefix)?;
+            reject_device_label(&snap, &name)?;
 
             let new = NewMcpServer {
                 name: name.clone(),
@@ -178,10 +211,24 @@ pub async fn mcp_server_set(state: &SharedState, p: McpServerPatch) -> Result<Va
                     reject_self_loop(&snap, &u)?;
                     Some(u)
                 }
-                None => cur.url,
+                None => cur.url.clone(),
             };
-            let tool_prefix = opt(&p.tool_prefix).unwrap_or(cur.tool_prefix);
+            // Whichever action this is, a move of the row's address checks
+            // the stored headers against the call's (V-1); `null` restates
+            // nothing, it keeps the stored ones (V-2).
+            if let Some(why) = credential_move::mcp_server_refusal(
+                writer,
+                &cur,
+                url.as_deref(),
+                p.headers.as_deref(),
+            ) {
+                return Err(why);
+            }
+            let tool_prefix = opt(&p.tool_prefix).unwrap_or(cur.tool_prefix.clone());
             validate_tool_prefix(&tool_prefix)?;
+            if tool_prefix != cur.tool_prefix {
+                reject_device_label(&snap, &tool_prefix)?;
+            }
 
             // Redacted-on-read fields are only rewritten when supplied, so a
             // read→partial-write round trip can't persist the `<set>` marker.
@@ -197,6 +244,9 @@ pub async fn mcp_server_set(state: &SharedState, p: McpServerPatch) -> Result<Va
             // Renaming *into* the reserved space is the same problem as
             // creating there; renaming an agent's own row *out* of it would
             // orphan the registration the agent lifecycle looks for by name.
+            if let Some(n) = renamed.as_deref().filter(|n| *n != cur.name) {
+                reject_device_label(&snap, n)?;
+            }
             if let Some(n) = renamed.as_deref() {
                 reject_agent_name(n)?;
             }

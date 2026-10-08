@@ -118,6 +118,16 @@ pub struct UsageCell {
     pub cache_n: i64,
     pub draft_n: i64,
     pub draft_accepted: i64,
+    /// Measured quantities (billable-units §5.3): what was recorded, 0 for
+    /// a request that measured nothing and for every hour before
+    /// [`units_since`].
+    pub audio_in_ms: i64,
+    pub chars_in: i64,
+    pub images_out: i64,
+    /// The same quantities of the requests `cost_unknown_requests` counts.
+    pub cost_unknown_audio_in_ms: i64,
+    pub cost_unknown_chars_in: i64,
+    pub cost_unknown_images_out: i64,
 }
 
 fn cell_from_row(r: &sqlx::sqlite::SqliteRow) -> UsageCell {
@@ -146,6 +156,12 @@ fn cell_from_row(r: &sqlx::sqlite::SqliteRow) -> UsageCell {
         cache_n: r.get("cache_n"),
         draft_n: r.get("draft_n"),
         draft_accepted: r.get("draft_accepted"),
+        audio_in_ms: r.get("audio_in_ms"),
+        chars_in: r.get("chars_in"),
+        images_out: r.get("images_out"),
+        cost_unknown_audio_in_ms: r.get("cost_unknown_audio_in_ms"),
+        cost_unknown_chars_in: r.get("cost_unknown_chars_in"),
+        cost_unknown_images_out: r.get("cost_unknown_images_out"),
     }
 }
 
@@ -195,7 +211,12 @@ pub async fn usage_series(
              SUM(decode_tokens) AS decode_tokens, SUM(decode_ms) AS decode_ms,
              SUM(prefill_ms) AS prefill_ms,
              SUM(prompt_n) AS prompt_n, SUM(cache_n) AS cache_n,
-             SUM(draft_n) AS draft_n, SUM(draft_accepted) AS draft_accepted
+             SUM(draft_n) AS draft_n, SUM(draft_accepted) AS draft_accepted,
+             SUM(audio_in_ms) AS audio_in_ms, SUM(chars_in) AS chars_in,
+             SUM(images_out) AS images_out,
+             SUM(cost_unknown_audio_in_ms) AS cost_unknown_audio_in_ms,
+             SUM(cost_unknown_chars_in) AS cost_unknown_chars_in,
+             SUM(cost_unknown_images_out) AS cost_unknown_images_out
              FROM usage_hourly",
         );
     push_filters(&mut qb, f);
@@ -231,8 +252,30 @@ pub async fn usage_totals(pool: &SqlitePool, f: &UsageFilter) -> DbResult<UsageC
         t.cache_n += r.cache_n;
         t.draft_n += r.draft_n;
         t.draft_accepted += r.draft_accepted;
+        t.audio_in_ms += r.audio_in_ms;
+        t.chars_in += r.chars_in;
+        t.images_out += r.images_out;
+        t.cost_unknown_audio_in_ms += r.cost_unknown_audio_in_ms;
+        t.cost_unknown_chars_in += r.cost_unknown_chars_in;
+        t.cost_unknown_images_out += r.cost_unknown_images_out;
     }
     Ok(t)
+}
+
+/// When this install started recording the billable quantities
+/// (billable-units §5.5): the moment migration 0070 was applied, as sqlx
+/// recorded it, in RFC 3339 UTC. A rollup hour before it holds 0 for every
+/// quantity because nothing was recorded, and raw rows from before it have
+/// none to rebuild from. `None` only when the bookkeeping holds no such row.
+pub async fn units_since(pool: &SqlitePool) -> DbResult<Option<String>> {
+    let at: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', installed_on) FROM _sqlx_migrations
+         WHERE version = ?1 AND success = 1",
+    )
+    .bind(BILLABLE_UNITS_MIGRATION)
+    .fetch_optional(pool)
+    .await?;
+    Ok(at.flatten())
 }
 
 /// Ranked totals for one dimension — the "where it went" bars.
@@ -260,7 +303,12 @@ pub async fn usage_top(
          SUM(decode_tokens) AS decode_tokens, SUM(decode_ms) AS decode_ms,
          SUM(prefill_ms) AS prefill_ms,
          SUM(prompt_n) AS prompt_n, SUM(cache_n) AS cache_n,
-         SUM(draft_n) AS draft_n, SUM(draft_accepted) AS draft_accepted
+         SUM(draft_n) AS draft_n, SUM(draft_accepted) AS draft_accepted,
+         SUM(audio_in_ms) AS audio_in_ms, SUM(chars_in) AS chars_in,
+         SUM(images_out) AS images_out,
+         SUM(cost_unknown_audio_in_ms) AS cost_unknown_audio_in_ms,
+         SUM(cost_unknown_chars_in) AS cost_unknown_chars_in,
+         SUM(cost_unknown_images_out) AS cost_unknown_images_out
          FROM usage_hourly",
     );
     push_filters(&mut qb, f);
@@ -346,8 +394,16 @@ pub async fn usage_percentiles(
 /// It is not a substitute for the same-transaction upsert on the write path:
 /// rows the retention pruner has already eaten cannot be rebuilt from anything,
 /// which is exactly why the rollup is written as the row is.
+///
+/// The one write transaction with Rust work inside (review B-6): it reads
+/// every ok request log, folds them and writes the cells, all under the write
+/// lock, about 1–3 s at the 200k-row retention default. Writers queued behind
+/// it wait (the contention warning, `begin_write`), and one past the busy
+/// timeout fails. That is deliberate: the read and the fold outside the lock
+/// would let a request's `roll_up` land between them and be counted twice. It
+/// runs once, at boot, when the rollup is empty and the logs are not.
 pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     sqlx::query("DELETE FROM usage_hourly")
         .execute(&mut *tx)
         .await?;
@@ -368,13 +424,26 @@ pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
               WHEN status BETWEEN 400 AND 499 THEN 'client_error'
               ELSE 'upstream_error' END"
     );
+    // 'unknown' is not 'zero', a tool row is not an unpriced model call, and
+    // work is tokens or any measured quantity (billable-units §5.3) — the
+    // write path's rules (`roll_up`) restated, so a rebuild produces exactly
+    // what it would have.
+    let unknown = format!(
+        "cost_micro IS NULL AND COALESCE(class,'chat') <> 'tool'
+         AND (({outcome}) = 'ok'
+              OR COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0) > 0
+              OR COALESCE(audio_in_ms,0) > 0 OR COALESCE(chars_in,0) > 0
+              OR COALESCE(images_out,0) > 0)"
+    );
 
     let sql = format!(
         "INSERT INTO usage_hourly (bucket_utc, key_id, alias, upstream_id, class, outcome,
             requests, tokens_in, tokens_out, tokens_cached, tokens_cache_write, tokens_reasoning,
             cost_micro, cost_unknown_requests, cost_unknown_tokens,
             ttfb_sum, ttfb_count, total_sum, total_count, total_min, total_max,
-            decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted)
+            decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted,
+            audio_in_ms, chars_in, images_out,
+            cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out)
          SELECT strftime('%Y-%m-%dT%H', ts),
                 COALESCE(key_id, 0),
                 requested_alias,
@@ -388,16 +457,8 @@ pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
                 COALESCE(SUM(cache_write_tokens), 0),
                 COALESCE(SUM(reasoning_tokens), 0),
                 COALESCE(SUM(cost_micro), 0),
-                -- 'unknown' is not 'zero', and a tool row is not an unpriced
-                -- model call — both rules restated here so a rebuild produces
-                -- exactly what the write path would have.
-                SUM(CASE WHEN cost_micro IS NULL AND COALESCE(class,'chat') <> 'tool'
-                              AND (({outcome}) = 'ok'
-                                   OR COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0) > 0)
-                         THEN 1 ELSE 0 END),
-                SUM(CASE WHEN cost_micro IS NULL AND COALESCE(class,'chat') <> 'tool'
-                              AND (({outcome}) = 'ok'
-                                   OR COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0) > 0)
+                SUM(CASE WHEN {unknown} THEN 1 ELSE 0 END),
+                SUM(CASE WHEN {unknown}
                          THEN COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0)
                          ELSE 0 END),
                 COALESCE(SUM(ttfb_ms), 0),
@@ -411,7 +472,13 @@ pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
                 COALESCE(SUM(prompt_n), 0),
                 COALESCE(SUM(cache_n), 0),
                 COALESCE(SUM(draft_n), 0),
-                COALESCE(SUM(draft_accepted), 0)
+                COALESCE(SUM(draft_accepted), 0),
+                COALESCE(SUM(audio_in_ms), 0),
+                COALESCE(SUM(chars_in), 0),
+                COALESCE(SUM(images_out), 0),
+                SUM(CASE WHEN {unknown} THEN COALESCE(audio_in_ms,0) ELSE 0 END),
+                SUM(CASE WHEN {unknown} THEN COALESCE(chars_in,0) ELSE 0 END),
+                SUM(CASE WHEN {unknown} THEN COALESCE(images_out,0) ELSE 0 END)
          FROM request_logs
          GROUP BY 1, 2, 3, 4, 5, 6"
     );

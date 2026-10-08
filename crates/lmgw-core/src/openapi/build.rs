@@ -202,7 +202,11 @@ fn security_schemes() -> Value {
         "bearer": {
             "type": "http",
             "scheme": "bearer",
-            "description": "An lmgw API key of any kind.",
+            "description": "An lmgw API key of any kind. A paired device's key is refused \
+                with 401 device_key_unknown once it matches no device (the device was rotated \
+                or deleted: pair it again), 401 device_disabled while the device is disabled \
+                (the same key works once it is enabled again), and 401 key_expired past its \
+                expiry date. A retry with the same key does not help with any of the three.",
         },
         "apiKeyHeader": {
             "type": "apiKey",
@@ -235,7 +239,7 @@ fn security_for(cap: Cap, method: &str, path: &str) -> Value {
             json!({"session": []}),
             json!({}),
         ],
-        Cap::Admin | Cap::AgentSelf => vec![
+        Cap::Admin | Cap::AgentSelf | Cap::Chat => vec![
             json!({"bearer": []}),
             json!({"apiKeyHeader": []}),
             json!({"session": []}),
@@ -399,6 +403,16 @@ fn request_body(
             }
             Some(json!({
                 "required": true,
+                "content": { "application/json": { "schema": schema } },
+            }))
+        }
+        Req::OptionalJson(schema_fn) => {
+            let mut schema = schemas::embed(g, schema_fn);
+            if let Some(ex) = example {
+                schema["example"] = ex;
+            }
+            Some(json!({
+                "required": false,
                 "content": { "application/json": { "schema": schema } },
             }))
         }
@@ -787,9 +801,10 @@ fn op_request_body(g: &mut schemars::SchemaGenerator, op: &OpDoc) -> Option<Valu
 // Principals + undocumented
 // ---------------------------------------------------------------------------
 
-const CAPS: [Cap; 5] = [
+const CAPS: [Cap; 6] = [
     Cap::Public,
     Cap::Inference,
+    Cap::Chat,
     Cap::Ledger,
     Cap::AgentSelf,
     Cap::Admin,
@@ -802,7 +817,7 @@ fn holds_list(principal: &Principal, snap: &Snapshot) -> Vec<&'static str> {
         .collect()
 }
 
-/// `x-lmgw-principals` (§4.4): what each of the five principal kinds holds,
+/// `x-lmgw-principals` (§4.4): what each of the six principal kinds holds,
 /// computed at build time from [`Principal::holds`] on synthetic principals —
 /// this document cannot itself drift from what the gate actually decides.
 fn principals_matrix() -> Value {
@@ -816,18 +831,28 @@ fn principals_matrix() -> Value {
         name: String::new(),
         kind: ApiKeyKind::Owner,
         agent_id: None,
+        fingerprint: String::new(),
     };
     let agent = Principal::Key {
         id: 0,
         name: String::new(),
         kind: ApiKeyKind::Agent,
         agent_id: None,
+        fingerprint: String::new(),
     };
     let key = Principal::Key {
         id: 0,
         name: String::new(),
         kind: ApiKeyKind::Key,
         agent_id: None,
+        fingerprint: String::new(),
+    };
+    let device = Principal::Key {
+        id: 0,
+        name: String::new(),
+        kind: ApiKeyKind::Device,
+        agent_id: None,
+        fingerprint: String::new(),
     };
     let anonymous = Principal::Anonymous;
 
@@ -835,6 +860,7 @@ fn principals_matrix() -> Value {
         "owner": holds_list(&owner, &auth_on),
         "agent": holds_list(&agent, &auth_on),
         "key": holds_list(&key, &auth_on),
+        "device": holds_list(&device, &auth_on),
         "anonymous": holds_list(&anonymous, &auth_on),
         "anonymous_auth_off": holds_list(&anonymous, &auth_off),
     })
@@ -1041,6 +1067,7 @@ mod tests {
             name: String::new(),
             kind: ApiKeyKind::Owner,
             agent_id: None,
+            fingerprint: String::new(),
         };
         assert!(owner.holds(Cap::Public, &snap));
         assert!(!owner.holds(Cap::Ledger, &snap));
@@ -1052,6 +1079,17 @@ mod tests {
             .collect();
         assert!(owner_list.contains("public"));
         assert!(!owner_list.contains("ledger"));
+        assert!(owner_list.contains("chat"));
+
+        // A paired device (client-apps design §1.2): the Chat API on top of
+        // a client key's inference, and nothing of the admin plane.
+        let device: Vec<&str> = matrix["device"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(device, ["public", "inference", "chat"]);
 
         let anon_off: HashSet<&str> = matrix["anonymous_auth_off"]
             .as_array()

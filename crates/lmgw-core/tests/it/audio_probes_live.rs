@@ -18,6 +18,11 @@
 //!   the two disagree on what was said by more than a quarter of its length
 //!   or the stream starts no sooner than the WAV ends.
 //!
+//! - **Supertonic characters** (`supertonic_chars`): whether the engine
+//!   says every character lmgw sends a Supertonic row as it is — the
+//!   tripwire for lmgw's copy of what its tokenizer rewrites and
+//!   decomposes.
+//!
 //! Gated twice: `#[ignore]`, and `LMGW_LIVE_AUDIO_PROBES=1`. Without the
 //! variable a probe prints `SKIP` and passes. With it the owner asked for
 //! the run, so anything missing fails the probe with the reason: podman,
@@ -49,6 +54,9 @@ use lmgw_core::store::{self, NewAudioModel};
 use serde_json::{json, Value};
 
 use crate::support::live_vram::{self, Measured, Phase};
+
+/// Supertonic's characters against a real container.
+mod supertonic_chars;
 
 const PREFIX: &str = "lmgwprobe";
 

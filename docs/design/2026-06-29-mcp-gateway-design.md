@@ -116,7 +116,9 @@ One `rmcp` `RoleClient` peer per enabled server, owned by `McpManager`. Verified
   - stdio → `TokioChildProcess` (feature `transport-child-process`). The child is
     a `tokio::process::Command`; for Podman isolation the command **is**
     `podman run --rm -i --quiet <image> <server-entrypoint…>` with env as `-e`
-    flags. rmcp speaks JSON-RPC over the child’s stdin/stdout.
+    flags (since 2026-10-08 split into `podman create` and `podman start
+    --attach --interactive`, §9). rmcp speaks JSON-RPC over the child’s
+    stdin/stdout.
   - remote → `StreamableHttpClientTransport` (streamable HTTP) and the legacy
     HTTP+SSE client transport. *(Exact feature-flag names: verify, §20.)*
 
@@ -360,6 +362,43 @@ struct McpConn {
   router badge” means *adding* an event type, not just a new caller.
 - **Timeouts**: every `call_tool` is wrapped in the server’s `timeout_ms`; a hung
   server fails that call, not the gateway.
+  *Changed 2026-10-08:* a server’s connect handshake (`initialize` and the tool
+  list) is bounded by the same `timeout_ms`, so a server that takes the connection,
+  or starts, and never answers ends `Error` (“no answer to the MCP handshake within
+  N ms”) instead of `Connecting` for good. A Podman-isolated stdio server’s
+  container is created first (`podman create`, with the pull of a cold image), and
+  that is not bounded, since cutting it would start the pull over; its start
+  (`podman start --attach --interactive`) and the handshake are. The container is
+  labelled `lmgw.mcp=<server id>` and `lmgw.instance=<container_prefix>`. The run
+  flags `podman create` refuses and `podman start` takes (`--sig-proxy`,
+  `--detach-keys`) go to the start; the ones neither takes (`-d`/`--detach`,
+  `--rmi`, `--preserve-fd`, `--preserve-fds`, `--passwd`) are refused when the row
+  is saved, by name and with why, and nothing of it is stored. A container whose
+  handshake fails is removed at once, and so is one whose connect is dropped before
+  it ends (a “Test” whose request went away, a panic). A bare stdio server’s start
+  stays unbounded: a command such as `npx` installs its package inside the process
+  it starts, and lmgw cannot tell that apart from the server’s own start. A
+  connect, once a server is marked `Connecting`, settles as `Ready` or `Error` on a
+  task of its own, and the reconcile after a reload runs to its end the same way: a
+  request dropped by its client no longer leaves a server `Connecting` until a
+  restart. Each connect holds its server’s `Connecting` mark under a claim number,
+  and stores its outcome only while the claim is still its own and the published
+  snapshot still has the server enabled with the configuration it connected. A
+  connect that ends after its server was deleted, disabled, stopped or restarted
+  closes its session and stores nothing; it used to come back `Ready`, running for a
+  server that was gone. A server edited while it connects is connected again with
+  its new configuration. Closing a session (a stop, a delete, a restart, an idle
+  reap, a withdrawn connect, a “Test”) closes the server’s stdin and ends the
+  attached client, and for an isolated server then stops its container: a server
+  that does not end on its stdin closing gets its stop signal, its `timeout_ms` to
+  end, then a kill, and the container is removed. At boot, lmgw removes the MCP
+  containers of its own instance (`lmgw.instance` its `container_prefix`) that are
+  older than the process, which a crash or a kill left behind; another instance’s
+  on the same podman are never touched. A settings writer (`settings_set`,
+  `settings_set_full`, `hold_set`, the router-mode sweep) reconciles, once it has
+  let go of the settings lock, against the snapshot published at that moment rather
+  than the one it published itself, which a publish by another path may have
+  replaced.
 
 ## 10. Data model (`migrations/0011_mcp_servers.sql`)
 

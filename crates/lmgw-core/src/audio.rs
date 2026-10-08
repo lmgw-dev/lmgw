@@ -8,6 +8,7 @@
 //! no shared audiocpp_server process left for this module to own.
 
 mod carry;
+pub mod charset;
 pub mod cues;
 pub mod engine_errors;
 pub mod families;

@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One (bucket, series) cell. Mirrors `store::UsageCell`.
+/// One (bucket, series) cell.
 ///
 /// Money is integer **micro-units** of the configured currency everywhere on
 /// this plane; a float that has been through JSON twice does not add up.
@@ -32,7 +32,7 @@ pub struct UsageCell {
     pub tokens_reasoning: i64,
     pub cost_micro: i64,
     /// What `cost_micro` does **not** cover. Every total that is displayed is
-    /// obliged to show this beside it (design §2.3) — a cost figure with a
+    /// obliged to show this beside it — a cost figure with a
     /// silent hole in it is worse than no cost figure.
     pub cost_unknown_requests: i64,
     pub cost_unknown_tokens: i64,
@@ -51,6 +51,20 @@ pub struct UsageCell {
     pub cache_n: i64,
     pub draft_n: i64,
     pub draft_accepted: i64,
+    // Billable-units design §5.3.
+    /// What the requests processed besides tokens, as **measured** or
+    /// reported by the provider: input audio in milliseconds, input
+    /// characters, generated images. A request that measured nothing adds 0,
+    /// so these are measured totals, and before the series' `units_since`
+    /// nothing was recorded at all.
+    pub audio_in_ms: i64,
+    pub chars_in: i64,
+    pub images_out: i64,
+    /// The same quantities of the requests `cost_unknown_requests` counts,
+    /// so the remainder can say what it holds beside its tokens.
+    pub cost_unknown_audio_in_ms: i64,
+    pub cost_unknown_chars_in: i64,
+    pub cost_unknown_images_out: i64,
 }
 
 /// Identity of one series, with the colour slot it wears everywhere.
@@ -70,7 +84,7 @@ pub struct SeriesMeta {
     /// teal" is being lied to.
     pub slot: Option<u8>,
     /// True for a locally-served model — it can never appear in a spend chart,
-    /// because its money cost is a real zero (design §2.4).
+    /// because its money cost is a real zero.
     pub local: bool,
     /// On the folded "Other" series only: how many entities it sums, so a
     /// legend can say "Other (49 aliases)" instead of hiding the tail's size.
@@ -105,6 +119,13 @@ pub struct UsageSeriesResponse {
     /// rollup's sums would give a mean, and one 30-second outlier drags a mean
     /// four times above the typical request.
     pub latency: Vec<LatencyPoint>,
+    /// When this install started recording the billable quantities
+    /// (`audio_in_ms`, `chars_in`, `images_out`), RFC 3339 UTC. A bucket
+    /// before it reads 0 because nothing was recorded, not because nothing
+    /// was processed: show such a bucket as not recorded rather than as
+    /// zero.
+    // Billable-units design §5.5.
+    pub units_since: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -154,7 +175,7 @@ pub struct UsageLocalResponse {
     pub local_tokens: i64,
     pub cloud_tokens: i64,
     /// What the local tokens **would** have cost at `reference_alias`'s price.
-    /// Not a saving — nobody would have run all of it there (design §2.5).
+    /// Not a saving — nobody would have run all of it there.
     /// `None` when no reference alias is configured, which the page must say
     /// rather than quietly picking one.
     pub counterfactual_micro: Option<i64>,
@@ -166,6 +187,23 @@ pub struct UsageLocalResponse {
     pub draft_acceptance: Option<f64>,
 }
 
+/// A key's state moved without a request landing: the `keys` frame of
+/// `/api/events`. A device's connection opened or closed — its online state
+/// and `last_seen_at` — or a key was disabled, rotated or deleted. The Keys
+/// page refetches its list on it, instead of polling.
+// The client-apps design record, §1.6.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct KeysChanged {
+    /// The `api_keys.id` it is about.
+    pub key_id: i64,
+    /// `link` (a device's connection opened or closed), `disabled`,
+    /// `rotated` or `deleted`; or `resync` (with `key_id` 0) when the event
+    /// stream could not deliver every frame: refetch the keys.
+    pub what: String,
+}
+
 /// One key on the Keys & policy table. `GET /api/usage/keys`
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -174,9 +212,9 @@ pub struct KeyRow {
     pub id: i64,
     pub name: String,
     pub enabled: bool,
-    /// `key` | `internal` | `agent` | `owner` — an internal identity is
-    /// budgetable but can never authenticate anything; an owner key holds
-    /// every capability (principals §3.1).
+    /// `key` | `internal` | `agent` | `owner` | `device` — an internal
+    /// identity is budgetable but can never authenticate anything; an owner
+    /// key holds every capability; a device is a paired client app.
     pub kind: String,
     pub scope_mode: String,
     pub scope_patterns: String,
@@ -202,6 +240,43 @@ pub struct KeyRow {
     pub spent_unknown_tokens: i64,
     pub requests: i64,
     pub last_used: Option<String>,
+    /// Devices only: when one of its long-lived connections (the Chat
+    /// feed, a voice session, its tool link) last opened or closed,
+    /// RFC 3339 UTC.
+    // The client-apps design record, §1.6.
+    pub last_seen_at: Option<String>,
+    /// Devices only: the label it may host MCP tools under; `null` without
+    /// a hosting grant.
+    // The client-apps design record, §1.5.
+    pub hosts_label: Option<String>,
+    /// Devices only: the device's level of lmgw's admin tools — `off`,
+    /// `read_only` (it reads lmgw's configuration and state) or `full` (it
+    /// also changes it, and may register programs that run on the gateway's
+    /// machine). Above `off` it sees and uses the Chat threads and folders
+    /// that carry the self-admin toolset (`lmgw`); at `full` it may also
+    /// attach the toolset and change such threads and folders. The
+    /// self-admin level in Settings caps what the tools may do. Admin Chat
+    /// stays hidden from every device. `off` for every other kind.
+    // The client-apps design record, L3/L5 (2026-10-07); a level since the
+    // pre-merge review's P-3.
+    pub self_admin: crate::AdminLevel,
+    /// Devices only: which of its connections are open now — `feed`,
+    /// `voice`, `tools`, in that order. Empty means offline.
+    pub online: Vec<String>,
+    /// Devices only: how many connections of each kind in `online` are
+    /// open, in the same order. More than one of a kind is a client that
+    /// opened another before its last one closed.
+    pub open_links: Vec<OpenLinks>,
+}
+
+/// How many connections of one kind a device holds open.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OpenLinks {
+    /// `feed`, `voice` or `tools`.
+    pub kind: String,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -210,7 +285,7 @@ pub struct KeyRow {
 pub struct KeysResponse {
     pub keys: Vec<KeyRow>,
     pub currency: String,
-    /// The owner's global budget and what has gone against it this period.
+    /// The global budget and what has gone against it this period.
     pub global_budget_micro: i64,
     pub global_spent_micro: i64,
     /// `day` | `month` | `total` — what "this period" means, so a projection
@@ -218,6 +293,10 @@ pub struct KeysResponse {
     /// calendar month.
     pub global_budget_period: String,
     pub global_spent_unknown_requests: i64,
+    /// *Require API key* (Settings → Network & access): off, an anonymous
+    /// `/v1` call is served — what the Devices card warns of, since a
+    /// device's scope and budget then bound only its own key.
+    pub auth_enabled: bool,
 }
 
 /// One price sheet. `GET /api/usage/prices`
@@ -236,6 +315,11 @@ pub struct PriceRowView {
     pub source: String,
     pub note: Option<String>,
     pub updated_at: String,
+    /// The rate of a unit other than tokens, per that unit's scale (per
+    /// minute of input audio, per 1M input characters, per generated image,
+    /// per answered request). `None` on a `per_mtok` row, whose rates are the
+    /// four above; those four are `None` on every other row.
+    pub price: Option<f64>,
 }
 
 /// One model that resolves to no price at all — an entry on the "why is my
@@ -260,7 +344,7 @@ pub struct PricesResponse {
     pub currency: String,
     /// Every model the gateway serves that no price sheet covers — **including
     /// the passthrough models an `expose_all` upstream serves**, which are the
-    /// ones an owner with no configured aliases actually uses. Ordered by the
+    /// ones a deployment with no configured aliases actually uses. Ordered by the
     /// requests each has already spent unpriced.
     pub unpriced_models: Vec<UnpricedModel>,
 }

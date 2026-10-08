@@ -276,6 +276,18 @@ pub struct Route {
     pub fallback: Option<std::sync::Arc<str>>,
 }
 
+impl Route {
+    /// The alias whose price rows apply to a call on this route: the fallback
+    /// that answered, when this route stands in for one, else `requested`
+    /// (billable-units design §12 Q2). Its alias-scoped rows, manual or
+    /// catalog, are that alias's, and the upstream and model beside it are
+    /// already the fallback's. Only the price lookup reads it: the row's
+    /// `requested_alias` stays the name the client asked for.
+    pub fn priced_alias<'a>(&'a self, requested: &'a str) -> &'a str {
+        self.fallback.as_deref().unwrap_or(requested)
+    }
+}
+
 /// A routed request's destination, and how it got there — the answer of
 /// [`Snapshot::resolve_for_request`] (gpu-hold design §4).
 #[derive(Debug, Clone)]

@@ -33,7 +33,7 @@ pub const EXTRA_OPEN: &str = "<sd_cpp_extra_args>";
 pub const EXTRA_CLOSE: &str = "</sd_cpp_extra_args>";
 
 /// One row of the optional LoRA table. `<lora:…>` prompt tags are refused by
-/// every sd.cpp family (§2.3), so a LoRA is this structured field or nothing.
+/// every sd.cpp family, so a LoRA is this structured field or nothing.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

@@ -12,7 +12,10 @@
 //                      /voice/viz/<variant>.js and mounted with the taps and
 //                      the panel's palette; answers {kind}. o.quiet: no taps
 //                      (a quiet room, nothing playing); o.reduced: reduced
-//                      motion.
+//                      motion; o.transparent: the transparent flag, and the
+//                      box behind the canvas without a background of its own.
+//   corners()          the alpha of the canvas's four corner pixels (a
+//                      Canvas2D variant), far from what any variant draws.
 //   rate(ms)           frames drawn over `ms`, and whether the engine draws
 //                      at its calm rate (idle and quiet, or reduced motion).
 //   state(name)        setState(name, {since, muted: false, loading: null,
@@ -97,7 +100,8 @@
     box = document.createElement("div");
     box.id = "viz-harness";
     box.style.cssText =
-      "position:fixed;left:0;top:0;width:640px;height:184px;z-index:99999;background:#121518;";
+      "position:fixed;left:0;top:0;width:640px;height:184px;z-index:99999;" +
+      (o.transparent ? "" : "background:#121518;");
     canvas = document.createElement("canvas");
     canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;";
     box.appendChild(canvas);
@@ -108,6 +112,7 @@
       input: o.quiet ? null : taps.input,
       palette: PALETTE,
       reducedMotion: !!o.reduced,
+      transparent: !!o.transparent,
     });
     handle.resize(640, 184, window.devicePixelRatio || 1);
     return { kind: handle.kind, fft: taps.output.fftSize, smoothing: taps.output.smoothingTimeConstant };
@@ -126,6 +131,18 @@
   };
 
   H.stats = () => Object.assign({ width: canvas.width, height: canvas.height }, handle.stats());
+
+  H.corners = () => {
+    const c = box.querySelector("canvas").getContext("2d");
+    const w = canvas.width;
+    const h = canvas.height;
+    return [
+      [0, 0],
+      [w - 1, 0],
+      [0, h - 1],
+      [w - 1, h - 1],
+    ].map(([x, y]) => c.getImageData(x, y, 1, 1).data[3]);
+  };
 
   H.destroy = async () => {
     const live = handle.stats();

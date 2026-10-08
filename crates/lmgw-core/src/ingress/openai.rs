@@ -116,11 +116,23 @@ pub fn parse_chat_request(body: &Value) -> Result<ChatRequest, GatewayError> {
     })
 }
 
+/// OpenAI's `stream_options.include_usage`: whether a streamed answer shows
+/// the client its usage — a final chunk with `choices: []`, and `usage: null`
+/// on every other chunk. Absent and `false` both mean no, as on OpenAI. Only
+/// what the client is shown: the egress asks every upstream for usage either
+/// way, because the request row, pricing and budgets need it.
+pub fn stream_include_usage(body: &Value) -> bool {
+    body.pointer("/stream_options/include_usage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Top-level request keys consumed by the parser above and re-emitted from the
 /// modeled IR. Everything *not* in this set is carried through verbatim (see
 /// [`passthrough_fields`]) so OpenAI-compatible upstreams still receive
 /// `response_format`, `grammar`, extra sampler params, etc. `stream_options`
-/// is listed here because the egress builder manages it itself.
+/// is listed here because the egress builder manages it itself; the client's
+/// own `include_usage` is read by [`stream_include_usage`].
 ///
 /// Of the reasoning controls (§5.2) only `reasoning_effort` is modeled — it is
 /// the one key whose spelling changes per route, so the egress has to own it.
@@ -492,9 +504,17 @@ fn usage_json(u: &Usage) -> Value {
     // adapter folded into the total. A client that caches can otherwise see
     // only the total and has no way to tell a cache hit from a cold prompt.
     // Absent stays absent: an unreported counter and a zero one are different
-    // statements.
+    // statements. A cache write is OpenAI's `cache_write_tokens` (GPT-5.6 on)
+    // or Anthropic's `cache_creation_input_tokens`, both a subset of the total.
+    let mut prompt_details = serde_json::Map::new();
     if let Some(v) = u.cached_input_tokens {
-        out["prompt_tokens_details"] = json!({"cached_tokens": v});
+        prompt_details.insert("cached_tokens".into(), json!(v));
+    }
+    if let Some(v) = u.cache_write_tokens {
+        prompt_details.insert("cache_write_tokens".into(), json!(v));
+    }
+    if !prompt_details.is_empty() {
+        out["prompt_tokens_details"] = Value::Object(prompt_details);
     }
     if let Some(v) = u.reasoning_tokens {
         out["completion_tokens_details"] = json!({"reasoning_tokens": v});
@@ -509,23 +529,28 @@ pub struct OpenaiStreamEncoder {
     created: i64,
     sent_role: bool,
     sent_finish: bool,
+    /// The client's `stream_options.include_usage` ([`stream_include_usage`]).
+    /// Without it no chunk carries `usage` and none has empty `choices`, so
+    /// the SDK loop that reads `chunk.choices[0]` holds to the end.
+    include_usage: bool,
     usage: Option<Usage>,
 }
 
 impl OpenaiStreamEncoder {
-    pub fn new(alias: &str) -> Self {
+    pub fn new(alias: &str, include_usage: bool) -> Self {
         Self {
             id: format!("chatcmpl-{}", rand_id()),
             alias: alias.to_string(),
             created: now_unix(),
             sent_role: false,
             sent_finish: false,
+            include_usage,
             usage: None,
         }
     }
 
     fn chunk(&self, delta: Value, finish_reason: Option<&str>) -> String {
-        let body = json!({
+        let mut body = json!({
             "id": self.id,
             "object": "chat.completion.chunk",
             "created": self.created,
@@ -536,6 +561,11 @@ impl OpenaiStreamEncoder {
                 "finish_reason": finish_reason,
             }],
         });
+        // OpenAI's own shape when usage was asked for: every chunk but the
+        // last carries the key, null.
+        if self.include_usage {
+            body["usage"] = Value::Null;
+        }
         frame(None, &body.to_string())
     }
 
@@ -595,6 +625,7 @@ impl ClientStreamEncoder for OpenaiStreamEncoder {
                     None,
                 ));
             }
+            // Kept whether or not the client sees it: only `finish` decides.
             StreamDelta::Usage(u) => {
                 let mut merged = self.usage.unwrap_or_default();
                 merged.merge(u);
@@ -623,7 +654,10 @@ impl ClientStreamEncoder for OpenaiStreamEncoder {
             self.sent_finish = true;
             out.push_str(&self.chunk(json!({}), Some("stop")));
         }
-        if let Some(u) = &self.usage {
+        // The usage-only chunk is OpenAI's answer to `include_usage`, and
+        // only to it. An upstream that reported no usage gets none invented
+        // here.
+        if let Some(u) = self.usage.as_ref().filter(|_| self.include_usage) {
             let body = json!({
                 "id": self.id,
                 "object": "chat.completion.chunk",

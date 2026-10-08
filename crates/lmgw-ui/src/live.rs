@@ -12,7 +12,12 @@ use gloo_net::eventsource::futures::EventSource;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::builds::UpdatesSummary;
-use lmgw_api_types::{JobRow, McpStatus, RequestRow, RuntimeStatus, StatsView, VramStatus};
+use lmgw_api_types::{
+    ChatChanged, JobRow, KeysChanged, McpStatus, RequestRow, RuntimeStatus, StatsView, VramStatus,
+};
+
+mod chat;
+pub use chat::ChatInbox;
 
 #[derive(Clone, Copy)]
 pub struct LiveBus {
@@ -37,6 +42,17 @@ pub struct LiveBus {
     /// whenever a check ends, a run finishes, a build is saved, promoted or
     /// verified, or an image is pulled.
     pub updates: ReadSignal<Option<UpdatesSummary>>,
+    /// A key's state moved without a request landing (client-apps design
+    /// §1.6): a device's connection opened or closed, a key disabled,
+    /// rotated or deleted. One value per change; the Keys page refetches on
+    /// it instead of polling.
+    pub keys: ReadSignal<Option<KeysChanged>>,
+    /// What every writer changed in the Chat — this window's own writes
+    /// too, which read back as what it shows: threads, folders, messages
+    /// (client-apps design §3.6, 2026-10-08). The Chat page takes the
+    /// merged frames and reads what they name again; one with `resync`
+    /// comes on every (re)connect.
+    pub chat: ChatInbox,
 }
 
 pub fn use_live() -> LiveBus {
@@ -53,6 +69,8 @@ pub fn provide_live_bus() {
     let (jobs, set_jobs) = signal(None);
     let (vram, set_vram) = signal(None);
     let (updates, set_updates) = signal(None);
+    let (keys, set_keys) = signal(None);
+    let (chat, post_chat) = chat::inbox();
 
     provide_context(LiveBus {
         stats,
@@ -62,6 +80,8 @@ pub fn provide_live_bus() {
         jobs,
         vram,
         updates,
+        keys,
+        chat,
     });
 
     // `/api/events` needs a principal (principals §3.5). While the gate is up
@@ -81,6 +101,8 @@ pub fn provide_live_bus() {
                 jobs: set_jobs,
                 vram: set_vram,
                 updates: set_updates,
+                keys: set_keys,
+                chat: post_chat,
             });
         }
         now
@@ -105,6 +127,8 @@ struct Setters {
     jobs: WriteSignal<Option<Vec<JobRow>>>,
     vram: WriteSignal<Option<VramStatus>>,
     updates: WriteSignal<Option<UpdatesSummary>>,
+    keys: WriteSignal<Option<KeysChanged>>,
+    chat: chat::ChatPost,
 }
 
 /// One EventSource, alive until a newer one opens or the gate goes up.
@@ -119,7 +143,7 @@ fn open_stream(set: Setters) {
             }
         };
         let subs = [
-            "stats", "request", "runtime", "mcp", "jobs", "vram", "updates",
+            "stats", "request", "runtime", "mcp", "jobs", "vram", "updates", "keys", "chat",
         ]
         .into_iter()
         .filter_map(|name| es.subscribe(name).ok());
@@ -156,6 +180,11 @@ fn open_stream(set: Setters) {
                 "jobs" => put(set.jobs, &text),
                 "vram" => put(set.vram, &text),
                 "updates" => put(set.updates, &text),
+                "keys" => put(set.keys, &text),
+                "chat" => match serde_json::from_str::<ChatChanged>(&text) {
+                    Ok(c) => set.chat.post(c),
+                    Err(err) => leptos::logging::error!("SSE decode: {err}"),
+                },
                 _ => {}
             }
         }

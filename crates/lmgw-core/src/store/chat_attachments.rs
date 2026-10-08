@@ -227,6 +227,17 @@ pub async fn get_chat_attachment_full(
     Ok(row.as_ref().map(chat_attachment_full_from_row))
 }
 
+/// The thread attachment `id` belongs to — whose reach decides whether a
+/// device may reach the attachment by its own id (client-apps design L3).
+/// `None` when there is no such attachment.
+pub async fn chat_attachment_thread_id(pool: &SqlitePool, id: i64) -> DbResult<Option<i64>> {
+    let thread = sqlx::query_scalar("SELECT thread_id FROM chat_attachments WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(thread)
+}
+
 /// Resolve a `send` request's `attachments: [id…]` to draft rows of this
 /// thread, upload order — the shape `web::chat::send` needs to both validate
 /// ("ids must be drafts of this thread, else 400", design §2) and order the
@@ -316,7 +327,7 @@ pub async fn append_user_message_with_voice(
     kb_refs: &[i64],
     voice: Option<&MessageVoice>,
 ) -> DbResult<SendMessageOutcome> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
 
     let res = sqlx::query(
         "INSERT INTO chat_messages (thread_id, role, content, reasoning, kb_refs, voice) \

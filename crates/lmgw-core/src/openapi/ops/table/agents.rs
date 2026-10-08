@@ -258,7 +258,8 @@ pub(super) const OPS: &[OpDoc] = &[
         description: Some(
             "Replaces the agent's token in one write. A running service container is holding \
              the old one, so it is stopped — the next request to the agent's origin starts it \
-             again with the new token.",
+             again with the new token. What the old token holds open ends at once: its \
+             realtime sessions close with 4003, and its /mcp notification streams end.",
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),

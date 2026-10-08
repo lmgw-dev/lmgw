@@ -11,7 +11,7 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Install or replace an agent from a manifest. `manifest` is the whole JSON \
                  document as a string — schema_version 1, an id matching [a-z0-9][a-z0-9-]*, a \
-                 name, a model (`{{config.model}}` lets the owner pick), an optional config \
+                 name, a model (`{{config.model}}` lets whoever configures the agent pick), an optional config \
                  schema, the MCP tool labels it may reach, and a run block (`chat` or `batch`). \
                  Unknown fields are refused naming the key, and every {{config.<field>}} must \
                  name a field of the config schema. This is exactly the import path the \
@@ -50,10 +50,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                  lmgw__agent_set uses, so the report is the same one — including the warnings \
                  for MCP labels this gateway does not have. Use this instead of pasting a \
                  manifest when the agent ships as an image; the row then records which image and \
-                 digest it came from, and 'Pull image' on the dashboard can tell the owner when \
+                 digest it came from, and 'Pull image' on the dashboard can tell an administrator when \
                  that image has moved. `pull` defaults to 'never': an image that is not already \
                  on the box is reported rather than downloaded, because a multi-gigabyte pull is \
-                 the owner's decision. Pass pull='missing' to let lmgw fetch it. Replacing an \
+                 a decision for an administrator. Pass pull='missing' to let lmgw fetch it. Replacing an \
                  existing agent needs replace=true and keeps its stored config.",
             props: vec![
                 (
@@ -91,7 +91,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                  cheap way to see what the agent would work on. `classify` also makes one \
                  structured model call per row. Both are **read-only**: nothing an agent writes \
                  happens until a person presses Apply on the dashboard, and apply is not \
-                 startable from here by design. The run is a job: poll it with lmgw__status or \
+                 startable from here. The run is a job: poll it with lmgw__status or \
                  GET /api/agents/runs/<job_id>, which carries the rows. One run per agent at a \
                  time; starting a second returns the one already in flight.",
             props: vec![

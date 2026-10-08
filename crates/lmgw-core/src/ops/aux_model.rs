@@ -17,8 +17,8 @@ use super::*;
 pub const POOLING_VALUES: &[&str] = &["none", "mean", "cls", "last", "rank"];
 
 /// A list-valued argument as either surface sends it: newline/shell text from
-/// the tool plane (every self-admin argument is a flat scalar, see
-/// [`crate::mcp::selfadmin`]) or a ready token list from the dashboard, whose
+/// the tool plane (every self-admin argument is a flat scalar) or a ready token
+/// list from the dashboard, whose
 /// editor already splits lines. Tokens are taken verbatim — re-parsing them
 /// through shlex would eat the backslashes in an `--override-tensor` regex.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -47,9 +47,8 @@ impl ArgList {
     }
 }
 
-/// Sparse patch for an aux (embedding / rerank) model — the aux twin of
-/// [`LocalModelPatch`], slimmer because the class is: no sampling, no
-/// template, no speculation. What an aux row *does* need beyond a path is
+/// Sparse patch for an aux (embedding / rerank) model — a slimmer sibling of
+/// the local model patch: no sampling, no template, no speculation. What an aux row *does* need beyond a path is
 /// its kind and, for embedders, the pooling the model was trained with; both
 /// are read out of the GGUF by `lmgw__local_model_plan target=aux`.
 ///
@@ -74,9 +73,9 @@ pub struct AuxModelPatch {
     pub extra_args: Option<ArgList>,
     pub idle_seconds: Option<i64>,
     pub enabled: Option<bool>,
-    /// Per-model image override (§3.1); empty clears back to the class image.
+    /// Per-model image override; empty clears back to the class image.
     pub image: Option<String>,
-    /// `podman run` args override (§3.1); name it in `clear` to revert to
+    /// `podman run` args override; name it in `clear` to revert to
     /// inheriting the class setting. An empty list inherits too (it is never
     /// stored as one); blank text leaves the current value.
     pub extra_run_args: Option<ArgList>,

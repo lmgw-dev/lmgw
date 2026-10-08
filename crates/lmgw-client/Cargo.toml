@@ -1,0 +1,13 @@
+[package]
+name = "lmgw-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sans-IO rules for lmgw's clients: the realtime protocol, the derived voice state, the truncate bookkeeping, the Chat change feed and request builders"
+
+# Sans-IO (client-apps design §4.1): no clock, no I/O, no runtime. It builds
+# for wasm32 (the dashboard's voice panel) and natively (a desktop client),
+# and its public types are owned, for a later FFI wrapper.
+[dependencies]
+lmgw-api-types = { path = "../lmgw-api-types" }
+serde_json = "1.0"

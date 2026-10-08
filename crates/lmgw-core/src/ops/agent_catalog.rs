@@ -17,21 +17,26 @@ pub async fn agent_get(state: &SharedState, id: &str) -> Result<Value, String> {
 
 /// `manifest` is the whole document, as a JSON string or as an object — the
 /// same two shapes the dashboard op takes, warning about the second for the
-/// same reason (see `api_agents::manifest_arg`).
+/// same reason (see `api_agents::manifest_arg`). `by_device` is the paired
+/// device that called, if one did: it records the agent as its own, and may
+/// replace only an agent it created (client-apps design L5's note,
+/// 2026-10-07).
 pub async fn agent_set(
     state: &SharedState,
     manifest: &Value,
     replace: Option<bool>,
     validate_only: Option<bool>,
+    by_device: Option<i64>,
 ) -> Result<Value, String> {
     let (text, order_warning) = crate::web::api_agents::manifest_arg(Some(manifest))?;
     // The tool plane is text: a refusal's code is an HTTP concern, and what
     // reaches a model here is the message that names the rule.
-    let mut report = crate::web::api_agents::import_inner(
+    let mut report = crate::web::api_agents::import_inner_as(
         state,
         &text,
         replace.unwrap_or(true),
         validate_only.unwrap_or(false),
+        by_device,
     )
     .await
     .map_err(|e| e.message)?;
@@ -59,8 +64,14 @@ pub async fn agent_set(
     Ok(out)
 }
 
-pub async fn agent_delete(state: &SharedState, id: &str) -> Result<Value, String> {
-    crate::web::api_agents::agent_delete(state, id).await
+/// `by_device` is the paired device that called, if one did: it deletes only
+/// an agent it created (client-apps design L5's note).
+pub async fn agent_delete(
+    state: &SharedState,
+    id: &str,
+    by_device: Option<i64>,
+) -> Result<Value, String> {
+    crate::web::api_agents::agent_delete_as(state, id, by_device).await
 }
 
 /// `lmgw__agent_install` — install an agent from an **image** (container-runtime
@@ -76,6 +87,7 @@ pub async fn agent_install(
     pull: Option<&str>,
     replace: Option<bool>,
     validate_only: Option<bool>,
+    by_device: Option<i64>,
 ) -> Result<Value, String> {
     let mut args = Map::new();
     args.insert("image".into(), json!(image));
@@ -88,7 +100,7 @@ pub async fn agent_install(
     if let Some(v) = validate_only {
         args.insert("validate_only".into(), json!(v));
     }
-    let mut out = crate::web::api_agents::agent_install(state, &args).await?;
+    let mut out = crate::web::api_agents::agent_install_as(state, &args, by_device).await?;
     if let Some(obj) = out.as_object_mut() {
         let id = obj
             .get("id")
@@ -111,8 +123,15 @@ pub async fn agent_install(
 /// `apply` is refused here rather than being absent from the enum, so a model
 /// that asks for it is told *why* instead of getting a schema error: the review
 /// table is the gate, and nothing an agent writes happens without a person
-/// (agent-catalog §1 principle 4, §5).
-pub async fn agent_run(state: &SharedState, id: &str, phase: &str) -> Result<Value, String> {
+/// (agent-catalog §1 principle 4, §5). A run a paired device starts
+/// (`by_device`) calls lmgw's admin tools as that device, at what its admin
+/// tools may do (client-apps design L5's note, 2026-10-07).
+pub async fn agent_run(
+    state: &SharedState,
+    id: &str,
+    phase: &str,
+    by_device: Option<i64>,
+) -> Result<Value, String> {
     if !matches!(phase, "list" | "classify") {
         return Err(format!(
             "lmgw__agent_run starts 'list' or 'classify' only; '{phase}' writes or depends on a \
@@ -122,7 +141,7 @@ pub async fn agent_run(state: &SharedState, id: &str, phase: &str) -> Result<Val
     let mut args = Map::new();
     args.insert("id".into(), json!(id));
     args.insert("phase".into(), json!(phase));
-    let mut out = crate::web::api_agents::agent_run(state, &args).await?;
+    let mut out = crate::web::api_agents::agent_run_as(state, &args, by_device).await?;
     if let Some(obj) = out.as_object_mut() {
         obj.insert(
             "next_step".into(),

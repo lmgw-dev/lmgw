@@ -69,9 +69,12 @@ pub async fn transcribe_as(
 /// [`transcribe`] for the Chat, its row labelled `proto` — `chat`, or
 /// `admin` for an Admin Chat thread (`web::chat_voice::speech_proto`), as
 /// its dictation and speech rows are: an attachment's transcript is the
-/// thread's own traffic (WP11 server review n5), not an API client's.
+/// thread's own traffic (WP11 server review n5), not an API client's. The
+/// row is `ctx`'s: a device's key for a device's request (client-apps
+/// design L4, its check the caller's), the in-process default otherwise.
 pub(crate) async fn transcribe_for(
     state: &SharedState,
+    ctx: &RequestCtx,
     proto: ClientProto,
     alias: &str,
     bytes: Bytes,
@@ -87,7 +90,7 @@ pub(crate) async fn transcribe_for(
         language: None,
         clip: false,
     };
-    transcribe_labelled(state, &RequestCtx::default(), proto, upload)
+    transcribe_labelled(state, ctx, proto, upload)
         .await
         .map(|t| t.text)
         .map_err(|u| u.error)
@@ -142,9 +145,11 @@ impl Untranscribed {
 /// `filename` and `mime` say its container to the upstream (OpenAI's
 /// Whisper reads the format from the extension). `stop` ends it at its next
 /// await, as [`transcribe_turn`]'s does: the page aborted the upload, and
-/// the stopped call still writes its row, `canceled`.
+/// the stopped call still writes its row, `canceled`. The row is `ctx`'s,
+/// as [`transcribe_for`]'s.
 pub(crate) async fn transcribe_dictation(
     state: &SharedState,
+    ctx: &RequestCtx,
     proto: ClientProto,
     alias: &str,
     (bytes, filename, mime): (Bytes, &str, &str),
@@ -160,7 +165,7 @@ pub(crate) async fn transcribe_dictation(
         language,
         clip: false,
     };
-    transcribe_labelled(state, &RequestCtx::default(), proto, upload).await
+    transcribe_labelled(state, ctx, proto, upload).await
 }
 
 /// A realtime session's ASR of one committed turn (realtime design §10.3,
@@ -306,6 +311,15 @@ async fn transcribe_labelled(
         () = stopped(stop) => Err(canceled("stopped by the caller while the transcript was read")),
         b = outcome.resp.bytes() => b.map_err(|e| GatewayError::Transport(e.to_string())),
     };
+    let reported =
+        super::audio::usage::of_answer(state, &outcome.route, body.as_deref().unwrap_or_default());
+    // Reported over measured — whisper's seconds over the WAV's length — and
+    // one answered request: its 2xx headers arrived, a stop while the body
+    // was read included (billable-units design §4.2, §4.5).
+    let quantities = crate::pricing::Quantities {
+        requests: Some(1),
+        ..reported.quantities().over(outcome.measured)
+    };
     let result = body.and_then(|b| transcript_of(&b, outcome.headers.clone()));
     // A stop is a 200 `canceled` row, whatever the upstream had answered.
     let status = match &result {
@@ -314,18 +328,21 @@ async fn transcribe_labelled(
     };
     let error = result.as_ref().err().map(|e| (e.kind(), e.to_string()));
     record(
-        log(
-            state,
-            ctx,
-            proto,
-            alias,
-            started,
-            Some(&outcome.route),
-            fallback,
-        ),
+        LogParams {
+            quantities,
+            ..log(
+                state,
+                ctx,
+                proto,
+                alias,
+                started,
+                Some(&outcome.route),
+                fallback,
+            )
+        },
         status,
         Some(outcome.ttfb_ms),
-        Usage::default(),
+        reported.usage,
         error,
     )
     .await;
@@ -368,6 +385,7 @@ fn log<'a>(
         fallback,
         rung: None,
         degraded: None,
+        quantities: Default::default(),
     }
 }
 

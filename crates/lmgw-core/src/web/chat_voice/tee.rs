@@ -45,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::state::SharedState;
 use crate::store::ChatThread;
 
+use super::super::chat_caller::Caller;
 use super::super::chat_repo::ChatRepo;
 use super::super::chat_turn::TurnFrame;
 use super::speech::{self, Feed, SpeechRx};
@@ -73,6 +74,7 @@ impl ReadAloud {
 /// (`TurnOpts::heard`).
 pub(crate) fn speaking_turn(
     state: &SharedState,
+    caller: &Caller,
     repo: ChatRepo,
     thread: &ChatThread,
     turn: mpsc::Receiver<TurnFrame>,
@@ -83,7 +85,7 @@ pub(crate) fn speaking_turn(
     if !read.lead.is_empty() {
         let _ = feed.send(Feed::Text(read.lead));
     }
-    let speech = speech::start(state, repo, thread, (started, planned), true, fed);
+    let speech = speech::start(state, caller, repo, thread, (started, planned), true, fed);
     let tee = Tee {
         turn: Some(turn),
         speech: Some(speech),
@@ -94,7 +96,7 @@ pub(crate) fn speaking_turn(
         let f = tee.next().await?;
         Some((Ok::<_, Infallible>(f.into_sse()), tee))
     });
-    Sse::new(events)
+    Sse::new(caller.sse(state, events))
         .keep_alive(KeepAlive::default())
         .into_response()
 }

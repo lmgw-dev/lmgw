@@ -22,8 +22,7 @@ use crate::state::SharedState;
 use crate::store::{self, NewCandidateAlias};
 
 /// Sparse patch for a candidate alias. Every list-shaped field is flat text
-/// (module doc of [`crate::mcp::selfadmin`]: no nested objects, no arrays),
-/// comma/space/newline separated like `extra_run_args`.
+/// (no nested objects, no arrays), comma/space/newline separated like `extra_run_args`.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CandidateAliasPatch {
@@ -33,7 +32,7 @@ pub struct CandidateAliasPatch {
     /// Local chat model ids, first = primary, rest = alternates in
     /// preference order. On `update`, absent leaves the stored list
     /// unchanged; there is no `clear` for it — an alias may never have an
-    /// empty list (§4.1), so emptying it means `delete`.
+    /// empty list, so emptying it means `delete`.
     pub candidates: Option<String>,
     pub background: Option<bool>,
     pub fallback_mode: Option<HoldFallbackMode>,

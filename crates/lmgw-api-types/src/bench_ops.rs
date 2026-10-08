@@ -25,11 +25,11 @@ pub const JOB_KIND: &str = "benchmark";
 /// `(kind, key)` guard is "one run at a time" (§3.1).
 pub const JOB_KEY: &str = "gpu";
 
-/// The regression threshold when a view names none (§6, decision 7). Always
+/// The regression threshold when a view names none. Always
 /// echoed in the answer, never applied silently.
 pub const DEFAULT_THRESHOLD_PCT: f64 = 5.0;
 
-/// §3.5: what a run changes about the row's container, and only about the
+/// What a run changes about the row's container, and only about the
 /// bench container. `None` (and `false`, `0`) is "as the row says".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -71,7 +71,7 @@ impl BenchOverrides {
     }
 }
 
-/// `bench_plan` and `bench_start` (§8.1): the row, the flat overrides, the
+/// `bench_plan` and `bench_start`: the row, the flat overrides, the
 /// phases and repetitions. `notes` is stored by `bench_start` and ignored by
 /// `bench_plan`, so the dashboard's modal sends one shape to both.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -93,9 +93,9 @@ pub struct BenchArgs {
     pub n_gpu_layers: Option<i64>,
     pub no_draft: bool,
     /// The phases to run, in any order; `load` always runs, and an empty list
-    /// runs every phase (§4.4).
+    /// runs every phase.
     pub phases: Vec<Phase>,
-    /// Repetitions per point; absent is [`DEFAULT_REPETITIONS`].
+    /// Repetitions per point; absent is 3.
     pub repetitions: Option<u32>,
     pub notes: String,
 }
@@ -129,11 +129,11 @@ impl BenchArgs {
     }
 }
 
-/// §6 `settings` (§7's `settings` column): what the bench container runs,
+/// The `settings` of a run: what the bench container runs,
 /// after the overrides.
 ///
-/// **The settings hash covers `params`, `args` and `extra_run_args` only**
-/// (decision 22): the image is the build identity and may differ between
+/// **The settings hash covers `params`, `args` and `extra_run_args` only**: the image is the build
+/// identity and may differ between
 /// comparable runs (that is the point of comparing builds), the weights file
 /// is the model identity, and `overrides` only says how these values came
 /// about — the same effective flags reached with or without an override are
@@ -158,7 +158,7 @@ pub struct BenchSettings {
     pub overrides: BenchOverrides,
 }
 
-/// How a run ended (§7 `status`).
+/// How a run ended.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -168,7 +168,7 @@ pub enum BenchStatus {
     Done,
     Failed,
     Canceled,
-    /// Ended by something other than the owner's cancel — the GPU hold
+    /// Ended by something other than a cancel request — the GPU hold
     /// switching on (`status_reason: "hold"`).
     Aborted,
     /// Found `running` at boot: lmgw went away mid-run.
@@ -201,7 +201,7 @@ impl BenchStatus {
     }
 }
 
-/// One container a start stops (§3.2 step 3) — what the confirmation lists.
+/// One container a start stops — what the confirmation lists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -219,7 +219,7 @@ pub struct BenchStop {
     pub in_flight: usize,
 }
 
-/// Why a run cannot start now (§8.1 `bench_plan` `blocked`).
+/// Why a run cannot start now.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -256,11 +256,11 @@ pub struct BenchBlocked {
     pub reason: BlockedReason,
     /// The sentence to show.
     pub message: String,
-    /// The running run, for [`BlockedReason::RunGoing`].
+    /// The running run, for the `run_going` reason.
     pub run_id: Option<i64>,
 }
 
-/// A probe the plan would run, or why it would not (§5).
+/// A probe the plan would run, or why it would not.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -271,7 +271,7 @@ pub struct PlannedProbe {
     pub skip: Option<String>,
 }
 
-/// `bench_plan`'s answer: everything the confirmation shows (§3.2, §8.1).
+/// `bench_plan`'s answer: everything the confirmation shows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -316,7 +316,7 @@ pub struct BenchStarted {
     pub message: String,
 }
 
-/// `bench_runs` (§8.1): run summaries, newest first.
+/// `bench_runs`: run summaries, newest first.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -327,11 +327,11 @@ pub struct BenchRunsArgs {
     pub limit: Option<u32>,
     /// Exclusive run-id cursor: runs older than this one.
     pub before: Option<i64>,
-    /// The regression badge's threshold; absent is [`DEFAULT_THRESHOLD_PCT`].
+    /// The regression badge's threshold; absent is 5 (percent).
     pub threshold_pct: Option<f64>,
 }
 
-/// The headline numbers of one run (§6), each `None` when the run did not
+/// The headline numbers of one run, each `None` when the run did not
 /// measure it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -360,7 +360,7 @@ pub struct Headline {
     pub stall_ms: Option<f64>,
 }
 
-/// One row of the runs table (§8.2).
+/// One row of the runs table.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -395,12 +395,12 @@ pub struct BenchRunSummary {
     pub probes_passed: u32,
     pub probes_judged: u32,
     pub notes: String,
-    /// The previous comparable run (§6), when there is one.
+    /// The previous comparable run, when there is one.
     pub previous_id: Option<i64>,
     /// Against it, at the answer's `threshold_pct`.
     pub regressions: Option<u32>,
     pub improvements: Option<u32>,
-    /// [`BenchRun::unreadable`]: stored columns that did not decode. Such a
+    /// The stored columns that did not decode. Such a
     /// run is listed with what could be read, and compared with nothing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<String>,
@@ -416,13 +416,13 @@ pub struct BenchRunsResponse {
     pub threshold_pct: f64,
 }
 
-/// `bench_run` (§8.1).
+/// `bench_run`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BenchRunArgs {
     pub id: i64,
-    /// Absent is [`DEFAULT_THRESHOLD_PCT`]; echoed in the answer.
+    /// Absent is 5 (percent); echoed in the answer.
     pub threshold_pct: Option<f64>,
     /// Include the 500 ms timeline (`run.timeline.samples`). Absent is
     /// `true`; the MCP tool sends `false` unless asked, since it is the
@@ -430,7 +430,7 @@ pub struct BenchRunArgs {
     pub timeline: Option<bool>,
 }
 
-/// One stored run, whole (§7): every column, the JSON ones typed.
+/// One stored run, whole: every column, the JSON ones typed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -458,15 +458,15 @@ pub struct BenchRun {
     pub probes: ProbeReport,
     pub timeline: Timeline,
     pub notes: String,
-    /// The JSON columns that did not decode, each as "<column>: <why>"
-    /// (§13 decision 51). Each reads as its empty default here, so the run
-    /// is comparable with nothing ([`crate::bench_compare::not_comparable`]):
+    /// The JSON columns that did not decode, each as "<column>: <why>". Each reads as its empty
+    /// default here, so the run
+    /// is comparable with nothing ):
     /// read as empty, it would compare as "measured nothing".
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<String>,
 }
 
-/// How one metric moved (§6's regression rule).
+/// How one metric moved (by the regression rule).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -479,8 +479,8 @@ pub enum Verdict {
     /// One of the two runs did not measure it.
     Missing,
     /// Both runs measured it, but at different points — another prompt
-    /// length, depth or stream count, as when one run stopped early (§13
-    /// decision 53). The delta is kept as information; it is no verdict, so
+    /// length, depth or stream count, as when one run stopped early. The delta is kept as
+    /// information; it is no verdict, so
     /// it counts neither as a regression nor as an improvement.
     NotSamePoint,
 }
@@ -508,7 +508,7 @@ pub struct MetricDelta {
     pub band_pct: f64,
     pub verdict: Verdict,
     /// E.g. the two runs measured different prompt lengths (the verdict is
-    /// then [`Verdict::NotSamePoint`]).
+    /// then `not_same_point`).
     pub note: Option<String>,
 }
 
@@ -525,22 +525,22 @@ pub struct ProbeChange {
     pub verdict: Verdict,
 }
 
-/// A run against another (§6): the previous comparable run for `bench_run`.
+/// A run against another: the previous comparable run for `bench_run`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BenchComparison {
     pub base_run_id: i64,
     pub base_created_at: String,
-    /// Same model file, settings hash, suite version and GPU (§6).
+    /// Same model file, settings hash, suite version and GPU.
     pub comparable: bool,
     /// Why not, when not.
     pub not_comparable: Vec<String>,
     pub threshold_pct: f64,
     pub metrics: Vec<MetricDelta>,
     pub probes: Vec<ProbeChange>,
-    /// Metrics and probes flagged each way ([`Verdict::NotSamePoint`] and
-    /// [`Verdict::Missing`] count for neither).
+    /// Metrics and probes flagged each way (`not_same_point` and
+    /// `missing` count for neither).
     pub regressions: u32,
     pub improvements: u32,
 }
@@ -567,7 +567,7 @@ pub struct BenchCancelArgs {
     pub run_id: Option<i64>,
 }
 
-/// `bench_run_set`: the owner's notes on a run (dashboard only).
+/// `bench_run_set`: the notes on a run (dashboard only).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

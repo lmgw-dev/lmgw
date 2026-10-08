@@ -155,6 +155,16 @@ pub(crate) struct TurnOpts {
     /// capability before it began — a heard turn going again as its
     /// transcript — for its request rows (`request_logs.degraded`).
     pub degraded: Option<String>,
+    /// Who the turn runs as (client-apps design §1.3, L4): the owner — the
+    /// default, today's Chat — or a device, whose key every model call of
+    /// the turn is checked against and charged to, and whose tool scope its
+    /// tools resolve under. A bound realtime session passes its own
+    /// principal's.
+    pub caller: super::super::chat_caller::Caller,
+    /// A device's concurrency slot for this turn (review W3-8), held until
+    /// the turn ends. The SSE routes take it; a bound session's turns run in
+    /// the slot the session holds.
+    pub slot: Option<crate::policy::ConcurrencyGuard>,
 }
 
 /// What makes a turn a voice turn (chat-voice design §8.5): its system
@@ -206,26 +216,31 @@ pub(crate) async fn heard(
 /// End a turn that was refused before it said anything: the refusal's
 /// `error` frame ([`TurnFrame::error`]), then `done {aborted}` with no
 /// message id — nothing was saved.
-pub(crate) async fn refuse(tx: &mpsc::Sender<TurnFrame>, e: &GatewayError) {
+pub(crate) async fn refuse(tx: &super::Events, e: &GatewayError) {
     refuse_frame(tx, TurnFrame::error(e)).await;
 }
 
 /// [`refuse`] for a request that was routed: its `error` frame says what
 /// the request went out as ([`TurnFrame::error_sent`]).
-pub(crate) async fn refuse_sent(tx: &mpsc::Sender<TurnFrame>, e: &GatewayError, sent: SentAs) {
+pub(crate) async fn refuse_sent(tx: &super::Events, e: &GatewayError, sent: SentAs) {
     refuse_frame(tx, TurnFrame::error_sent(e, sent)).await;
 }
 
-async fn refuse_frame(tx: &mpsc::Sender<TurnFrame>, error: TurnFrame) {
+async fn refuse_frame(tx: &super::Events, error: TurnFrame) {
     let _ = tx.send(error).await;
     let done = serde_json::json!({ "aborted": true }).to_string();
     let _ = tx.send(TurnFrame::new("done", done)).await;
 }
 
-/// A turn's frames as its SSE response, one event per frame, in order.
-pub(super) fn sse(rx: mpsc::Receiver<TurnFrame>) -> Response {
+/// A turn's frames as its SSE response, one event per frame, in order —
+/// ended at once should `caller`, a device, be revoked (§1.6).
+pub(super) fn sse(
+    state: &crate::state::SharedState,
+    caller: &super::super::chat_caller::Caller,
+    rx: mpsc::Receiver<TurnFrame>,
+) -> Response {
     let events = ReceiverStream::new(rx).map(|f| Ok::<_, Infallible>(f.into_sse()));
-    Sse::new(events)
+    Sse::new(caller.sse(state, events))
         .keep_alive(KeepAlive::default())
         .into_response()
 }

@@ -185,19 +185,27 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         Err(_) => return Err(GatewayError::Internal("the journal is gone".into())),
     };
     let (state, gen, tx) = (&job.state, job.gen, &job.tx);
+    let caller = bound::Caller::of(&job.ctx);
     let Some(thread) = bound::thread(state, job.thread_id).await else {
         return Err(refused(
             "chat_thread_not_found",
-            format!(
-                "chat thread {} is gone (deleted, or a temporary chat kept or discarded)",
-                job.thread_id
-            ),
+            super::not_there(job.thread_id, caller.is_device()),
         ));
     };
     if bound::is_admin(&thread) {
         return Err(refused(
             "chat_thread_admin",
             "voice mode is not available in Admin Chat".into(),
+        ));
+    }
+    // A device's thread that left its reach since the bind (the toolset
+    // attached, or its admin-tools switch turned off) is gone for it (L3,
+    // review W3-1), in the words a deleted one gets; its session is being
+    // closed.
+    if !caller.sees(&state.snapshot(), &thread) {
+        return Err(refused(
+            "chat_thread_not_found",
+            super::not_there(job.thread_id, true),
         ));
     }
     let plan = match &job.speaking {
@@ -221,7 +229,7 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         Msg::Planned {
             chat: thread.model_alias.clone(),
             tts: plan.as_ref().map(|(p, _)| p.speech.alias.clone()),
-            thread: bound::thread_ref(&state.snapshot(), &thread),
+            thread: bound::thread_ref(&state.snapshot(), &thread, &bound::Caller::of(&job.ctx)),
         },
     ));
 
@@ -235,6 +243,7 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         language: bound::turn_language(&state.snapshot(), &thread, plan.is_some()),
         stop: turn_signal,
         degraded: job.degraded.take(),
+        caller: bound::Caller::of(&job.ctx),
     };
     let mut attempt = audio::Attempt::new(job.audio.take(), gen, tx, saved.journal.clone());
     let (mut frames, mut began) = attempt.first(&starter, user_message_id, &job.stop).await?;

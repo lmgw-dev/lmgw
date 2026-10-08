@@ -59,9 +59,9 @@ fn run_events_body(g: &mut SchemaGenerator) -> Schema {
             "items": { "type": "object" },
             "description": "One ledger event object ({row, ...} or {log: \"...\"} or \
                 {done: true, ...}) or a JSON array of them. The same events may be sent as \
-                application/x-ndjson instead, one object per line — ledger::decode_body reads \
-                the raw body either way, whatever its Content-Type. A line or entry it cannot \
-                parse is skipped and counted in the response's rejected list, never fails the \
+                application/x-ndjson instead, one object per line; lmgw reads the raw body \
+                either way, whatever its Content-Type. A line or entry it cannot parse is \
+                skipped and counted in the response's rejected list, and never fails the \
                 whole call."
         }),
     )
@@ -112,7 +112,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "One run with its rows: the executor's live buffer while it is in \
                 flight, the stored result once it has ended. Ownership is checked before \
-                existence — a foreign run and a missing one both answer the same refusal.",
+                existence, so a run that belongs to another caller and a missing one get the same \
+                refusal.",
             path_ints: &["job_id"],
             response: Resp::Json(|g| g.root_schema_for::<dto::AgentRunDetail>()),
             ..base(
@@ -124,7 +125,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Appends one ledger event, an array of them, or an NDJSON batch to \
-                a run this caller owns — straight into the buffer the Run tab reads.",
+                a run this caller owns, straight into the run's live buffer, which the dashboard's Run \
+                tab reads.",
             path_ints: &["job_id"],
             // Review R2 #8: NDJSON is raw text, not the JSON *string* the
             // old `"type": [.., "string"]` schema described.
@@ -150,8 +152,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
-            description: "One agent's full definition — the owner's own document, or, for an \
-                agent's own token, the same document with host paths substituted out.",
+            description: "One agent's full definition: the complete document for owner \
+                credentials or, for the agent's own token, the same document with host paths \
+                substituted out.",
             response: Resp::Json(|g| g.root_schema_for::<dto::AgentDetail>()),
             ..base("GET", "/api/agents/{id}", "agent-runtime", "Get an agent")
         },
@@ -184,9 +187,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Opens a run from outside lmgw, exactly as the manifest's own \
-                trigger would — \"one live run per agent\" still comes free from the \
-                (kind, key) index; a second open while one is live is refused with the \
-                running job's id.",
+                trigger would. An agent has at most one live run: a second open while one is live \
+                is refused with the running job's id.",
             request: Req::Json(|g| g.root_schema_for::<OpenBody>()),
             response: Resp::Untyped("ad-hoc {run, deadline_seconds}; no DTO"),
             ..base(

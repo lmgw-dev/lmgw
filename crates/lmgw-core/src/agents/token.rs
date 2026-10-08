@@ -156,24 +156,50 @@ pub async fn rotate(
 ) -> Result<(String, Option<String>), String> {
     let id = &agent.row.id;
     let plain = mint();
+    let hash = crate::config::hash_api_key(&plain);
     store::upsert_agent_key(
         &state.db,
         id,
         &key_name(id),
-        &crate::config::hash_api_key(&plain),
+        &hash,
         &plain,
         agent.row.enabled,
     )
     .await
     .map_err(|e| e.to_string())?;
+    // The row keeps its id: the one the snapshot knows it by.
+    let key_id = state
+        .snapshot()
+        .api_keys
+        .iter()
+        .find(|k| k.name == key_name(id))
+        .map(|k| k.id);
     let warning = write_scope(state, agent).await.err().map(|e| {
         tracing::warn!("agent '{id}': the rotated token was stored but not re-scoped: {e}");
+        // A reload that failed leaves the published snapshot admitting the
+        // old token: the rotation is laid over it, as every other key's
+        // (review W4-21, as W3-7 for the rest).
+        if let Some(k) = key_id {
+            state.key_written(
+                k,
+                crate::state::KeyWritten::Rehashed {
+                    hash: hash.clone(),
+                    plain: Some(plain.clone()),
+                },
+            );
+        }
         format!(
             "the new token is stored and is the one this gateway accepts, but its scope could \
              not be rewritten ({e}). It is carrying the scope the previous token had; saving the \
              config or restarting lmgw re-derives it."
         )
     });
+    // What the old token opened ends now (client-apps design §1.6), after
+    // the snapshot holds the new one (§1.6: a client that reconnects at
+    // once meets the refusal), as any rotated key's.
+    if let Some(k) = key_id {
+        crate::devices::revoke(state, k, crate::devices::RevokeReason::Rotated);
+    }
     Ok((plain, warning))
 }
 
@@ -377,7 +403,21 @@ pub async fn set_owner_key(
     plaintext: &str,
     enabled: bool,
 ) -> Result<i64, String> {
-    let id = store::upsert_owner_key(
+    let id = write_owner_key(state, name, plaintext, enabled).await?;
+    state.reload_snapshot().await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// [`set_owner_key`]'s write alone, for a caller that handles the reload
+/// itself (`key_rotate`, which revokes the old value whatever the reload
+/// did). Returns the row id.
+pub async fn write_owner_key(
+    state: &SharedState,
+    name: &str,
+    plaintext: &str,
+    enabled: bool,
+) -> Result<i64, String> {
+    store::upsert_owner_key(
         &state.db,
         name,
         &crate::config::hash_api_key(plaintext),
@@ -385,9 +425,7 @@ pub async fn set_owner_key(
         enabled,
     )
     .await
-    .map_err(|e| e.to_string())?;
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
-    Ok(id)
+    .map_err(|e| e.to_string())
 }
 
 /// Seed the two owner rows, once per install (§6).
@@ -480,6 +518,7 @@ mod tests {
             source: "authored".into(),
             provenance: String::new(),
             dev_url: None,
+            created_by_key: None,
             created_at: String::new(),
             updated_at: String::new(),
         })

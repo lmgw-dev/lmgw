@@ -333,6 +333,8 @@ pub async fn run_open(
             // And nothing lmgw starts: the run is driven from outside, so
             // there is no phase whose config this would be (mounts §5.7).
             effective: None,
+            // Opened by the agent's own token, never a device's call.
+            started_by: None,
         },
     )
     .await
@@ -740,6 +742,7 @@ fn run_summary(row: &store::JobRow) -> dto::AgentRunSummary {
         detail: progress.detail.clone(),
         tokens,
         cost_micro: result.get("cost_micro").and_then(Value::as_i64),
+        model_calls: result.get("model_calls").and_then(Value::as_u64),
         duration_ms: job_duration_ms(row),
         error: row.error.clone(),
         created_at: row.created_at.clone(),
@@ -1759,6 +1762,23 @@ pub(crate) async fn import_inner(
     replace: bool,
     validate_only: bool,
 ) -> Result<dto::AgentImportReport, ApiRefusal> {
+    import_inner_as(state, text, replace, validate_only, None).await
+}
+
+/// [`import_inner`] for a caller: `by_device` is the paired device whose
+/// `lmgw__agent_set` or `lmgw__agent_install` this is. A new agent is
+/// recorded as that device's (`agents.created_by_key`), and an existing one
+/// it did not create is refused, `replace` or not (client-apps design L5's
+/// note, 2026-10-07): a device's write must not turn the owner's agent into
+/// one that runs what the device chose. The owner's replace (`by_device`
+/// `None`) adopts the agent: it is the owner's from then on.
+pub(crate) async fn import_inner_as(
+    state: &SharedState,
+    text: &str,
+    replace: bool,
+    validate_only: bool,
+    by_device: Option<i64>,
+) -> Result<dto::AgentImportReport, ApiRefusal> {
     // 0. Strip the export envelope, keeping the config values it may carry.
     let (manifest_text, carried_config) = strip_envelope(text)?;
 
@@ -1804,6 +1824,16 @@ pub(crate) async fn import_inner(
             _ => None,
         })
         .unwrap_or_default();
+    if let (Some(row), Some(device)) = (&existing, by_device) {
+        if row.created_by_key != Some(device) {
+            return Err(format!(
+                "an agent with id '{}' already exists and this device did not create it, so it \
+                 may not replace it; pick another id",
+                m.id
+            )
+            .into());
+        }
+    }
     if let (Some(row), false, false) = (&existing, replace, validate_only) {
         // Which kind of agent is being overwritten matters: replacing a
         // **built-in** is not the same decision as replacing something the
@@ -1899,7 +1929,7 @@ pub(crate) async fn import_inner(
         Some(_) => {
             let keep = store::AgentConfigField::of(&m);
             dropped_config =
-                store::update_agent_manifest_pruned(&state.db, &m.id, &canonical, &keep)
+                store::update_agent_manifest_pruned(&state.db, &m.id, &canonical, &keep, by_device)
                     .await
                     .map_err(|e| e.to_string())?;
             if !dropped_config.is_empty() {
@@ -1912,9 +1942,15 @@ pub(crate) async fn import_inner(
             true
         }
         None => {
-            store::insert_agent(&state.db, &m.id, &canonical, store::AGENT_SOURCE_IMPORTED)
-                .await
-                .map_err(|e| e.to_string())?;
+            store::insert_agent_by(
+                &state.db,
+                &m.id,
+                &canonical,
+                store::AGENT_SOURCE_IMPORTED,
+                by_device,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             false
         }
     };
@@ -2091,32 +2127,59 @@ fn not_found_or_bad_request(id: &str, e: String) -> Response {
 /// §5.3). Every other op here refuses with the flat `op_failed` it always did
 /// — the `?` below is what renders it.
 pub(super) async fn op(state: &SharedState, name: &str, args: Args) -> Result<Value, ApiRefusal> {
-    match name {
-        "agent_set" => return agent_set(state, &args).await,
-        "agent_duplicate" => return agent_duplicate(state, &args).await,
-        "agent_config_set" => return agent_config_set(state, &args).await,
-        _ => {}
+    let id = need_id(&args).ok();
+    let out = async {
+        match name {
+            "agent_set" => return agent_set(state, &args).await,
+            "agent_duplicate" => return agent_duplicate(state, &args).await,
+            "agent_config_set" => return agent_config_set(state, &args).await,
+            _ => {}
+        }
+        Ok(match name {
+            "agent_install" => agent_install(state, &args).await,
+            "agent_pull" => agent_pull(state, &need_id(&args)?).await,
+            "agent_reimport" => agent_reimport(state, &need_id(&args)?).await,
+            "agent_dev_url_set" => agent_dev_url_set(state, &args).await,
+            "agent_enable" => agent_enable(state, &args).await,
+            "agent_delete" => agent_delete(state, &need_id(&args)?).await,
+            "agent_reset" => agent_reset(state, &need_id(&args)?).await,
+            "agent_open_chat" => {
+                agents::chat::open(state, &need_id(&args)?, &values_arg(&args)?).await
+            }
+            "agent_run" => agent_run(state, &args).await,
+            "agent_run_cancel" => agent_run_cancel(state, &need_id(&args)?).await,
+            "agent_token_get" => agent_token(state, &need_id(&args)?, false).await,
+            "agent_token_rotate" => agent_token(state, &need_id(&args)?, true).await,
+            "agent_service_start" => agent_service(state, &need_id(&args)?, true).await,
+            "agent_service_stop" => agent_service(state, &need_id(&args)?, false).await,
+            "agent_service_log" => agent_service_log(state, &args).await,
+            "agents_restore" => seed::restore(state).await,
+            other => Err(format!("unknown op '{other}'")),
+        }?)
     }
-    Ok(match name {
-        "agent_install" => agent_install(state, &args).await,
-        "agent_pull" => agent_pull(state, &need_id(&args)?).await,
-        "agent_reimport" => agent_reimport(state, &need_id(&args)?).await,
-        "agent_dev_url_set" => agent_dev_url_set(state, &args).await,
-        "agent_enable" => agent_enable(state, &args).await,
-        "agent_delete" => agent_delete(state, &need_id(&args)?).await,
-        "agent_reset" => agent_reset(state, &need_id(&args)?).await,
-        "agent_open_chat" => agents::chat::open(state, &need_id(&args)?, &values_arg(&args)?).await,
-        "agent_run" => agent_run(state, &args).await,
-        "agent_run_cancel" => agent_run_cancel(state, &need_id(&args)?).await,
-        "agent_token_get" => agent_token(state, &need_id(&args)?, false).await,
-        "agent_token_rotate" => agent_token(state, &need_id(&args)?, true).await,
-        "agent_service_start" => agent_service(state, &need_id(&args)?, true).await,
-        "agent_service_stop" => agent_service(state, &need_id(&args)?, false).await,
-        "agent_service_log" => agent_service_log(state, &args).await,
-        "agents_restore" => seed::restore(state).await,
-        other => Err(format!("unknown op '{other}'")),
-    }?)
+    .await?;
+    // The owner's write to an agent adopts it (the branch review's
+    // verification, V-5): a device that created it may no longer replace or
+    // delete what the owner has since changed. The manifest writes
+    // (`agent_set`, `agent_install`, `agent_reimport`) adopt in
+    // `import_inner_as`, in the same statement.
+    if let Some(id) = id.filter(|_| OWNER_WRITES.contains(&name)) {
+        store::adopt_agent(&state.db, &id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(out)
 }
+
+/// The dashboard's ops that write an existing agent's row by its `id`, past
+/// its manifest (see [`op`]).
+const OWNER_WRITES: &[&str] = &[
+    "agent_config_set",
+    "agent_pull",
+    "agent_dev_url_set",
+    "agent_enable",
+    "agent_reset",
+];
 
 /// A `manifest` argument as text, plus the warning an object form earns.
 ///
@@ -2207,6 +2270,16 @@ async fn agent_set(state: &SharedState, args: &Args) -> Result<Value, ApiRefusal
 /// caller has not read yet, so overwriting an existing agent has to be asked
 /// for.
 pub(crate) async fn agent_install(state: &SharedState, args: &Args) -> Result<Value, String> {
+    agent_install_as(state, args, None).await
+}
+
+/// [`agent_install`] for a caller: `by_device` as [`import_inner_as`] takes
+/// it.
+pub(crate) async fn agent_install_as(
+    state: &SharedState,
+    args: &Args,
+    by_device: Option<i64>,
+) -> Result<Value, String> {
     use agents::package::{self, Provenance};
 
     let image = arg_str(args, "image")
@@ -2249,7 +2322,7 @@ pub(crate) async fn agent_install(state: &SharedState, args: &Args) -> Result<Va
     // has already happened by the time the import refuses. Say so, rather than
     // leaving the owner to wonder whether the several gigabytes are on the box
     // (they are).
-    let mut report = match import_inner(state, &text, replace, validate_only).await {
+    let mut report = match import_inner_as(state, &text, replace, validate_only, by_device).await {
         Ok(r) => r,
         // The refusal's *code* stops here: an install answers on the flat
         // `op_failed` this op has always had, and the message — which names
@@ -2778,11 +2851,37 @@ async fn agent_enable(state: &SharedState, args: &Args) -> Result<Value, String>
 /// what was said, an agent is only the preset it was said through. The op
 /// reports the count rather than doing it quietly.
 pub(crate) async fn agent_delete(state: &SharedState, id: &str) -> Result<Value, String> {
-    let existed = store::delete_agent(&state.db, id)
-        .await
-        .map_err(|e| e.to_string())?;
+    agent_delete_as(state, id, None).await
+}
+
+/// [`agent_delete`] for a caller: `by_device` is the paired device whose
+/// `lmgw__agent_delete` this is, which deletes only an agent it created
+/// (`agents.created_by_key`; the branch review's verification, V-5).
+/// Otherwise a delete and a create under the same id would replace the
+/// owner's agent with one the device chose.
+pub(crate) async fn agent_delete_as(
+    state: &SharedState,
+    id: &str,
+    by_device: Option<i64>,
+) -> Result<Value, String> {
+    let existed = match by_device {
+        None => store::delete_agent(&state.db, id).await,
+        Some(device) => store::delete_agent_created_by(&state.db, id, device).await,
+    }
+    .map_err(|e| e.to_string())?;
     if !existed {
-        return Err(format!("no agent with id '{id}'"));
+        let there = store::get_agent(&state.db, id)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some();
+        return Err(if there {
+            format!(
+                "agent '{id}' was not created by this device, so it may not delete it; nothing \
+                 was deleted"
+            )
+        } else {
+            format!("no agent with id '{id}'")
+        });
     }
     // `ON DELETE` is manual (§3.1): the agent's credential goes with it, and
     // the AUTOINCREMENT in 0032 is what stops the next key inheriting the id
@@ -2798,6 +2897,7 @@ pub(crate) async fn agent_delete(state: &SharedState, id: &str) -> Result<Value,
     let unlinked = store::clear_chat_thread_agent(&state.db, id)
         .await
         .map_err(|e| e.to_string())?;
+    state.chat_feed.wake();
     Ok(json!({
         "ok": true,
         "id": id,
@@ -2991,6 +3091,19 @@ async fn with_base_config(
 /// flight, which is reported as the running job rather than as an error (§2.4,
 /// "one live run per agent").
 pub(crate) async fn agent_run(state: &SharedState, args: &Args) -> Result<Value, String> {
+    agent_run_as(state, args, None).await
+}
+
+/// [`agent_run`] for a caller: a run a paired device starts (`by_device`)
+/// calls lmgw's admin tools as that device, at what its admin tools may do
+/// as each call is made (client-apps design L5's note, 2026-10-07). The
+/// run's other tools are the agent's own, its manifest's labels, not
+/// narrowed by the device's tool scope.
+pub(crate) async fn agent_run_as(
+    state: &SharedState,
+    args: &Args,
+    by_device: Option<i64>,
+) -> Result<Value, String> {
     let id = need_id(args)?;
     let phase = match arg_str(args, "phase") {
         Some(p) => batch::Phase::parse(p)
@@ -3105,6 +3218,7 @@ pub(crate) async fn agent_run(state: &SharedState, args: &Args) -> Result<Value,
             ledger: false,
             values,
             effective: Some(effective),
+            started_by: by_device,
         },
     )
     .await?;

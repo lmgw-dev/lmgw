@@ -27,6 +27,9 @@ pub mod capabilities;
 pub mod catalog;
 pub mod config;
 pub mod degraded;
+/// Device keys (client-apps design §1): pairing, open connections, the
+/// revocation signal.
+pub mod devices;
 pub mod egress;
 pub mod error;
 pub mod extract;

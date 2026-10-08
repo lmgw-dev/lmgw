@@ -583,6 +583,78 @@
   "js": "window.vizHarness.unmount()"
  },
  {
+  "js": "'The transparent flag (client-apps design §8): ring.js with it keeps no background, its corners see-through; without it, and the ribbon with it, the corners are the background, opaque.'"
+ },
+ {
+  "expect": "window.vizHarness.mount('ring', {transparent: true}).then(r => r.kind === 'Canvas2D')",
+  "label": "transparent: a ring with the flag mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "transparent: it draws frames"
+ },
+ {
+  "js": "window.vizHarness.state('speaking')"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "window.vizHarness.corners().every(a => a === 0)",
+  "label": "transparent: the ring's corner pixels are transparent with the flag"
+ },
+ {
+  "shot": "harness-ring-transparent"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "transparent: destroyed cleanly"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ring').then(r => r.kind === 'Canvas2D')",
+  "label": "transparent: a ring without the flag mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "transparent: it draws frames"
+ },
+ {
+  "expect": "window.vizHarness.corners().every(a => a === 255)",
+  "label": "transparent: without the flag the ring's corners are its background, opaque, as always"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "transparent: destroyed cleanly"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
+  "expect": "window.vizHarness.mount('ribbon', {transparent: true}).then(r => r.kind === 'Canvas2D')",
+  "label": "transparent: a ribbon with the flag mounts"
+ },
+ {
+  "until": "window.vizHarness.stats().frames > 10",
+  "timeout": 10,
+  "label": "transparent: it draws frames"
+ },
+ {
+  "expect": "window.vizHarness.corners().every(a => a === 255)",
+  "label": "transparent: the ribbon ignores the flag and paints its background"
+ },
+ {
+  "expect": "window.vizHarness.destroy().then(r => r.ok)",
+  "label": "transparent: destroyed cleanly"
+ },
+ {
+  "js": "window.vizHarness.unmount()"
+ },
+ {
   "snap": "b"
  },
  {
@@ -591,6 +663,6 @@
    "b"
   ],
   "nodes": 0,
-  "label": "nine mounts and destroys leave no listener, interval, observer or detached node behind"
+  "label": "twelve mounts and destroys leave no listener, interval, observer or detached node behind"
  }
 ]

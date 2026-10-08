@@ -31,7 +31,7 @@ pub struct WiringView {
 pub struct LocalChain {
     pub id: i64,
     pub model_id: String,
-    /// `owner/repo` when the GGUF is a tracked HF download, else empty.
+    /// `<org>/<repo>` when the GGUF is a tracked HF download, else empty.
     pub hf_repo: String,
     /// HF row status (`done | queued | downloading | failed |
     /// update_available`), empty when the file was not downloaded by lmgw.
@@ -97,34 +97,32 @@ pub struct LocalModelDetail {
     pub idle_seconds: i64,
     pub enabled: bool,
     pub public: bool,
-    /// Per-model container image override (per-model-containers design §3.1);
+    /// Per-model container image override;
     /// `None` inherits the chat class settings' image.
     pub image: Option<String>,
-    /// Per-model `podman run` args override (§3.1), one per line — same
+    /// Per-model `podman run` args override, one per line — same
     /// round-trip convention as `extra_args`; `None` inherits the chat class
     /// settings' `extra_run_args`.
     pub extra_run_args: Option<String>,
-    /// Start this model's own container at app launch (§3.1, §3.4).
+    /// Start this model's own container at app launch.
     pub warm_start: bool,
-    /// GPU-hold fallback mode and alias (gpu-hold design §2/§3.2); mirror of
-    /// `ops::local_model_get`'s `hold_fallback_mode`/`hold_fallback` fields.
+    /// GPU-hold fallback mode (`inherit` | `none` | `alias`) and alias.
     #[serde(default = "default_hold_fallback_mode")]
     pub hold_fallback_mode: String,
     #[serde(default)]
     pub hold_fallback: Option<String>,
-    /// Owner override of the derived `/v1/models` capability facts
-    /// (model-capabilities design §7): a JSON object with optional keys
-    /// `capabilities`, `max_output_tokens`, `notes`. `None` = no override.
+    /// An alias's capabilities override for the derived `/v1/models` capability facts: a JSON
+    /// object with optional keys `capabilities`, `max_output_tokens`, `notes`. `None` = no
+    /// override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities_override: Option<serde_json::Value>,
-    /// Ladder rungs above the base (ladder design §4.1); empty = not a
-    /// ladder. Mirror of `config::LocalModel::ladder`, added to this view by
-    /// `ops::local_model_get` (WP5 — the editor's ladder table reads it).
+    /// Ladder rungs above the base; empty = not a ladder. The editor's ladder table reads
+    /// it.
     #[serde(default)]
     pub ladder: Vec<Rung>,
-    /// The exact `podman run …` command line this model renders to (§3.6);
+    /// The exact `podman run …` command line this model renders to;
     /// the published host port is a placeholder, since it is allocated per
-    /// start (§3.5).
+    /// start.
     pub command_line: String,
     /// Static findings; empty means "nothing obviously wrong", not "loads".
     pub problems: Vec<String>,
@@ -168,7 +166,7 @@ pub struct PlanResult {
 }
 
 /// `GET /api/ladder-rung-plan` — one ladder rung's footprint, MTP flag and
-/// trained context (ladder design §4.2, §6): what the editor's rung table
+/// trained context: what the editor's rung table
 /// cannot compute itself. Per-slot context and switchover are plain
 /// arithmetic the UI does over fields it already holds, capped at
 /// `trained_context` the way llama-server caps every slot.
@@ -176,18 +174,18 @@ pub struct PlanResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RungPlan {
     pub footprint: RungFootprint,
-    /// Whether the GGUF header carries MTP tensors (§4.3 rule 6).
+    /// Whether the GGUF header carries MTP tensors.
     pub has_mtp_layers: bool,
     /// The weights' trained context (`<arch>.context_length`): llama-server
-    /// caps every slot there, and §4.3 refuses a rung whose per-slot context
-    /// is above it. `None` when the header does not say.
+    /// caps every slot there, and a rung whose per-slot context
+    /// is above it is refused. `None` when the header does not say.
     #[serde(default)]
     pub trained_context: Option<u64>,
 }
 
-/// Mirror of `vram::plan::Footprint` — a model's estimated GPU cost, a
-/// documented lower bound (compute/graph buffers and allocator slack are not
-/// in it; see that module's docs).
+/// A model's estimated GPU cost, a documented lower bound (compute/graph buffers and
+/// allocator slack are not in it).
+// Mirror of `vram::plan::Footprint`; see that module's docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RungFootprint {

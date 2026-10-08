@@ -13,15 +13,14 @@ use crate::web::audio;
 
 mod engine;
 
-/// Audio model CRUD — same shape as `ops::aux_model_set` (sparse patch,
-/// unknown fields rejected, `reload_snapshot()` after every write, apply stays
-/// separate), adapted to the wider audio.cpp field set. Validation lives in
-/// `crate::web::audio`, next to the container it protects: a task from the
-/// fixed 13-value list, every voice preset naming
-/// a `voice_id`/`voice_ref`, a bare `default_voice_preset` resolving to a
-/// declared preset, and every `voice_ref` under `/models/...` existing on
-/// disk — audiocpp_server opens reference clips at startup and exits if one
-/// is missing.
+/// Audio model CRUD: a sparse patch (unknown fields are rejected) over the wider
+/// audio.cpp field set, like the aux model patch. A save does not restart the
+/// model's container; apply does. A save is validated: a task from the fixed
+/// 13-value list, every voice preset naming a `voice_id`/`voice_ref`, a bare
+/// `default_voice_preset` resolving to a declared preset, and every `voice_ref`
+/// under `/models/...` existing on disk — audiocpp_server opens reference clips
+/// at startup and exits if one is missing.
+// Validation itself lives in `crate::web::audio`, next to the container it protects.
 #[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioPatch {
@@ -65,28 +64,27 @@ pub struct AudioPatch {
     voice_presets: Option<serde_json::Map<String, Value>>,
     /// `None` = not supplied (update keeps the current value); an explicit
     /// blank string clears it back to `None`, the same "empty clears"
-    /// convention `AuxPatch::pooling` uses for a plain string field.
+    /// convention the aux patch's `pooling` uses for a plain string field.
     default_voice_preset: Option<Value>,
     enabled: Option<bool>,
-    /// Per-model container image override (per-model-containers design §3.1);
-    /// empty clears back to inheriting the audio class settings' image.
+    /// Per-model container image override; empty clears back to inheriting the audio class settings' image.
     image: Option<String>,
-    /// `podman run` args override (§3.1); replaces the current value
+    /// `podman run` args override; replaces the current value
     /// wholesale when supplied. `None` keeps the current value; an empty list
     /// is no override and inherits the class settings, as naming
-    /// `extra_run_args` in `clear` does (same convention as `AuxPatch::clear`).
+    /// `extra_run_args` in `clear` does (same convention as the aux patch's `clear`).
     extra_run_args: Option<Vec<String>>,
-    /// Start this model's own container at app launch (§3.4).
+    /// Start this model's own container at app launch.
     warm_start: Option<bool>,
-    /// GPU-hold fallback mode (gpu-hold design §2/§3.2): `inherit` (default,
+    /// GPU-hold fallback mode: `inherit` (default,
     /// means "no fallback" for audio) | `none` | `alias`.
     hold_fallback_mode: Option<String>,
     /// The alias `hold_fallback_mode = "alias"` routes a held request to.
     hold_fallback: Option<String>,
     /// Field names to reset to unset, comma- or space-separated — see
-    /// `AuxPatch::clear`. `residency` (on `update`) forgets the learned
-    /// residency, so the row is charged at its on-disk size until a request
-    /// teaches it again (realtime design §9.4).
+    /// the aux patch's `clear`. `residency` (on `update`) forgets the
+    /// learned residency, so the row is charged at its on-disk size until a
+    /// request teaches it again.
     clear: Option<String>,
 }
 

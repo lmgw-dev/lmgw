@@ -59,6 +59,7 @@ use crate::proxy::stop_pair;
 use crate::state::SharedState;
 
 use super::super::chat::{err_json, read_upload_body};
+use super::super::chat_caller::Caller;
 use super::super::chat_extract::ChatPath;
 use super::super::chat_repo::ChatRepo;
 use super::resolve::resolve;
@@ -66,11 +67,13 @@ use super::resolve::resolve;
 /// `POST /chat/api/threads/{id}/transcribe` (module doc).
 pub(crate) async fn transcribe(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let Some(thread) = ChatRepo::of(id).thread(&state, id).await.ok().flatten() else {
+    let repo = ChatRepo::of(id);
+    let Some(thread) = repo.thread_as(&state, &caller, id).await.ok().flatten() else {
         return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
     };
     let snap = state.snapshot();
@@ -106,18 +109,31 @@ pub(crate) async fn transcribe(
     let audio_ms = wav_ms(&body);
     let language = cfg.language.value.clone();
     let started = Instant::now();
+    // A device's dictation is a model call of its key (client-apps design
+    // L4): checked against it, and its row the key's. A refusal answers as
+    // a failed transcription does, its row written.
+    let proto = super::speech_proto(&thread);
+    if let Err(e) = caller
+        .check(&state, proto, &alias, crate::telemetry::RequestClass::Audio)
+        .await
+    {
+        let answer = Json(json!({ "code": e.kind(), "message": e.to_string() }));
+        return (e.http_status(), answer).into_response();
+    }
+    let ctx = caller.ctx();
     // Its own task, stopped when this handler is dropped (the page aborted
     // the upload): the call ends at its next await and still writes its row,
     // `canceled` — the audio may already be with a provider.
     let (_stop, signal) = stop_pair();
     let call = {
         let (state, alias, language) = (state.clone(), alias.clone(), language.clone());
-        let proto = super::speech_proto(&thread);
         tokio::spawn(async move {
             let recording = (body, filename, mime);
             let language = language.as_deref();
-            crate::proxy::transcribe_dictation(&state, proto, &alias, recording, language, &signal)
-                .await
+            crate::proxy::transcribe_dictation(
+                &state, &ctx, proto, &alias, recording, language, &signal,
+            )
+            .await
         })
     };
     let transcribed = match call.await {

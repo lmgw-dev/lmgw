@@ -29,6 +29,7 @@ use zip::write::SimpleFileOptions;
 
 use super::api_knowledge::attachment as content_disposition;
 use super::chat::err_json;
+use super::chat_caller::Caller;
 use super::chat_extract::{ChatPath, ChatQuery};
 use super::chat_repo::ChatRepo;
 use crate::state::{AppState, SharedState};
@@ -191,9 +192,12 @@ async fn load(s: &AppState, thread: ChatThread) -> DbResult<Bundle> {
 
 // -- routes -----------------------------------------------------------------
 
-/// `GET /chat/api/threads/{id}/export`.
+/// `GET /chat/api/threads/{id}/export`. A device's export of an Admin Chat
+/// thread is a 404, as every route that reaches one by id (client-apps
+/// design L3).
 pub async fn export_thread(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatQuery(q): ChatQuery<ExportQuery>,
 ) -> Response {
@@ -202,7 +206,7 @@ pub async fn export_thread(
         Err(r) => return r,
     };
     let repo = ChatRepo::of(id);
-    let thread = match repo.thread(&state, id).await {
+    let thread = match repo.thread_as(&state, &caller, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return not_found("thread"),
         Err(e) => return internal(e),
@@ -235,9 +239,11 @@ pub async fn export_thread(
         .into_response()
 }
 
-/// `GET /chat/api/folders/{id}/export`.
+/// `GET /chat/api/folders/{id}/export`. A device's zip leaves Admin Chat
+/// threads out (client-apps design L2, L3).
 pub async fn export_folder(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatQuery(q): ChatQuery<ExportQuery>,
 ) -> Response {
@@ -245,12 +251,14 @@ pub async fn export_folder(
         (Ok(f), Ok(m)) => (f, m),
         (Err(r), _) | (_, Err(r)) => return r,
     };
+    // A folder whose defaults attach the self-admin toolset does not exist
+    // for a device (L3, review W3-1).
     let folder = match store::get_chat_folder(&state.db, id).await {
-        Ok(Some(f)) => f,
-        Ok(None) => return not_found("folder"),
+        Ok(Some(f)) if caller.sees_folder(&state.snapshot(), &f) => f,
+        Ok(_) => return not_found("folder"),
         Err(e) => return internal(e),
     };
-    let threads: Vec<ChatThread> = match ChatRepo::stored_threads(&state, mode).await {
+    let threads: Vec<ChatThread> = match ChatRepo::stored_threads(&state, &caller, mode).await {
         Ok(t) => t.into_iter().filter(|t| t.folder_id == Some(id)).collect(),
         Err(e) => return internal(e),
     };
@@ -262,25 +270,28 @@ pub async fn export_folder(
         false,
     );
     let name = format!("lmgw-folder-{}-{}.zip", slug(&folder.name), today());
-    zip_response(&state, threads, format, readme, name, false).await
+    zip_response(&state, &caller, threads, format, readme, name, false).await
 }
 
-/// `GET /chat/api/export`.
+/// `GET /chat/api/export`. A device's zip leaves Admin Chat threads out
+/// (client-apps design L2, L3).
 pub async fn export_all(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatQuery(q): ChatQuery<ExportQuery>,
 ) -> Response {
     let (format, mode) = match (Format::parse(&q.format), archived_mode(&q.archived)) {
         (Ok(f), Ok(m)) => (f, m),
         (Err(r), _) | (_, Err(r)) => return r,
     };
-    let threads = match ChatRepo::stored_threads(&state, mode).await {
+    let threads = match ChatRepo::stored_threads(&state, &caller, mode).await {
         Ok(t) => t,
         Err(e) => return internal(e),
     };
     let readme = readme("every stored chat", format, mode, threads.len(), true);
     zip_response(
         &state,
+        &caller,
         threads,
         format,
         readme,
@@ -321,13 +332,15 @@ fn readme(what: &str, f: Format, mode: ThreadListMode, n: usize, all: bool) -> S
 /// Write the zip into an anonymous temp file and stream it back.
 async fn zip_response(
     state: &SharedState,
+    caller: &Caller,
     threads: Vec<ChatThread>,
     format: Format,
     readme: String,
     file_name: String,
     by_folder: bool,
 ) -> Response {
-    match build_zip(state, threads, format, &readme, by_folder).await {
+    let folders = caller.reach(&state.snapshot());
+    match build_zip(state, threads, format, &readme, by_folder, folders).await {
         Ok((file, len)) => {
             let file = tokio::fs::File::from_std(file);
             let body = Body::from_stream(futures::stream::unfold(file, |mut f| async move {
@@ -362,10 +375,14 @@ async fn build_zip(
     format: Format,
     readme: &str,
     by_folder: bool,
+    folders: store::AdminThreads,
 ) -> anyhow::Result<(std::fs::File, u64)> {
     let mut dirs: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
     if by_folder {
-        for f in store::list_chat_folders(&state.db).await? {
+        // The folders' names only: which directory a thread goes in — the
+        // folders the reader may see (L3); a thread in another goes at the
+        // top.
+        for f in store::list_chat_folders(&state.db, folders).await? {
             dirs.insert(f.folder.id, slug(&f.folder.name));
         }
     }

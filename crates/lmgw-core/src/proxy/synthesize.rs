@@ -27,13 +27,19 @@
 //! - **one `request_logs` row per response** (§11), written by
 //!   [`Synthesis::finish`] — also for a response stopped half-way, carrying
 //!   what it synthesized. Per-clause rows would drown the Usage page in five
-//!   or more rows per answer. Characters and audio seconds have no column
-//!   (§11, no new columns in v1), so they go to the log line — the
-//!   characters as sent, after the cue and shaping took what they take.
+//!   or more rows per answer. The row carries the characters its answered
+//!   clauses were sent — as sent, after the cue and shaping took what they
+//!   take — as `chars_in`, and their count as its upstream requests, which a
+//!   `per_request` fee prices (billable-units design §4.3, §4.5; this
+//!   supersedes §11's "no new columns in v1" for characters). Neither is
+//!   known when a stop or a failed send left a clause with the upstream
+//!   unanswered ([`tally`]). The audio seconds that came back are output,
+//!   which no unit prices, and go to the log line beside them.
 //!
 //! The key's policy is the caller's to check before [`open`] (§10.3); this
 //! only records.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -42,7 +48,7 @@ use serde_json::{json, Value};
 use crate::audio::cues;
 use crate::audio::engine_errors::explain_speech;
 use crate::audio::language::{Field, SpeechLanguage};
-use crate::audio::preflight::{refuse_row, refuse_speech, refuse_undescribed};
+use crate::audio::preflight::{refuse_row, refuse_speech, refuse_undescribed, refuse_unsayable};
 use crate::audio::profile::{InstructionsMode, SpeechProfile, Unvoiced};
 use crate::audio::shape::ShapeReport;
 use crate::audio::transcript;
@@ -57,9 +63,12 @@ use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 use crate::vram::LocalHold;
 
+use super::audio::measure::speech_chars;
 use super::audio::{audio_send, local_speech, rules_on, shape_on, voices_body};
 use super::stop::{canceled, stopped};
 use super::{record, LogParams, RequestCtx, StopSignal};
+pub(crate) use chars::CharsSeen;
+use tally::Tally;
 
 /// One response's speech: the route it opened once, and what it sent so far.
 pub(crate) struct Synthesis {
@@ -85,9 +94,12 @@ pub(crate) struct Synthesis {
     started: Instant,
     /// The first clause's answer, relative to `started`.
     ttfb_ms: Option<i64>,
-    clauses: u32,
-    /// The characters of `input` the answered clauses were sent.
-    chars: usize,
+    /// The clauses answered, and the characters of `input` they were sent:
+    /// the row's quantities ([`tally`]).
+    tally: Tally,
+    /// The characters shaping replaced or dropped because the row's engine
+    /// cannot say them, logged once when the response ends ([`chars`]).
+    chars: CharsSeen,
     /// The claim was let go while the client did not read, and the next
     /// clause takes it again (`claim`).
     regain: bool,
@@ -219,8 +231,8 @@ pub(crate) async fn open(
             headers: o.headers,
             started,
             ttfb_ms: None,
-            clauses: 0,
-            chars: 0,
+            tally: Tally::new(),
+            chars: CharsSeen::default(),
             regain: false,
             finished: false,
         }),
@@ -442,10 +454,14 @@ impl Synthesis {
     /// Synthesize one clause; the answer is the upstream's WAV and what
     /// shaping changed in the request ([`crate::audio::shape`] — the same
     /// functions `POST /v1/audio/speech` applies, and its preflight: a
-    /// clause of nothing but inline tags is `empty_input`, a voice-design
-    /// row without a description `instructions_required`). Inline tags and
+    /// clause of nothing but inline tags is `empty_input`, and so is one
+    /// with nothing left once the characters the row's engine cannot say
+    /// are fitted out; a voice-design row without a description
+    /// `instructions_required`). Inline tags and
     /// instructions are shaped in what is sent, for the route that answers —
-    /// a fallback by its own rules (WP10 D12) — never in the caller's text.
+    /// a fallback by its own rules (WP10 D12) — never in the caller's text;
+    /// so are the characters an lmgw row's engine cannot say, which
+    /// [`Self::finish`] logs for the whole response.
     /// `language` goes only to an lmgw audio row that takes it
     /// ([`SpeechLanguage::for_row`]), and `seed` only to one that reads it
     /// ([`sends_seed`]): a remote route never gets either.
@@ -463,27 +479,61 @@ impl Synthesis {
             answering,
             clause,
         )?;
+        self.chars.note(&shaped);
+        // A clause shaping left nothing to say (a lone emoji): `empty_input`,
+        // which the speaker skips, its characters noted above.
+        let text = body.get("input").and_then(Value::as_str);
+        let vocab = self
+            .speech
+            .as_ref()
+            .and_then(|(_, s)| s.profile.char_vocab.as_deref());
+        refuse_unsayable(text, &shaped, answering, vocab)?;
         let (state, route, hold) = (&self.state, &self.route, self.hold.as_ref());
         if let Some(hold) = hold {
             hold.note_sending();
         }
-        let send = audio_send(hold, route, |r| {
-            let url = format!("{}/audio/speech", r.upstream.base());
-            Ok(apply_bearer_auth(
-                state.http.post(url).json(&body),
-                &r.upstream,
-            ))
-        });
+        // Whether the request may have gone out: a stop that is already
+        // raised wins the biased race before the send is ever polled.
+        let went_out = AtomicBool::new(false);
+        let send = async {
+            went_out.store(true, Ordering::Relaxed);
+            audio_send(hold, route, |r| {
+                let url = format!("{}/audio/speech", r.upstream.base());
+                Ok(apply_bearer_auth(
+                    state.http.post(url).json(&body),
+                    &r.upstream,
+                ))
+            })
+            .await
+        };
         // What the TTS reads, not what the caller handed in: the cue and
         // the tags shaping strips are not said.
-        let sent = body["input"].as_str().map_or(0, |i| i.chars().count());
-        // audio.cpp's own refusal of the clip, or of an image without
-        // eSpeak NG, said as lmgw's (`crate::audio::engine_errors`).
-        let resp = tokio::select! {
+        let sent = speech_chars(&body);
+        let answered = tokio::select! {
             biased;
-            () = stopped(stop) => return Err(canceled("stopped by the caller")),
-            r = send => r.map_err(|e| explain_speech(e, answering, clause.voice))?,
+            () = stopped(stop) => None,
+            r = send => Some(r),
         };
+        let resp = match answered {
+            Some(Ok(resp)) => resp,
+            None => {
+                if went_out.load(Ordering::Relaxed) {
+                    self.tally.in_doubt();
+                }
+                return Err(canceled("stopped by the caller"));
+            }
+            Some(Err(e)) => {
+                if tally::leaves_doubt(&e) {
+                    self.tally.in_doubt();
+                }
+                // audio.cpp's own refusal of the clip, or of an image
+                // without eSpeak NG, said as lmgw's
+                // (`crate::audio::engine_errors`).
+                return Err(explain_speech(e, answering, clause.voice));
+            }
+        };
+        // A 2xx: the upstream took the clause, whatever its body does next.
+        self.tally.answered(sent);
         if self.ttfb_ms.is_none() {
             self.ttfb_ms = Some(self.started.elapsed().as_millis() as i64);
         }
@@ -501,8 +551,6 @@ impl Synthesis {
         if let Some(hold) = self.hold.as_ref() {
             hold.note_inference();
         }
-        self.clauses += 1;
-        self.chars += sent;
         Ok((wav, shaped))
     }
 
@@ -514,8 +562,21 @@ impl Synthesis {
 
     /// The response's one row (§11): `error` is why it ended early — a
     /// failed clause, or `canceled` for a stop — and `None` for a whole
-    /// answer. `audio_ms` is what was synthesized, for the log line.
+    /// answer. The row carries the answered clauses' characters and count
+    /// ([`tally`]). `audio_ms` is what was synthesized, for the log line.
+    ///
+    /// The contract: a response in which [`speak`](Self::speak) left a
+    /// clause in doubt — a stop or a send with no answer — finishes with an
+    /// error, as every caller does after a failed `speak` (the one it goes
+    /// on after, `empty_input`, is refused before anything is sent). The
+    /// row writer then keeps the unknown request count unknown; on a row
+    /// finished as whole it would default it to 1. Checked in debug builds.
     pub async fn finish(mut self, error: Option<&GatewayError>, audio_ms: u64) {
+        debug_assert!(
+            error.is_some() || !self.tally.is_in_doubt(),
+            "{}: a TTS response with a clause in doubt finished as whole",
+            self.label
+        );
         self.release();
         // A stop is a 200 `canceled` row, like the chat call's (`stop`).
         let status = error.map_or(200, super::stop::row_status);
@@ -523,21 +584,33 @@ impl Synthesis {
             "{}: TTS '{}': {} clause(s), {} characters sent, {:.1} s of audio, {} ms{}",
             self.label,
             self.alias,
-            self.clauses,
-            self.chars,
+            self.tally.clauses(),
+            self.tally
+                .chars()
+                .map_or_else(|| "uncounted".to_string(), |c| c.to_string()),
             audio_ms as f64 / 1000.0,
             self.started.elapsed().as_millis(),
             error.map(|e| format!(" — {e}")).unwrap_or_default()
         );
-        let params = log(
-            &self.state,
-            &self.ctx,
-            self.proto,
-            &self.alias,
-            self.started,
-            Some(&self.route),
-            &self.headers,
-        );
+        if let Some(line) = self.chars.line() {
+            tracing::info!(
+                "{}: TTS '{}': characters its engine cannot say: {line}",
+                self.label,
+                self.alias
+            );
+        }
+        let params = LogParams {
+            quantities: self.tally.quantities(),
+            ..log(
+                &self.state,
+                &self.ctx,
+                self.proto,
+                &self.alias,
+                self.started,
+                Some(&self.route),
+                &self.headers,
+            )
+        };
         record(
             params,
             status,
@@ -587,6 +660,7 @@ fn log<'a>(
         fallback: headers.fallback_reason(),
         rung: None,
         degraded: None,
+        quantities: Default::default(),
     }
 }
 
@@ -620,7 +694,9 @@ fn parse_voice_names(body: &[u8]) -> Vec<String> {
     out
 }
 
+mod chars;
 mod claim;
+mod tally;
 pub(crate) mod warm;
 
 #[cfg(test)]

@@ -24,9 +24,10 @@
 //!
 //! - **Hosted tools** (`web_search`, `file_search`, `code_interpreter`,
 //!   `image_generation`, `computer_use`) — nothing here can run them.
-//! - **`previous_response_id`** — this stage stores nothing, so a chained call
-//!   would silently lose the conversation. The response object reports
-//!   `"store": false` so a client can see it before trying.
+//! - (`previous_response_id` is not refused here: this stage only parses it.
+//!   `crate::responses` stores responses and continues from one. The response
+//!   object's `store` is overridden with what the gateway actually did, so a
+//!   client can see whether a chained call will work before it tries.)
 //! - **`background: true`** and **`truncation: "auto"`** — both would change
 //!   what the client gets in ways it could not detect.
 //! - **`require_approval` other than `"never"`** — auto-approving a call the
@@ -1225,10 +1226,13 @@ impl ResponsesEncoder {
             // carries the real numbers now; a provider that reports nothing
             // still yields 0 here, because Responses' shape has no way to say
             // "unknown" and inventing one would be worse than the schema.
+            // `cache_write_tokens` is required beside `cached_tokens` in
+            // OpenAI's current shape, so it is always there too.
             "usage": {
                 "input_tokens": p,
                 "input_tokens_details": {
                     "cached_tokens": self.usage.cached_input_tokens.unwrap_or(0),
+                    "cache_write_tokens": self.usage.cache_write_tokens.unwrap_or(0),
                 },
                 "output_tokens": c,
                 "output_tokens_details": {

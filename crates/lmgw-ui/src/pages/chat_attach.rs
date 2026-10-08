@@ -273,14 +273,23 @@ pub(super) fn refresh_drafts(
         if !is_current(tid) {
             return;
         }
-        let fresh = d.draft_attachments;
-        chips.with_untracked(|v| {
-            for c in v {
-                if let Some(a) = fresh.iter().find(|a| Some(a.id) == c.id.get_untracked()) {
+        fold_drafts(chips, &d.draft_attachments);
+    });
+}
+
+/// The thread's drafts as the server read them (`fresh`) folded into the
+/// chips that are them, where they differ: their `blockers` and `hints`
+/// against the thread's model as stored, their mode. A chip still
+/// uploading, or one the server does not list, is left as it is.
+pub(super) fn fold_drafts(chips: RwSignal<Vec<DraftChip>>, fresh: &[Attachment]) {
+    chips.with_untracked(|v| {
+        for c in v {
+            if let Some(a) = fresh.iter().find(|a| Some(a.id) == c.id.get_untracked()) {
+                if c.att.with_untracked(|cur| cur != a) {
                     c.att.set(a.clone());
                 }
             }
-        });
+        }
     });
 }
 

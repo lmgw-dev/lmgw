@@ -34,9 +34,17 @@ impl Core {
     ) {
         let label = format!("realtime {}", self.id());
         let state = self.state.clone();
+        let caller = crate::web::chat_voice::bound::Caller::of(&self.ctx);
         if let Some(b) = self.bound.as_mut() {
             let fence = b.fence.take();
-            b.journal = Some(Journal::spawn(state, b.thread_id, label, events, fence));
+            b.journal = Some(Journal::spawn(
+                state,
+                b.thread_id,
+                label,
+                events,
+                fence,
+                caller,
+            ));
             b.states = Some(states);
             b.verdict_tx = Some(verdicts);
         }
@@ -53,16 +61,32 @@ impl Core {
         }
     }
 
-    /// Another window bound the thread (§8.1): said once, before the close.
+    /// Another window bound the thread (§8.1): said once, before the close,
+    /// naming who (client-apps design §1.7).
     pub(in crate::realtime) fn taken_over(&mut self) {
         let id = self.bound.as_ref().map_or(0, |b| b.thread_id);
+        let reason = super::taken_over_reason(self.taken_by().as_deref());
         self.error(ErrorObject::invalid(
             "chat_thread_taken_over",
-            format!(
-                "{}: another window bound chat thread {id}, and this session closes",
-                super::TAKEN_OVER
-            ),
+            format!("{reason}: it bound chat thread {id}, and this session closes"),
         ));
+    }
+
+    /// The session's thread left its device's reach (client-apps design
+    /// L3, review W3-1): said once, before the close, as the bind answers a
+    /// thread the device cannot see — and as neutrally (review W4-18): not
+    /// why.
+    pub(in crate::realtime) fn out_of_reach(&mut self) {
+        let id = self.bound.as_ref().map_or(0, |b| b.thread_id);
+        self.error(ErrorObject::invalid(
+            "chat_thread_not_found",
+            format!("chat thread {id} is out of reach for this key, and this session closes"),
+        ));
+    }
+
+    /// Who took the session's thread over, once it was.
+    pub(in crate::realtime) fn taken_by(&self) -> Option<String> {
+        self.bound.as_ref().and_then(|b| b.taken_by.get())
     }
 
     /// A model state the connect warm said (§4.3): `lmgw.model.state`.

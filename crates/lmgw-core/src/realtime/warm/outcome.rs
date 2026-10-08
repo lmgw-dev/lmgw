@@ -340,6 +340,93 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Review W6-9: every frame the gateway writes reads into the clients'
+    /// type (`lmgw-api-types::chat_voice::ModelState`) field for field — the
+    /// two are separate structs, and this is what keeps them in step.
+    #[test]
+    fn every_frame_reads_as_the_clients_type() {
+        let outcomes = [
+            WarmOutcome::Ready { ms: Some(12) },
+            WarmOutcome::Ready { ms: None },
+            WarmOutcome::Held {
+                cause: HeldCause::GpuHold,
+                message: "held".into(),
+            },
+            WarmOutcome::Held {
+                cause: HeldCause::Benchmark,
+                message: "bench".into(),
+            },
+            WarmOutcome::Fallback {
+                answered_by: "cloud".into(),
+            },
+            WarmOutcome::Skipped {
+                reason: SkipReason::DoesNotFit,
+                message: "no room".into(),
+                sizes: Some(GroupSizes {
+                    needed_bytes: 9,
+                    capacity_bytes: 4,
+                }),
+            },
+            WarmOutcome::Skipped {
+                reason: SkipReason::Full,
+                message: "full".into(),
+                sizes: None,
+            },
+            WarmOutcome::Skipped {
+                reason: SkipReason::CannotSpeak,
+                message: "mute".into(),
+                sizes: None,
+            },
+            WarmOutcome::Failed {
+                message: "boom".into(),
+            },
+        ];
+        let frames = outcomes
+            .iter()
+            .filter_map(|o| ModelState::of("tts", "speak", o))
+            .chain([ModelState::loading("asr", "hear")]);
+        for ours in frames {
+            let wire = serde_json::to_value(&ours).unwrap();
+            let theirs: lmgw_api_types::chat_voice::ModelState =
+                serde_json::from_value(wire.clone()).unwrap();
+            let word = |v: serde_json::Value| v.as_str().map(str::to_string);
+            assert_eq!(theirs.stage, ours.stage, "{wire}");
+            assert_eq!(theirs.alias, ours.alias, "{wire}");
+            assert_eq!(theirs.state, ours.state, "{wire}");
+            assert_eq!(theirs.ms, ours.ms, "{wire}");
+            assert_eq!(
+                theirs.cause,
+                ours.cause.and_then(|c| word(json!(c))),
+                "{wire}"
+            );
+            assert_eq!(theirs.answered_by, ours.answered_by, "{wire}");
+            assert_eq!(
+                theirs.reason,
+                ours.reason.and_then(|r| word(json!(r))),
+                "{wire}"
+            );
+            assert_eq!(theirs.message, ours.message, "{wire}");
+            assert_eq!(theirs.needed_bytes, ours.needed_bytes, "{wire}");
+            assert_eq!(theirs.capacity_bytes, ours.capacity_bytes, "{wire}");
+            // And nothing more is written than the clients' type holds
+            // (review F-14): a field added here and not there fails, rather
+            // than being dropped by every client. A `null` is no field.
+            let present = |v: &serde_json::Value| -> serde_json::Map<String, serde_json::Value> {
+                v.as_object()
+                    .expect("a frame is an object")
+                    .iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            };
+            assert_eq!(
+                present(&serde_json::to_value(&theirs).unwrap()),
+                present(&wire),
+                "the clients' type round-trips the frame whole"
+            );
+        }
+    }
+
     #[test]
     fn each_outcome_is_said_in_its_frame_shape() {
         let f = |o: &WarmOutcome| serde_json::to_value(ModelState::of("asr", "a", o)).unwrap();

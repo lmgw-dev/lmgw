@@ -1,4 +1,6 @@
-//! The agent catalog (agent-catalog design §5)
+//! The agent catalog
+//
+// Design record: agent-catalog §5.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,18 +29,18 @@ pub struct AgentCard {
     /// Every label resolves and every narrowed tool name is currently listed.
     pub requires_ok: bool,
     pub requires: Vec<AgentRequirement>,
-    /// Warnings that are not tool gaps (container-runtime §4.3).
+    /// Warnings that are not tool gaps.
+    // container-runtime §4.3
     pub warnings: Vec<AgentWarning>,
     pub last_run: Option<AgentRunSummary>,
     /// Threads a `chat` agent has opened.
     pub threads: i64,
-    /// This agent declares `run.service`, so it serves an app of its own
-    /// (container-runtime §3.3) — the card's `app` chip, and a link to the App
-    /// tab.
+    /// This agent declares `run.service`, so it serves an app of its own — the card's
+    /// `app` chip, and a link to the App tab.
     pub app: bool,
     /// Set when the stored manifest could not be read at all — a row written
     /// by a newer build. The card still lists, saying why, rather than the
-    /// whole catalog failing (§4.1).
+    /// whole catalog failing.
     pub error: Option<String>,
 }
 
@@ -90,7 +92,7 @@ pub struct AgentDetail {
     ///
     /// Text and not a `serde_json::Value` on purpose. `serde_json::Map` is a
     /// `BTreeMap`, so a `Value` here would alphabetize the config schema's
-    /// properties and silently re-sort the form the author laid out (§2.6).
+    /// properties and silently re-sort the form the author laid out.
     /// Parse it client-side if a tree is needed, and post it back to
     /// `agent_set` as a **string**: an object argument is accepted but arrives
     /// already re-sorted, and the import report says so.
@@ -112,22 +114,22 @@ pub struct AgentDetail {
     /// The run surface a `batch` or `container` agent offers. `None` for a
     /// `chat` agent.
     pub batch: Option<AgentBatchShape>,
-    /// Warnings that are not tool gaps (§4.3). Start is disabled while any of
-    /// them carries `blocks_start`.
+    /// Warnings that are not tool gaps. Start is disabled while any of them carries
+    /// `blocks_start`.
     pub warnings: Vec<AgentWarning>,
     /// What a `container` agent runs under. `None` for every other kind.
     pub runtime: Option<AgentRuntime>,
-    /// The agent's own token (container-runtime §3.1) — its name, whether one
-    /// has been minted, and the scope it currently carries. **Never the value**:
+    /// The agent's own token — its name, whether one has been minted, and the scope it
+    /// currently carries. **Never the value**:
     /// that comes from `agent_token_get`, which is what Copy token calls.
     pub token: AgentToken,
-    /// Service mode (container-runtime §3.3), when the manifest declares it.
+    /// Service mode, when the manifest declares it.
     /// `None` means no App tab, no proxy route and no `agent:<id>` MCP row.
     pub service: Option<AgentService>,
-    /// Where this row was installed from (§3.4). `None` for a row that came
+    /// Where this row was installed from. `None` for a row that came
     /// from a pasted manifest rather than from an image.
     pub provenance: Option<AgentProvenance>,
-    /// The dev-server override (§3.4). While it is set, `/agents/<id>/app/**`
+    /// The dev-server override. While it is set, `/agents/<id>/app/**`
     /// goes there and no container is started for the app; runs and applies
     /// still use the image. Empty means "served from the image".
     pub dev_url: String,
@@ -143,12 +145,11 @@ pub struct AgentDetail {
     /// Set when the stored manifest could not be read at all — a row written by
     /// a newer build. The document still comes back `200` with whatever could
     /// be read, so the Definition editor stays reachable for the very manifest
-    /// that needs fixing (container-runtime §4.3); a `400` here used to lock
-    /// the owner out of it.
+    /// that needs fixing; a `400` here would lock the client out of it.
     pub error: Option<String>,
 }
 
-/// One rendered config field (§2.6). `ty` is `string | integer | number |
+/// One rendered config field. `ty` is `string | integer | number |
 /// boolean | array`; `format` is `secret | model_alias | multiline | directory
 /// | file` or empty.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -171,13 +172,13 @@ pub struct AgentField {
     /// the value itself is in `config`.
     pub has_value: bool,
     /// For a `directory` or `file` field: `ro` or `rw`, as the **manifest**
-    /// declared it (mounts §5.1). Empty for every other field — the mode is a
+    /// declared it. Empty for every other field — the mode is a
     /// property of the agent, never of the form.
     pub access: String,
 }
 
-/// The visible bounds a turn runs under (§4.4, gateway design §21): one pair
-/// from Settings → Agents & tools, never a second one invented here.
+/// The visible bounds a turn runs under: one pair from Settings → Agents & tools,
+/// never a second one invented per agent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -186,13 +187,13 @@ pub struct AgentBudget {
     pub timeout_seconds: u64,
 }
 
-/// What a `batch` manifest can actually do, for the Run tab (§6.2).
+/// What a `batch` manifest can actually do, for the Run tab.
 ///
 /// Derived server-side from the manifest **and the stored config**, because
 /// both halves matter and only one of them is in the manifest: the review
 /// columns are the author's, in the author's order, while the values an
 /// editable field may be set to come from the config field `enum_from` names —
-/// so widening the taxonomy is a config edit and the table picks it up (§2.4).
+/// so widening the taxonomy is a config edit and the table picks it up.
 /// A client re-deriving this from the manifest text would also lose the column
 /// order, since a JSON object parses into a sorted map here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -212,11 +213,11 @@ pub struct AgentBatchShape {
     pub apply_tools: Vec<String>,
     /// `apply_tools` is the ceiling the agent's token enforces rather than the
     /// calls the step makes — true for a container, whose image decides. The
-    /// Run tab says "may call" instead of "calls" (container-runtime §7).
+    /// Run tab says "may call" instead of "calls".
     pub apply_tools_are_ceiling: bool,
 }
 
-/// One warning that is not a tool gap (container-runtime §4.3).
+/// One warning that is not a tool gap.
 ///
 /// Beside `requires`, of the same shape and rendered in the same place. The
 /// Start gate is `requires_ok` **and** no warning with `blocks_start`.
@@ -232,10 +233,11 @@ pub struct AgentWarning {
     pub blocks_start: bool,
 }
 
-/// What a `container` agent runs under (container-runtime §4.1, §7).
+/// What a `container` agent runs under.
 ///
-/// Every limit is here with its default printed next to it on the Run tab,
-/// because principle 5 now covers the container's bounds too. `0` means "no
+/// Every limit is here with its default printed next to it on the Run tab:
+/// a container's bounds are shown, never guessed, like a run's tool-call and
+/// wall-clock budget. `0` means "no
 /// limit" everywhere except `stop_grace_seconds`, where it means SIGKILL at
 /// once — the page says which.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -255,7 +257,7 @@ pub struct AgentRuntime {
     pub read_only: bool,
     /// The phases whose `output` event is validated against a declared schema.
     /// A phase absent here is unvalidated, which the Run tab says out loud
-    /// rather than leaving the owner to assume a check that is not happening.
+    /// rather than leaving the reader to assume a check that is not happening.
     pub output_validated: Vec<String>,
     /// `podman --version` answered on this box.
     pub podman: bool,
@@ -263,7 +265,7 @@ pub struct AgentRuntime {
     pub podman_note: String,
 }
 
-/// Service mode as the App tab describes it (container-runtime §3.3, §8).
+/// Service mode as the App tab describes it.
 ///
 /// Everything a bound here is read from is a manifest field with its value
 /// printed: the idle window, the start timeout and the health path are the
@@ -277,7 +279,7 @@ pub struct AgentService {
     pub port: u32,
     /// `run.service.health_path`. Empty = a TCP connect instead of an HTTP GET.
     pub health_path: String,
-    /// `0` = never idle-stop, exactly as `McpServer::idle_seconds` means it.
+    /// `0` = never idle-stop, exactly as an MCP server's `idle_seconds` means it.
     pub idle_seconds: i64,
     /// `0` = wait as long as the container takes.
     pub start_timeout_seconds: u64,
@@ -285,7 +287,7 @@ pub struct AgentService {
     /// speaks MCP, registered as the `agent:<id>` server.
     pub provides_mcp: Option<String>,
     /// The origin this agent's UI is served on, as a URL with its slash:
-    /// `http://board.localhost:8001/` (origins §4.1, §4.9). The container's
+    /// `http://board.localhost:8001/`. The container's
     /// own `LMGW_APP_ORIGIN` is the same origin *without* the slash — an
     /// origin to concatenate onto, rather than an `href`.
     pub origin: String,
@@ -313,19 +315,19 @@ pub struct AgentService {
     /// nothing is up — `podman logs` on a container that is gone has nothing to
     /// say.
     pub log_tail: String,
-    /// How many lines [`log_tail`](Self::log_tail) is at most, printed beside
+    /// How many lines `log_tail` is at most, printed beside
     /// it so nobody has to guess whether they are seeing all of it.
     pub log_tail_lines: usize,
-    /// The host mounts this agent's container holds (mounts §5.5, §5.8), in
-    /// the manifest's field order and only the ones an owner has bound.
+    /// The host mounts this agent's container holds, in the manifest's field order and
+    /// only the ones that are bound.
     ///
     /// The App tab lists them. `host` is filled for an `Admin` reader and left
     /// out for the container reading its own row, which is told
-    /// `/lmgw/mounts/<field>` and nothing else (principals §3.10).
+    /// `/lmgw/mounts/<field>` and nothing else.
     pub mounts: Vec<AgentServiceMount>,
 }
 
-/// One bound mount as a reader is shown it (mounts §5.5, §7).
+/// One bound mount as a reader is shown it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -345,7 +347,7 @@ pub struct AgentServiceMount {
     pub access: String,
 }
 
-/// Where this row's document came from (container-runtime §3.4, §5).
+/// Where this row's document came from.
 ///
 /// `None` on the detail document for a row nobody installed from an image — an
 /// agent written in the Definition editor has no package and says so by having
@@ -358,7 +360,7 @@ pub struct AgentServiceMount {
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AgentProvenance {
-    /// The image reference as the owner gave it, tag and all.
+    /// The image reference as it was given at install, tag and all.
     pub image: String,
     /// `podman image inspect --format '{{.Digest}}'` at the last read. Empty
     /// when podman could not say — never a placeholder that reads like a digest.
@@ -369,8 +371,7 @@ pub struct AgentProvenance {
     pub pulled_at: String,
 }
 
-/// Whether the export of this agent lands on another box (container-runtime
-/// §3.4, §8).
+/// Whether the export of this agent lands on another box.
 ///
 /// Shown before the download, never enforced: exporting to the same box is the
 /// common case, and the wrong answer is a file that looks complete while naming
@@ -386,8 +387,7 @@ pub struct AgentPortability {
     pub notes: Vec<String>,
 }
 
-/// The agent's credential as the detail page describes it (container-runtime
-/// §3.1, §8).
+/// The agent's credential as the detail page describes it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -415,7 +415,7 @@ pub struct AgentReviewField {
 /// One `agent_run` job as the Runs tab lists it.
 ///
 /// The universal job fields plus the run's own `detail`/`result`, whose inner
-/// shape belongs to the executor (WP3) rather than to this DTO — the same
+/// shape belongs to the executor rather than to this DTO — the same
 /// split `JobView` already makes for every other job kind.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -432,12 +432,18 @@ pub struct AgentRunSummary {
     pub percent: Option<u64>,
     pub stage: String,
     pub detail: serde_json::Value,
-    /// Prompt + completion tokens the run spent, from its result (§4.5).
+    /// Prompt + completion tokens the run spent, from its result.
     /// `None` until it has one — "not known yet", which is not zero.
     pub tokens: Option<u64>,
     /// What those tokens cost, in micro-units of the gateway's currency.
     /// `None` is "nobody could price this", which is also not zero.
     pub cost_micro: Option<i64>,
+    /// The model calls the run made, from its result: calls answered without
+    /// an error. `None` until it has a result. `Some(0)` with no `cost_micro`
+    /// and no tokens is a run that had nothing to price; `Some(0)` can also
+    /// come with a cost, from calls that failed or were stopped after their
+    /// rows were priced.
+    pub model_calls: Option<u64>,
     /// Wall clock from claim to finish. `None` while it is still going.
     pub duration_ms: Option<i64>,
     pub error: Option<String>,
@@ -454,7 +460,7 @@ pub struct AgentRunDetail {
     pub job: AgentRunSummary,
     /// The reviewed rows: the executor's live buffer while running, the job
     /// result after. Rows are deliberately **not** pushed through the generic
-    /// jobs feed (§3).
+    /// jobs feed.
     pub rows: Vec<serde_json::Value>,
     /// The apply step's structured output and the run's usage total, once the
     /// run has finished.
@@ -463,7 +469,7 @@ pub struct AgentRunDetail {
     /// alone — including one finished last week, which is what "reopen this
     /// run's review" needs. For a ledger run its `columns` carry the undeclared
     /// keys the events brought, appended after the declared ones in first-seen
-    /// order (container-runtime §3.2).
+    /// order.
     pub batch: Option<AgentBatchShape>,
     /// The run log: `log` events, rejected events, and the lines lmgw itself
     /// wrote. Empty for an in-process run, which has none yet.
@@ -485,13 +491,13 @@ pub struct AgentImportReport {
     /// An existing agent was overwritten (`replace=1`), keeping its config.
     pub replaced: bool,
     /// Stored config keys the **new** manifest no longer declares, removed with
-    /// the manifest that declared them (container-runtime §5.1's rule, applied
-    /// to every replace). Keeping them would leave a row that fails validation
+    /// the manifest that declared them (the same rule applies to every replace). Keeping them
+    /// would leave a row that fails validation
     /// on every run and cannot be fixed from its own config form.
     pub dropped_config: Vec<String>,
-    /// Mount slots this agent has and nothing has bound (mounts §5.2): an
+    /// Mount slots this agent has and nothing has bound: an
     /// export never carries a host path, so an imported agent arrives with its
-    /// `directory` and `file` fields empty and the owner says which folder.
+    /// `directory` and `file` fields empty and the importer says which folder.
     pub config_unbound: Vec<String>,
     /// `validate_only=1`: the same report, nothing written.
     pub validate_only: bool,

@@ -79,7 +79,7 @@ pub const CLOCK_EVENT_REASONS: &[(u64, &str, bool)] = &[
 /// The bits of [`CLOCK_EVENT_REASONS`] that count as throttling.
 pub const THROTTLE_MASK: u64 = 0x4 | 0x8 | 0x20 | 0x40 | 0x80;
 
-/// One phase of a run, in suite order (§4.4).
+/// One phase of a run, in suite order.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -152,7 +152,7 @@ impl Phase {
     }
 }
 
-/// The sampling every request of a run uses (§4.2): pinned, so builds compare
+/// The sampling every request of a run uses: pinned, so builds compare
 /// and speculative decoding's acceptance does not wander with the row's own
 /// sampler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,8 +177,8 @@ impl Default for Sampling {
     }
 }
 
-/// What a run was asked to do (§7 `params`). The suite constants are stored
-/// beside the owner's choices, so a stored run says exactly what it measured
+/// What a run was asked to do. The suite constants are stored
+/// beside the caller's choices, so a stored run says exactly what it measured
 /// without anyone having to know which suite version meant what.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -236,7 +236,7 @@ impl SuiteParams {
     }
 }
 
-/// The points a run measures (§4.2), derived from the live server's per-slot
+/// The points a run measures, derived from the live server's per-slot
 /// context and slot count — or, in `bench_plan`, provisionally from the row's
 /// own numbers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -276,7 +276,7 @@ impl PointPlan {
     }
 }
 
-/// The mixed phase's shape (§4.2).
+/// The mixed phase's shape.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -304,7 +304,7 @@ pub struct Stat {
     pub values: Vec<f64>,
 }
 
-/// Where a joule figure came from (§2.3, §4.3).
+/// Where a joule figure came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -323,7 +323,7 @@ pub enum EnergySource {
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Energy {
-    /// The whole card, idle draw included (§4.3).
+    /// The whole card, idle draw included.
     pub joules: f64,
     /// Length of the measured windows, summed.
     pub seconds: f64,
@@ -343,8 +343,8 @@ pub struct Energy {
     pub source: EnergySource,
 }
 
-/// Speculative decoding's draft statistics, summed over a point's requests
-/// (§4.3). Present only when the server reported them.
+/// Speculative decoding's draft statistics, summed over a point's requests. Present only when the
+/// server reported them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -355,7 +355,7 @@ pub struct DraftStats {
     pub acceptance: Option<f64>,
 }
 
-/// One prefill point (§4.3): `n_predict: 1`, `cache_prompt: false`.
+/// One prefill point: `n_predict: 1`, `cache_prompt: false`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -375,13 +375,13 @@ pub struct PrefillPoint {
     pub energy: Option<Energy>,
     /// Why `energy` is `None` although the card reports power: a window
     /// shorter than the GPU sampler resolves (two of its ticks, 200 ms at
-    /// the 100 ms tick — §13 decision 56), whose figure would have been the
+    /// the 100 ms tick), whose figure would have been the
     /// ticks' average power times its length rather than a measurement.
     /// `None` otherwise.
     pub energy_unmeasured: Option<String>,
 }
 
-/// One decode point (§4.3): `n_predict: G`, `ignore_eos`, `cache_prompt: true`.
+/// One decode point: `n_predict: G`, `ignore_eos`, `cache_prompt: true`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -399,7 +399,7 @@ pub struct DecodePoint {
     /// Distinct token ids over generated ones, per repetition: near 1 for
     /// prose, low for a degenerate loop that `ignore_eos` ran into — and a
     /// loop is what a drafter predicts perfectly, so a draft acceptance
-    /// next to a low ratio flatters it (§13 decision 58). Only where the
+    /// next to a low ratio flatters it. Only where the
     /// engine streams token ids (official llama.cpp, not ik).
     pub distinct_token_ratio: Option<Stat>,
     /// Over first token → last token of each repetition, so the priming
@@ -407,13 +407,13 @@ pub struct DecodePoint {
     pub energy: Option<Energy>,
     /// Why `energy` is `None` although the card reports power: a window
     /// shorter than the GPU sampler resolves (two of its ticks, 200 ms at
-    /// the 100 ms tick — §13 decision 56), whose figure would have been the
+    /// the 100 ms tick), whose figure would have been the
     /// ticks' average power times its length rather than a measurement.
     /// `None` otherwise.
     pub energy_unmeasured: Option<String>,
 }
 
-/// One concurrent point (§4.3): *N* streams released together.
+/// One concurrent point: *N* streams released together.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -429,13 +429,13 @@ pub struct ConcurrentPoint {
     pub energy: Option<Energy>,
     /// Why `energy` is `None` although the card reports power: a window
     /// shorter than the GPU sampler resolves (two of its ticks, 200 ms at
-    /// the 100 ms tick — §13 decision 56), whose figure would have been the
+    /// the 100 ms tick), whose figure would have been the
     /// ticks' average power times its length rather than a measurement.
     /// `None` otherwise.
     pub energy_unmeasured: Option<String>,
 }
 
-/// The mixed phase (§4.3): what an arriving long prompt costs streams that
+/// The mixed phase: what an arriving long prompt costs streams that
 /// are already decoding.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -464,7 +464,7 @@ pub struct MixedResult {
     pub notes: Vec<String>,
 }
 
-/// The load phase (§4.3), measured by the integration around `podman run`.
+/// The load phase, measured by the integration around `podman run`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -473,13 +473,13 @@ pub struct LoadResult {
     pub ms: u64,
     /// Device VRAM used once healthy.
     pub vram_used_bytes: Option<u64>,
-    /// `vram_used_bytes` minus the baseline (§3.2 step 4).
+    /// `vram_used_bytes` minus the baseline.
     pub vram_bytes: Option<u64>,
 }
 
-/// What the live server says about itself (§3.4): the numbers every point is
+/// What the live server says about itself: the numbers every point is
 /// derived from, and the build facts `/props` carries on engines that report
-/// them (§2.1).
+/// them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -494,8 +494,8 @@ pub struct ServerFacts {
     /// The whole context, where the engine reports it (ik's top-level
     /// `/props` `n_ctx`).
     pub total_ctx: Option<u64>,
-    /// Whether every slot draws its KV cells from one shared pool (§13
-    /// decision 57): then *S* is the whole pool, and requests running
+    /// Whether every slot draws its KV cells from one shared pool: then *S* is the whole pool, and
+    /// requests running
     /// together must fit in it side by side — a full pool aborts every
     /// running request. From the server where it says (ik's top-level
     /// `n_ctx` against the per-slot one), else from the row's effective
@@ -527,7 +527,7 @@ pub struct PhaseError {
 }
 
 /// A request the engine sent a second time because its connection broke
-/// before any response arrived (benchmark design §13 decision 62). What the
+/// before any response arrived. What the
 /// step recorded is the second attempt's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -542,7 +542,7 @@ pub struct RetriedRequest {
     pub error: String,
 }
 
-/// The run's VRAM and energy picture (§4.3, §7 `results`).
+/// The run's VRAM and energy picture.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -551,7 +551,7 @@ pub struct EnergySummary {
     /// power at all (then `unavailable` says why).
     pub source: Option<EnergySource>,
     pub unavailable: Option<String>,
-    /// Device VRAM used before the bench container started (§3.2 step 4).
+    /// Device VRAM used before the bench container started.
     pub baseline_vram_bytes: Option<u64>,
     /// Mean power over the baseline window, so a view can show net energy.
     pub idle_power_w: Option<f64>,
@@ -561,8 +561,7 @@ pub struct EnergySummary {
     pub total_joules: Option<f64>,
 }
 
-/// Everything a run measured apart from the probes and the timeline (§7
-/// `results`).
+/// Everything a run measured apart from the probes and the timeline.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -573,11 +572,11 @@ pub struct RunResults {
     pub complete: bool,
     pub server: Option<ServerFacts>,
     pub points: Option<PointPlan>,
-    /// The corpus, tokenized by the bench server (§4.1).
+    /// The corpus, tokenized by the bench server.
     pub corpus_tokens: Option<u64>,
     /// The token ids every measured prompt starts with: the vocabulary's
     /// BOS where it adds one — llama-server adds none to a token-id prompt —
-    /// counted inside each prompt's length (§13 decision 58). Empty when the
+    /// counted inside each prompt's length. Empty when the
     /// vocabulary adds nothing.
     pub prompt_prefix: Vec<u32>,
     pub load: Option<LoadResult>,
@@ -588,13 +587,13 @@ pub struct RunResults {
     /// Phases that ran to the end, in order.
     pub phases_done: Vec<Phase>,
     pub phase_errors: Vec<PhaseError>,
-    /// Requests sent a second time after a broken connection (decision 62),
+    /// Requests sent a second time after a broken connection,
     /// in the order they happened.
     pub retried: Vec<RetriedRequest>,
     pub energy: EnergySummary,
 }
 
-/// The behaviour probes (§5).
+/// The behaviour probes.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -610,7 +609,7 @@ pub enum ProbeKind {
     Deterministic,
     Vision,
     ReasoningHistory,
-    /// Always last (§4.4): it is the one probe with a full-context prefill.
+    /// Always last: it is the one probe with a full-context prefill.
     Needle,
 }
 
@@ -642,14 +641,14 @@ impl ProbeKind {
     }
 }
 
-/// How a probe ended (§5).
+/// How a probe ended.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ProbeOutcome {
     Pass,
     Fail,
-    /// A finding, not a verdict (`reasoning_history`).
+    /// An observation, not a verdict (`reasoning_history`).
     Info,
     /// Not applicable to this model; `detail` says why.
     #[default]
@@ -692,7 +691,7 @@ pub struct ProbeResult {
     pub evidence: Vec<ProbeEvidence>,
 }
 
-/// §7 `probes`.
+/// The probe results stored with a run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -700,7 +699,7 @@ pub struct ProbeReport {
     pub probes: Vec<ProbeResult>,
 }
 
-/// One stored sample (every [`TIMELINE_INTERVAL_MS`]); sums over the devices,
+/// One stored sample (spaced `interval_ms` apart); sums over the devices,
 /// temperature is the hottest one's.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -711,7 +710,7 @@ pub struct TimelineSample {
     pub vram_used_bytes: Option<u64>,
     pub power_w: Option<f64>,
     pub temp_c: Option<u32>,
-    /// The OR of [`CLOCK_EVENT_REASONS`] bits seen since the previous stored
+    /// The OR of the NVML clock-event reason bits seen since the previous stored
     /// sample.
     pub clock_events: Option<u64>,
 }
@@ -727,7 +726,7 @@ pub struct PhaseSpan {
     pub end_ms: Option<u64>,
 }
 
-/// §7 `timeline`.
+/// The sampled timeline stored with a run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -737,13 +736,13 @@ pub struct Timeline {
     pub phases: Vec<PhaseSpan>,
 }
 
-/// §6 `gpu`, as far as the sampler sees it. Sums and maxima over the visible
+/// The GPU the run used, as far as the sampler sees it. Sums and maxima over the visible
 /// devices.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GpuIdentity {
-    /// The first device's name (comparison key, §6).
+    /// The first device's name (a comparison key).
     pub name: Option<String>,
     pub driver: Option<String>,
     pub devices: u32,
@@ -755,14 +754,18 @@ pub struct GpuIdentity {
     pub temp_max_c: Option<u32>,
     /// The OR of every sample's clock-event reasons.
     pub clock_events: u64,
-    /// Whether any of those is a [`THROTTLE_MASK`] reason. A run that
-    /// throttled reports the throttled numbers.
+    /// Whether any of those is a throttling reason: NVML's software power cap
+    /// (`0x4`), hardware slowdown (`0x8`), software or hardware thermal
+    /// slowdown (`0x20`, `0x40`) or power-brake slowdown (`0x80`). Idle, the
+    /// applications-clocks setting, sync boost and the display clock are
+    /// states, not throttling. A run that throttled reports the throttled
+    /// numbers.
     pub throttled: bool,
     /// The GPU probe's own label (`NVML (driver …)`, or why there is none).
     pub telemetry: String,
 }
 
-/// §6 `model`, filled by the integration.
+/// The model the run measured, filled in by the benchmark runner.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -777,8 +780,8 @@ pub struct ModelIdentity {
     pub rung: u32,
 }
 
-/// §6 `build`, filled by the integration from the image and its labels
-/// (§2.2), plus `/props` `build_info` where the engine reports it.
+/// The build the run measured, filled in by the benchmark runner from the image and its labels,
+/// plus `/props` `build_info` where the engine reports it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

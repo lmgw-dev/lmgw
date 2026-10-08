@@ -10,10 +10,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Mirror of `config::CandidateAlias` (stored fields) plus what
-/// `candidates::derive::derive` computes from the live snapshot (never
-/// stored, recomputed on every read — see that function's own doc comment
-/// for the cost).
+/// A candidate alias: its stored fields plus what lmgw computes from the live snapshot
+/// (never stored, recomputed on every read).
+// Mirror of `config::CandidateAlias`; the derived part is `candidates::derive::derive`,
+// whose own doc comment states the cost.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CandidateAliasView {
@@ -26,8 +26,7 @@ pub struct CandidateAliasView {
     /// `inherit` | `none` | `alias`.
     pub fallback_mode: String,
     pub fallback: Option<String>,
-    /// The owner's explicit "turn this common facet off" list (wire facet
-    /// names).
+    /// The explicit "turn this common facet off" list (wire facet names).
     pub capabilities_disabled: Vec<String>,
     pub enabled: bool,
     pub notes: String,
@@ -48,7 +47,7 @@ pub struct CandidateAliasView {
     pub routable: Vec<String>,
     /// What is wrong with a candidate or the fallback, in prose.
     pub problems: Vec<String>,
-    /// A candidate with `--cache-ram 0` (§4.5): not an error, but worth
+    /// A candidate with `--cache-ram 0`: not an error, but worth
     /// flagging.
     pub advisories: Vec<String>,
     /// The alias fallback resolves, is not local, and supports every enabled
@@ -59,7 +58,7 @@ pub struct CandidateAliasView {
     pub context_length: Option<u64>,
     pub max_output_tokens: Option<u64>,
     /// How many `gpu_deferred` refusals this alias logged in the last 24
-    /// hours (§6) — `lmgw_core::candidates::deferrals`. `Some(0)` is a real
+    /// hours. `Some(0)` is a real
     /// zero; `None` only ever means a frame cached from before this field
     /// existed (`#[serde(default)]`), never "unknown".
     #[serde(default)]

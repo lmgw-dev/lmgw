@@ -180,10 +180,11 @@ async fn connect(State(st): State<SharedState>) -> Json<dto::ConnectInfo> {
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct LogsQuery {
     limit: Option<i64>,
-    /// Deserialized as a string, not `Option<bool>`: serde's bool rejects
-    /// anything but `true`/`false`, so a hand-typed (or older) `?errors_only=1`
-    /// answered **400 Failed to deserialize query string** — a link that looks
-    /// right and returns nothing. See [`truthy`].
+    /// `1`, `true`, `yes` or `on` (any case) lists errors only.
+    // Deserialized as a string, not `Option<bool>`: serde's bool rejects
+    // anything but `true`/`false`, so a hand-typed (or older) `?errors_only=1`
+    // answered **400 Failed to deserialize query string** — a link that looks
+    // right and returns nothing. See `truthy`.
     errors_only: Option<String>,
     alias: Option<String>,
     upstream: Option<String>,
@@ -225,37 +226,60 @@ async fn logs(State(st): State<SharedState>, Query(q): Query<LogsQuery>) -> Resp
         alias_q: q.alias_q.filter(|s| !s.trim().is_empty()),
         upstream_q: q.upstream_q.filter(|s| !s.trim().is_empty()),
     };
+    let currency = st.snapshot().settings.currency.clone();
     match crate::store::query_logs(&st.db, &filter).await {
         Ok(rows) => {
             let logs = rows
                 .into_iter()
-                .map(|r| dto::RequestRow {
-                    log_id: r.id,
-                    ts: r.ts,
-                    client_key: r.client_key,
-                    ingress_proto: r.ingress_proto,
-                    requested_alias: r.requested_alias,
-                    upstream_name: r.upstream_name,
-                    upstream_model: r.upstream_model,
-                    egress_proto: r.egress_proto,
-                    status: r.status as u16,
-                    ttfb_ms: r.ttfb_ms,
-                    total_ms: r.total_ms,
-                    prompt_tokens: r.prompt_tokens,
-                    completion_tokens: r.completion_tokens,
-                    cached_in_tokens: r.cached_in_tokens,
-                    cache_write_tokens: r.cache_write_tokens,
-                    streamed: r.streamed,
-                    error_kind: r.error_kind,
-                    error_msg: r.error_msg,
-                    mcp_tool: r.mcp_tool,
-                    cost_micro: r.cost_micro,
-                    class: r.class.unwrap_or_default(),
-                    key_id: r.key_id,
-                    max_tokens_clamped: r.max_tokens_clamped,
-                    fallback_reason: r.fallback_reason,
-                    rung: r.rung,
-                    degraded: r.degraded,
+                .map(|r| {
+                    // The rollup's own rule, read before the row's fields
+                    // move into the frame (billable units §8.4).
+                    let in_remainder = r.in_unpriced_remainder();
+                    dto::RequestRow {
+                        log_id: r.id,
+                        ts: r.ts,
+                        client_key: r.client_key,
+                        ingress_proto: r.ingress_proto,
+                        requested_alias: r.requested_alias,
+                        upstream_name: r.upstream_name,
+                        upstream_model: r.upstream_model,
+                        egress_proto: r.egress_proto,
+                        status: r.status as u16,
+                        ttfb_ms: r.ttfb_ms,
+                        total_ms: r.total_ms,
+                        prompt_tokens: r.prompt_tokens,
+                        completion_tokens: r.completion_tokens,
+                        cached_in_tokens: r.cached_in_tokens,
+                        cache_write_tokens: r.cache_write_tokens,
+                        streamed: r.streamed,
+                        error_kind: r.error_kind,
+                        error_msg: r.error_msg,
+                        mcp_tool: r.mcp_tool,
+                        cost_micro: r.cost_micro,
+                        class: r.class.unwrap_or_default(),
+                        key_id: r.key_id,
+                        max_tokens_clamped: r.max_tokens_clamped,
+                        fallback_reason: r.fallback_reason,
+                        rung: r.rung,
+                        degraded: r.degraded,
+                        audio_in_ms: r.audio_in_ms,
+                        chars_in: r.chars_in,
+                        images_out: r.images_out,
+                        pricing: Some(dto::RowPricing {
+                            currency: currency.clone(),
+                            source: r.price_source,
+                            in_remainder,
+                            price_in: r.price_in,
+                            price_out: r.price_out,
+                            cost_in_micro: r.cost_in_micro,
+                            cost_out_micro: r.cost_out_micro,
+                            cost_units_micro: r.cost_units_micro,
+                            price_per_audio_minute: r.price_per_audio_minute,
+                            price_per_mchar: r.price_per_mchar,
+                            price_per_image: r.price_per_image,
+                            price_per_request: r.price_per_request,
+                        }),
+                    }
                 })
                 .collect();
             Json(dto::LogsResponse { logs }).into_response()
@@ -459,7 +483,7 @@ async fn gguf_files(State(st): State<SharedState>, Query(q): Query<SearchQuery>)
 pub(crate) struct FlagsQuery {
     search: Option<String>,
     /// A configured model id (any class) or an image reference; absent reads
-    /// the chat class image (§3.6 — the vocabulary is per image now).
+    /// the chat class image (the flag vocabulary is per image).
     model: Option<String>,
 }
 
@@ -487,9 +511,9 @@ async fn local_model_plan(
     ops_result(crate::modelinfo::local_model_plan(&st, &q.path, q.probe, q.target.as_deref()).await)
 }
 
-/// The editor's ladder table (ladder design §6): every rung shares cache
-/// types, projector and drafter with the base row (§4.1), so these mirror
-/// `LlamaParams`' own field names rather than nesting a whole row.
+/// The editor's ladder table: every rung shares cache types, projector and
+/// drafter with the base row, so these mirror `LlamaParams`' own field names
+/// rather than nesting a whole row.
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct RungPlanQuery {
     gguf_path: String,
@@ -548,7 +572,7 @@ async fn hf_downloads(State(st): State<SharedState>) -> Response {
     ops_result(crate::ops::hf_downloads(&st).await)
 }
 
-/// Poll half of the jobs feed (§9c); the SSE `jobs` frame on `/api/events` is
+/// Poll half of the jobs feed; the SSE `jobs` frame on `/api/events` is
 /// the push half. `limit` is a request parameter with no default ceiling — the
 /// table is bounded by the visible retention settings, not by a second cap
 /// hidden in a handler.
@@ -825,7 +849,7 @@ async fn op(
     }
     let res = match name.as_str() {
         "upstream_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::upstream_set(&st, p).await,
+            Ok(p) => ops::upstream_set(&st, p, ops::RowWriter::Dashboard).await,
             Err(e) => Err(e),
         },
         "model_set" => match patch_from_args(Some(args)) {
@@ -844,7 +868,7 @@ async fn op(
             Err(e) => Err(e),
         },
         "mcp_server_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::mcp_server_set(&st, p).await,
+            Ok(p) => ops::mcp_server_set(&st, p, ops::RowWriter::Dashboard).await,
             Err(e) => Err(e),
         },
         "settings_set" => match patch_from_args(Some(args)) {
@@ -891,21 +915,46 @@ async fn op(
         // The fourth, `key_set`, is dispatched above with the other four
         // credential ops.
         "price_set" => {
-            let f = |k: &str| args.get(k).and_then(Value::as_f64);
+            // A rate that is not a number is refused by name: dropped, a
+            // "3" in quotes would clear the price it was meant to set.
+            let rate = |k: &str| -> Result<Option<f64>, String> {
+                match args.get(k) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(v) => v
+                        .as_f64()
+                        .map(Some)
+                        .ok_or_else(|| format!("{k} must be a number, got {v}")),
+                }
+            };
+            let rates = (|| {
+                Ok::<_, String>(ops::PriceRates {
+                    price_in: rate("price_in")?,
+                    price_out: rate("price_out")?,
+                    price_cache_read: rate("price_cache_read")?,
+                    price_cache_write: rate("price_cache_write")?,
+                    price: rate("price")?,
+                })
+            })();
             let scope_kind = arg_str(&args, "scope_kind").unwrap_or("alias").to_string();
             let scope_key = arg_str(&args, "scope_key").map(str::to_string);
             let note = arg_str(&args, "note").map(str::to_string);
-            ops::price_set(
-                &st,
-                &scope_kind,
-                scope_key.as_deref(),
-                f("price_in"),
-                f("price_out"),
-                f("price_cache_read"),
-                f("price_cache_write"),
-                note.as_deref(),
-            )
-            .await
+            // The editor also posts the row's `id`; the unit is part of a
+            // row's key, so the op writes by scope and unit and ignores it.
+            let unit = arg_str(&args, "unit").map(str::to_string);
+            match rates {
+                Ok(rates) => {
+                    ops::price_set(
+                        &st,
+                        &scope_kind,
+                        scope_key.as_deref(),
+                        unit.as_deref(),
+                        rates,
+                        note.as_deref(),
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            }
         }
         "price_delete" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => ops::price_delete(&st, id).await,
@@ -1140,8 +1189,8 @@ async fn audio_catalog_op(st: &SharedState, args: &Args) -> Result<Value, String
     }
 }
 
-/// Upstream create/update including `extra_headers`, which the tool-plane
-/// patch omits. Secrets follow the house convention: an empty api_key keeps
+/// Upstream create/update including `extra_headers`, which the self-admin
+/// `upstream_set` tool omits. For secrets, an empty api_key keeps
 /// the stored one, and a header value of "<set>" round-trips to the stored
 /// value for that header name.
 #[derive(Deserialize, Default, schemars::JsonSchema)]
@@ -1284,9 +1333,9 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
     }
 }
 
-/// Alias create/update including param overrides, which `ops::model_set`
-/// does not carry (its tool-plane schema stays scalar-only). Overrides are
-/// replaced wholesale — the form always sends the complete set.
+/// Alias create/update including param overrides, which the self-admin
+/// `model_set` tool does not carry (its schema stays scalar-only). Overrides
+/// are replaced wholesale — the form always sends the complete set.
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct AliasFullPatch {
@@ -1297,15 +1346,14 @@ pub(crate) struct AliasFullPatch {
     upstream_model: Option<String>,
     enabled: Option<bool>,
     overrides: Option<serde_json::Value>,
-    /// Owner override of the derived `/v1/models` capability facts
-    /// (model-capabilities design §7) — see
-    /// `ops::parse_capabilities_override`, which this field is handed to
-    /// verbatim. A JSON `null` is indistinguishable from an absent field
-    /// once serde has parsed it (both deserialise to `None`), so — like
-    /// `chat_template_kwargs` on the local model form — the form sends an
-    /// empty *string* to clear, never `null`; `parse_capabilities_override`
-    /// reads that string as "clear". `None` here (the field truly absent)
-    /// leaves the stored value as is.
+    /// An alias's capabilities override: the derived `/v1/models` capability
+    /// facts it replaces or extends. An empty *string* clears a stored
+    /// override; an absent field (or `null`) leaves the stored value as is.
+    // Design: model-capabilities §7; the value is handed verbatim to
+    // `ops::parse_capabilities_override`. A JSON `null` is indistinguishable
+    // from an absent field once serde has parsed it (both deserialise to
+    // `None`), so — like `chat_template_kwargs` on the local model form — the
+    // form sends an empty string to clear, never `null`.
     capabilities_override: Option<serde_json::Value>,
 }
 
@@ -1397,8 +1445,7 @@ async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<Value, String>
 }
 
 /// Hide/unhide one model of an `expose_all` upstream's live catalog from
-/// `/v1/models` and the client-facing model list (`server::exposed_model_names`
-/// filters on the same `hidden_passthrough` set this writes). The model itself
+/// `/v1/models` and the client-facing model list. The model itself
 /// is never configured here — it is whatever the upstream's catalog reports —
 /// so there is no `id`, only the `(upstream_id, model_id)` pair that names one
 /// entry of a live catalog.
@@ -1469,8 +1516,16 @@ const RATE_TICK: std::time::Duration = std::time::Duration::from_millis(500);
 /// - `vram` — the GPU ledger + admission queue (§9b); on connect, whenever a
 ///   request starts or stops waiting for memory, and on the same 5 s tick
 ///   (free memory moves without lmgw doing anything).
+/// - `keys` — `KeysChanged`; a device's connection opened or closed, or a
+///   key was disabled, rotated or deleted (client-apps design §1.6).
+/// - `chat` — `ChatChanged`; the threads, folders and messages every
+///   writer changed (a device, an owner key, this window or another, the
+///   sweep), so the Chat page reads them again. One with `resync` on
+///   connect; a burst is one frame, 200 ms after its first change
+///   (`chat_feed::dashboard`).
 async fn events(
     State(st): State<SharedState>,
+    served: Option<axum::Extension<crate::server::ServedAt>>,
 ) -> Sse<impl Stream<Item = Result<SseFrame, String>>> {
     fn frame<T: serde::Serialize>(event: &str, data: &T) -> Result<SseFrame, String> {
         Ok(SseFrame::default()
@@ -1483,6 +1538,9 @@ async fn events(
     }
 
     let rx = st.telemetry.subscribe();
+    // Before the first frame: the `chat` resync below covers what changed
+    // until now, and every change after it is a frame of its own.
+    let chat = super::chat_feed::dashboard::Changes::open(&st).await;
 
     let first_stats = st.telemetry.stats();
     let initial = stream::iter(vec![
@@ -1492,6 +1550,8 @@ async fn events(
         // dashboard opened onto a steady-state gateway would otherwise see no
         // `runtime` frame until something started or stopped.
         frame("runtime", &st.runtime().list()),
+        // What a page read before this stream (re)connected may be stale.
+        frame("chat", &dto::ChatChanged::resync()),
     ])
     .chain(stream::once({
         let st = st.clone();
@@ -1531,7 +1591,19 @@ async fn events(
                     Ok(Event::Vram(view)) => vec![frame("vram", &view)],
                     Ok(Event::Runtime(views)) => vec![frame("runtime", &views)],
                     Ok(Event::Updates(summary)) => vec![frame("updates", &summary)],
-                    Err(_) => vec![], // lagged; drop
+                    Ok(Event::Keys(changed)) => vec![frame("keys", &changed)],
+                    // Lagged: the frames missed are not replayed, but a
+                    // `keys` frame may be among them, and the Keys page polls
+                    // nothing — so it is told to refetch (review W3-19). The
+                    // other frames carry whole views and catch up on their
+                    // next change or tick.
+                    Err(_) => vec![frame(
+                        "keys",
+                        &lmgw_api_types::KeysChanged {
+                            key_id: 0,
+                            what: "resync".into(),
+                        },
+                    )],
                 }
             })
             .flat_map(stream::iter)
@@ -1581,6 +1653,14 @@ async fn events(
         )
     };
 
-    let stream = initial.chain(stream::select(live, stream::select(tick, rate)));
+    let chat = super::chat_feed::dashboard::frames(chat).map(|c| frame("chat", &c));
+
+    let stream = initial.chain(stream::select(
+        live,
+        stream::select(tick, stream::select(rate, chat)),
+    ));
+    // Ends when the server stops: the page reconnects to the next one.
+    let at = served.map(|axum::Extension(crate::server::ServedAt(at))| at);
+    let stream = crate::server::until_stopped(&st.stops, at, stream, None);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

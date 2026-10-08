@@ -19,20 +19,26 @@ fn reasoning_text(msg: &Value) -> Option<&str> {
         .or_else(|| msg.get("reasoning").and_then(Value::as_str))
 }
 
-pub(super) fn parse_usage(v: Option<&Value>) -> Usage {
+/// An OpenAI `usage` object: a chat completion's, whole or streamed, the
+/// auxiliary routes' and legacy `/v1/completions`'.
+pub(crate) fn parse_usage(v: Option<&Value>) -> Usage {
     match v {
         Some(u) => {
-            // `prompt_tokens` already includes the cached subset here — OpenAI
-            // reports `prompt_tokens_details.cached_tokens` as a *detail of* the
-            // total, which is the IR's meaning too, so nothing is adjusted.
+            // `prompt_tokens` already includes both cache subsets here — OpenAI
+            // reports `prompt_tokens_details.cached_tokens` and
+            // `.cache_write_tokens` as *details of* the total, which is the
+            // IR's meaning too, so nothing is adjusted.
             let detail = |k: &str, f: &str| u.get(k).and_then(|d| d.get(f)).and_then(Value::as_u64);
             Usage {
                 prompt_tokens: u.get("prompt_tokens").and_then(Value::as_u64),
                 completion_tokens: u.get("completion_tokens").and_then(Value::as_u64),
                 cached_input_tokens: detail("prompt_tokens_details", "cached_tokens"),
-                // OpenAI's prompt caching is automatic and writes are not
-                // billed separately, so there is no write counter to read.
-                cache_write_tokens: None,
+                // Since GPT-5.6 OpenAI bills prompt-cache writes at their own
+                // rate (1.25x input), in place of the input rate rather than on
+                // top of it — the IR's cache-write subset exactly. On older
+                // models a write costs the plain input rate, which is what a
+                // price row without `price_cache_write` falls back to.
+                cache_write_tokens: detail("prompt_tokens_details", "cache_write_tokens"),
                 reasoning_tokens: detail("completion_tokens_details", "reasoning_tokens"),
             }
         }

@@ -1,0 +1,173 @@
+[
+ {
+  "nav": "/usage/keys"
+ },
+ {
+  "until": "!!document.querySelector('.devices-card')",
+  "timeout": 10,
+  "label": "the Devices card is there"
+ },
+ {
+  "click": ".devices-card .card-head button.btn"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "!!document.querySelector(\"dialog[open] input[aria-label=\\\"May use lmgw's admin tools\\\"]\")",
+  "label": "the pairing form has the switch \"may use lmgw's admin tools\""
+ },
+ {
+  "expect": "document.querySelector(\"dialog[open] input[aria-label=\\\"May use lmgw's admin tools\\\"]\").checked === false",
+  "label": "off by default"
+ },
+ {
+  "click": "dialog[open] input[aria-label='Device name']"
+ },
+ {
+  "js": "(() => { const i = document.querySelector(\"dialog[open] input[aria-label='Device name']\"); i.value = 'drive-admin-' + Date.now().toString(36); i.dispatchEvent(new Event('input', {bubbles: true})); window.__driveName = i.value; return i.value; })()"
+ },
+ {
+  "click": "dialog[open] input[aria-label=\"May use lmgw's admin tools\"]"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "expect": "document.querySelector(\"dialog[open] input[aria-label=\\\"May use lmgw's admin tools\\\"]\").checked === true",
+  "label": "ticked"
+ },
+ {
+  "shot": "pair-form-admin-tools"
+ },
+ {
+  "click": "dialog[open] .modal-foot button.primary"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('dialog[open] .pair-review tr')].some(r => r.querySelector('th')?.textContent === 'Admin tools' && r.querySelector('td')?.textContent.trim() === 'allowed')",
+  "label": "the review restates the switch"
+ },
+ {
+  "expect": "document.querySelector('dialog[open]').textContent.includes(\"read and change lmgw's configuration through the admin tools, within the self-admin level set in Settings\")",
+  "label": "and says what it lets the device do, before anything is minted"
+ },
+ {
+  "shot": "pair-review-admin-tools"
+ },
+ {
+  "click": "dialog[open] .modal-foot button.primary"
+ },
+ {
+  "until": "document.querySelector('dialog[open] .pair-link')?.textContent.startsWith('lmgw-pair:?v=1&url=')",
+  "timeout": 10,
+  "label": "paired: the link is shown once"
+ },
+ {
+  "click": "dialog[open] .modal-foot button.primary"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "until": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); return !!row && [...row.querySelectorAll('.chip')].some(c => c.textContent === 'admin tools'); })()",
+  "timeout": 10,
+  "label": "the new device carries the \"admin tools\" chip"
+ },
+ {
+  "shot": "devices-card-admin-tools"
+ },
+ {
+  "js": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); row.querySelector('.row-menu-btn').click(); return !!row; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "[...document.querySelectorAll('.menu-list .menu-item')].some(i => i.textContent.trim() === 'Take back the admin tools')",
+  "label": "its menu takes the admin tools back"
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === \"Take back the admin tools\"); i.click(); return !!i; })()"
+ },
+ {
+  "until": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); return !!row && ![...row.querySelectorAll('.chip')].some(c => c.textContent === 'admin tools'); })()",
+  "timeout": 10,
+  "label": "taken back at once, no confirmation: the chip goes"
+ },
+ {
+  "js": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); row.querySelector('.row-menu-btn').click(); return !!row; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === \"Allow lmgw's admin tools\\u2026\"); i.click(); return !!i; })()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .notice.warn')?.textContent.includes(\"read and change lmgw's configuration through the admin tools, within the self-admin level set in Settings\")",
+  "label": "turning it on asks first, saying what it lets the device do"
+ },
+ {
+  "shot": "allow-admin-tools-confirm"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]')",
+  "label": "Cancel allows nothing"
+ },
+ {
+  "expect": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); return !!row && ![...row.querySelectorAll('.chip')].some(c => c.textContent === 'admin tools'); })()",
+  "label": "still without the admin tools"
+ },
+ {
+  "js": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); row.querySelector('.row-menu-btn').click(); return !!row; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === \"Allow lmgw's admin tools\\u2026\"); i.click(); return !!i; })()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "click": "dialog[open] .modal-foot button.danger"
+ },
+ {
+  "until": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); return !!row && [...row.querySelectorAll('.chip')].some(c => c.textContent === 'admin tools'); })()",
+  "timeout": 10,
+  "label": "confirmed: the chip is back"
+ },
+ {
+  "js": "(() => { const row = [...document.querySelectorAll('.devices-table tr')].find(r => [...r.querySelectorAll('.mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)); row.querySelector('.row-menu-btn').click(); return !!row; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === \"Delete\\u2026\"); i.click(); return !!i; })()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "click": "dialog[open] .modal-foot button.danger"
+ },
+ {
+  "until": "![...document.querySelectorAll('.devices-table td .mono-sm')].some(s => s.textContent === 'device:' + window.__driveName)",
+  "timeout": 10,
+  "label": "the drive's device is deleted: no live credential is left behind"
+ }
+]

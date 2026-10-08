@@ -361,9 +361,10 @@ impl ErrorObject {
 
 /// `conversation.item.input_audio_transcription.completed`'s `usage`:
 /// openai-python declares it required, and the GA type is billed tokens or
-/// billed audio (live acceptance L3, §23). A cascade's ASR has no tokens to
-/// report; what it took is the committed segment's audio, so the variant is
-/// `duration` — which `@openai/agents`' schema accepts too.
+/// billed audio (live acceptance L3, §23). The event reports what the
+/// cascade's ASR took as the committed segment's audio, so the variant is
+/// `duration` — which `@openai/agents`' schema accepts too. Tokens a cloud
+/// ASR reports go on its `request_logs` row, not into this event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptionUsage {

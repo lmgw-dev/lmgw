@@ -90,16 +90,31 @@ async fn main() -> anyhow::Result<()> {
     // still on it.
     ensure_dev_instance_safety(&state, cli_addr.as_deref()).await?;
 
+    // Ctrl-C or SIGTERM stops the server: its streams end, its sessions
+    // close with 1001, and it returns once they and its turns have ended,
+    // within `server::STOP_WITHIN`. A second one exits at once, said in the
+    // log (review F-4): a stop that is taking its time is never the only way
+    // out but SIGKILL.
     server::run(state.clone(), addr, async {
-        let _ = tokio::signal::ctrl_c().await;
+        let first = server::quit_signal().await;
+        tracing::info!("{first}: stopping (again to exit at once)");
+        tokio::spawn(async {
+            let second = server::quit_signal().await;
+            tracing::warn!(
+                "{second} again: exiting now, without waiting for the stop to finish or the \
+                 model containers to stop (the next start adopts them)"
+            );
+            std::process::exit(server::signal_exit_code(second));
+        });
     })
     .await?;
 
-    // Ctrl-C is this binary's "quit", so it owes the same graceful teardown the
-    // tray app's exit handler does (per-model-containers §3.4): stop every
-    // managed container rather than leaving the GPU full behind a process that
-    // is gone. A kill -9 skips this, deliberately — boot reconciliation adopts
-    // what a crash leaves behind.
+    // The quit's teardown, as the tray app's (per-model-containers §3.4): stop
+    // every managed container rather than leaving the GPU full behind a
+    // process that is gone — only now, after the server returned, so no
+    // session or turn still running has its model stopped under it. A kill -9
+    // skips this, deliberately — boot reconciliation adopts what a crash
+    // leaves behind.
     lmgw_core::runtime::lifecycle::shutdown(&state).await;
     Ok(())
 }

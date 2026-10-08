@@ -33,26 +33,33 @@ pub fn UsageKeys() -> impl IntoView {
     // time it is ever legible (principals §3.12).
     let fresh = RwSignal::new(None::<(String, String)>);
 
-    // Spend and last-used move as requests land: re-ask at most every 15 s,
-    // and only when something landed.
-    let landed = RwSignal::new(false);
+    // Nothing here polls. Spend and last-used move as requests land: one
+    // refetch at most 15 s after the first that landed since the last one.
+    // A device's online state and a revocation move without a request: the
+    // `keys` frame of `/api/events` says so, and the list is refetched at
+    // once (client-apps design §1.6).
+    let pending = RwSignal::new(None::<TimeoutHandle>);
+    let refetch = move || refresh.update(|v| *v = v.wrapping_add(1));
     Effect::new(move |_| {
-        if live.request.get().is_some() {
-            landed.set(true);
+        if live.request.get().is_none() || pending.get_untracked().is_some() {
+            return;
+        }
+        let later = set_timeout_with_handle(
+            move || {
+                pending.set(None);
+                refetch();
+            },
+            Duration::from_secs(15),
+        );
+        pending.set(later.ok());
+    });
+    Effect::new(move |_| {
+        if live.keys.get().is_some() {
+            refetch();
         }
     });
-    let tick = set_interval_with_handle(
-        move || {
-            if landed.get_untracked() {
-                landed.set(false);
-                refresh.update(|v| *v = v.wrapping_add(1));
-            }
-        },
-        Duration::from_secs(15),
-    )
-    .ok();
     on_cleanup(move || {
-        if let Some(h) = tick {
+        if let Some(h) = pending.get_untracked() {
             h.clear();
         }
     });
@@ -83,7 +90,9 @@ pub fn UsageKeys() -> impl IntoView {
                 "caller presents on " <code>"/v1"</code> "; an owner key holds every capability, "
                 "signs a browser in, and is the credential " <code>"/api"</code> " and "
                 <code>"/mcp/admin"</code> " ask for — it is named " <code>"owner:<name>"</code>
-                " and stays copyable from its row."
+                " and stays copyable from its row. A device key is a paired client app's: the "
+                "Chat API and " <code>"/v1"</code> " under its own scope and budget, hash-only — "
+                "Rotate pairs it again."
             </Explain>
         </PageFrame>
     }
@@ -396,8 +405,11 @@ fn KeysTable(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
     let idents = Memo::new(move |_| {
         keys.data.with(|d| {
             d.as_ref().map(|k| {
+                // A device is listed on its own card, with the actions that
+                // say what they end (client-apps design §1.4).
                 k.keys
                     .iter()
+                    .filter(|r| r.kind != "device")
                     .map(|r| KeyIdent {
                         id: r.id,
                         name: r.name.clone(),
@@ -452,6 +464,10 @@ fn KeysTable(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
 
     view! {
         <CardErr err=keys.err/>
+        // The paired devices first — a handful, each with its own actions —
+        // as a strip above the table, which stays the page's one scroller
+        // (and so keeps its sticky head).
+        <DevicesCard keys=keys refresh=refresh edit=edit/>
         <div class="fill-pane hug card pad0" class:stale=move || keys.stale()>
             // Not `many-cols` (its p2 fold at 1180 hid rpm/tpm at 1440, where
             // main showed them): they fold under 1000, where Scope and Spend

@@ -72,6 +72,10 @@ pub(crate) struct Run {
     pub stop: StopSignal,
     /// The caller's start: `first_audio_ms` counts from it.
     pub started: Instant,
+    /// Whose request it speaks for: its TTS call is checked against this
+    /// context's key and charged to it — a device's (client-apps design L4),
+    /// or the in-process default the Chat has always used.
+    pub ctx: RequestCtx,
 }
 
 /// Speak what `feed` brings until it closes (module doc); the frames go to
@@ -89,11 +93,11 @@ pub(crate) async fn run(
         plan,
         stop: registered,
         started,
+        ctx,
     } = run;
     let Plan {
         speech, announce, ..
     } = plan;
-    let ctx = RequestCtx::default();
     let (tx, mut msgs) = mpsc::unbounded_channel::<(u64, Msg)>();
     let (work, queue) = mpsc::unbounded_channel();
     // The speaker stops the chat stream it reads when its voice fails. Here

@@ -1,0 +1,1308 @@
+[
+ {
+  "js": "'SETUP: as chat-folders.json (a dev instance with the fake-echo alias); scripts/chat-drives.sh --only chat-live runs it. Wipes every chat thread and folder of that instance first. The Chat page follows what a paired device writes (client-apps design §3.6, 2026-10-08): the device writes through its own key, never the page, so only /api/events can tell the page; the page is never reloaded meanwhile. A tall turn the device adds follows a reader at the end of the transcript and leaves one who scrolled up (review CL-1); a device turn moves its conversation up the list and only that row is read (CL-11); the open thread deleted under a draft leaves the draft in an unsaved new chat, and nothing is made, nor the ongoing folder\\'s current thread moved, until Send (CL-2, CL-14); a second Enter while Send makes the new chat neither makes nor opens it twice, and a Send after a failed open reads the chat first and keeps the draft once another writer wrote in it (CL-19); opening another conversation while Send makes the chat leaves it there, unopened and unsent into (CL-20); a draft waiting in an ongoing folder holds the picker on the folder\\'s model, says why, and writes no model, so the folder\\'s current thread keeps it (CF-2); a model picked while the draft waits in a plain folder that names one is the new chat\\'s (CL-21); an open or a New chat that left the draft and failed (a 500, a 404, the toolbar\\'s and the folder menu\\'s New chat) puts its new chat back, and Send while that open is out says so (CF-1); the fall-through after a delete elsewhere and New chat\\'s open never override a conversation the owner clicked meanwhile, and a failed New chat cancels no open (CF-4); leaving the page drops such a draft. From step 08 on, the page\\'s own requests are logged, and chosen answers held or failed, by a wrapper around window.fetch. Keep on a temporary chat opens the kept chat although the open row was clicked meanwhile, a search hit\\'s reveal superseded by another open leaves no \"that message no longer exists\" note, and Retry on a failed list read keeps a waiting draft waiting (CF-10, CF-5, CF-9).'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=await j('/chat/api/folders');for(const x of f.folders)await j('/chat/api/folders/'+x.id+'/delete',{threads:'delete'});const t=await j('/chat/api/threads?archived=all');for(const x of t.threads)await j('/chat/api/threads/'+x.id+'/delete',{});return 'clean'})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "until": "[...document.querySelectorAll('.empty')].some(e=>e.textContent.includes('No conversations yet'))",
+  "timeout": 15,
+  "label": "the list is in, and empty"
+ },
+ {
+  "js": "(async()=>{const r=await fetch('/api/op/key_create',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({kind:'device',name:'live-desktop-'+Date.now()})});const k=await r.json();const h={'content-type':'application/json',authorization:'Bearer '+k.key};window.__dev=(u,b)=>fetch(u,{method:'POST',credentials:'omit',headers:h,body:JSON.stringify(b||{})}).then(r=>r.json());window.__devSend=(t,c)=>fetch('/chat/api/threads/'+t+'/send',{method:'POST',credentials:'omit',headers:h,body:JSON.stringify({content:c})}).then(r=>r.text());window.__same=1;window.__said=()=>[...document.querySelectorAll('#chat-scroll .msg-item')].map(e=>e.textContent).join(' | ');return k.key?'device paired':JSON.stringify(k)})()"
+ },
+ {
+  "shot": "01-empty"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>{window.__t=t.id;return 'device thread '+t.id})"
+ },
+ {
+  "until": "document.querySelectorAll('.thread-row').length===1",
+  "timeout": 10,
+  "label": "a thread a device creates shows in the sidebar"
+ },
+ {
+  "js": "__devSend(__t,'Kai: hello from the desktop').then(s=>s.includes('event: done')?'sent':s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: hello from the desktop\"]')",
+  "timeout": 10,
+  "label": "its title, named by its first message, follows"
+ },
+ {
+  "shot": "02-device-thread"
+ },
+ {
+  "click": ".thread-row[title='Kai: hello from the desktop']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: hello from the desktop')",
+  "timeout": 10,
+  "label": "opened in the page: the device's turn and its reply"
+ },
+ {
+  "js": "__devSend(__t,'Kai: a second turn while the page has it open').then(s=>s.includes('event: done')?'sent':s)"
+ },
+ {
+  "until": "__said().includes('Kai: a second turn while the page has it open')&&__said().includes('Echo: Kai: a second turn while the page has it open')",
+  "timeout": 10,
+  "label": "a turn a device adds to the open thread shows, with its saved reply"
+ },
+ {
+  "expect": "document.querySelectorAll('#chat-scroll .msg-item').length===4",
+  "label": "each message once: nothing doubled"
+ },
+ {
+  "expect": "window.__same===1",
+  "label": "no reload, no navigation"
+ },
+ {
+  "shot": "03-appended"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft the device must not touch"
+ },
+ {
+  "js": "__devSend(__t,'Kai: a third turn while the owner types').then(s=>s.includes('event: done')?'sent':s)"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: a third turn while the owner types')",
+  "timeout": 10,
+  "label": "another device turn shows while the owner types"
+ },
+ {
+  "expect": "document.querySelector('textarea.composer-input').value==='a draft the device must not touch'",
+  "label": "the composer's draft is untouched"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: a draft the device must not touch')",
+  "timeout": 10,
+  "label": "the page's own turn streams"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "(()=>{const t=[...document.querySelectorAll('#chat-scroll .msg-item')].map(e=>e.textContent);return t.length===8&&t.filter(x=>x.includes('a draft the device must not touch')).length===2})()",
+  "label": "its own turn shows once, after its frames came back"
+ },
+ {
+  "js": "(()=>{window.__tall=(n,tag)=>'Kai: '+tag+'\\n\\n'+Array.from({length:n},(_,i)=>'paragraph '+(i+1)+' of '+tag).join('\\n\\n');window.__pane=()=>document.getElementById('chat-scroll');window.__below=()=>{const p=__pane();return p.scrollHeight-p.scrollTop-p.clientHeight};__pane().scrollTop=__pane().scrollHeight;return 'at the end, '+__below()+' px below'})()"
+ },
+ {
+  "js": "__devSend(__t,__tall(30,'a tall turn')).then(s=>s.includes('event: done')?'sent':s)"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: a tall turn')&&__said().split('paragraph 30 of a tall turn').length===3&&__below()<2",
+  "timeout": 15,
+  "label": "a reply taller than the at-the-end margin, added by another writer, scrolls into view for a reader at the end (CL-1)"
+ },
+ {
+  "expect": "[...document.querySelectorAll('#chat-scroll .msg-item')].slice(-2).every(m=>m.getBoundingClientRect().height>120)",
+  "label": "the device's turn and its reply are each taller than 120 px"
+ },
+ {
+  "shot": "03b-tall-followed"
+ },
+ {
+  "js": "(()=>{__pane().scrollTop=0;return 'scrolled up, '+__below()+' px below'})()"
+ },
+ {
+  "js": "__devSend(__t,__tall(5,'a turn while the reader scrolled up')).then(s=>s.includes('event: done')?'sent':s)"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: a turn while the reader scrolled up')",
+  "timeout": 15,
+  "label": "another device turn shows while the reader scrolled up"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "__pane().scrollTop<2",
+  "label": "a reader who scrolled up is left where they are"
+ },
+ {
+  "js": "(()=>{__pane().scrollTop=__pane().scrollHeight;return 'back at the end'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>{window.__u=t.id;return __devSend(t.id,'Kai: a second conversation')}).then(s=>s.includes('event: done')?'thread '+__u:s)"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>{window.__w=t.id;return __devSend(t.id,'Kai: a third conversation')}).then(s=>s.includes('event: done')?'thread '+__w:s)"
+ },
+ {
+  "until": "(()=>{const r=[...document.querySelectorAll('.thread-row')].map(e=>e.title);return r[0]==='Kai: a third conversation'&&r[1]==='Kai: a second conversation'})()",
+  "timeout": 10,
+  "label": "the device's two new conversations lead the list, the newest first"
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "js": "(()=>{performance.setResourceTimingBufferSize(5000);performance.clearResourceTimings();window.__reads=()=>performance.getEntriesByType('resource').map(e=>{const u=new URL(e.name);return (u.pathname+u.search).replace(/[?&]$/,'')}).filter(u=>u.startsWith('/chat/api/')&&!u.endsWith('/send'));return 'the page\\'s reads from here on are logged, less the empty query gloo-net appends (updated_at moved on a second)'})()"
+ },
+ {
+  "js": "__devSend(__u,'Kai: a turn in the older one').then(s=>s.includes('event: done')?'sent':s)"
+ },
+ {
+  "until": "[...document.querySelectorAll('.thread-row')][0]?.title==='Kai: a second conversation'",
+  "timeout": 10,
+  "label": "a device's turn moves its conversation to the top of the list (CL-11)"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "JSON.stringify(__reads())"
+ },
+ {
+  "expect": "__reads().length>0&&__reads().every(u=>u==='/chat/api/threads/rows?ids='+__u)",
+  "label": "the page read only that conversation's row: not the whole list, not the open thread (CL-11)"
+ },
+ {
+  "expect": "document.querySelector('.thread-row.open')?.title==='Kai: hello from the desktop'&&!__said().includes('a turn in the older one')",
+  "label": "the open conversation is still open, and untouched"
+ },
+ {
+  "shot": "03c-reordered"
+ },
+ {
+  "js": "__dev('/chat/api/folders',{name:'Kai desktop',defaults:{model_alias:'fake-echo'},ongoing:{idle_minutes:0}}).then(f=>{window.__f=f.id;return 'folder '+f.id})"
+ },
+ {
+  "until": "[...document.querySelectorAll('.thread-folder .folder-name')].some(e=>e.textContent==='Kai desktop')",
+  "timeout": 10,
+  "label": "a folder a device creates shows"
+ },
+ {
+  "js": "__dev('/chat/api/folders/'+__f+'/current',{new:false}).then(c=>{window.__c1=c.thread.id;return 'current '+c.thread.id})"
+ },
+ {
+  "until": "document.querySelectorAll('.thread-row .thread-current').length===1",
+  "timeout": 10,
+  "label": "the folder's current thread is marked"
+ },
+ {
+  "js": "__devSend(__c1,'Kai: in the ongoing conversation').then(()=>__dev('/chat/api/folders/'+__f+'/current',{new:true})).then(c=>{window.__c2=c.thread.id;return 'rolled over to '+c.thread.id+': '+c.rolled_over})"
+ },
+ {
+  "until": "(()=>{const cur=[...document.querySelectorAll('.thread-row')].filter(r=>r.querySelector('.thread-current'));return cur.length===1&&cur[0].title==='New chat'&&!!document.querySelector('.thread-row.nested[title=\"Kai: in the ongoing conversation\"]')})()",
+  "timeout": 10,
+  "label": "a rollover moves the current mark to the folder's new thread"
+ },
+ {
+  "shot": "04-rollover"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__t+'/delete',{}).then(v=>JSON.stringify(v))"
+ },
+ {
+  "until": "!document.querySelector('.thread-row[title=\"Kai: hello from the desktop\"]')&&!__said().includes('a second turn')",
+  "timeout": 10,
+  "label": "the open thread a device deletes leaves the list, and the page moves on"
+ },
+ {
+  "expect": "window.__same===1",
+  "label": "still no reload, no navigation"
+ },
+ {
+  "shot": "05-deleted"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__d=t.id;return __devSend(t.id,'Kai: a conversation deleted under a draft')}).then(s=>s.includes('event: done')?'device thread '+__d+' in the folder':s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row.nested[title=\"Kai: a conversation deleted under a draft\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows"
+ },
+ {
+  "click": ".thread-row[title='Kai: a conversation deleted under a draft']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: a conversation deleted under a draft')",
+  "timeout": 10,
+  "label": "opened in the page"
+ },
+ {
+  "js": "(()=>{window.__cur=()=>fetch('/chat/api/folders').then(r=>r.json()).then(l=>l.folders.find(f=>f.id===__f).ongoing.current_thread_id);return __cur().then(c=>'the folder\\'s current thread is '+c+', the device thread '+__d)})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft whose conversation goes"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__d+'/delete',{}).then(()=>__dev('/chat/api/folders/'+__f+'/current',{new:false})).then(c=>{window.__fresh=c.thread.id;return __devSend(__fresh,'Kai: going on in a fresh conversation')}).then(s=>s.includes('event: done')?'deleted '+__d+'; Kai goes on in '+__fresh:s)"
+ },
+ {
+  "until": "(()=>{const ta=document.querySelector('textarea.composer-input');const s=document.querySelector('.new-chat-strip');return !document.querySelector('.thread-row[title=\"Kai: a conversation deleted under a draft\"]')&&!document.querySelector('.thread-row.open')&&!!s&&s.textContent===\"New chat in “Kai desktop” · made when you send · on fake-echo: this folder's ongoing conversation uses its folder's model; change it in the folder settings\"&&!!ta&&ta.value==='a draft whose conversation goes'&&__said()===''&&!location.search.includes('t=')})()",
+  "timeout": 10,
+  "label": "the open thread a device deletes under a draft: the draft waits in an unsaved new chat in its folder, the transcript empty, no conversation open (CL-2, CL-14)"
+ },
+ {
+  "expect": "document.querySelector('.toast-host').textContent.includes('deleted elsewhere — your draft was kept, for a new chat in “Kai desktop” that is made when you send')",
+  "label": "the toast says the draft was kept for a new chat that is made when you send"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "fetch('/chat/api/threads?archived=all').then(r=>r.json()).then(l=>JSON.stringify(l.threads.map(t=>t.id).sort((a,b)=>a-b))===JSON.stringify([__u,__w,__c1,__c2,__fresh].sort((a,b)=>a-b)))",
+  "label": "nothing was made for the draft: only the conversations the device made exist (CL-14)"
+ },
+ {
+  "expect": "__cur().then(c=>c===__fresh)",
+  "label": "the ongoing folder's current thread is still the one Kai goes on in: untouched until Send (CL-14)"
+ },
+ {
+  "shot": "06-draft-waits"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: a draft whose conversation goes')",
+  "timeout": 10,
+  "label": "Send makes the new chat and sends the draft into it"
+ },
+ {
+  "js": "(()=>{window.__made=+new URLSearchParams(location.search).get('t');return 'the new chat is '+__made})()"
+ },
+ {
+  "expect": "__made>0&&![__u,__w,__c1,__c2,__fresh].includes(__made)&&__cur().then(c=>c===__made)",
+  "label": "Send was the folder's own New conversation: a new current thread, made at the Send and not before"
+ },
+ {
+  "expect": "Promise.all([fetch('/chat/api/threads/'+__made).then(r=>r.json()),fetch('/chat/api/threads/'+__fresh).then(r=>r.json())]).then(([m,k])=>m.thread.folder_id===__f&&m.messages.some(x=>x.role==='user'&&x.content==='a draft whose conversation goes')&&!k.messages.some(x=>x.content==='a draft whose conversation goes'))",
+  "label": "the draft is stored in the new chat, in the folder, and not in Kai's conversation"
+ },
+ {
+  "expect": "!!document.querySelector('.thread-row.open.nested')&&!document.querySelector('.new-chat-strip')",
+  "label": "the new chat is open in its folder, and the strip is gone"
+ },
+ {
+  "expect": "window.__same===1",
+  "label": "still no reload, no navigation"
+ },
+ {
+  "shot": "07-draft-sent"
+ },
+ {
+  "js": "(()=>{const of=window.fetch;window.__log=[];window.__hold={};window.__late={};window.__fail={};window.fetch=async function(u,o){if(typeof u==='string')return of.apply(this,arguments);const k=u.method.toUpperCase()+' '+new URL(u.url).pathname;window.__log.push(k);for(const re of Object.keys(window.__fail)){if(new RegExp(re).test(k)){const f=window.__fail[re];delete window.__fail[re];const st=typeof f==='object'?f.status:(f>=400?f:500);if(typeof f==='object'&&f.ms)await new Promise(z=>setTimeout(z,f.ms));return new Response(JSON.stringify(st===404?{code:'not_found',message:'the drive says this conversation is not there'}:{code:'internal',message:'the drive fails this read'}),{status:st,headers:{'content-type':'application/json'}})}}for(const [re,ms] of Object.entries(window.__late)){if(new RegExp(re).test(k)){await new Promise(z=>setTimeout(z,ms));break}}for(const [re,ms] of Object.entries(window.__hold)){if(new RegExp(re).test(k)){const r=await of.apply(this,arguments);await new Promise(z=>setTimeout(z,ms));return r}}return of.apply(this,arguments)};window.__made=()=>__cur();window.__thread=id=>fetch('/chat/api/threads/'+id).then(r=>r.json());return 'the page\\'s own requests (gloo-net passes a Request; the drive\\'s own calls pass a URL) are logged in __log; __hold delays an answer, __late delays a request before it goes out, __fail fails one (a status: 404 is not_found, else a 500; or {status, ms}: that late)'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue one')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue one\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (one)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue one']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue one')",
+  "timeout": 10,
+  "label": "opened in the page (one)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft sent with a double Enter"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft sent with a double Enter'&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (one)"
+ },
+ {
+  "js": "(()=>{window.__hold={'^GET /chat/api/threads/\\\\d+$':900};window.__log=[];return 'the open of a thread answers 0.9 s late'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: a draft sent with a double Enter')",
+  "timeout": 15,
+  "label": "Send makes the chat, opens it and sends, the second and third Enter waiting"
+ },
+ {
+  "js": "(()=>{window.__hold={};return 'answers on time again'})()"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "__made().then(m=>{window.__m1=m;return JSON.stringify(__log)})"
+ },
+ {
+  "expect": "(()=>{const s=__log.indexOf('POST /chat/api/threads/'+__m1+'/send');const before=__log.slice(0,s);return s>0&&before.filter(k=>k==='GET /chat/api/threads/'+__m1).length===1&&before.filter(k=>/^POST \\/chat\\/api\\/(folders\\/\\d+\\/current|threads)$/.test(k)).length===1&&__log.filter(k=>k.endsWith('/send')).length===1})()",
+  "label": "the chat was made once and opened once before its one send (CL-19)"
+ },
+ {
+  "expect": "[...document.querySelectorAll('#chat-scroll .msg-item')].filter(e=>e.textContent.includes('a draft sent with a double Enter')).length===2",
+  "label": "the owner's message shows once, with its reply"
+ },
+ {
+  "expect": "__thread(__m1).then(t=>t.messages.filter(x=>x.role==='user').map(x=>x.content).join('|')==='a draft sent with a double Enter')",
+  "label": "and is stored once"
+ },
+ {
+  "shot": "08-double-enter"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue two')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue two\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (two)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue two']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue two')",
+  "timeout": 10,
+  "label": "opened in the page (two)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft whose open fails"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose open fails'&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (two)"
+ },
+ {
+  "js": "(()=>{window.__fail={'^GET /chat/api/threads/\\\\d+$':1};window.__log=[];return 'the next open of a thread fails'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.toast-host').textContent.includes('opening the new chat failed')&&!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose open fails'",
+  "timeout": 10,
+  "label": "a failed open keeps the draft waiting, and says Send tries again"
+ },
+ {
+  "js": "__made().then(m=>{window.__m2=m;return __devSend(m,'Kai: in the new chat meanwhile')}).then(s=>s.includes('event: done')?'Kai wrote in '+__m2:s)"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: in the new chat meanwhile')&&document.querySelector('.toast-host').textContent.includes('another writer has written in the new chat meanwhile')",
+  "timeout": 10,
+  "label": "the retry opens the made chat and reads Kai's turn in it (CL-19)"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "expect": "document.querySelector('textarea.composer-input').value==='a draft whose open fails'&&!document.querySelector('.new-chat-strip')&&!__said().includes('a draft whose open fails')",
+  "label": "the draft stays in the composer, not sent into a chat another writer wrote in"
+ },
+ {
+  "js": "__thread(__m2).then(t=>JSON.stringify({log:__log,thread:t.thread.id,folder:t.thread.folder_id,msgs:t.messages.map(m=>m.role+': '+m.content)}))"
+ },
+ {
+  "expect": "__thread(__m2).then(t=>!t.messages.some(x=>x.content==='a draft whose open fails')&&__log.filter(k=>k.endsWith('/send')).length===0)",
+  "label": "nothing was sent"
+ },
+ {
+  "expect": "__log.filter(k=>/^POST \\/chat\\/api\\/(folders\\/\\d+\\/current|threads)$/.test(k)).length===1",
+  "label": "the retry made no second chat"
+ },
+ {
+  "shot": "09-retry-written"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue three')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue three\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (three)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue three']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue three')",
+  "timeout": 10,
+  "label": "opened in the page (three)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft left while it is made"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft left while it is made'&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (three)"
+ },
+ {
+  "js": "(()=>{window.__hold={'^POST /chat/api/folders/\\\\d+/current$':500,['^GET /chat/api/threads/'+__u+'$']:1500};window.__log=[];return 'the create answers 0.5 s late, the other conversation 1.5 s'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 0.1
+ },
+ {
+  "click": ".thread-row[title='Kai: a second conversation']"
+ },
+ {
+  "until": "document.querySelector('.thread-row.open')?.title==='Kai: a second conversation'&&__said().includes('Echo: Kai: a turn in the older one')",
+  "timeout": 10,
+  "label": "the conversation opened while Send made the chat shows"
+ },
+ {
+  "js": "(()=>{window.__hold={};return 'answers on time again'})()"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "document.querySelector('.thread-row.open')?.title==='Kai: a second conversation'&&!__said().includes('a draft left while it is made')",
+  "label": "the made chat's answer did not switch the page back (CL-20)"
+ },
+ {
+  "expect": "__log.filter(k=>k.endsWith('/send')).length===0&&document.querySelector('textarea.composer-input').value==='a draft left while it is made'",
+  "label": "nothing was sent: the draft stays in the composer, as on any switch"
+ },
+ {
+  "js": "__made().then(m=>{window.__m3=m;return 'made '+m})"
+ },
+ {
+  "js": "__thread(__m3).then(t=>JSON.stringify({log:__log,thread:t.thread.id,folder:t.thread.folder_id,msgs:t.messages.map(m=>m.role+': '+m.content)}))"
+ },
+ {
+  "expect": "__thread(__m3).then(t=>t.thread.folder_id===__f&&t.messages.length===0&&!__log.includes('GET /chat/api/threads/'+__m3))",
+  "label": "the chat Send made stays, empty and never opened, as the New chat button leaves one"
+ },
+ {
+  "expect": "!document.querySelector('.new-chat-strip')",
+  "label": "the strip went as the other open started"
+ },
+ {
+  "shot": "10-left-while-made"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue four')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue four\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (four)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue four']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue four')",
+  "timeout": 10,
+  "label": "opened in the page (four)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft on the folder's model"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value===\"a draft on the folder's model\"&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (four)"
+ },
+ {
+  "expect": "document.querySelector('.model-picker .mp-val')?.textContent.includes('fake-echo')",
+  "label": "the picker is on the ongoing folder's model"
+ },
+ {
+  "expect": "document.querySelector('.model-picker .mp-btn').disabled&&!!document.querySelector('.held-badge')&&document.querySelector('.held-badge').title===\"this folder's ongoing conversation uses its folder's model; change it in the folder settings\"",
+  "label": "and held there: disabled, a badge beside it saying why (CF-2)"
+ },
+ {
+  "expect": "document.querySelector('.new-chat-strip').textContent===\"New chat in “Kai desktop” · made when you send · on fake-echo: this folder's ongoing conversation uses its folder's model; change it in the folder settings\"",
+  "label": "the strip names the model and why it is held"
+ },
+ {
+  "shot": "11-ongoing-held"
+ },
+ {
+  "click": ".model-picker .mp-btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.model-picker .mp-btn').getAttribute('aria-expanded')!=='true'",
+  "label": "a click on the held picker opens nothing"
+ },
+ {
+  "js": "(()=>{window.__log=[];return 'log cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes(\"Echo: a draft on the folder's model\")",
+  "timeout": 15,
+  "label": "Send makes the folder's new conversation and sends the draft"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "__made().then(m=>{window.__m4=m;return JSON.stringify(__log)})"
+ },
+ {
+  "expect": "__log.filter(k=>k.endsWith('/settings')).length===0&&__log.includes('POST /chat/api/threads/'+__m4+'/send')",
+  "label": "no model was written: only the send (CF-2)"
+ },
+ {
+  "expect": "Promise.all([__thread(__m4),fetch('/chat/api/folders').then(r=>r.json())]).then(([t,l])=>{const f=l.folders.find(x=>x.id===__f);return f.ongoing.current_thread_id===__m4&&t.thread.model_alias===f.defaults.model_alias&&f.defaults.model_alias==='fake-echo'&&t.messages.find(x=>x.role==='assistant')?.model==='fake-echo'})",
+  "label": "the folder's current thread is the made chat, on the folder's model, and it answered on it"
+ },
+ {
+  "expect": "!document.querySelector('.model-picker .mp-btn').disabled&&!document.querySelector('.held-badge')",
+  "label": "the chat open, the picker is the owner's again"
+ },
+ {
+  "shot": "11b-ongoing-sent"
+ },
+ {
+  "js": "__dev('/chat/api/folders',{name:'Kai notes',defaults:{model_alias:'fake-echo'}}).then(f=>{window.__p=f.id;return 'plain folder '+f.id})"
+ },
+ {
+  "until": "[...document.querySelectorAll('.thread-folder .folder-name')].some(e=>e.textContent==='Kai notes')",
+  "timeout": 10,
+  "label": "a plain folder a device creates shows"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__p}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue five')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue five\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (five)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue five']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue five')",
+  "timeout": 10,
+  "label": "opened in the page (five)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft on the model picked"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value===\"a draft on the model picked\"&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (five)"
+ },
+ {
+  "expect": "document.querySelector('.new-chat-strip').textContent==='New chat in “Kai notes” · made when you send'&&!document.querySelector('.model-picker .mp-btn').disabled&&!document.querySelector('.held-badge')",
+  "label": "in a plain folder the picker is the owner's"
+ },
+ {
+  "expect": "document.querySelector('.model-picker .mp-val')?.textContent.includes('fake-echo')",
+  "label": "the picker starts on the folder's model"
+ },
+ {
+  "click": ".model-picker .mp-btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "type": "fake-novision"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelector('.model-picker .mp-val')?.textContent.includes('fake-novision')&&!!document.querySelector('.new-chat-strip')",
+  "timeout": 5,
+  "label": "the owner picks another model while the draft waits"
+ },
+ {
+  "js": "(()=>{window.__log=[];return 'log cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: a draft on the model picked')",
+  "timeout": 15,
+  "label": "Send makes the chat and sends the draft"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "(()=>{window.__m5=+new URLSearchParams(location.search).get('t');return JSON.stringify(__log)})()"
+ },
+ {
+  "expect": "__thread(__m5).then(t=>t.thread.folder_id===__p&&t.thread.model_alias==='fake-novision'&&t.messages.find(x=>x.role==='assistant')?.model==='fake-novision')",
+  "label": "the new chat is in the plain folder, on the model picked, and it answered (CL-21)"
+ },
+ {
+  "expect": "(()=>{const set=__log.indexOf('POST /chat/api/threads/'+__m5+'/settings');const send=__log.indexOf('POST /chat/api/threads/'+__m5+'/send');return set>=0&&send>set})()",
+  "label": "its model was set before the send"
+ },
+ {
+  "expect": "document.querySelector('.model-picker .mp-val')?.textContent.includes('fake-novision')",
+  "label": "the picker shows it"
+ },
+ {
+  "shot": "12-plain-model-picked"
+ },
+ {
+  "js": "(()=>{document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());window.__toasts=s=>[...document.querySelectorAll('.toast-host > div')].filter(e=>e.textContent.includes(s)).length;return 'toasts cleared'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue six')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue six\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (six)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue six']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue six')",
+  "timeout": 10,
+  "label": "opened in the page (six)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft whose leaving fails"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value===\"a draft whose leaving fails\"&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (six)"
+ },
+ {
+  "js": "(()=>{window.__fail={['^GET /chat/api/threads/'+__u+'$']:500};window.__log=[];return 'the next open of the second conversation fails (500)'})()"
+ },
+ {
+  "click": ".thread-row[title='Kai: a second conversation']"
+ },
+ {
+  "until": "__toasts(\"your draft waits for its new chat again\")===1&&!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose leaving fails'&&__said()===''&&document.querySelector('.model-picker .mp-btn').disabled&&!!document.querySelector('.held-badge')",
+  "timeout": 10,
+  "label": "an open that left the draft and failed puts its new chat back, with the draft and the held picker (CF-1)"
+ },
+ {
+  "shot": "13a-open-failed-back"
+ },
+ {
+  "js": "(()=>{window.__fail={['^GET /chat/api/threads/'+__w+'$']:404};return 'the next open of the third conversation answers 404'})()"
+ },
+ {
+  "click": ".thread-row[title='Kai: a third conversation']"
+ },
+ {
+  "until": "__toasts(\"your draft waits for its new chat again\")===2&&!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose leaving fails'&&__said()===''&&document.querySelector('.model-picker .mp-btn').disabled&&!!document.querySelector('.held-badge')",
+  "timeout": 10,
+  "label": "so does one that answers 404"
+ },
+ {
+  "js": "(()=>{window.__fail={'^POST /chat/api/threads$':500};return 'the next New chat fails'})()"
+ },
+ {
+  "click": ".thread-tools .row .btn",
+  "nth": 0
+ },
+ {
+  "until": "__toasts(\"your draft waits for its new chat again\")===3&&!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose leaving fails'&&__said()===''&&document.querySelector('.model-picker .mp-btn').disabled&&!!document.querySelector('.held-badge')",
+  "timeout": 10,
+  "label": "so does a New chat whose POST fails"
+ },
+ {
+  "js": "(()=>{const e=[...document.querySelectorAll('.thread-folder')].find(e=>e.querySelector('.folder-name')?.textContent==='Kai desktop');if(!e)return 'not found';e.setAttribute('data-drive','kai-desktop');return 'tagged'})()"
+ },
+ {
+  "click": ".thread-folder[data-drive='kai-desktop'] .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(()=>{const e=[...document.querySelectorAll(\".thread-folder[data-drive='kai-desktop'] .menu-pop .menu-item\")].find(e=>e.textContent==='New conversation');if(!e)return 'not found';e.setAttribute('data-drive','new-conversation');return 'tagged'})()"
+ },
+ {
+  "js": "(()=>{window.__fail={'^POST /chat/api/folders/\\\\d+/current$':500};return 'the folder menu\\'s next New conversation fails'})()"
+ },
+ {
+  "click": "[data-drive='new-conversation']"
+ },
+ {
+  "until": "__toasts(\"your draft waits for its new chat again\")===4&&!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose leaving fails'&&__said()===''&&document.querySelector('.model-picker .mp-btn').disabled&&!!document.querySelector('.held-badge')",
+  "timeout": 10,
+  "label": "so does the folder menu's New conversation whose POST fails"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.toast-host > div')].some(e=>e.textContent.startsWith('starting a new conversation failed: the drive fails this read — your draft waits for its new chat again'))",
+  "label": "its toast says the draft waits again"
+ },
+ {
+  "js": "(()=>{window.__fail={['^GET /chat/api/threads/'+__u+'$']:{status:500,ms:1500}};return 'the next open of the second conversation fails after 1.5 s'})()"
+ },
+ {
+  "click": ".thread-row[title='Kai: a second conversation']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__toasts('the conversation is still opening — send once it shows')===1",
+  "timeout": 5,
+  "label": "Send while the open that left the draft is out says so, and sends nothing (CF-1)"
+ },
+ {
+  "until": "__toasts(\"your draft waits for its new chat again\")===5&&!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft whose leaving fails'&&__said()===''&&document.querySelector('.model-picker .mp-btn').disabled&&!!document.querySelector('.held-badge')",
+  "timeout": 10,
+  "label": "that open fails too: the new chat is back"
+ },
+ {
+  "js": "(()=>{window.__log=[];return 'log cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: a draft whose leaving fails')",
+  "timeout": 15,
+  "label": "Send after all that makes the chat and sends the draft"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "__made().then(m=>{window.__m6=m;return JSON.stringify(__log)})"
+ },
+ {
+  "expect": "__log.filter(k=>/^POST \\/chat\\/api\\/(folders\\/\\d+\\/current|threads)$/.test(k)).length===1&&__log.filter(k=>k.endsWith('/settings')).length===0&&__log.includes('POST /chat/api/threads/'+__m6+'/send')",
+  "label": "one create, no model write, one send"
+ },
+ {
+  "expect": "__thread(__m6).then(t=>t.thread.folder_id===__f&&t.messages.filter(x=>x.role==='user').map(x=>x.content).join('|')==='a draft whose leaving fails')",
+  "label": "the draft is stored once, in the folder's new conversation"
+ },
+ {
+  "shot": "13-leaving-failed"
+ },
+ {
+  "js": "(()=>{document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'toasts and composer cleared'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>{window.__a=t.id;return __devSend(t.id,'Kai: deleted while another opens')}).then(s=>s.includes('event: done')?'thread '+__a:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: deleted while another opens\"]')",
+  "timeout": 10,
+  "label": "a device conversation in no folder shows"
+ },
+ {
+  "click": ".thread-row[title='Kai: deleted while another opens']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: deleted while another opens')&&document.querySelector('textarea.composer-input').value===''",
+  "timeout": 10,
+  "label": "opened in the page, no draft"
+ },
+ {
+  "js": "(()=>{window.__hold={['^GET /chat/api/threads/'+__u+'$']:2500};window.__log=[];return 'the second conversation answers 2.5 s late'})()"
+ },
+ {
+  "click": ".thread-row[title='Kai: a second conversation']"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__a+'/delete',{}).then(()=>'the open one deleted elsewhere: '+__a)"
+ },
+ {
+  "until": "__toasts('the open conversation was deleted elsewhere')===1",
+  "timeout": 10,
+  "label": "the open conversation goes, deleted elsewhere, while the owner's open is out"
+ },
+ {
+  "until": "document.querySelector('.thread-row.open')?.title==='Kai: a second conversation'&&__said().includes('Echo: Kai: a turn in the older one')",
+  "timeout": 10,
+  "label": "the conversation the owner clicked shows"
+ },
+ {
+  "js": "(()=>{window.__hold={};return 'answers on time again'})()"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "js": "JSON.stringify(__log)"
+ },
+ {
+  "expect": "document.querySelector('.thread-row.open')?.title==='Kai: a second conversation'&&__log.filter(k=>/^GET \\/chat\\/api\\/threads\\/-?\\d+$/.test(k)).every(k=>k==='GET /chat/api/threads/'+__u||k==='GET /chat/api/threads/'+__a)",
+  "label": "the fall-through opened nothing over the owner's open (CF-4)"
+ },
+ {
+  "js": "(()=>{window.__hold={'^POST /chat/api/threads$':1500};window.__log=[];return 'New chat\\'s POST answers 1.5 s late'})()"
+ },
+ {
+  "click": ".thread-tools .row .btn",
+  "nth": 0
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "click": ".thread-row[title='Kai: a third conversation']"
+ },
+ {
+  "until": "document.querySelector('.thread-row.open')?.title==='Kai: a third conversation'&&__said().includes('Echo: Kai: a third conversation')",
+  "timeout": 10,
+  "label": "a conversation clicked while New chat's POST is out shows"
+ },
+ {
+  "js": "(()=>{window.__hold={};return 'answers on time again'})()"
+ },
+ {
+  "wait": 2.0
+ },
+ {
+  "js": "JSON.stringify(__log)"
+ },
+ {
+  "expect": "document.querySelector('.thread-row.open')?.title==='Kai: a third conversation'&&+new URLSearchParams(location.search).get('t')===__w&&__log.includes('POST /chat/api/threads')&&__log.filter(k=>/^GET \\/chat\\/api\\/threads\\/-?\\d+$/.test(k)).every(k=>k==='GET /chat/api/threads/'+__w)",
+  "label": "New chat's answer opened nothing over it: the made chat stays, listed (CF-4)"
+ },
+ {
+  "js": "(()=>{window.__hold={['^GET /chat/api/threads/'+__u+'$']:1500};window.__fail={'^POST /chat/api/threads$':500};window.__log=[];return 'the second conversation answers 1.5 s late, and New chat fails'})()"
+ },
+ {
+  "click": ".thread-row[title='Kai: a second conversation']"
+ },
+ {
+  "wait": 0.2
+ },
+ {
+  "click": ".thread-tools .row .btn",
+  "nth": 0
+ },
+ {
+  "until": "__toasts('the drive fails this read')===1",
+  "timeout": 5,
+  "label": "New chat, pressed while the open is out, fails"
+ },
+ {
+  "until": "document.querySelector('.thread-row.open')?.title==='Kai: a second conversation'&&__said().includes('Echo: Kai: a turn in the older one')",
+  "timeout": 10,
+  "label": "the open it came after still shows: a failed New chat cancels nothing (CF-4)"
+ },
+ {
+  "js": "(()=>{window.__hold={};document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());return 'answers on time again, toasts cleared'})()"
+ },
+ {
+  "shot": "14-owner-order"
+ },
+ {
+  "js": "(()=>{document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());return 'toasts cleared'})()"
+ },
+ {
+  "click": ".thread-tools button[title^='New temporary chat']"
+ },
+ {
+  "until": "!!document.querySelector('.temp-strip')&&+new URLSearchParams(location.search).get('t')<0",
+  "timeout": 10,
+  "label": "a temporary chat is open (CF-10)"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "Kai: kept while the row is clicked"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: kept while the row is clicked')",
+  "timeout": 15,
+  "label": "it answers"
+ },
+ {
+  "js": "(()=>{window.__tid=+new URLSearchParams(location.search).get('t');window.__late={'^POST /chat/api/threads/-\\\\d+/persist$':1500};window.__log=[];return 'Keep goes out 1.5 s late, temporary chat '+__tid})()"
+ },
+ {
+  "click": ".temp-strip .btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-row.open"
+ },
+ {
+  "until": "!document.querySelector('.temp-strip')&&+new URLSearchParams(location.search).get('t')>0&&__said().includes('Echo: Kai: kept while the row is clicked')&&!!document.querySelector('.thread-row.open')",
+  "timeout": 10,
+  "label": "a click on the open row during Keep's request still opens the kept chat (CF-10)"
+ },
+ {
+  "js": "(()=>{window.__late={};return 'goes out on time again'})()"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "JSON.stringify(__log)"
+ },
+ {
+  "expect": "__log.filter(k=>/^GET \\/chat\\/api\\/threads\\/-/.test(k)).length===0&&fetch('/chat/api/threads/'+(+new URLSearchParams(location.search).get('t'))).then(r=>r.ok)",
+  "label": "the page is on the stored chat, and read no dead id"
+ },
+ {
+  "expect": "(s=>[...document.querySelectorAll('.toast-host > div')].filter(e=>e.textContent.includes(s)).length)('chat kept')===1",
+  "label": "chat kept, said once"
+ },
+ {
+  "shot": "15-keep-open-row"
+ },
+ {
+  "js": "(()=>{document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());return 'toasts cleared'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>{window.__h1=t.id;return __devSend(t.id,'Kai: quuxhit first')}).then(()=>__dev('/chat/api/threads',{model_alias:'fake-echo'})).then(t=>{window.__h2=t.id;return __devSend(t.id,'Kai: quuxhit second')}).then(s=>s.includes('event: done')?'threads '+__h1+' '+__h2:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: quuxhit second\"]')",
+  "timeout": 10,
+  "label": "two conversations with a word in common show (CF-5)"
+ },
+ {
+  "click": ".thread-q"
+ },
+ {
+  "type": "quuxhit"
+ },
+ {
+  "until": "document.querySelectorAll('.msg-hit').length>=2",
+  "timeout": 15,
+  "label": "the search finds the messages"
+ },
+ {
+  "js": "(()=>{const h=[...document.querySelectorAll('.msg-hit')].find(e=>e.textContent.includes('first')&&e.textContent.startsWith('you'));if(!h)return 'no hit';h.dataset.pick='1';window.__hold={['^GET /chat/api/threads/'+__h1+'$']:1500};window.__log=[];return 'the first conversation answers 1.5 s late'})()"
+ },
+ {
+  "click": ".msg-hit[data-pick='1']"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-row[title='Kai: quuxhit second']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: quuxhit second')&&document.querySelector('.thread-row.open')?.title==='Kai: quuxhit second'",
+  "timeout": 10,
+  "label": "the conversation clicked after the hit shows"
+ },
+ {
+  "wait": 2.0
+ },
+ {
+  "js": "(()=>{window.__hold={};return 'answers on time again'})()"
+ },
+ {
+  "expect": "(s=>[...document.querySelectorAll('.toast-host > div')].filter(e=>e.textContent.includes(s)).length)('that message no longer exists')===0&&document.querySelector('.thread-row.open')?.title==='Kai: quuxhit second'",
+  "label": "an open that supersedes a search hit's reveal leaves no 'that message no longer exists' behind (CF-5)"
+ },
+ {
+  "click": ".thread-q"
+ },
+ {
+  "key": "Escape"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: a third conversation\"]')",
+  "timeout": 10,
+  "label": "the filter cleared"
+ },
+ {
+  "click": ".thread-row[title='Kai: a third conversation']"
+ },
+ {
+  "until": "document.querySelector('.thread-row.open')?.title==='Kai: a third conversation'&&__said().includes('Echo: Kai: a third conversation')",
+  "timeout": 10,
+  "label": "the next open"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "(s=>[...document.querySelectorAll('.toast-host > div')].filter(e=>e.textContent.includes(s)).length)('that message no longer exists')===0",
+  "label": "says nothing about a message either (CF-5)"
+ },
+ {
+  "shot": "16-hit-superseded"
+ },
+ {
+  "js": "(()=>{document.querySelector('.toast-clear')?.click();[...document.querySelectorAll('.toast-x')].forEach(b=>b.click());return 'toasts cleared'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo',folder_id:__f}).then(t=>{window.__r=t.id;return __devSend(t.id,'Kai: rescue seven')}).then(s=>s.includes('event: done')?'device thread '+__r:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: rescue seven\"]')",
+  "timeout": 10,
+  "label": "a device thread in the folder shows (seven)"
+ },
+ {
+  "click": ".thread-row[title='Kai: rescue seven']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: rescue seven')",
+  "timeout": 10,
+  "label": "opened in the page (seven)"
+ },
+ {
+  "js": "(()=>{const ta=document.querySelector('textarea.composer-input');ta.value='';ta.dispatchEvent(new Event('input',{bubbles:true}));return 'composer cleared'})()"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft that waits through Retry"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__r+'/delete',{}).then(()=>'deleted '+__r)"
+ },
+ {
+  "until": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value===\"a draft that waits through Retry\"&&__said()===''",
+  "timeout": 10,
+  "label": "the draft waits in an unsaved new chat (seven)"
+ },
+ {
+  "js": "(()=>{window.__fail={'^GET /chat/api/threads$':500};window.__log=[];return 'the next read of the list fails'})()"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>'a device made '+t.id)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-list .status-err .link-btn')",
+  "timeout": 10,
+  "label": "a failed read of the list says so, with Retry (CF-9)"
+ },
+ {
+  "expect": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft that waits through Retry'",
+  "label": "the draft still waits"
+ },
+ {
+  "js": "(()=>{window.__log=[];return 'log cleared'})()"
+ },
+ {
+  "click": ".thread-list .status-err .link-btn"
+ },
+ {
+  "until": "!document.querySelector('.thread-list .status-err')",
+  "timeout": 10,
+  "label": "Retry reads the list again"
+ },
+ {
+  "wait": 1.0
+ },
+ {
+  "js": "JSON.stringify(__log)"
+ },
+ {
+  "expect": "!!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value==='a draft that waits through Retry'&&!document.querySelector('.thread-row.open')&&__said()===''&&__log.filter(k=>/^GET \\/chat\\/api\\/threads\\/-?\\d+$/.test(k)).length===0",
+  "label": "the draft keeps waiting: Retry opened nothing (CF-9)"
+ },
+ {
+  "shot": "17-retry-draft-waits"
+ },
+ {
+  "go": "/usage"
+ },
+ {
+  "go": "/chat"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row.open')&&!!document.querySelector('textarea.composer-input')&&!document.querySelector('.new-chat-strip')",
+  "timeout": 10,
+  "label": "back on Chat, the waiting draft dropped with the page"
+ },
+ {
+  "js": "__dev('/chat/api/threads',{model_alias:'fake-echo'}).then(t=>{window.__g=t.id;return __devSend(t.id,'Kai: one more, deleted under a draft')}).then(s=>s.includes('event: done')?'thread '+__g:s)"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row[title=\"Kai: one more, deleted under a draft\"]')",
+  "timeout": 10,
+  "label": "another device conversation shows, in no folder"
+ },
+ {
+  "click": ".thread-row[title='Kai: one more, deleted under a draft']"
+ },
+ {
+  "until": "__said().includes('Echo: Kai: one more, deleted under a draft')",
+  "timeout": 10,
+  "label": "opened in the page"
+ },
+ {
+  "click": "textarea.composer-input"
+ },
+ {
+  "type": "a draft left behind"
+ },
+ {
+  "js": "__dev('/chat/api/threads/'+__g+'/delete',{}).then(()=>fetch('/chat/api/threads?archived=all')).then(r=>r.json()).then(l=>{window.__left=l.threads.map(t=>t.id).sort((a,b)=>a-b).join();return 'deleted '+__g})"
+ },
+ {
+  "until": "document.querySelector('.new-chat-strip')?.textContent==='New chat · made when you send'&&document.querySelector('textarea.composer-input').value==='a draft left behind'",
+  "timeout": 10,
+  "label": "a draft whose unfiled conversation went waits in a new chat in no folder"
+ },
+ {
+  "go": "/usage"
+ },
+ {
+  "go": "/chat"
+ },
+ {
+  "until": "!!document.querySelector('.thread-row.open')&&!!document.querySelector('textarea.composer-input')",
+  "timeout": 10,
+  "label": "back on Chat, a conversation opens"
+ },
+ {
+  "expect": "!document.querySelector('.new-chat-strip')&&document.querySelector('textarea.composer-input').value===''",
+  "label": "leaving the page dropped the unsaved new chat with its draft, as an unsent draft goes"
+ },
+ {
+  "expect": "fetch('/chat/api/threads?archived=all').then(r=>r.json()).then(l=>l.threads.map(t=>t.id).sort((a,b)=>a-b).join()===__left)",
+  "label": "and nothing was made for it"
+ },
+ {
+  "expect": "window.__same===1",
+  "label": "no reload: the page was left and entered in the app"
+ }
+]

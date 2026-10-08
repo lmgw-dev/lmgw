@@ -546,9 +546,12 @@ pub(crate) async fn speak(mut s: Speaker<'_>) -> Result<(), GatewayError> {
                 }
                 w
             }
-            // A clause of nothing but inline tags (`[laughs]` on its own)
-            // has nothing to say: it stays in the transcript as written,
-            // with no audio, and the answer goes on.
+            // A clause of nothing but inline tags (`[laughs]` on its own),
+            // or of nothing but characters the row's engine cannot say (a
+            // lone `😊` to Supertonic, logged with the response's other
+            // such characters when it ends), has nothing to say: it stays
+            // in the transcript as written, with no audio, and the answer
+            // goes on.
             Err(GatewayError::InvalidRequest {
                 code: "empty_input",
                 ..
@@ -604,9 +607,10 @@ fn report(speech: &Speech, synth: &Synthesis, shaped: &crate::audio::shape::Shap
 /// The key's check, then the response's one TTS route (§9.1, §10.3), judged
 /// on the speech instructions and the voice its clauses carry (a
 /// voice-design row needs a description; an engine that clones a clip, its
-/// transcript). Both under the caller's label ([`Speech::proto`]): a
-/// session's per-call check counts against its key (`realtime::policy`);
-/// the Chat has none to count against.
+/// transcript). Both under the caller's label ([`Speech::proto`]), and
+/// checked and counted against the caller's key: a session's, a device's
+/// read-aloud in the Chat (client-apps design L4); the owner's read-aloud
+/// carries no key, and nothing is counted for it.
 async fn open(
     state: &SharedState,
     ctx: &RequestCtx,

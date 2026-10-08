@@ -21,19 +21,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::LocalModel;
 
-/// One rung above the base: its own weights and its own `-c` (design §4.1).
-/// `ctx_size` is a real token count, not `Option` — a rung with no context at
-/// all is not a rung, and §4.3 rule 3 refuses saving one with a non-positive
-/// value (`per_slot_ctx`/`switchover` below already return `None` for a
-/// stored row that somehow has one, e.g. one written before that rule
-/// existed).
+/// One rung above the base: its own weights and its own `-c`.
+/// `ctx_size` is a real token count: a rung with no context at all is not a
+/// rung, so saving one with a non-positive value is refused.
+// Design §4.1; §4.3 rule 3 is the refusal. `per_slot_ctx`/`switchover` below
+// already return `None` for a stored row that somehow has a non-positive
+// value (e.g. one written before that rule existed).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Rung {
-    /// GGUF path relative to the models dir, exactly like
-    /// [`crate::config::LocalModel::gguf_path`].
+    /// GGUF path relative to the models dir, exactly like the base row's
+    /// `gguf_path`.
     pub gguf_path: String,
     /// `--ctx-size` for this rung — the same meaning `ctx_size` has
-    /// everywhere else (design §4.1): it is `-c`, never the per-slot number.
+    /// everywhere else: it is `-c`, never the per-slot number.
     pub ctx_size: i64,
 }
 

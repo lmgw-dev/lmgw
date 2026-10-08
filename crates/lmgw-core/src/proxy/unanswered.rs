@@ -201,6 +201,7 @@ impl Pending {
                 fallback: self.fallback,
                 rung: None,
                 degraded: None,
+                quantities: Default::default(),
             },
             status,
             None,

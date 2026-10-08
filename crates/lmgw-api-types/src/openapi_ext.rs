@@ -51,7 +51,7 @@ pub const PREFILL: &str = "x-lmgw-prefill";
 pub const AUDIENCE: &str = "x-lmgw-audience";
 /// Tag: the tag's group name.
 pub const GROUP: &str = "x-lmgw-group";
-/// Root: `{owner, agent, key, anonymous, anonymous_auth_off: [caps]}`.
+/// Root: `{owner, agent, key, device, anonymous, anonymous_auth_off: [caps]}`.
 pub const PRINCIPALS: &str = "x-lmgw-principals";
 /// Root: `[{method, path, reason}]`, the coverage exclusion list (§4.2).
 pub const UNDOCUMENTED: &str = "x-lmgw-undocumented";

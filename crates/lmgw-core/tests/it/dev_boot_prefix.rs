@@ -20,6 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use lmgw_core::agents::container::{KIND_AGENT, LABEL_INSTANCE, LABEL_KIND, LABEL_RUN};
 use lmgw_core::config::{default_container_prefix, dev_instance_override};
+use lmgw_core::mcp::container::LABEL_MCP;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner};
 use lmgw_core::state::AppState;
 use lmgw_core::store;
@@ -27,8 +28,8 @@ use lmgw_core::vram::nvml::NoTelemetry;
 use serde_json::{json, Value};
 
 /// A podman with the installed app's containers in it: an agent's service
-/// container and a model's, both under the production prefix and older than
-/// this process. `ps` applies its filters the way podman does (each
+/// container, a model's and an MCP server's, all under the production prefix
+/// and older than this process. `ps` applies its filters the way podman does (each
 /// `--filter` ANDed); every call is recorded.
 struct InstalledAppPodman {
     containers: Vec<Value>,
@@ -50,6 +51,12 @@ impl InstalledAppPodman {
                 json!({
                     "Names": [format!("{prod}-chat-talk")],
                     "Labels": {LABEL_INSTANCE: prod, "lmgw.class": "chat", "lmgw.model": "talk"},
+                    "State": "running",
+                    "Created": old,
+                }),
+                json!({
+                    "Names": ["sharp_mcp_server"],
+                    "Labels": {LABEL_INSTANCE: prod, LABEL_MCP: "3"},
                     "State": "running",
                     "Created": old,
                 }),
@@ -194,12 +201,13 @@ async fn a_fresh_dev_data_dir_never_lists_or_removes_another_prefixs_containers(
     state.reload_snapshot().await.unwrap();
     lmgw_core::runtime::lifecycle::boot(&state).await;
     lmgw_core::agents::container::boot_reconcile(&state).await;
+    lmgw_core::mcp::container::boot_sweep(&state).await;
 
     let calls = podman.calls();
     let listings: Vec<&Vec<String>> = calls.iter().filter(|c| c[0] == "ps").collect();
     assert!(
-        listings.len() >= 2,
-        "model and agent reconciliation both list: {calls:?}"
+        listings.len() >= 3,
+        "model and agent reconciliation and the MCP sweep all list: {calls:?}"
     );
     let own = format!("label={LABEL_INSTANCE}={prefix}");
     for c in &listings {

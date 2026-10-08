@@ -86,7 +86,7 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "bench_run_set",
         tag: TAG,
         summary: "Edit a benchmark run's notes",
-        description: Some("The owner's free-text notes on one run (dashboard only)."),
+        description: Some("Free-text notes on one run (dashboard only)."),
         tool: None,
         args: OpArgs::Struct(|g| g.root_schema_for::<dto::BenchRunSetArgs>()),
         response: Resp::Json(|g| g.root_schema_for::<dto::BenchDone>()),

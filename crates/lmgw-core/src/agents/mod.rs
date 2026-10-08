@@ -681,24 +681,30 @@ pub async fn tool_grant(state: &SharedState, agent_id: &str) -> Result<ToolGrant
 /// What one run spent on traffic that arrived over HTTP carrying
 /// `X-Lmgw-Run: <job id>` — a container's own `/v1` and `/mcp` calls.
 ///
-/// The in-process executor sums its own [`batch::Meter`] and prices it once at
-/// the end; a request that arrives from outside has already been priced by
+/// A request that arrives from outside has already been priced by
 /// [`crate::proxy`] before anyone knows which run it belongs to, so these
-/// totals are the **sum of per-request costs** instead. Pricing is linear in
-/// tokens, so for one route the two agree; across a run that switched models
-/// mid-way the per-request sum is the more accurate of the two.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+/// totals are the **sum of its rows' costs**, by the rollup's own rule for an
+/// unpriced row ([`crate::store::NewRequestLog::row_cost`]) — the rule the
+/// in-process executor's meter sums its calls' rows by, so neither reads a
+/// run lower than its rows.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunTotals {
+    /// The tokens the run's rows reported, a failed call's included.
     pub usage: crate::ir::Usage,
-    /// `None` is "nobody could price this", which is not zero.
-    pub cost_micro: Option<i64>,
+    /// What the rows add up to: nothing until a row adds to it, unknown for
+    /// good once one was unpriced work — never the priced rows' partial sum.
+    pub cost: crate::pricing::CostTotal,
+    /// Calls that reached an upstream and came back without an error: a
+    /// refused, failed or stopped call is none, though its row's cost counts.
     pub model_calls: u32,
     pub tool_calls: u32,
 }
 
 impl RunTotals {
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
+    /// `None` is "nobody could price this", which is not zero: no row added
+    /// to the total, or one that could not be priced.
+    pub fn cost_micro(&self) -> Option<i64> {
+        self.cost.micro()
     }
 }
 
@@ -707,26 +713,53 @@ impl RunTotals {
 /// On [`crate::state::AppState`] rather than in a `static` for the same reason
 /// [`batch::RunBuffer`] is: two gateways in one test process must not see each
 /// other's runs through colliding job ids.
+///
+/// A run is open from [`Self::open`] — when its job goes live, before any
+/// request can name it — until [`Self::take`]. A call noted for a run that
+/// is not open is dropped: long-lived stamped work (a realtime session, a
+/// long `/v1/responses` loop) that finishes after its run was read and
+/// forgotten re-creates no entry nobody would ever take.
 #[derive(Default)]
 pub struct RunMeters(std::sync::Mutex<std::collections::HashMap<i64, RunTotals>>);
 
 impl RunMeters {
-    /// Fold one finished `/v1` call into the run it stamped itself with.
-    pub fn note_model_call(&self, run: i64, usage: &crate::ir::Usage, cost_micro: Option<i64>) {
-        let mut m = self.0.lock().unwrap();
-        let t = m.entry(run).or_default();
-        t.usage.add(usage);
-        t.model_calls += 1;
-        if let Some(c) = cost_micro {
-            t.cost_micro = Some(t.cost_micro.unwrap_or(0) + c);
-        }
+    /// Open a run's meter, empty. Its job is about to go live.
+    pub fn open(&self, run: i64) {
+        self.0.lock().unwrap().entry(run).or_default();
     }
 
-    /// Same for a `tools/call` on `/mcp`. A tool call has no usage of its own —
-    /// `counts_in_token_stats` already excludes the `"mcp"` proto — so only the
-    /// count moves.
+    /// Fold one finished call's row into the run it stamped itself with:
+    /// its tokens, what it adds to the cost (`row`, the row's own
+    /// [`crate::store::NewRequestLog::row_cost`]), and — `answered`, it came
+    /// back without an error — one model call.
+    ///
+    /// The first row that adds to the cost starts the total and every later
+    /// one adds to it. Unpriced work makes the total unknown for the rest of
+    /// the run: a sum of the others would read as the whole run's cost.
+    pub fn note_row(
+        &self,
+        run: i64,
+        usage: &crate::ir::Usage,
+        row: crate::pricing::RowCost,
+        answered: bool,
+    ) {
+        let mut m = self.0.lock().unwrap();
+        let Some(t) = m.get_mut(&run) else {
+            return;
+        };
+        t.usage.add(usage);
+        t.cost.add(row);
+        t.model_calls += u32::from(answered);
+    }
+
+    /// Same for a tool call — a `tools/call` on `/mcp`, or one lmgw ran for a
+    /// stamped `/v1/responses` or realtime turn. A tool call has no usage of
+    /// its own — `counts_in_token_stats` already excludes the `"mcp"` proto —
+    /// so only the count moves.
     pub fn note_tool_call(&self, run: i64) {
-        self.0.lock().unwrap().entry(run).or_default().tool_calls += 1;
+        if let Some(t) = self.0.lock().unwrap().get_mut(&run) {
+            t.tool_calls += 1;
+        }
     }
 
     /// Read without disturbing, for a run still going.
@@ -739,39 +772,10 @@ impl RunMeters {
             .unwrap_or_default()
     }
 
-    /// Read and forget, when the run ends.
+    /// Read and forget, when the run ends: the run is closed, and a call
+    /// noted for it from here on is dropped.
     pub fn take(&self, run: i64) -> RunTotals {
         self.0.lock().unwrap().remove(&run).unwrap_or_default()
-    }
-
-    /// Add these totals to a run report an in-process executor has already
-    /// built, so one run that both drove model turns itself *and* had a
-    /// container call `/v1` reports one number rather than two halves.
-    pub fn fold_into(&self, run: i64, report: &mut serde_json::Value) {
-        let t = self.read(run);
-        if t.is_empty() {
-            return;
-        }
-        let Some(m) = report.as_object_mut() else {
-            return;
-        };
-        let mut usage: crate::ir::Usage = m
-            .get("usage")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        usage.add(&t.usage);
-        m.insert("usage".into(), serde_json::json!(usage));
-        let own = m.get("cost_micro").and_then(serde_json::Value::as_i64);
-        // `None` + `None` stays `None`: "nobody could price this" is not zero.
-        let cost = match (own, t.cost_micro) {
-            (None, None) => serde_json::Value::Null,
-            (a, b) => serde_json::json!(a.unwrap_or(0) + b.unwrap_or(0)),
-        };
-        m.insert("cost_micro".into(), cost);
-        for (key, add) in [("model_calls", t.model_calls), ("tool_calls", t.tool_calls)] {
-            let own = m.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
-            m.insert(key.into(), serde_json::json!(own + u64::from(add)));
-        }
     }
 }
 

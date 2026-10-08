@@ -185,10 +185,14 @@ impl ActionEnv {
             return;
         };
         let env = *self;
+        // A read of the thread out now may answer with the message still
+        // there (`chat_sync`).
+        env.turn.own.bump();
         env.turn.scope.spawn(async move {
             match crate::api::post::<Value, _>(Self::msg_url(tid, mid, "delete"), &json!({})).await
             {
                 Ok(_) => {
+                    env.turn.own.bump();
                     if env.turn.current_id.get_untracked() == Some(tid) {
                         env.turn.msgs.update(|v| v.retain(|m| m.key != key));
                     }
@@ -215,6 +219,9 @@ impl ActionEnv {
             return;
         };
         let env = *self;
+        // A read of the thread out now may answer with the old text
+        // (`chat_sync`).
+        env.turn.own.bump();
         env.turn.scope.spawn(async move {
             let res = crate::api::post::<Value, _>(
                 Self::msg_url(tid, mid, "edit"),
@@ -223,6 +230,7 @@ impl ActionEnv {
             .await;
             match res {
                 Ok(v) => {
+                    env.turn.own.bump();
                     let saved = v["message"]["content"]
                         .as_str()
                         .unwrap_or(&text)

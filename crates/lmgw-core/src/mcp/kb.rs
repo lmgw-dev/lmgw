@@ -221,12 +221,12 @@ pub async fn call(
     name: &str,
     args: Option<Map<String, Value>>,
     access: &KbAccess,
-    default_budget: Option<usize>,
+    (default_budget, charged): (Option<usize>, Option<&crate::proxy::RequestCtx>),
 ) -> Result<Value, CallError> {
     let a = args.unwrap_or_default();
     let out = match name {
         "kb__list" => list_tool(state, access).await.map(|v| ok_json(&v)),
-        "kb__search" => search_tool(state, &a, access, default_budget)
+        "kb__search" => search_tool(state, &a, access, (default_budget, charged))
             .await
             .map(ok_text),
         "kb__read" => read_tool(state, &a, access, default_budget)
@@ -307,11 +307,13 @@ async fn pick_bases(
     })
 }
 
+/// `charged`: whose request the search's embedder and reranker run for
+/// (`retrieve::Options::caller`).
 async fn search_tool(
     state: &SharedState,
     args: &Map<String, Value>,
     access: &KbAccess,
-    default_budget: Option<usize>,
+    (default_budget, charged): (Option<usize>, Option<&crate::proxy::RequestCtx>),
 ) -> Result<String, String> {
     let query = arg_str(args, "query")?
         .map(str::trim)
@@ -327,6 +329,7 @@ async fn search_tool(
         &Options {
             budget_tokens: budget,
             params: None,
+            caller: charged.cloned(),
         },
     )
     .await;

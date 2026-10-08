@@ -436,6 +436,9 @@ a.btn { text-decoration: none; }
   border: 1px solid var(--border-strong); background: var(--bg1); color: var(--text);
   font: 400 var(--fs) var(--sans); min-width: 0; }
 .input.mono { font-family: var(--mono); }
+/* A locked box or picker (a row's key, a value this row does not own) looks
+   locked, as a disabled button does: dimmed, and no pointer. */
+.input:disabled, .select-btn:disabled { opacity: .5; cursor: default; }
 .field label { display: block; font-size: var(--fs-sm); font-weight: 500;
   color: var(--text-2); margin-bottom: 4px; }
 .row { display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap; }
@@ -1446,6 +1449,8 @@ tr.detail-row td { background: var(--bg1); height: auto; padding: 10px 14px; }
   color: var(--text-3); white-space: nowrap; }
 .thread-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .thread-kind { color: var(--text-2); }
+/* An ongoing folder's current thread (client-apps §3.6). */
+.thread-current { color: var(--accent); }
 .thread-row > .thread-row-menu { grid-column: 2; grid-row: 1 / span 2; }
 .thread-row-menu .row-menu-btn { padding: 0 5px; font-size: 11px; color: var(--text-3); }
 .thread-row-menu .row-menu-btn:hover { color: var(--text); }
@@ -1465,6 +1470,10 @@ tr.detail-row td { background: var(--bg1); height: auto; padding: 10px 14px; }
   transition: transform .12s; }
 .folder-chev.collapsed { transform: rotate(-90deg); }
 .folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A folder a device's delete hid from devices (review F-7): it gives way
+   before the name does, ellipsized, its whole text on hover. */
+.folder-hidden { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; font-weight: 400; color: var(--text-3); white-space: nowrap; }
 .folder-rename { flex: 1; min-width: 0; }
 .thread-row.nested { margin-left: 14px; }
 .thread-folder.drop-over, .thread-dropzone.drop-over { background: var(--accent-bg);
@@ -1477,6 +1486,7 @@ tr.detail-row td { background: var(--bg1); height: auto; padding: 10px 14px; }
 .move-list { display: flex; flex-direction: column; gap: 4px; }
 .move-list .btn { justify-content: flex-start; }
 .folder-settings { padding: 0; }
+.modal-foot .folder-apply { margin-right: auto; font-size: var(--fs-sm); }
 .chat-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .chat-head { flex: none; display: flex; align-items: center; gap: 10px;
   padding: 10px 20px; border-bottom: 1px solid var(--border); min-width: 0; }
@@ -1942,10 +1952,39 @@ table.data td.clip.key-spend { width: 65%; }
 /* A key's actions sit in the same slots on every row: Edit at the edge, the
    owner key's menu (or its empty slot) beside it, Revoke apart at the left. */
 .key-acts .menu-slot { display: inline-block; width: 26px; }
+/* Devices (client-apps design §1.4): a strip above the keys table, which
+   stays the page's one fill-pane. A handful of devices is the case; past
+   two fifths of the page the card scrolls its own rows, head kept in view,
+   rather than squeezing the keys table out. */
+.page.fill > .page-body > .devices-card { max-height: 40%; overflow: auto; }
+.devices-card .card-head { flex-wrap: wrap; }
+.devices-sub { font-size: var(--fs-sm); min-width: 0; }
+.devices-empty { margin: 0; font-size: var(--fs-sm); }
+table.devices-table td.clip { max-width: 0; width: 30%; }
+table.devices-table td.nowrap { white-space: nowrap; }
+.dev-online { color: var(--ok); white-space: nowrap; }
+.dev-online::before { content: ""; display: inline-block; width: 7px; height: 7px;
+  margin-right: 6px; border-radius: 50%; background: var(--ok); vertical-align: 1px; }
+/* The pairing link: the whole credential, selectable in one click. */
+.pair-link { margin-top: 8px; padding: 9px 12px; border: 1px solid var(--border);
+  border-radius: var(--card-r); background: var(--surface-hi); overflow-wrap: anywhere;
+  user-select: all; }
+.pair-review { border-collapse: collapse; margin: 6px 0 10px; font-size: var(--fs-sm); }
+.pair-review th { text-align: left; font-weight: 500; color: var(--text-2);
+  padding: 3px 16px 3px 0; white-space: nowrap; vertical-align: top; }
+.pair-review td { padding: 3px 0; overflow-wrap: anywhere; }
 /* Prices: an unpriced model is waiting on the owner — its row says how much
    it has already spent unnamed, and its one action prices it. */
 table.price-table tr.unpriced-row td.num { text-align: left; }
 table.price-table tr.unpriced-row .chip { height: 20px; }
+/* Each row says its unit (billable units): a unit other than tokens has one
+   rate, which takes the In and Out cells — the number in the numbers' face,
+   what it is per beside it. */
+table.price-table td.price-unit { white-space: nowrap; }
+table.price-table td.price-rate { white-space: nowrap; font-size: var(--fs-sm); }
+table.price-table td.price-rate .num-v { font-family: var(--mono); color: var(--text-2); }
+.price-unit-row { margin-top: 10px; }
+.price-unit-row .price-unit-note { margin-top: 0; }
 
 /* ---------- 12-column dashboard grid ----------
    Rows of related cards: spend + budget; the three time series; where it
@@ -1981,6 +2020,13 @@ table.price-table tr.unpriced-row .chip { height: 20px; }
 }
 @container pane (width < 600px) {
   .usage .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* The measured-quantity tiles (billable units) follow the six as a band of
+   their own: a third of the row each, so one or two of them never stand as
+   a lone sixth-wide tile; at three across they are one tile each. */
+.usage .tile.qty { grid-column: span 2; }
+@container pane (width < 1100px) {
+  .usage .tile.qty { grid-column: span 1; }
 }
 .usage .tile { padding: 11px 14px 9px; border-radius: var(--card-r);
   box-shadow: var(--shadow); text-align: left; }
@@ -2089,11 +2135,19 @@ table.share-table td.share-name { width: 34%; }
 table.share-table .share-name a { color: var(--text); }
 table.share-table .share-name a:hover { color: var(--accent); }
 table.share-table td.bar-cell { width: 26%; }
+/* What an alias processed besides tokens (billable units): kept at every
+   width, since a narrow card hides the other number columns first. */
+table.share-table td.share-measured { white-space: nowrap; font-size: var(--fs-sm); width: 1%; }
+/* In a narrow card the alias names give up the room the measured column
+   takes (they ellipsize, their tooltip is whole), so the bars keep a track. */
+@container tbl (width < 640px) {
+  table.share-table.has-measured td.share-name { width: 22%; }
+}
 .bar-cell { white-space: nowrap; }
-.cell-bar { display: inline-block; vertical-align: middle; width: calc(100% - 92px);
+.cell-bar { display: inline-block; vertical-align: middle; width: calc(100% - var(--val-w, 86px) - 6px);
   height: 12px; border-radius: 3px; background: var(--seq0); overflow: hidden; }
 .cell-bar > i { display: block; height: 100%; border-radius: 0 4px 4px 0; }
-.bar-val { display: inline-block; vertical-align: middle; width: 86px; margin-left: 6px;
+.bar-val { display: inline-block; vertical-align: middle; width: var(--val-w, 86px); margin-left: 6px;
   font: 11px var(--mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; }
 i.slot-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2.5px;
   margin-right: 7px; vertical-align: -1px; }

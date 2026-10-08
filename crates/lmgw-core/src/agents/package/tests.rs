@@ -392,6 +392,7 @@ fn agent(manifest: &str, provenance: &str, dev_url: Option<&str>) -> Agent {
         source: "imported".into(),
         provenance: provenance.into(),
         dev_url: dev_url.map(str::to_string),
+        created_by_key: None,
         created_at: String::new(),
         updated_at: String::new(),
     })

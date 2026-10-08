@@ -1,6 +1,6 @@
 //! API keys
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::config::KeyPolicy;
 
@@ -25,6 +25,14 @@ pub async fn insert_api_key(pool: &SqlitePool, name: &str, key_hash: &str) -> Db
 /// middle would leave a row carrying half of one policy and half of another —
 /// and the gate reads the row, not the intent.
 ///
+/// `hosts_label` rides along (a device's hosting grant, client-apps design
+/// §1.5), and so does `self_admin` (a device's admin-tools level, L3/L5):
+/// `None` and `off` on every other kind, which the table's CHECKs hold them
+/// to. A level that moved (`self_admin.1`: the one before it) is recorded
+/// in the Chat change feed in the same transaction
+/// (`feed::record_device_reach`), so the device's stream hears it in commit
+/// order.
+///
 /// Returns the number of rows written, so a caller can tell "id does not
 /// exist" from "wrote nothing because nothing changed".
 pub async fn update_key_policy(
@@ -33,12 +41,19 @@ pub async fn update_key_policy(
     policy: &KeyPolicy,
     enabled: bool,
     note: &str,
+    hosts_label: Option<&str>,
+    (self_admin, was): (
+        crate::config::DeviceAdmin,
+        Option<crate::config::DeviceAdmin>,
+    ),
 ) -> DbResult<u64> {
+    let mut tx = super::begin_write(pool).await?;
     let res = sqlx::query(
         "UPDATE api_keys
             SET enabled = ?2, scope_mode = ?3, scope_patterns = ?4, budget_micro = ?5,
                 budget_period = ?6, rpm_limit = ?7, tpm_limit = ?8, concurrency_limit = ?9,
-                expires_at = ?10, note = ?11, tool_scope_mode = ?12, tool_scope_patterns = ?13
+                expires_at = ?10, note = ?11, tool_scope_mode = ?12, tool_scope_patterns = ?13,
+                hosts_label = ?14, self_admin = ?15
           WHERE id = ?1",
     )
     .bind(id)
@@ -54,8 +69,14 @@ pub async fn update_key_policy(
     .bind(note)
     .bind(policy.tool_scope_mode.as_str())
     .bind(&policy.tool_scope_patterns)
-    .execute(pool)
+    .bind(hosts_label)
+    .bind(self_admin.column())
+    .execute(&mut *tx)
     .await?;
+    if let Some(was) = was.filter(|_| res.rows_affected() > 0) {
+        super::feed::record_device_reach(&mut tx, id, self_admin, was).await?;
+    }
+    tx.commit().await?;
     Ok(res.rows_affected())
 }
 
@@ -225,4 +246,157 @@ pub async fn delete_agent_key(pool: &SqlitePool, agent_id: &str) -> DbResult<()>
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Device keys (client-apps design §1.1)
+// ---------------------------------------------------------------------------
+
+/// Insert one device key with its whole owner-set policy and its hosting
+/// label, in one statement: a device is never live, even for a moment, with a
+/// scope wider than the one the pairing form confirmed (§11 Q1).
+///
+/// Hash only (L1): `key_plain` stays NULL, as the table's CHECK requires.
+pub async fn insert_device_key(
+    pool: &SqlitePool,
+    name: &str,
+    key_hash: &str,
+    policy: &KeyPolicy,
+    (hosts_label, self_admin): (Option<&str>, crate::config::DeviceAdmin),
+    note: &str,
+) -> DbResult<i64> {
+    let row = sqlx::query(
+        "INSERT INTO api_keys
+              (name, key_hash, enabled, kind, scope_mode, scope_patterns, budget_micro,
+               budget_period, rpm_limit, tpm_limit, concurrency_limit, expires_at, note,
+               tool_scope_mode, tool_scope_patterns, hosts_label, self_admin)
+         VALUES (?1, ?2, 1, 'device', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         RETURNING id",
+    )
+    .bind(name)
+    .bind(key_hash)
+    .bind(policy.scope_mode.as_str())
+    .bind(&policy.scope_patterns)
+    .bind(policy.budget_micro)
+    .bind(policy.budget_period.as_str())
+    .bind(policy.rpm_limit)
+    .bind(policy.tpm_limit)
+    .bind(policy.concurrency_limit)
+    .bind(policy.expires_at.as_deref().filter(|e| !e.is_empty()))
+    .bind(note)
+    .bind(policy.tool_scope_mode.as_str())
+    .bind(&policy.tool_scope_patterns)
+    .bind(hosts_label)
+    .bind(self_admin.column())
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get("id"))
+}
+
+/// Replace a device key's hash — Rotate on a hash-only row (L1), which is a
+/// re-pairing: the old value matches nothing from this write on. The row, its
+/// id, its policy and its history stay.
+///
+/// Returns the number of rows written, so a caller can tell a row that went
+/// away from a rotation that happened.
+pub async fn set_device_key_hash(pool: &SqlitePool, id: i64, key_hash: &str) -> DbResult<u64> {
+    let res = sqlx::query("UPDATE api_keys SET key_hash = ?2 WHERE id = ?1 AND kind = 'device'")
+        .bind(id)
+        .bind(key_hash)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// Stamp `last_seen_at` with now (L15): a device's connection opened or
+/// closed. Not part of the snapshot — it moves without a reload, and only the
+/// Keys page reads it ([`key_last_seen`]).
+pub async fn touch_key_last_seen(pool: &SqlitePool, id: i64) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE api_keys SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// When one key's connection last opened or closed, as RFC 3339 UTC.
+pub async fn key_last_seen(pool: &SqlitePool, id: i64) -> DbResult<Option<String>> {
+    let row = sqlx::query("SELECT last_seen_at FROM api_keys WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.get::<Option<String>, _>("last_seen_at")))
+}
+
+/// Key `id`'s level of lmgw's admin tools now, as its row says — `off` for a
+/// key that is gone, not a device, disabled or expired — whatever the
+/// published snapshot still holds (review P-8): what a device's `lmgw__*`
+/// call is checked against as well, so a key write that committed is in
+/// force before its snapshot is reloaded.
+pub async fn device_admin_now(pool: &SqlitePool, id: i64) -> DbResult<crate::config::DeviceAdmin> {
+    let row = sqlx::query(
+        "SELECT self_admin, enabled, expires_at FROM api_keys WHERE id = ?1 AND kind = 'device'",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row
+        .filter(|r| {
+            let mut key = crate::config::ApiKey::default();
+            key.policy.expires_at = r.get("expires_at");
+            r.get::<i64, _>("enabled") != 0
+                && crate::policy::check_expiry(&key, chrono::Utc::now()).is_ok()
+        })
+        .map_or(crate::config::DeviceAdmin::Off, |r| {
+            crate::config::DeviceAdmin::from_column(r.get("self_admin"))
+        }))
+}
+
+/// The gateway's self-admin level as the stored settings say now, whatever
+/// the published snapshot still holds (client-apps design L3's note,
+/// 2026-10-07): checked with [`device_admin_now`] on a device's `lmgw__*`
+/// call, so a lowered level is in force from its commit, as a device's own
+/// is. A blob that does not parse reads as the default, as `load_settings`
+/// reads it.
+pub async fn gateway_self_admin_now(pool: &SqlitePool) -> DbResult<crate::config::SelfAdmin> {
+    let mut conn = pool.acquire().await?;
+    gateway_self_admin_in(&mut conn).await
+}
+
+/// [`gateway_self_admin_now`] on `conn`, a transaction's.
+///
+/// The whole blob, through the parse the snapshot loader uses
+/// (`settings_from_row`), and the same defaults while no settings are
+/// stored. Read as one field with `json_extract`, a blob that held a valid
+/// level but did not parse as settings said that level here and the
+/// default in the published snapshot, for good: every device's feed then
+/// waited a full keep-alive for a publish that would never say it. A blob
+/// that was not JSON at all failed the read.
+pub async fn gateway_self_admin_in(
+    conn: &mut SqliteConnection,
+) -> DbResult<crate::config::SelfAdmin> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'settings'")
+            .fetch_optional(conn)
+            .await?;
+    Ok(super::settings_from_row(raw.as_deref()).self_admin)
+}
+
+/// Key `id`'s level of lmgw's admin tools, as its row says now
+/// (`ApiKey::self_admin`; `off` for a key that is no device): what a Chat
+/// feed opens with, read in the transaction that reads the feed's head
+/// (`feed::bounds_and_switch`), so it neither trails nor runs ahead of the
+/// records the stream reads.
+pub async fn device_self_admin(
+    conn: &mut SqliteConnection,
+    id: i64,
+) -> DbResult<crate::config::DeviceAdmin> {
+    let level: Option<i64> =
+        sqlx::query_scalar("SELECT self_admin FROM api_keys WHERE id = ?1 AND kind = 'device'")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?;
+    Ok(crate::config::DeviceAdmin::from_column(level.unwrap_or(0)))
 }

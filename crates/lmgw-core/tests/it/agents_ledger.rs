@@ -31,7 +31,7 @@ use common::{serve, Gw};
 // Harness
 // ---------------------------------------------------------------------------
 
-async fn op(base: &Gw, name: &str, args: Value) -> (u16, Value) {
+pub(crate) async fn op(base: &Gw, name: &str, args: Value) -> (u16, Value) {
     let resp = base
         .client()
         .post(format!("{base}/api/op/{name}"))
@@ -61,7 +61,12 @@ async fn get_json(base: &Gw, path: &str) -> Value {
 /// A POST as one named credential, or — with `None` — as a caller with **no**
 /// credential at all, which is a different thing now that the dashboard key is
 /// what `Gw::client` presents.
-async fn post_as(base: &Gw, path: &str, token: Option<&str>, body: Value) -> (u16, Value) {
+pub(crate) async fn post_as(
+    base: &Gw,
+    path: &str,
+    token: Option<&str>,
+    body: Value,
+) -> (u16, Value) {
     let mut req = base.anon().post(format!("{base}{path}")).json(&body);
     if let Some(t) = token {
         req = req.header("authorization", format!("Bearer {t}"));
@@ -76,7 +81,7 @@ async fn post_as(base: &Gw, path: &str, token: Option<&str>, body: Value) -> (u1
 }
 
 /// The test agent: two tools on the surface, exactly one of them allowed.
-fn doc(id: &str, deadline_seconds: u64) -> String {
+pub(crate) fn doc(id: &str, deadline_seconds: u64) -> String {
     format!(
         r#"{{
   "schema_version": 1,
@@ -95,7 +100,7 @@ fn doc(id: &str, deadline_seconds: u64) -> String {
     )
 }
 
-async fn install(base: &Gw, manifest: &str) {
+pub(crate) async fn install(base: &Gw, manifest: &str) {
     let (status, body) = op(
         base,
         "agent_set",
@@ -199,7 +204,7 @@ fn tool_names(body: &Value) -> Vec<String> {
 }
 
 /// Wait until `job_id` has left `running`, or give up with what it was doing.
-async fn settled(base: &Gw, job_id: i64) -> Value {
+pub(crate) async fn settled(base: &Gw, job_id: i64) -> Value {
     for _ in 0..200 {
         let v = get_json(base, &format!("/api/agents/runs/{job_id}")).await;
         let status = v["job"]["status"].as_str().unwrap_or_default().to_string();
@@ -280,6 +285,28 @@ async fn a_token_is_minted_on_demand_scoped_to_any_model_and_rotates_both_column
         "the old token stopped working"
     );
     assert!(snap.verify_api_key(&fresh).is_some());
+
+    // A rotation whose reload fails (review W4-21): the new value is laid
+    // over the published snapshot all the same, so the old one is refused
+    // at once, and the failure is said beside the new token.
+    sqlx::query("ALTER TABLE prices RENAME TO prices_away")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (status, again) = op(&base, "agent_token_rotate", json!({ "id": "labeler" })).await;
+    sqlx::query("ALTER TABLE prices_away RENAME TO prices")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "{again}");
+    let newest = again["token"].as_str().unwrap().to_string();
+    let snap = state.snapshot();
+    assert!(snap.verify_api_key(&fresh).is_none(), "{again}");
+    assert!(snap.verify_api_key(&newest).is_some(), "{again}");
+    assert!(
+        again.to_string().contains("could not be rewritten"),
+        "{again}"
+    );
 }
 
 /// `POST /api/op/<name>` with an explicit `Origin`.

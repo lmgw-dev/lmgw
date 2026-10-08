@@ -37,15 +37,22 @@ pub enum Principal {
         /// `Some` for `kind = agent` only: the catalog row the token belongs
         /// to, which is what `Ledger` and `AgentSelf` scope themselves by.
         agent_id: Option<String>,
+        /// The credential it was resolved with ([`ApiKey::fingerprint`]): a
+        /// row rotated since holds another, and every per-call check that
+        /// re-reads the row refuses then (client-apps design §1.6).
+        fingerprint: String,
     },
 }
 
-/// What a route needs (§3.2). Five words, and every route declares exactly
+/// What a route needs (§3.2). Six words, and every route declares exactly
 /// one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cap {
     Public,
     Inference,
+    /// The Chat API (client-apps design §1.2): threads, folders, the voice
+    /// binding. Held by an owner and by a paired device, and by nobody else.
+    Chat,
     Ledger,
     AgentSelf,
     Admin,
@@ -57,6 +64,7 @@ impl Cap {
         match self {
             Self::Public => "public",
             Self::Inference => "inference",
+            Self::Chat => "chat",
             Self::Ledger => "ledger",
             Self::AgentSelf => "agent-self",
             Self::Admin => "admin",
@@ -72,7 +80,26 @@ impl Principal {
             name: key.name.clone(),
             kind: key.kind,
             agent_id: key.agent_id.clone(),
+            fingerprint: key.fingerprint(),
         }
+    }
+
+    /// Whether `key` is still the credential this principal was resolved
+    /// with: the same row, not rotated since. `false` for `Anonymous`.
+    pub fn presents(&self, key: &ApiKey) -> bool {
+        matches!(self, Self::Key { id, fingerprint, .. }
+            if *id == key.id && *fingerprint == key.fingerprint())
+    }
+
+    /// Whether it is a paired device's key.
+    pub fn is_device_key(&self) -> bool {
+        matches!(
+            self,
+            Self::Key {
+                kind: ApiKeyKind::Device,
+                ..
+            }
+        )
     }
 
     /// `api_keys.id`, for the handlers and the log line that carry it.
@@ -96,18 +123,24 @@ impl Principal {
         }
     }
 
-    /// The §3.2 table, in code.
+    /// The §3.2 table, in code, with the client-apps design's `Chat` column
+    /// (§1.2).
+    ///
+    /// **Every arm names what it grants** (client-apps review R16): a
+    /// capability added later is held by nobody until an arm says so, rather
+    /// than by whoever an arm wrote as "everything but …".
     ///
     /// The one conditional row is `Anonymous` × `Inference`: **Require API
     /// key** off is what makes an anonymous `/v1` call legal, and that is the
     /// whole of what the toggle has ever meant (§3.8). Anonymous never holds
-    /// `Admin` in either state — the dashboard's own calls carry the cookie.
+    /// `Admin` or `Chat` in either state — the dashboard's own calls carry the
+    /// cookie.
     pub fn holds(&self, cap: Cap, snap: &Snapshot) -> bool {
         match self {
             Self::Anonymous => match cap {
                 Cap::Public => true,
                 Cap::Inference => !snap.settings.auth_enabled,
-                Cap::Ledger | Cap::AgentSelf | Cap::Admin => false,
+                Cap::Chat | Cap::Ledger | Cap::AgentSelf | Cap::Admin => false,
             },
             Self::Key { kind, .. } => match kind {
                 // Every enabled owner row holds everything an owner holds, and
@@ -119,12 +152,25 @@ impl Principal {
                 // (`403 forbidden`, naming the capability); before this the
                 // handler's `run_not_owned` said it by accident, and only for
                 // a run that happened to exist.
-                ApiKeyKind::Owner => cap != Cap::Ledger,
+                ApiKeyKind::Owner => matches!(
+                    cap,
+                    Cap::Public | Cap::Inference | Cap::Chat | Cap::AgentSelf | Cap::Admin
+                ),
                 // Scoped and allow-listed as today on `Inference`; `Ledger`
                 // and `AgentSelf` are narrowed to its own runs and its own id
-                // by the handlers' existing ownership checks.
-                ApiKeyKind::Agent => !matches!(cap, Cap::Admin),
+                // by the handlers' existing ownership checks. Not `Chat`: an
+                // agent reaches models through `/v1`, never the owner's
+                // conversations.
+                ApiKeyKind::Agent => {
+                    matches!(
+                        cap,
+                        Cap::Public | Cap::Inference | Cap::Ledger | Cap::AgentSelf
+                    )
+                }
                 ApiKeyKind::Key => matches!(cap, Cap::Public | Cap::Inference),
+                // A paired client app (client-apps design §1.2): a client key
+                // that also holds the Chat API, and nothing of the admin plane.
+                ApiKeyKind::Device => matches!(cap, Cap::Public | Cap::Inference | Cap::Chat),
                 // `internal` rows are attribution identities, not credentials.
                 // [`resolve`] never produces one, so this arm is the second
                 // backstop `policy::admit`'s refusal already is (§3.1).
@@ -156,7 +202,16 @@ impl Principal {
                 name,
                 ..
             } => format!("an internal identity ('{name}')"),
-            Self::Key { name, .. } => format!("a client API key ('{name}')"),
+            Self::Key {
+                kind: ApiKeyKind::Device,
+                name,
+                ..
+            } => format!("a device key ('{}')", crate::devices::short_name(name)),
+            Self::Key {
+                kind: ApiKeyKind::Key,
+                name,
+                ..
+            } => format!("a client API key ('{name}')"),
         }
     }
 }
@@ -226,6 +281,49 @@ impl Refusal {
             status: StatusCode::UNAUTHORIZED,
             code: "key_disabled",
             message: format!("client key '{name}' is disabled — enable it on Usage → Keys"),
+        }
+    }
+
+    /// `401` — the credential matched a **device** row that is switched off
+    /// (client-apps design §1.6). Disable on the Devices card is how a lost
+    /// phone is cut off, and the device is told which switch to look at.
+    pub fn device_disabled(name: &str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "device_disabled",
+            message: format!(
+                "device '{}' is disabled — enable it on Usage → Keys",
+                crate::devices::short_name(name)
+            ),
+        }
+    }
+
+    /// `401` — a bearer that is a device key by its prefix
+    /// (`devices::KEY_PREFIX`) and matches no row: the device was
+    /// rotated or deleted. Said as what the device does next, not as the
+    /// dashboard's login hint `session_required` gives, and without saying
+    /// which of the two happened.
+    pub fn device_key_unknown() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "device_key_unknown",
+            message: "this device key is no longer valid (rotated or deleted) — pair the device \
+                      again"
+                .into(),
+        }
+    }
+
+    /// `401` — a key past its `expires_at`, on a route the gate checks expiry
+    /// on outside `/v1` (`Chat`, client-apps design L17). The same code and
+    /// words `/v1` has always answered (`GatewayError::KeyExpired`), in the
+    /// flat shape the Chat API speaks — a device named as every other device
+    /// message names it, `device 'desktop'` (review W2-18).
+    pub fn key_expired(key: &ApiKey, expired_at: &str) -> Self {
+        let who = key.described();
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "key_expired",
+            message: format!("{who} expired on {expired_at}"),
         }
     }
 
@@ -348,6 +446,15 @@ pub fn resolve(headers: &HeaderMap, snap: &Snapshot) -> Result<Principal, Refusa
 /// [`token::presented`]: crate::agents::token::presented
 pub fn from_bearer(snap: &Snapshot, bearer: &str) -> Result<Principal, Refusal> {
     let Some(key) = matching_row(snap, bearer) else {
+        // A device key is known by its prefix even with no row behind it:
+        // it was rotated or deleted, and the device is told to pair again
+        // rather than handed the dashboard's login hint. Like a disabled
+        // row, the refusal waits for the route's gate (a `Public` route
+        // drops it).
+        if bearer.starts_with(crate::devices::KEY_PREFIX) {
+            tracing::debug!("a presented device key matched no key row");
+            return Err(Refusal::device_key_unknown());
+        }
         tracing::debug!("a presented bearer matched no key row");
         return Ok(Principal::Anonymous);
     };
@@ -365,6 +472,7 @@ pub fn from_bearer(snap: &Snapshot, bearer: &str) -> Result<Principal, Refusal> 
         )),
         ApiKeyKind::Owner => Err(Refusal::owner_key_disabled(&key.name)),
         ApiKeyKind::Key => Err(Refusal::key_disabled(&key.name)),
+        ApiKeyKind::Device => Err(Refusal::device_disabled(&key.name)),
         ApiKeyKind::Internal => Ok(Principal::Anonymous),
     }
 }
@@ -474,6 +582,13 @@ mod tests {
                     true,
                 ),
                 key(4, "internal:agents", ApiKeyKind::Internal, "", true),
+                key(
+                    5,
+                    "device:phone",
+                    ApiKeyKind::Device,
+                    "lmgw-device-phone",
+                    true,
+                ),
             ],
             ..Default::default()
         }
@@ -503,6 +618,7 @@ mod tests {
             ("lmgw-client", 1, ApiKeyKind::Key),
             ("lmgw-agent-board", 2, ApiKeyKind::Agent),
             ("lmgw-owner-dash", 3, ApiKeyKind::Owner),
+            ("lmgw-device-phone", 5, ApiKeyKind::Device),
         ] {
             let p = resolve(&with_bearer(token), &s).unwrap();
             assert_eq!(p.key_id(), Some(id), "{token}");
@@ -527,7 +643,7 @@ mod tests {
             Some(3)
         );
         // Not an error, not a credential in that position (§3.3).
-        for other in ["lmgw-client", "lmgw-agent-board"] {
+        for other in ["lmgw-client", "lmgw-agent-board", "lmgw-device-phone"] {
             assert_eq!(
                 resolve(&with_cookie(other), &s).unwrap(),
                 Principal::Anonymous,
@@ -588,6 +704,36 @@ mod tests {
     }
 
     #[test]
+    fn a_device_key_without_its_row_is_told_to_pair_again() {
+        let s = snap();
+        // Rotated or deleted: the prefix says it was a device's.
+        let e = resolve(&with_bearer("lmgw-device-0123abcd"), &s).unwrap_err();
+        assert_eq!(
+            (e.status, e.code),
+            (StatusCode::UNAUTHORIZED, "device_key_unknown")
+        );
+        assert!(e.message.contains("pair the device again"), "{}", e.message);
+        assert!(
+            !e.message.contains("login link"),
+            "not the dashboard's hint"
+        );
+        // Its row matches: it is the device.
+        assert!(resolve(&with_bearer("lmgw-device-phone"), &s)
+            .unwrap()
+            .is_device_key());
+        // Any other unknown bearer, and a device key in the cookie, stay
+        // anonymous.
+        assert_eq!(
+            resolve(&with_bearer("lmgw-zzz"), &s).unwrap(),
+            Principal::Anonymous
+        );
+        assert_eq!(
+            resolve(&with_cookie("lmgw-device-0123abcd"), &s).unwrap(),
+            Principal::Anonymous
+        );
+    }
+
+    #[test]
     fn a_disabled_row_names_itself_rather_than_reading_as_a_typo() {
         let mut s = snap();
         s.api_keys[1].enabled = false;
@@ -613,6 +759,16 @@ mod tests {
         assert_eq!(e.code, "key_disabled");
         assert_eq!(e.status, StatusCode::UNAUTHORIZED);
         assert!(e.message.contains("client key 'laptop'"), "{}", e.message);
+
+        // A device says it is a device, by the name its card shows.
+        s.api_keys[4].enabled = false;
+        let e = resolve(&with_bearer("lmgw-device-phone"), &s).unwrap_err();
+        assert_eq!(e.code, "device_disabled");
+        assert_eq!(e.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            e.message,
+            "device 'phone' is disabled — enable it on Usage → Keys"
+        );
 
         // A key that matches *nothing* still falls through, which is what
         // keeps `/v1`'s "any key value works" promise with the toggle off.
@@ -696,6 +852,7 @@ mod tests {
         let all = [
             Cap::Public,
             Cap::Inference,
+            Cap::Chat,
             Cap::Ledger,
             Cap::AgentSelf,
             Cap::Admin,
@@ -719,31 +876,43 @@ mod tests {
         let agent = Principal::from_key(&key(2, "agent:board", ApiKeyKind::Agent, "a", true));
         let owner = Principal::from_key(&key(3, "owner:dashboard", ApiKeyKind::Owner, "o", true));
         let internal = Principal::from_key(&key(4, "internal:x", ApiKeyKind::Internal, "", true));
-        for cap in all {
-            // A client is an inference credential and never more — the
-            // toggle does not widen it either.
-            assert_eq!(
-                client.holds(cap, &closed),
-                matches!(cap, Cap::Public | Cap::Inference),
-                "client / {cap:?}"
-            );
-            assert_eq!(
-                agent.holds(cap, &closed),
-                cap != Cap::Admin,
-                "agent / {cap:?}"
-            );
-            // Everything except the ledger, which is the agent's alone.
-            assert_eq!(
-                owner.holds(cap, &closed),
-                cap != Cap::Ledger,
-                "owner / {cap:?}"
-            );
-            assert_eq!(
-                internal.holds(cap, &closed),
-                cap == Cap::Public,
-                "internal / {cap:?}"
-            );
+        let device = Principal::from_key(&key(5, "device:phone", ApiKeyKind::Device, "d", true));
+        // The client-apps design's §1.2 table, row by row: every cell is
+        // written here, so a capability added later fails this test until
+        // each principal's answer for it is decided (R16).
+        use Cap::*;
+        let table: [(&str, &Principal, [bool; 6]); 5] = [
+            //                Public Infer  Chat   Ledger AgentS Admin
+            ("owner", &owner, [true, true, true, false, true, true]),
+            ("device", &device, [true, true, true, false, false, false]),
+            ("agent", &agent, [true, true, false, true, true, false]),
+            ("client", &client, [true, true, false, false, false, false]),
+            (
+                "internal",
+                &internal,
+                [true, false, false, false, false, false],
+            ),
+        ];
+        for (who, p, row) in table {
+            for (cap, want) in [Public, Inference, Chat, Ledger, AgentSelf, Admin]
+                .into_iter()
+                .zip(row)
+            {
+                // The toggle widens nothing for a key: it is about anonymous.
+                assert_eq!(p.holds(cap, &closed), want, "{who} / {cap:?}");
+                assert_eq!(p.holds(cap, &open), want, "{who} / {cap:?}, toggle off");
+            }
         }
+    }
+
+    #[test]
+    fn a_device_names_itself_without_its_prefix() {
+        let device = Principal::from_key(&key(5, "device:phone", ApiKeyKind::Device, "d", true));
+        assert_eq!(device.describe(), "a device key ('phone')");
+        assert_eq!(
+            Refusal::forbidden(Cap::Admin, &device).message,
+            "this route needs admin; the request presented a device key ('phone')"
+        );
     }
 
     #[test]

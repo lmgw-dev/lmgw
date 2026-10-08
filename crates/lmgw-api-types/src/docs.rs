@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The §6 stage defaults (`Settings.docs_search`) — where a request that
+/// The stage defaults (`Settings.docs_search`) — where a request that
 /// overrides nothing starts. None of these is a cap: every one is a
 /// per-request parameter the playground and `docs__query` can override.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ pub struct CorpusView {
     /// Chunks with no vector yet; non-zero means the KNN stage sees only part
     /// of the corpus.
     pub unembedded_chunks: i64,
-    /// What serving this corpus costs once resident (§5): the visible price of
+    /// What serving this corpus costs once resident: the visible price of
     /// the exact-KNN scan.
     pub resident_bytes: i64,
     pub embed_upstream: String,
@@ -116,7 +116,7 @@ pub struct CorpusSource {
     pub root: String,
     /// `llms_txt | markdown | rustdoc_json | html`.
     pub kind: String,
-    /// Domains a fetch may touch; empty = the root's own host (§8).
+    /// Domains a fetch may touch; empty = the root's own host.
     pub fence: Vec<String>,
     pub created_at: String,
 }
@@ -198,7 +198,7 @@ pub struct GoldenQueryRow {
     pub origin: String,
 }
 
-/// `GET /api/docs/golden/candidates?corpus_id=[&status=]` — §11's curation
+/// `GET /api/docs/golden/candidates?corpus_id=[&status=]` — the curation
 /// queue. `chunks` carries the sections the candidates were written from, keyed
 /// by chunk id: deciding whether a question is a fair test means reading the
 /// section it is supposed to find.
@@ -243,7 +243,7 @@ pub struct EvalHistory {
     pub eval_runs: Vec<EvalRunRow>,
 }
 
-/// One measured run. `params` is the §6 parameter set it was measured under —
+/// One measured run. `params` is the stage parameter set it was measured under —
 /// two runs under different parameters are not comparable, so the numbers
 /// never travel without them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -325,7 +325,7 @@ pub struct SearchHit {
     pub tokens: u32,
 }
 
-/// The two badges §7 and §11 both read. Neither blocks a query.
+/// The corpus status badges (embedding and evaluation state). Neither blocks a query.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -336,7 +336,7 @@ pub struct CorpusStatusView {
     pub warnings: Vec<String>,
 }
 
-/// Per-stage trace (§6, §10): what each stage saw, in the order it saw it.
+/// Per-stage trace: what each stage saw, in the order it saw it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -365,7 +365,7 @@ pub struct SearchTraceView {
     pub timings: TimingsView,
 }
 
-/// One request's §6 stage parameters. Round-trips: this is both what the trace
+/// One request's stage parameters. Round-trips: this is both what the trace
 /// reports and what the playground posts back as `params`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

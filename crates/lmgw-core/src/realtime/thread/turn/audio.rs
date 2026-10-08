@@ -91,6 +91,9 @@ pub(super) struct Starter<'a> {
     /// The response's turns go as their transcripts because the model lacks
     /// audio input (the verdict's): what the first turn's request rows say.
     pub degraded: Option<String>,
+    /// Who the session's turns run as: its principal — a device's turns are
+    /// checked against its key and charged to it (client-apps design §1.3).
+    pub caller: bound::Caller,
 }
 
 /// A started turn: its frames, and the generation it began at.
@@ -120,6 +123,9 @@ impl Starter<'_> {
             spoken,
             user_row,
             degraded,
+            caller: self.caller.clone(),
+            // The session's own slot holds its place (realtime §10.3).
+            slot: None,
         };
         bound::start_turn(self.state, self.thread, user_message_id, frames_tx, opts)
             .await

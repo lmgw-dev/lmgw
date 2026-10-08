@@ -151,6 +151,20 @@ impl Task {
                 return UserRow::Unwritten;
             }
         };
+        // A device's thread that left its reach since the bind (the
+        // self-admin toolset attached, or the device's admin-tools switch
+        // turned off) is gone for it (L3, review W4-3): nothing the device
+        // said is written there. The writes below check again under the
+        // thread's lock, against a change that lands in between.
+        if !self.caller.sees(&self.state.snapshot(), &thread) {
+            tracing::warn!(
+                "{}: chat thread {} is out of this device's reach now; the spoken turn is not \
+                 written",
+                self.label,
+                self.thread_id
+            );
+            return UserRow::Unwritten;
+        }
         let content = spoken
             .iter()
             .map(|t| t.text.trim())
@@ -169,7 +183,15 @@ impl Task {
         let untitled = thread.title == "New chat" || thread.title.trim().is_empty();
         let written = match began.generation {
             Some(generation) => {
-                bound::append_spoken_user(&self.state, &thread, generation, &content, &voice).await
+                bound::append_spoken_user(
+                    &self.state,
+                    &thread,
+                    generation,
+                    &content,
+                    &voice,
+                    &self.caller,
+                )
+                .await
             }
             None => Ok(None),
         };
@@ -177,13 +199,16 @@ impl Task {
             Ok(Some(id)) => id,
             // The history moved, or no turn began: a history write, as
             // today.
-            Ok(None) => match bound::write_user(&self.state, &thread, &content, &voice).await {
-                Ok(id) => id,
-                Err(why) => {
-                    self.not_written(new, &why);
-                    return UserRow::Unwritten;
+            Ok(None) => {
+                match bound::write_user(&self.state, &thread, &content, &voice, &self.caller).await
+                {
+                    Ok(id) => id,
+                    Err(why) => {
+                        self.not_written(new, &why);
+                        return UserRow::Unwritten;
+                    }
                 }
-            },
+            }
             Err(why) => {
                 self.not_written(new, &why);
                 return UserRow::Unwritten;
@@ -209,7 +234,7 @@ impl Task {
             if let Some(named) = bound::thread(&self.state, self.thread_id).await {
                 let snap = self.state.snapshot();
                 self.event(ServerEvent::LmgwChatThread {
-                    chat_thread: bound::thread_ref(&snap, &named),
+                    chat_thread: bound::thread_ref(&snap, &named, &self.caller),
                 });
             }
         }

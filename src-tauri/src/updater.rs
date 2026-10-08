@@ -208,8 +208,24 @@ fn do_install(app: AppHandle, info: UpdateInfo) {
                         "Later".into(),
                     ))
                     .show(move |restart| {
+                        // The quit sequence first, then the restart (review
+                        // P-2): the server stops and is waited for, the
+                        // model containers stop, and only then is the
+                        // restart asked for. Tauri ignores `prevent_exit`
+                        // for a restart's exit, so the exit events cannot
+                        // hold it for the sequence (`gateway` module doc).
                         if restart {
-                            app2.restart();
+                            match crate::gateway::quit_then(
+                                &app2,
+                                crate::gateway::AfterQuit::Restart,
+                            ) {
+                                crate::gateway::QuitStep::Start => {}
+                                crate::gateway::QuitStep::Done => app2.request_restart(),
+                                crate::gateway::QuitStep::Running => tracing::warn!(
+                                    "update: lmgw is already quitting, so it ends without the \
+                                     restart; start it again to run {v}"
+                                ),
+                            }
                         }
                     });
             }

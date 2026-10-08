@@ -23,7 +23,7 @@ pub async fn status(state: &SharedState) -> Result<Value, String> {
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "bind_addr": snap.settings.bind_addr,
         "auth_enabled": snap.settings.auth_enabled,
-        "self_admin": snap.settings.self_admin.as_str(),
+        "self_admin": lmgw_api_types::AdminLevel::from(snap.settings.self_admin),
         "requests": {
             "total": stats.total_requests,
             "errors": stats.total_errors,
@@ -625,6 +625,12 @@ pub async fn settings(state: &SharedState) -> Result<Value, String> {
     // differs between prod and a dev instance.
     // The default Chat prompt, after the macro for the same reason: the one
     // in force, and whether it is the built-in one (which then shows it).
+    // The Chat change feed's limits (client-apps design §2.3), outside the
+    // macro above, which is at the recursion limit.
+    out["chat_feed_retention_days"] = json!(s.chat_feed_retention_days);
+    out["chat_feed_keepalive_s"] = json!(s.chat_feed_keepalive_s);
+    out["chat_feed_page_size"] = json!(s.chat_feed_page_size);
+    out["chat_feed_live_buffer"] = json!(s.chat_feed_live_buffer);
     out["chat_system_prompt"] = json!(s.default_chat_prompt());
     out["chat_system_prompt_is_builtin"] = json!(s.chat_system_prompt.is_none());
     out["chat_pdf_mode"] = json!(s.chat_pdf_mode);

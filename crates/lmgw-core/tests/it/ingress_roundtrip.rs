@@ -313,9 +313,10 @@ fn collect_sse_events(raw: &str) -> Vec<(Option<String>, String)> {
         .collect()
 }
 
-#[test]
-fn openai_stream_encoder_frames() {
-    let mut enc = ClientProto::OpenaiChat.new_stream_encoder("alias-z");
+/// A two-token answer whose upstream reported usage before its stop, run
+/// through the OpenAI encoder: the JSON chunks, and whether `[DONE]` ended it.
+fn openai_stream_with_usage(include_usage: bool) -> (Vec<serde_json::Value>, bool) {
+    let mut enc = ClientProto::OpenaiChat.new_stream_encoder("alias-z", include_usage);
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::TextDelta("Hel".into())));
@@ -329,13 +330,23 @@ fn openai_stream_encoder_frames() {
     out.push_str(&enc.finish());
 
     let events = collect_sse_events(&out);
-    assert_eq!(events.last().unwrap().1, "[DONE]");
-    let first: serde_json::Value = serde_json::from_str(&events[0].1).unwrap();
-    assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
-    assert_eq!(first["model"], "alias-z");
-    let texts: Vec<String> = events
+    let done = events.last().is_some_and(|(_, d)| d == "[DONE]");
+    let chunks = events
         .iter()
         .filter_map(|(_, d)| serde_json::from_str::<serde_json::Value>(d).ok())
+        .collect();
+    (chunks, done)
+}
+
+#[test]
+fn openai_stream_encoder_frames() {
+    let (chunks, done) = openai_stream_with_usage(true);
+    assert!(done);
+    let first = &chunks[0];
+    assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(first["model"], "alias-z");
+    let texts: Vec<String> = chunks
+        .iter()
         .filter_map(|v| {
             v["choices"][0]["delta"]["content"]
                 .as_str()
@@ -343,18 +354,38 @@ fn openai_stream_encoder_frames() {
         })
         .collect();
     assert_eq!(texts.concat(), "Hello");
-    // usage chunk has empty choices
-    let usage_chunk = events
-        .iter()
-        .filter_map(|(_, d)| serde_json::from_str::<serde_json::Value>(d).ok())
-        .find(|v| v.get("usage").is_some_and(|u| !u.is_null()))
-        .unwrap();
-    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 4);
+    // Asked for, the usage is the last chunk, with empty choices — and every
+    // chunk before it says `usage: null`, as OpenAI's do.
+    let (last, rest) = chunks.split_last().unwrap();
+    assert_eq!(last["choices"], serde_json::json!([]));
+    assert_eq!(last["usage"]["prompt_tokens"], 4);
+    assert_eq!(last["usage"]["total_tokens"], 6);
+    for c in rest {
+        assert!(c["usage"].is_null() && c.get("usage").is_some(), "{c}");
+        assert_eq!(c["choices"].as_array().map(Vec::len), Some(1), "{c}");
+    }
+}
+
+/// Not asked for, the usage stays the gateway's: no chunk carries the key,
+/// and none has empty `choices` — the SDK loop that reads `choices[0]` holds
+/// to the last chunk.
+#[test]
+fn openai_stream_encoder_sends_no_usage_chunk_unasked() {
+    let (chunks, done) = openai_stream_with_usage(false);
+    assert!(done);
+    assert_eq!(
+        chunks.last().unwrap()["choices"][0]["finish_reason"],
+        "stop"
+    );
+    for c in &chunks {
+        assert!(c.get("usage").is_none(), "{c}");
+        assert_eq!(c["choices"].as_array().map(Vec::len), Some(1), "{c}");
+    }
 }
 
 #[test]
 fn anthropic_stream_encoder_event_sequence() {
-    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder("alias-a");
+    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder("alias-a", false);
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::TextDelta("Hi".into())));
@@ -416,7 +447,7 @@ fn anthropic_stream_encoder_event_sequence() {
 
 #[test]
 fn openai_stream_encoder_forwards_reasoning() {
-    let mut enc = ClientProto::OpenaiChat.new_stream_encoder("alias-r");
+    let mut enc = ClientProto::OpenaiChat.new_stream_encoder("alias-r", false);
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::ReasoningDelta("Th".into())));
@@ -444,7 +475,7 @@ fn openai_stream_encoder_forwards_reasoning() {
 
 #[test]
 fn anthropic_stream_encoder_maps_reasoning_to_thinking() {
-    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder("alias-r");
+    let mut enc = ClientProto::AnthropicMessages.new_stream_encoder("alias-r", false);
     let mut out = String::new();
     out.push_str(&enc.start());
     out.push_str(&enc.delta(&StreamDelta::ReasoningDelta("pondering".into())));

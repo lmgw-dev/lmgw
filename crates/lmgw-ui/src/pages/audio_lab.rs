@@ -245,6 +245,10 @@ struct RunStats {
     wall_ms: Option<f64>,
     audio_ms: Option<f64>,
     rtf: Option<f64>,
+    /// `x-lmgw-speech`: what lmgw changed in the request on its way to the
+    /// model (a voice moved, tags stripped, characters the engine cannot
+    /// say replaced or dropped).
+    shaped: Option<String>,
 }
 
 /// `alias` → a safe file stem for downloads (runs of unusable characters
@@ -1000,10 +1004,12 @@ pub fn AudioLab() -> impl IntoView {
                         .get("content-type")
                         .unwrap_or_default()
                         .to_string();
+                    let shaped = resp.headers().get("x-lmgw-speech");
                     lab.stats.set(Some(RunStats {
                         status,
                         ttfb_ms: Some(now() - t0),
                         mime: ct.clone(),
+                        shaped,
                         ..Default::default()
                     }));
                     if ct.starts_with("text/event-stream") {
@@ -2181,6 +2187,18 @@ fn result_body(
                         <span>{parts.join(" · ")}</span>
                         <span>{s.mime}</span>
                     </div>
+                    {s
+                        .shaped
+                        .map(|h| {
+                            view! {
+                                <div
+                                    class="dim mini-note mono-sm"
+                                    title="x-lmgw-speech: what lmgw changed in the request for this model"
+                                >
+                                    {format!("shaped: {h}")}
+                                </div>
+                            }
+                        })}
                 }
             })}
     }

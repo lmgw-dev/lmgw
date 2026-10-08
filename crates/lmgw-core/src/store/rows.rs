@@ -4,8 +4,8 @@ use sqlx::Row;
 
 use crate::config::{
     ApiKey, ApiKeyKind, BudgetPeriod, CandidateAlias, HoldFallbackMode, KeyPolicy, LocalModel,
-    McpServer, McpTransport, ModelAlias, PriceRow, PriceScope, Protocol, ScopeMode, Upstream,
-    UpstreamKind,
+    McpServer, McpTransport, ModelAlias, PriceRow, PriceScope, PriceUnit, Protocol, ScopeMode,
+    Upstream, UpstreamKind,
 };
 use crate::error::GatewayError;
 use crate::ir::Params;
@@ -176,6 +176,8 @@ pub(super) fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
             expires_at: row.get("expires_at"),
         },
         note: row.get("note"),
+        hosts_label: row.get("hosts_label"),
+        self_admin: crate::config::DeviceAdmin::from_column(row.get::<i64, _>("self_admin")),
     }
 }
 
@@ -184,7 +186,8 @@ pub(super) fn price_from_row(row: &sqlx::sqlite::SqliteRow) -> PriceRow {
         id: row.get("id"),
         scope_kind: PriceScope::parse(row.get::<String, _>("scope_kind").as_str()),
         scope_key: row.get("scope_key"),
-        unit: row.get("unit"),
+        // The table's CHECK admits only the units `PriceUnit` names.
+        unit: PriceUnit::parse(row.get::<String, _>("unit").as_str()).unwrap_or_default(),
         price_in: row.get("price_in"),
         price_out: row.get("price_out"),
         price_cache_read: row.get("price_cache_read"),
@@ -192,6 +195,7 @@ pub(super) fn price_from_row(row: &sqlx::sqlite::SqliteRow) -> PriceRow {
         source: PriceSource::parse(row.get::<String, _>("source").as_str()),
         note: row.get("note"),
         updated_at: row.get("updated_at"),
+        price: row.get("price"),
     }
 }
 

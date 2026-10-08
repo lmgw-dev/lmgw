@@ -18,6 +18,6 @@ pub use aux::{
 };
 pub(crate) use body::has_reasoning_object;
 pub use body::{build_chat_body, chat_request, ReasoningStep};
-pub(crate) use decode::parse_timings;
 pub use decode::{parse_completion, OpenaiDecoder};
+pub(crate) use decode::{parse_timings, parse_usage};
 pub use messages::{messages_json, FlattenToolResults, ToolResultRenderer};

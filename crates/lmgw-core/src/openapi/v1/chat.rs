@@ -1,4 +1,4 @@
-//! `POST /v1/chat/completions` (api-docs design §4.8): request, response and
+//! `POST /v1/chat/completions`: request, response and
 //! the `chat.completion.chunk` SSE frame, read from what
 //! `ingress::openai::parse_chat_request` actually reads and
 //! `serialize_completion`/`OpenaiStreamEncoder` actually emit — not from
@@ -26,8 +26,8 @@ fn message_schema() -> Value {
             "role": {
                 "type": "string",
                 "enum": ["system", "developer", "user", "assistant", "tool", "function"],
-                "description": "system and developer both become an IR system message; tool \
-                    and function both become an IR tool-result message."
+                "description": "system and developer are both treated as a system message; \
+                    tool and function are both treated as a tool-result message."
             },
             "content": {
                 "description": "A string, or an array of parts: {type:text,text}, \
@@ -37,11 +37,12 @@ fn message_schema() -> Value {
                     defines it; any other part is dropped with a WARN naming it.",
             },
             "tool_call_id": {"type": "string", "description": "role: tool only."},
-            "name": {"type": "string", "description": "role: tool only, forwarded as the \
+            "name": {"type": "string", "description": "role: tool only. Forwarded as the \
                 tool result's name."},
             "reasoning_content": {"type": "string", "description": "role: assistant only. \
                 Replayed as the leading reasoning part (also accepted spelled \
-                'reasoning' — DeepSeek/llama.cpp vs. OpenRouter)."},
+                'reasoning', as OpenRouter spells it; DeepSeek and llama.cpp use \
+                reasoning_content)."},
             "tool_calls": {
                 "type": "array",
                 "description": "role: assistant only: [{id, type:function, \
@@ -81,7 +82,7 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
             "required": ["model", "messages"],
             "properties": {
                 "model": {"type": "string", "description": "An alias, a local model id, a \
-                    candidate alias, or 'prefix/…' passthrough to an exposed upstream."},
+                    candidate alias, or 'prefix/…' to pass through to an exposed upstream."},
                 "messages": {"type": "array", "items": message_schema()},
                 "tools": {"type": "array", "items": tool_schema()},
                 "tool_choice": {
@@ -89,10 +90,19 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                         {type:function,function:{name}}."
                 },
                 "stream": {"type": "boolean", "default": false},
+                "stream_options": {
+                    "type": "object",
+                    "properties": {"include_usage": {"type": "boolean", "default": false}},
+                    "description": "With stream: true, include_usage ends the stream with a \
+                        chunk whose choices is [] and that carries usage; every other chunk \
+                        then has usage: null. Without it no chunk carries usage. Not \
+                        forwarded: lmgw asks the upstream for usage itself, for its request \
+                        log."
+                },
                 "temperature": {"type": "number"},
                 "top_p": {"type": "number"},
-                "top_k": {"type": "integer", "description": "Not standard OpenAI, but \
-                    accepted — llama.cpp supports it."},
+                "top_k": {"type": "integer", "description": "Not part of the OpenAI API, but \
+                    accepted; llama.cpp supports it."},
                 "max_completion_tokens": {"type": "integer", "description": "Wins over \
                     max_tokens when both are sent."},
                 "max_tokens": {"type": "integer"},
@@ -152,8 +162,14 @@ fn usage_schema() -> Value {
             "total_tokens": {"type": "integer"},
             "prompt_tokens_details": {
                 "type": "object",
-                "properties": {"cached_tokens": {"type": "integer"}},
-                "description": "Present only when the upstream reported a cache hit."
+                "properties": {
+                    "cached_tokens": {"type": "integer"},
+                    "cache_write_tokens": {"type": "integer"}
+                },
+                "description": "Present only when the upstream reported prompt-cache \
+                    counts, and each field only when reported: cached_tokens read from \
+                    the cache, cache_write_tokens written to it. Both are part of \
+                    prompt_tokens."
             },
             "completion_tokens_details": {
                 "type": "object",
@@ -199,13 +215,21 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
 }
 
 /// The `chat.completion.chunk` SSE frame `stream: true` answers with instead
-/// of [`response`] (WP4 "Extra" gap — `response`'s own doc comment explains
-/// why this did not exist until now): `choices[].delta` in place of
+/// of [`response`] (`response`'s own doc comment explains why it is a
+/// separate schema): `choices[].delta` in place of
 /// `choices[].message`, the same `id`/`created`/`model` carried on every
 /// frame, and a final `usage`-bearing frame when the client asked for one
-/// (`stream_options.include_usage`). The stream ends with the literal
-/// `data: [DONE]`, which is not JSON and so has no schema of its own.
+/// (`stream_options.include_usage`) — every other frame then has `usage:
+/// null`, as OpenAI's do; unasked, no frame has the key. The stream ends with
+/// the literal `data: [DONE]`, which is not JSON and so has no schema of its
+/// own.
 pub(crate) fn stream_chunk(g: &mut SchemaGenerator) -> Schema {
+    let mut usage = usage_schema();
+    usage["type"] = json!(["object", "null"]);
+    usage["description"] = json!(
+        "Only with stream_options.include_usage: null on every frame but the last, \
+         whose choices is [] and which carries the request's usage."
+    );
     schemas::named(
         g,
         "ChatCompletionChunk",
@@ -227,7 +251,7 @@ pub(crate) fn stream_chunk(g: &mut SchemaGenerator) -> Schema {
                         }
                     }
                 },
-                "usage": usage_schema()
+                "usage": usage
             },
             "description": "One frame: `data: <this object>`, repeated, ending with the \
                 literal `data: [DONE]`."
@@ -235,7 +259,7 @@ pub(crate) fn stream_chunk(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-/// `model` is `"<pick a model>"` (§4.10): the tester replaces it with
+/// `model` is `"<pick a model>"`: the tester replaces it with
 /// whichever the caller picks.
 pub(crate) fn example() -> Value {
     json!({

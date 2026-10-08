@@ -581,6 +581,155 @@ async fn tool_mode_gives_the_model_kb_tools_restricted_to_the_thread() {
     kbfix::cleanup(&w.state);
 }
 
+/// A device's thread with the `kb` label attached by hand (tool mode off):
+/// its `kb__search` embeds as the device, checked against its key and
+/// charged to it, never as the gateway (client-apps design L4, review W3-3).
+#[tokio::test]
+async fn a_device_s_hand_attached_kb_label_searches_as_the_device() {
+    let w = world().await;
+    let answer = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let replies = [
+        tool_call_sse("c1", "kb__search", json!({"query": "refund"})),
+        answer.to_string(),
+    ];
+    for (i, body) in replies.into_iter().enumerate() {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(body, "text/event-stream"),
+            )
+            .up_to_n_times(1)
+            .with_priority((i + 1) as u8)
+            .mount(&w.chat)
+            .await;
+    }
+    w.base("Taxes", ("notes.md", kbfix::NOTES)).await;
+    let r = post(
+        &w.gw,
+        "/api/op/key_create",
+        json!({ "kind": "device", "name": "phone" }),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let paired: Value = r.json().await.unwrap();
+    let device_id = paired["id"].as_i64().unwrap();
+    let device = crate::device_chat::bearer(paired["key"].as_str().unwrap());
+    let created: Value = device
+        .post(format!("{}/chat/api/threads", w.gw))
+        .json(&json!({ "model_alias": "m" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tid = created["id"].as_i64().unwrap();
+    let r = device
+        .post(format!("{}/chat/api/threads/{tid}/settings", w.gw))
+        .json(&json!({ "mcp_tools": [{ "server_label": "kb" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let r = device
+        .post(format!("{}/chat/api/threads/{tid}/send", w.gw))
+        .json(&json!({ "content": "the refund?" }))
+        .send()
+        .await
+        .unwrap();
+    let events = sse_events(&r.text().await.unwrap());
+    let result = events
+        .iter()
+        .find(|(e, d)| e == "tool" && d["event"] == "result")
+        .map(|(_, d)| d.clone())
+        .unwrap_or_else(|| panic!("no tool result: {events:?}"));
+    assert_eq!(result["is_error"], false, "{result}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let embeds: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM request_logs WHERE key_id = ?1 AND requested_alias = 'embed-model'",
+    )
+    .bind(device_id)
+    .fetch_one(&w.state.db)
+    .await
+    .unwrap();
+    assert!(embeds >= 1, "the search's embedding is the device's");
+    // The tool loop's two model calls are two rows of the device's (review
+    // W3-11: each call checked and counted).
+    let calls: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM request_logs WHERE key_id = ?1 AND requested_alias = 'm'",
+    )
+    .bind(device_id)
+    .fetch_one(&w.state.db)
+    .await
+    .unwrap();
+    assert_eq!(calls, 2);
+    kbfix::cleanup(&w.state);
+}
+
+/// A device's auto-mode retrieval embeds as the device (review W3-11): the
+/// query's embedding row is the device key's, not the gateway's.
+#[tokio::test]
+async fn a_device_s_auto_retrieval_embeds_as_the_device() {
+    let w = world().await;
+    mount_openai_reply(&w.chat, "done", 1, 1).await;
+    let taxes = w.base("Taxes", ("notes.md", kbfix::NOTES)).await;
+    let r = post(
+        &w.gw,
+        "/api/op/key_create",
+        json!({ "kind": "device", "name": "phone" }),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let paired: Value = r.json().await.unwrap();
+    let device_id = paired["id"].as_i64().unwrap();
+    let device = crate::device_chat::bearer(paired["key"].as_str().unwrap());
+    let created: Value = device
+        .post(format!("{}/chat/api/threads", w.gw))
+        .json(&json!({ "model_alias": "m" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tid = created["id"].as_i64().unwrap();
+    let r = device
+        .post(format!("{}/chat/api/threads/{tid}/settings", w.gw))
+        .json(&json!({ "kb_ids": [taxes], "kb_mode": "auto" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    let r = device
+        .post(format!("{}/chat/api/threads/{tid}/send", w.gw))
+        .json(&json!({ "content": "when did the refund arrive?" }))
+        .send()
+        .await
+        .unwrap();
+    let events = sse_events(&r.text().await.unwrap());
+    assert!(event(&events, "retrieval").is_some(), "{events:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT requested_alias, status FROM request_logs WHERE key_id = ?1 ORDER BY id",
+    )
+    .bind(device_id)
+    .fetch_all(&w.state.db)
+    .await
+    .unwrap();
+    assert!(
+        rows.contains(&("embed-model".to_string(), 200)),
+        "the retrieval's embedding is the device's: {rows:?}"
+    );
+    assert!(rows.contains(&("m".to_string(), 200)), "{rows:?}");
+    kbfix::cleanup(&w.state);
+}
+
 // ---------------------------------------------------------------------------
 // Settings, folders, temporary chats, Keep
 // ---------------------------------------------------------------------------

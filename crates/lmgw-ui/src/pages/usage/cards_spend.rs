@@ -7,7 +7,7 @@ use crate::charts::{
     area_path, chart_height, crosshair, hit_bands, legend, line_path, path_len, rect_path,
     top_round, x_labels, y_grid, LegendItem, Plot, Tip, TipRow, Tips,
 };
-use crate::fmt::{compact, grouped, pct};
+use crate::fmt::{grouped, pct};
 
 use super::*;
 
@@ -72,10 +72,7 @@ pub(super) fn SpendCard(
                                         grouped(t.cost_unknown_requests.max(0) as u64),
                                     )}
                                 </b>
-                                {format!(
-                                    " ({} tokens) unpriced, local ones are free. ",
-                                    compact(t.cost_unknown_tokens.max(0) as f64),
-                                )}
+                                {format!(" ({}) unpriced, local ones are free. ", remainder_holds(t))}
                                 <a href="/usage/prices">"Price them on Prices →"</a>
                             }
                                 .into_any()
@@ -256,10 +253,7 @@ pub(super) fn SpendCard(
                             row
                         })
                         .collect();
-                    let total_unpriced = unpriced_note(
-                        r.totals.cost_unknown_requests,
-                        r.totals.cost_unknown_tokens,
-                    );
+                    let total_unpriced = unpriced_of(&r.totals);
                     let chart = || {
                         view! {
                         {legend(leg)}
@@ -578,11 +572,7 @@ pub(super) fn BudgetCard(
                                     }
                                     format!(" {t}.")
                                 })}
-                            {unpriced_note(
-                                    r.totals.cost_unknown_requests,
-                                    r.totals.cost_unknown_tokens,
-                                )
-                                .map(|n| format!(" This window: {n}."))}
+                            {unpriced_of(&r.totals).map(|n| format!(" This window: {n}."))}
                         </div>
                     }
                         .into_any()

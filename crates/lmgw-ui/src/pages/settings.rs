@@ -82,7 +82,7 @@ const CATS: &[(&str, &str, &str)] = &[
     (
         "chat",
         "Chat",
-        "the system prompt new conversations start with, how attachments are read, the knowledge budget, the voice",
+        "the system prompt new conversations start with, how attachments are read, the knowledge budget, the voice, the change feed client apps follow",
     ),
     (
         "realtime",
@@ -190,6 +190,7 @@ const GROUPS: &[Group] = &[
     g("chat", "attachments", "Attachments"),
     g("chat", "knowledge", "Knowledge bases"),
     g("chat", "chat-voice", "Voice"),
+    g("chat", "feed", "Change feed"),
     g("realtime", "rt-cascade", "Voice cascade"),
     g("realtime", "rt-budget", "GPU memory of the cascade"),
     g("realtime", "rt-prompt", "Voice instructions"),
@@ -587,7 +588,10 @@ const COMMON: &[Def] = &[
     )
     .s()
     .unit("days")
-    .hint("0 = never auto-archive; pinned threads are exempt")
+    .hint(
+        "0 = never auto-archive; pinned threads and an ongoing conversation's current thread \
+         are exempt; a folder's own retention overrides this",
+    )
     .terms("chat thread conversation idle archive"),
     f(
         "retention",
@@ -598,7 +602,10 @@ const COMMON: &[Def] = &[
     )
     .s()
     .unit("days")
-    .hint("0 = keep archived threads forever; pinned threads are exempt")
+    .hint(
+        "0 = keep archived threads forever; pinned threads are exempt; a folder's own \
+         retention overrides this",
+    )
     .terms("chat thread conversation purge delete"),
     f(
         "retention",
@@ -1027,6 +1034,51 @@ const REST: &[Def] = &[
     .unit("tokens")
     .hint("knowledge-base excerpts one turn may carry; a thread can override it; above 0")
     .terms("chat knowledge base kb rag retrieval budget"),
+    // The change feed client apps follow (client-apps design §2).
+    f(
+        "chat",
+        "feed",
+        "chat_feed_retention_days",
+        "Keep changes for",
+        Ctl::Int(0),
+    )
+    .s()
+    .unit("days")
+    .hint("a client away longer reloads what it shows (resync); 0 = keep all")
+    .terms("chat feed change client app device retention resync cursor"),
+    f(
+        "chat",
+        "feed",
+        "chat_feed_keepalive_s",
+        "Keep-alive every",
+        Ctl::Int(1),
+    )
+    .s()
+    .unit("seconds")
+    .hint("told to each client, which takes a silent feed as dead after it; open feeds keep theirs")
+    .terms("chat feed keepalive keep-alive ping dead link timeout"),
+    f(
+        "chat",
+        "feed",
+        "chat_feed_page_size",
+        "Catch-up page",
+        Ctl::IntRange(1, lmgw_api_types::chat_feed::MAX_PAGE_SIZE as i64),
+    )
+    .s()
+    .unit("records")
+    .hint("read per query while a client catches up; bounds memory, every record is still sent; at most 10 000")
+    .terms("chat feed catch-up page size since"),
+    f(
+        "chat",
+        "feed",
+        "chat_feed_live_buffer",
+        "Live buffer",
+        Ctl::IntRange(1, lmgw_api_types::chat_feed::MAX_LIVE_BUFFER as i64),
+    )
+    .s()
+    .unit("events")
+    .hint("turns, voice and hold events held for a slow client; past it the client gets a fresh state; at most 65 536, as it is allocated whole")
+    .terms("chat feed live buffer lag slow state turn voice hold"),
     // Agents & tools
     f(
         "agents",

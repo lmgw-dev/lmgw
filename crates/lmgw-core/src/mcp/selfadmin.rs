@@ -54,6 +54,11 @@ mod bench;
 /// package B7) — the tools themselves are `catalog/audio.rs`.
 mod audio;
 
+/// The access settings no tool changes (client-apps design L5's notes,
+/// 2026-10-07).
+mod guards;
+pub use guards::ACCESS_SETTINGS;
+
 /// Prefix every tool in this module carries — the namespace reserved from
 /// southbound servers by [`super::RESERVED_TOOL_NAMESPACE`].
 pub const PREFIX: &str = super::RESERVED_TOOL_NAMESPACE;
@@ -297,22 +302,130 @@ fn unknown_arg(def: &Builtin, args: Option<&Map<String, Value>>) -> Option<Strin
     ))
 }
 
-/// Invoke a built-in tool.
-///
-/// `Err(CallError)` is reserved for "this name is not a tool" — everything else,
-/// including a mode refusal or a bad argument, comes back as an `isError`
-/// result the calling model can read and act on.
+/// Whether the built-in tool `name` writes: needs [`SelfAdmin::Full`].
+/// Every tool that has lmgw run a program on this machine is one — an MCP
+/// server's command or container, a model's or a build's container, an
+/// agent — so a caller below `Full` reaches none of them. `false` for a name
+/// that is no tool here.
+pub fn writes(name: &str) -> bool {
+    catalog().iter().any(|t| t.name == name && t.writes)
+}
+
+/// Why a device whose own level is `level` may not call the write tool
+/// `name` (the pre-merge review's P-3): its level, not the gateway's, is
+/// what stops it.
+pub fn device_level_refusal(name: &str, level: crate::config::DeviceAdmin) -> String {
+    format!(
+        "{name} changes lmgw's configuration and this device's admin tools are {} — the \
+         device's level is set on its row under Usage → Devices",
+        match level {
+            crate::config::DeviceAdmin::Off => "off",
+            crate::config::DeviceAdmin::ReadOnly => "read only",
+            crate::config::DeviceAdmin::Full => "full",
+        }
+    )
+}
+
+/// Invoke a built-in tool as the owner: [`call_capped`] at the gateway's
+/// own level.
 pub async fn call(
     state: &SharedState,
     name: &str,
     args: Option<Map<String, Value>>,
 ) -> Result<Value, CallError> {
+    call_capped(state, name, args, Caller::OWNER).await
+}
+
+/// Who makes a built-in tool call, as far as [`call_capped`]'s gate asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caller {
+    /// A paired device's key: its own level caps the call, an agent run it
+    /// starts carries it as the run's caller, and an agent it did not create
+    /// is not its to replace or delete (client-apps design L5's note,
+    /// 2026-10-07). `None` for the owner and every caller that is no device.
+    pub device: Option<i64>,
+}
+
+impl Caller {
+    /// The owner, and every caller that is no device.
+    pub const OWNER: Self = Self { device: None };
+
+    /// The caller `principal` is.
+    pub fn of(principal: &crate::principal::Principal) -> Self {
+        Self {
+            device: principal
+                .is_device_key()
+                .then(|| principal.key_id())
+                .flatten(),
+        }
+    }
+}
+
+/// A device's own level and the gateway's, as stored now rather than as
+/// the published snapshot says (client-apps design L3's note; the branch
+/// review's verification V-7): a lowered level is in force from its commit
+/// for every call a device makes, its turns' (which `ScopedExecutor` checks
+/// too) and those of an agent run it started alike. A device that is gone,
+/// disabled or expired is `Off`.
+async fn stored_levels(
+    state: &SharedState,
+    device: i64,
+) -> Result<(SelfAdmin, SelfAdmin), crate::error::GatewayError> {
+    let own = crate::store::device_admin_now(&state.db, device).await?;
+    let gateway = crate::store::gateway_self_admin_now(&state.db).await?;
+    Ok((own.as_self_admin(), gateway))
+}
+
+/// Invoke a built-in tool for `caller`: the mode gate applies the lower of
+/// a device's own level and the gateway's (both as stored now, for a
+/// device; the gateway's as published, for anyone else), and names the
+/// device's level when that is what refuses. Then, for every caller, the access
+/// settings are refused ([`guards`]). A move of a stored credential's host
+/// without the credential is refused by the op that applies it
+/// (`ops::RowWriter::Tool`).
+///
+/// `Err(CallError)` is reserved for "this name is not a tool" — everything else,
+/// including a mode refusal or a bad argument, comes back as an `isError`
+/// result the calling model can read and act on.
+pub async fn call_capped(
+    state: &SharedState,
+    name: &str,
+    args: Option<Map<String, Value>>,
+    caller: Caller,
+) -> Result<Value, CallError> {
     let Some(def) = catalog().into_iter().find(|t| t.name == name) else {
         return Err(CallError::ToolNotFound(name.to_string()));
     };
 
-    let mode = state.snapshot().settings.self_admin;
-    if let Err(e) = ops::check_mode(mode, def.writes) {
+    let (cap, global) = match caller.device {
+        Some(device) => match stored_levels(state, device).await {
+            Ok(levels) => levels,
+            Err(e) => {
+                return Ok(err_result(&format!(
+                    "{name} — whether this device may use lmgw's admin tools could not be read \
+                     ({e}), so the call was not made"
+                )))
+            }
+        },
+        None => (SelfAdmin::Full, state.snapshot().settings.self_admin),
+    };
+    if let Err(e) = ops::check_mode(global.min(cap), def.writes) {
+        // The device's own level is the lower one: say that, not the
+        // gateway's Setting, which would not let it through either way.
+        let e = if cap < global {
+            match cap {
+                SelfAdmin::Off => format!("{name} — this device is not allowed lmgw's admin tools"),
+                SelfAdmin::ReadOnly => {
+                    device_level_refusal(name, crate::config::DeviceAdmin::ReadOnly)
+                }
+                SelfAdmin::Full => e,
+            }
+        } else {
+            e
+        };
+        return Ok(err_result(&e));
+    }
+    if let Some(e) = guards::access_refusal(name, args.as_ref()) {
         return Ok(err_result(&e));
     }
     if CLOSED_ARG_TOOLS.contains(&def.name) {
@@ -321,18 +434,20 @@ pub async fn call(
         }
     }
 
-    Ok(match run(state, name, args).await {
+    Ok(match run(state, name, args, caller).await {
         Ok(v) => ok_result(&v),
         Err(e) => err_result(&e),
     })
 }
 
 /// The name → [`ops`] mapping proper, with argument extraction. Split out so
-/// [`call`] owns only gating and result shaping.
+/// [`call`] owns only gating and result shaping. `caller` reaches the agent
+/// tools only: a device's run is its own, and so is what it may replace.
 async fn run(
     state: &SharedState,
     name: &str,
     args: Option<Map<String, Value>>,
+    caller: Caller,
 ) -> Result<Value, String> {
     let a = args.clone().unwrap_or_default();
     match name {
@@ -355,6 +470,7 @@ async fn run(
                 a.get("manifest").ok_or("manifest is required")?,
                 arg_bool(&a, "replace")?,
                 arg_bool(&a, "validate_only")?,
+                caller.device,
             )
             .await
         }
@@ -365,6 +481,7 @@ async fn run(
                 arg_str(&a, "pull")?,
                 arg_bool(&a, "replace")?,
                 arg_bool(&a, "validate_only")?,
+                caller.device,
             )
             .await
         }
@@ -373,11 +490,17 @@ async fn run(
                 state,
                 arg_str(&a, "id")?.ok_or("id is required")?,
                 arg_str(&a, "phase")?.ok_or("phase is required")?,
+                caller.device,
             )
             .await
         }
         "lmgw__agent_delete" => {
-            ops::agent_delete(state, arg_str(&a, "id")?.ok_or("id is required")?).await
+            ops::agent_delete(
+                state,
+                arg_str(&a, "id")?.ok_or("id is required")?,
+                caller.device,
+            )
+            .await
         }
         "lmgw__mcp_servers" => ops::mcp_servers(state).await,
         "lmgw__logs" => {
@@ -486,7 +609,9 @@ async fn run(
             )
             .await
         }
-        "lmgw__upstream_set" => ops::upstream_set(state, ops::patch_from_args(args)?).await,
+        "lmgw__upstream_set" => {
+            ops::upstream_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await
+        }
         "lmgw__model_set" => ops::model_set(state, ops::patch_from_args(args)?).await,
         "lmgw__candidate_alias_set" => {
             ops::candidate_alias_set(state, ops::patch_from_args(args)?).await
@@ -498,7 +623,9 @@ async fn run(
         }
         "lmgw__aux_model_set" => ops::aux_model_set(state, ops::patch_from_args(args)?).await,
         "lmgw__image_model_set" => ops::image_model_set(state, ops::patch_from_args(args)?).await,
-        "lmgw__mcp_server_set" => ops::mcp_server_set(state, ops::patch_from_args(args)?).await,
+        "lmgw__mcp_server_set" => {
+            ops::mcp_server_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await
+        }
         "lmgw__container" => {
             let target = arg_str(&a, "target")?;
             let model = arg_str(&a, "model")?;
@@ -525,10 +652,14 @@ async fn run(
                 state,
                 scope_kind,
                 arg_str(&a, "scope_key")?,
-                arg_f64(&a, "price_in")?,
-                arg_f64(&a, "price_out")?,
-                arg_f64(&a, "price_cache_read")?,
-                arg_f64(&a, "price_cache_write")?,
+                arg_str(&a, "unit")?,
+                ops::PriceRates {
+                    price_in: arg_f64(&a, "price_in")?,
+                    price_out: arg_f64(&a, "price_out")?,
+                    price_cache_read: arg_f64(&a, "price_cache_read")?,
+                    price_cache_write: arg_f64(&a, "price_cache_write")?,
+                    price: arg_f64(&a, "price")?,
+                },
                 arg_str(&a, "note")?,
             )
             .await

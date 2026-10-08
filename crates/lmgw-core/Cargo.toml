@@ -144,6 +144,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # heard whole (realtime design §7.3). Already in the tree through other
 # crates, so nothing new is built.
 unicode-segmentation = "1.13.3"
+# Compatibility decomposition (NFKD) and combining marks: a TTS engine that
+# looks every codepoint of its NFKD-normalised text up in its package's
+# character vocabulary (Supertonic) is sent only characters it has
+# (`crate::audio::charset`). Already in the lock through stringprep, at this
+# version.
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 async-trait = "0.1.89"
@@ -152,6 +158,9 @@ async-trait = "0.1.89"
 hyper = "1.10.1"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 insta = "1.47.2"
+# The client crate read against the real gateway: its readers (refusals in
+# both shapes, the feed) checked on the bodies the routes answer with.
+lmgw-client = { path = "../lmgw-client" }
 # Validates the OpenAPI description's examples against its own schemas
 # (api-docs design §7.1 `every_example_validates_against_its_schema`, WP8).
 # `default-features = false`: lmgw never validates a remote `$schema` URI

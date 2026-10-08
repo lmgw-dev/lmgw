@@ -27,7 +27,14 @@ async fn rig() -> Rig {
         .await
         .unwrap();
     let (tx, events) = mpsc::unbounded_channel();
-    let journal = Journal::spawn(state.clone(), tid, "realtime test".into(), tx, None);
+    let journal = Journal::spawn(
+        state.clone(),
+        tid,
+        "realtime test".into(),
+        tx,
+        None,
+        Default::default(),
+    );
     Rig {
         state,
         tid,
@@ -362,7 +369,9 @@ async fn a_row_the_store_refused_is_unwritten_and_its_words_are_kept() {
     let texts: Vec<&str> = rows.iter().map(|m| m.content.as_str()).collect();
     assert_eq!(texts, ["Erste Frage.\nZweite Frage."]);
     // A thread that went.
-    store::delete_chat_thread(&r.state.db, r.tid).await.unwrap();
+    store::delete_chat_thread(&r.state.db, r.tid, None)
+        .await
+        .unwrap();
     let (_, w) = r.launch(3).await;
     r.began(3, None, true);
     r.journal.send(In::Heard {

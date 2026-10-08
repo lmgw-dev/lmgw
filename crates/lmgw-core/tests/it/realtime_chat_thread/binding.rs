@@ -1,6 +1,6 @@
-//! The binding (§8.1): decided at the handshake, for the dashboard's
-//! capability only, never for an Admin Chat thread; a second bind takes
-//! over; what the thread owns stays the thread's; Keep waits.
+//! The binding (§8.1): decided at the handshake, for the Chat capability
+//! (client-apps design §1.3) only, never for an Admin Chat thread; a second
+//! bind takes over; what the thread owns stays the thread's; Keep waits.
 
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -212,7 +212,9 @@ async fn a_second_bind_takes_the_thread_over() {
     };
     let close = close.expect("a close frame with a reason");
     assert_eq!(u16::from(close.code), 4000);
-    assert_eq!(close.reason.as_str(), "voice mode moved to another window");
+    // The close names who took it over (client-apps design §1.7): the
+    // second bind was the dashboard's own.
+    assert_eq!(close.reason.as_str(), "voice mode moved to the dashboard");
 }
 
 #[tokio::test]

@@ -1021,16 +1021,200 @@ async fn update_is_partial_and_preserves_the_stored_key() {
             &base,
             &sid,
             "lmgw__upstream_set",
-            json!({ "action": "update", "id": id, "base_url": "https://new.acme.test/v1" }),
+            json!({ "action": "update", "id": id, "timeout_ms": 30000 }),
         )
         .await,
     );
+    let stored = store::get_upstream(&inspect.db, id).await.unwrap().unwrap();
+    assert_eq!(stored.base_url, "https://api.acme.test/v1");
+    assert_eq!(stored.name, "acme");
+    assert_eq!(stored.timeout_ms, 30000);
+    assert_eq!(stored.api_key.as_deref(), Some("sk-keep-me"));
 
+    // Moving it to another host without the key for that host is refused
+    // (review G-3): the stored key is never sent where it was not given.
+    let refused = call(
+        &base,
+        &sid,
+        "lmgw__upstream_set",
+        json!({ "action": "update", "id": id, "base_url": "https://new.acme.test/v1" }),
+    )
+    .await;
+    assert!(is_error(&refused), "{refused}");
+    assert!(
+        text_of(&refused).contains("needs the key for that address in the same call"),
+        "{}",
+        text_of(&refused)
+    );
+    let stored = store::get_upstream(&inspect.db, id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.base_url, "https://api.acme.test/v1",
+        "nothing changed"
+    );
+    // Every action that applies base_url is checked, not only update (the
+    // review's verification V-1): enable and disable move the row too.
+    for action in ["enable", "disable"] {
+        let refused = call(
+            &base,
+            &sid,
+            "lmgw__upstream_set",
+            json!({ "action": action, "id": id, "base_url": "https://new.acme.test/v1" }),
+        )
+        .await;
+        assert!(is_error(&refused), "{action}: {refused}");
+        assert!(
+            text_of(&refused).contains("needs the key for that address in the same call"),
+            "{action}: {}",
+            text_of(&refused)
+        );
+        let stored = store::get_upstream(&inspect.db, id).await.unwrap().unwrap();
+        assert_eq!(stored.base_url, "https://api.acme.test/v1", "{action}");
+        assert!(
+            stored.enabled,
+            "{action}: nothing changed, enabled included"
+        );
+        assert_eq!(stored.api_key.as_deref(), Some("sk-keep-me"), "{action}");
+    }
+    // The same address written differently is no move.
+    payload(
+        &call(
+            &base,
+            &sid,
+            "lmgw__upstream_set",
+            json!({ "action": "update", "id": id, "base_url": "https://API.acme.test/v1/" }),
+        )
+        .await,
+    );
+    // With the key for the new host, it moves.
+    payload(
+        &call(
+            &base,
+            &sid,
+            "lmgw__upstream_set",
+            json!({ "action": "update", "id": id, "base_url": "https://new.acme.test/v1",
+                    "api_key": "sk-new-host" }),
+        )
+        .await,
+    );
     let stored = store::get_upstream(&inspect.db, id).await.unwrap().unwrap();
     assert_eq!(stored.base_url, "https://new.acme.test/v1");
-    assert_eq!(stored.name, "acme");
-    assert_eq!(stored.timeout_ms, 45000);
-    assert_eq!(stored.api_key.as_deref(), Some("sk-keep-me"));
+    assert_eq!(stored.api_key.as_deref(), Some("sk-new-host"));
+}
+
+/// An MCP server's stored headers follow its `url` the same way (review
+/// G-3): a move without them is refused, whichever action carries it and
+/// with `null` as no restatement, and a move that restates them — `""`
+/// included, which sends none — goes through.
+#[tokio::test]
+async fn moving_an_mcp_server_needs_its_headers_restated() {
+    let state = state_with_mode(SelfAdmin::Full).await;
+    let inspect = state.clone();
+    let base = serve_with(state).await;
+    let sid = initialize(&base).await;
+    let created = payload(
+        &call(
+            &base,
+            &sid,
+            "lmgw__mcp_server_set",
+            json!({
+                "action": "create", "name": "tickets", "transport": "http",
+                "url": "https://mcp.tickets.test/mcp",
+                "headers": "Authorization: Bearer secret-token",
+                "autostart": false, "enabled": false,
+            }),
+        )
+        .await,
+    );
+    let id = created["id"].as_i64().unwrap();
+    let refused = call(
+        &base,
+        &sid,
+        "lmgw__mcp_server_set",
+        json!({ "action": "update", "id": id, "url": "https://x.example/mcp" }),
+    )
+    .await;
+    assert!(is_error(&refused), "{refused}");
+    assert!(
+        text_of(&refused).contains("needs the headers for that address"),
+        "{}",
+        text_of(&refused)
+    );
+    let row = store::get_mcp_server(&inspect.db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.url.as_deref(), Some("https://mcp.tickets.test/mcp"));
+    // `null` keeps the stored headers, so it restates nothing (V-2), and
+    // enable and disable apply url as update does (V-1).
+    for args in [
+        json!({ "action": "update", "id": id, "url": "https://x.example/mcp", "headers": null }),
+        json!({ "action": "enable", "id": id, "url": "https://x.example/mcp" }),
+        json!({ "action": "disable", "id": id, "url": "https://x.example/mcp" }),
+    ] {
+        let refused = call(&base, &sid, "lmgw__mcp_server_set", args.clone()).await;
+        assert!(is_error(&refused), "{args}: {refused}");
+        assert!(
+            text_of(&refused).contains("needs the headers for that address"),
+            "{args}: {}",
+            text_of(&refused)
+        );
+        let row = store::get_mcp_server(&inspect.db, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.url.as_deref(),
+            Some("https://mcp.tickets.test/mcp"),
+            "{args}"
+        );
+        assert!(!row.enabled, "{args}: nothing changed, enabled included");
+        assert_eq!(row.headers.len(), 1, "{args}");
+    }
+    payload(
+        &call(
+            &base,
+            &sid,
+            "lmgw__mcp_server_set",
+            json!({ "action": "update", "id": id, "url": "https://x.example/mcp", "headers": "" }),
+        )
+        .await,
+    );
+    let row = store::get_mcp_server(&inspect.db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.url.as_deref(), Some("https://x.example/mcp"));
+    assert!(row.headers.is_empty(), "the old credential did not travel");
+}
+
+/// The access settings are refused to every tool caller, the owner's own
+/// plane included (review G-1): they change on Settings.
+#[tokio::test]
+async fn the_access_settings_are_no_tool_s_to_change() {
+    let state = state_with_mode(SelfAdmin::Full).await;
+    let inspect = state.clone();
+    let base = serve_with(state).await;
+    let sid = initialize(&base).await;
+    for args in [
+        json!({ "auth_enabled": true }),
+        json!({ "self_admin": "off" }),
+        json!({ "bind_addr": "0.0.0.0:8787" }),
+        json!({ "agent_origin_suffix": "lmgw.lan" }),
+    ] {
+        let key = args.as_object().unwrap().keys().next().unwrap().clone();
+        let refused = call(&base, &sid, "lmgw__settings_set", args).await;
+        assert!(is_error(&refused), "{key}: {refused}");
+        assert!(
+            text_of(&refused).starts_with(&format!(
+                "{key} cannot be changed through lmgw's admin tools"
+            )),
+            "{}",
+            text_of(&refused)
+        );
+    }
+    let s = inspect.snapshot().settings.clone();
+    assert!(!s.auth_enabled);
+    assert_eq!(s.self_admin, SelfAdmin::Full);
 }
 
 #[tokio::test]

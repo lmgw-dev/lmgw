@@ -408,16 +408,17 @@ fn resolve_builtin(
     // tell a client key how to get the configuration API, and no mode does.
     if label == SELF_ADMIN_LABEL && !scope.self_admin() {
         return Err(
-            "the 'lmgw' self-admin toolset needs an owner credential: a client key or an \
-             agent token does not reach the gateway's configuration. Present an owner key \
-             (Usage → Keys), or use /mcp/admin."
+            "the 'lmgw' self-admin toolset needs an owner credential: a client key, an agent \
+             token or a device not allowed lmgw's admin tools does not reach the gateway's \
+             configuration. Present an owner key (Usage → Keys), or use /mcp/admin."
                 .to_string(),
         );
     }
     // The self-admin mode gate is applied by `selfadmin::list` itself, so
     // attaching the label can never widen what the Setting allows.
     let entries = match label {
-        SELF_ADMIN_LABEL => selfadmin::list(snap.settings.self_admin),
+        // At the caller's level: a device's own, capped by the gateway's.
+        SELF_ADMIN_LABEL => selfadmin::list(scope.admin_level(snap.settings.self_admin)),
         KB_LABEL => kb::list(),
         _ => docs::list(),
     };
@@ -625,10 +626,16 @@ impl ToolExecutor for SelfAdminExecutor {
             Value::Object(m) => Some(m.clone()),
             _ => None,
         };
-        let call = if self.state.snapshot().tool_disabled(name) {
+        let snap = self.state.snapshot();
+        let call = if snap.tool_disabled(name) {
             Ok(selfadmin::err_result(&super::disabled_message(name)))
         } else {
-            selfadmin::call(&self.state, name, arguments).await
+            // A device's own level caps what its calls may do (the
+            // pre-merge review's P-3), read as stored when the call is made,
+            // and nobody changes the access settings through a tool (L5's
+            // notes, 2026-10-07).
+            let caller = selfadmin::Caller::of(&self.ctx.principal);
+            selfadmin::call_capped(&self.state, name, arguments, caller).await
         };
         let outcome = match call {
             Ok(v) => ToolOutcome {
@@ -670,6 +677,9 @@ pub struct DocsExecutor {
     /// takes it from `initialize`; an in-process run has to say so itself.
     client: Option<String>,
     proto: &'static str,
+    /// Whose request a `docs__query`'s model calls are charged to
+    /// ([`Self::charged_to`]).
+    charged: Option<RequestCtx>,
 }
 
 impl DocsExecutor {
@@ -679,7 +689,16 @@ impl DocsExecutor {
             ctx,
             client: None,
             proto: crate::telemetry::RESPONSES_TOOL_PROTO,
+            charged: None,
         }
+    }
+
+    /// Charge a query's embedder and reranker calls to `caller` — checked
+    /// against its key, its rows (client-apps design L4: a device's Chat
+    /// turn). `None`, the default, keeps the gateway's own charging.
+    pub fn charged_to(mut self, caller: Option<RequestCtx>) -> Self {
+        self.charged = caller;
+        self
     }
 
     pub fn with_client(mut self, client: impl Into<String>) -> Self {
@@ -706,7 +725,15 @@ impl ToolExecutor for DocsExecutor {
         let call = if self.state.snapshot().tool_disabled(name) {
             Ok(selfadmin::err_result(&super::disabled_message(name)))
         } else {
-            docs::call(&self.state, name, arguments, self.client.as_deref()).await
+            let charged = self.charged.as_ref();
+            docs::call(
+                &self.state,
+                name,
+                arguments,
+                self.client.as_deref(),
+                charged,
+            )
+            .await
         };
         let outcome = match call {
             Ok(v) => ToolOutcome {
@@ -748,6 +775,9 @@ pub struct KbExecutor {
     /// retrieval budget. `None`: the owner's `chat_kb_budget_tokens`.
     default_budget: Option<usize>,
     proto: &'static str,
+    /// Whose request a search's model calls are charged to
+    /// ([`Self::charged_to`]).
+    charged: Option<RequestCtx>,
 }
 
 impl KbExecutor {
@@ -758,7 +788,15 @@ impl KbExecutor {
             access: KbAccess::McpVisible,
             default_budget: None,
             proto: crate::telemetry::RESPONSES_TOOL_PROTO,
+            charged: None,
         }
+    }
+
+    /// Charge a search's embedder and reranker calls to `caller`, as
+    /// [`DocsExecutor::charged_to`].
+    pub fn charged_to(mut self, caller: Option<RequestCtx>) -> Self {
+        self.charged = caller;
+        self
     }
 
     /// Reach exactly these bases, whatever their `mcp_visible` says.
@@ -800,7 +838,7 @@ impl ToolExecutor for KbExecutor {
                 name,
                 arguments,
                 &self.access,
-                self.default_budget,
+                (self.default_budget, self.charged.as_ref()),
             )
             .await
         };
@@ -871,7 +909,11 @@ impl SplitExecutor {
         builtin_names: impl IntoIterator<Item = String>,
         mcp: McpExecutor,
     ) -> Self {
-        let kb = KbExecutor::new(docs.state.clone(), docs.ctx.clone()).with_proto(docs.proto);
+        // Charged as the docs half is: a device's `kb__search` through a
+        // hand-attached `kb` label is the device's (review W3-3).
+        let kb = KbExecutor::new(docs.state.clone(), docs.ctx.clone())
+            .with_proto(docs.proto)
+            .charged_to(docs.charged.clone());
         Self {
             admin,
             docs,

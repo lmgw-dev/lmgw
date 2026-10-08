@@ -84,6 +84,7 @@ pub fn held_caps(
                 "owner" => principals.owner.clone(),
                 "agent" => principals.agent.clone(),
                 "key" => principals.key.clone(),
+                "device" => principals.device.clone(),
                 _ => Vec::new(),
             },
             _ => anonymous(),
@@ -134,6 +135,7 @@ mod tests {
             owner: vec!["public".into(), "inference".into(), "admin".into()],
             agent: vec!["public".into(), "inference".into(), "agent-self".into()],
             key: vec!["public".into(), "inference".into()],
+            device: vec!["public".into(), "inference".into(), "chat".into()],
             anonymous: vec!["public".into()],
             anonymous_auth_off: vec!["public".into(), "inference".into()],
         }

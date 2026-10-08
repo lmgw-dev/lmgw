@@ -12,17 +12,16 @@ use crate::store::{self};
 
 use super::*;
 
-/// A `files` or `args` map as a patch carries it — the image class's twin of
-/// [`ArgList`].
+/// A `files` or `args` map as a patch carries it, the image class's map
+/// counterpart of the list-valued `ArgList`.
 ///
 /// Two spellings for one map, and both are load-bearing. `/api/op` and the
 /// dashboard send a real JSON object, because that is what the row stores.
-/// The MCP plane cannot: its schemas are flat scalars on purpose (see the
-/// module note on [`crate::mcp::selfadmin`] — a tool whose arguments need
-/// hand-built JSON is a tool a small local model cannot call reliably), which
-/// is the same reason `capabilities_override` accepts a JSON *string* there.
-/// So a text block of `key = value` lines — the syntax an owner reads off
-/// `sd-server --help` — is accepted wherever the object is.
+/// The MCP plane cannot: its schemas are flat scalars on purpose (a tool
+/// whose arguments need hand-built JSON is a tool a small local model cannot
+/// call reliably), which is the same reason `capabilities_override` accepts a
+/// JSON *string* there. So a text block of `key = value` lines — the syntax
+/// printed by `sd-server --help` — is accepted wherever the object is.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum KeyMap {
@@ -125,13 +124,11 @@ impl StrList {
     }
 }
 
-/// Sparse patch for an image (stable-diffusion.cpp) model — the fourth class's
-/// twin of [`AuxModelPatch`], and the one departure from the audio precedent
-/// the design makes on purpose (§8): audio CRUD lives in the web layer alone,
-/// this one is shared by `/api/op/image_model_set` and `lmgw__image_model_set`,
-/// because an image row is `files` + `args` and nothing an agent cannot check.
+/// Sparse patch for an image (stable-diffusion.cpp) model. It is shared by
+/// `/api/op/image_model_set` and `lmgw__image_model_set`, because an image row
+/// is `files` + `args` and nothing an agent cannot check.
 ///
-/// Same conventions as every other patch here: a field left out keeps what the
+/// Same conventions as every other model patch: a field left out keeps what the
 /// row has, an empty string clears the fields that can be cleared, and `clear`
 /// names the rest.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -161,7 +158,7 @@ pub struct ImageModelPatch {
     /// `inherit` (default — no fallback for this class) | `none` | `alias`.
     pub hold_fallback_mode: Option<String>,
     pub hold_fallback: Option<String>,
-    /// Owner override of the derived `/v1/models` facts; a JSON object, or a
+    /// Override of the derived `/v1/models` facts; a JSON object, or a
     /// JSON string holding one.
     pub capabilities_override: Option<Value>,
     /// Field names to reset: `args`, `modes`, `extra_run_args`, `image`,

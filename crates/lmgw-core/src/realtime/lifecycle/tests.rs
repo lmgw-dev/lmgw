@@ -49,6 +49,7 @@ impl Rig {
             .await
             .unwrap();
         let init = SessionInit {
+            running: None,
             state,
             ctx: Default::default(),
             requested_model: Some("chatty".into()),

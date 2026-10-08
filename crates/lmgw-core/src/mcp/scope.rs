@@ -10,6 +10,7 @@
 //! | Principal | Tools | `lmgw__*` self-admin |
 //! | --- | --- | --- |
 //! | client key | its own tool scope (`all` / `allow` / `deny` globs) | never |
+//! | device key | its own tool scope, as a client key's | at the level the owner gave it (`ApiKey::self_admin`), capped by the gateway's |
 //! | agent token | its manifest's `tools[]`, resolved against the surface | never |
 //! | owner key | everything offered | yes, where the plane serves it |
 //! | no credential | everything offered | never |
@@ -32,7 +33,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent::{ToolExecutor, ToolOutcome};
-use crate::config::{ApiKeyKind, KeyPolicy, McpServer, ScopeMode, Snapshot};
+use crate::config::{ApiKeyKind, KeyPolicy, McpServer, ScopeMode, SelfAdmin, Snapshot};
 use crate::principal::{Cap, Principal};
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
@@ -42,10 +43,17 @@ use super::selfadmin;
 /// One caller's reach into the tool plane.
 #[derive(Debug, Clone)]
 pub struct ToolScope {
-    /// May this caller use the `lmgw__*` self-admin tools? Only an owner
-    /// credential (principals §3.7) or the gateway itself. Whether a plane
-    /// serves them at all is the plane's business — `/mcp` never does.
+    /// May this caller use the `lmgw__*` self-admin tools? An owner
+    /// credential (principals §3.7), the gateway itself, and a device the
+    /// owner allowed lmgw's admin tools (`ApiKey::self_admin`, client-apps
+    /// design L5, 2026-10-07). Whether a plane serves them at all is the
+    /// plane's business — `/mcp` never does — and the self-admin level in
+    /// Settings bounds what they may do.
     self_admin: bool,
+    /// What its admin tools may do at most before the gateway's own level
+    /// caps it (`devices::admin_cap`): a device's own level (the pre-merge
+    /// review's P-3), `Full` for every other caller.
+    cap: SelfAdmin,
     list: List,
 }
 
@@ -72,7 +80,17 @@ impl ToolScope {
     pub fn gateway() -> Self {
         Self {
             self_admin: true,
+            cap: SelfAdmin::Full,
             list: List::All,
+        }
+    }
+
+    /// A caller that reaches no tool at all, named `who` in a refusal.
+    pub fn nothing(who: impl Into<String>) -> Self {
+        Self {
+            self_admin: false,
+            cap: SelfAdmin::Off,
+            list: List::Nothing { who: who.into() },
         }
     }
 
@@ -83,16 +101,19 @@ impl ToolScope {
     /// tool loop that outlived the edit may keep the old answer.
     pub async fn of_request(state: &SharedState, ctx: &RequestCtx) -> Self {
         let snap = state.snapshot();
-        let self_admin = ctx.principal.holds(Cap::Admin, &snap);
+        let self_admin = self_admin_of(&ctx.principal, &snap);
+        let cap = crate::devices::admin_cap(&snap, &ctx.principal);
         // An agent token, whether or not `auth_enabled` is on (§3.1).
         if let Some(agent) = &ctx.agent {
             return Self {
                 self_admin,
+                cap,
                 list: agent_list(state, &agent.agent_id).await,
             };
         }
         Self {
             self_admin,
+            cap,
             list: principal_list(&ctx.principal, &snap),
         }
     }
@@ -104,6 +125,7 @@ impl ToolScope {
         match &self.list {
             List::Agent { agent_id, .. } => Self {
                 self_admin: self.self_admin,
+                cap: self.cap,
                 list: agent_list(state, agent_id).await,
             },
             _ => self.clone(),
@@ -112,9 +134,23 @@ impl ToolScope {
 
     /// Is `name` within this caller's reach? Says nothing about whether the
     /// gateway offers it — that is `tool_disabled` and the source's own state.
+    ///
+    /// The `lmgw__*` tools are the caller's only when it may use them
+    /// ([`Self::self_admin`]). A device's switch "may use lmgw's admin
+    /// tools" grants the whole label, and the device's own list narrows it
+    /// where it names the namespace (client-apps design L5, review P-6): an
+    /// allow pattern that begins with `lmgw__`, or a deny pattern that can
+    /// match such a name. A list that says nothing about it leaves the
+    /// label whole. The self-admin level bounds which of them exist.
     pub fn admits(&self, name: &str) -> bool {
-        if selfadmin::owns(name) && !self.self_admin {
-            return false;
+        if selfadmin::owns(name) {
+            return self.self_admin
+                && match &self.list {
+                    List::Key { policy, .. } if names_self_admin(policy) => {
+                        policy.admits_tool(name)
+                    }
+                    _ => true,
+                };
         }
         match &self.list {
             List::All => true,
@@ -151,9 +187,35 @@ impl ToolScope {
         }
     }
 
+    /// Is **every** name in `<prefix>__…` within this caller's reach — the
+    /// question a written label must answer when its server cannot list its
+    /// tools now (client-apps design L5). Conservative where a glob could
+    /// match only part of the namespace: an allow list admits it whole only
+    /// through a pattern `<head>*` whose head the namespace starts with; a
+    /// deny list only when none of its patterns can match a name in it.
+    pub fn admits_namespace(&self, prefix: &str) -> bool {
+        match &self.list {
+            List::All => true,
+            List::Nothing { .. } | List::Agent { .. } => false,
+            List::Key { policy, .. } => namespace_admitted(policy, prefix),
+        }
+    }
+
     /// May this caller attach the `lmgw` self-admin toolset?
     pub fn self_admin(&self) -> bool {
         self.self_admin
+    }
+
+    /// What this caller's admin tools may do under the gateway's `global`
+    /// level: `Off` for a caller that may not use them, a device's own level
+    /// capped by `global` (the pre-merge review's P-3), `global` for the
+    /// owner and the gateway.
+    pub fn admin_level(&self, global: SelfAdmin) -> SelfAdmin {
+        if self.self_admin {
+            self.cap.min(global)
+        } else {
+            SelfAdmin::Off
+        }
     }
 
     /// Does this caller have a list of its own, beyond the owner's switch?
@@ -170,9 +232,9 @@ impl ToolScope {
         match &self.list {
             List::All => "this caller".to_string(),
             List::Key { name, policy } => match policy.tool_scope_mode {
-                ScopeMode::Deny => format!("key '{name}' (tool scope: a deny list)"),
+                ScopeMode::Deny => format!("{name} (tool scope: a deny list)"),
                 _ => format!(
-                    "key '{name}' (tool scope: allow {})",
+                    "{name} (tool scope: allow {})",
                     if policy.tool_scope_patterns.is_empty() {
                         "— an empty list".to_string()
                     } else {
@@ -198,8 +260,9 @@ impl ToolScope {
     pub fn refusal(&self, name: &str) -> String {
         if selfadmin::owns(name) && !self.self_admin {
             return format!(
-                "{name} — the lmgw__* self-admin tools need an owner credential; a client key \
-                 or an agent token does not reach the gateway's configuration"
+                "{name} — the lmgw__* self-admin tools need an owner credential or a device \
+                 the owner allowed lmgw's admin tools; a client key, an agent token or any \
+                 other device does not reach the gateway's configuration"
             );
         }
         match &self.list {
@@ -240,6 +303,23 @@ async fn agent_list(state: &SharedState, agent_id: &str) -> List {
     }
 }
 
+/// Whether `principal` may use the `lmgw__*` tools: an owner credential
+/// (principals §3.7), or a device the owner allowed lmgw's admin tools
+/// (`ApiKey::self_admin`, client-apps design L5, 2026-10-07) while the
+/// gateway's self-admin level is not `off` — what it sees of the toolset's
+/// threads follows the same capped level (L3's note).
+fn self_admin_of(principal: &Principal, snap: &Snapshot) -> bool {
+    principal.holds(Cap::Admin, snap)
+        || matches!(
+            principal,
+            Principal::Key {
+                id,
+                kind: ApiKeyKind::Device,
+                ..
+            } if crate::devices::may_do(snap, *id).allows_read()
+        )
+}
+
 /// The list for every principal that is not an agent identity. Each shape is
 /// named: a default here would be a fail-open the day a new one appears.
 fn principal_list(principal: &Principal, snap: &Snapshot) -> List {
@@ -249,20 +329,34 @@ fn principal_list(principal: &Principal, snap: &Snapshot) -> List {
             kind: ApiKeyKind::Owner,
             ..
         } => List::All,
+        // A device's tool scope is a client key's (client-apps design §1.1):
+        // the same list, the same modes.
         Principal::Key {
             id,
             name,
-            kind: ApiKeyKind::Key,
+            kind: ApiKeyKind::Key | ApiKeyKind::Device,
             ..
         } => match snap.api_keys.iter().find(|k| k.id == *id) {
             Some(k) if k.policy.tool_scope_mode == ScopeMode::All => List::All,
             Some(k) => List::Key {
-                name: k.name.clone(),
+                // As a refusal names it: "device 'phone'", "key 'laptop'".
+                name: k.described(),
                 policy: k.policy.clone(),
             },
             // Resolved at the door, deleted since: the owner took it away.
+            // Named as every refusal names it (review W4-20): a device by
+            // its short name.
             None => List::Nothing {
-                who: format!("key '{name}', which no longer exists,"),
+                who: format!(
+                    "{}, which no longer exists,",
+                    match principal {
+                        Principal::Key {
+                            kind: ApiKeyKind::Device,
+                            ..
+                        } => format!("device '{}'", crate::devices::short_name(name)),
+                        _ => format!("key '{name}'"),
+                    }
+                ),
             },
         },
         // An agent row reaches here only without its agent identity, and an
@@ -274,6 +368,29 @@ fn principal_list(principal: &Principal, snap: &Snapshot) -> List {
         } => List::Nothing {
             who: format!("'{name}'"),
         },
+    }
+}
+
+/// Whether a key's tool scope says anything about the `lmgw__*` names
+/// (review P-6): an allow pattern that begins with the namespace, or a deny
+/// pattern that can match a name in it. Only such a list narrows the label
+/// a device's admin-tools switch grants ([`ToolScope::admits`]).
+fn names_self_admin(policy: &KeyPolicy) -> bool {
+    use lmgw_api_types::scope::fold;
+    let ns = fold(selfadmin::PREFIX);
+    let mut patterns = policy
+        .tool_scope_patterns
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(fold);
+    match policy.tool_scope_mode {
+        ScopeMode::All => false,
+        ScopeMode::Allow => patterns.any(|p| p.starts_with(&ns)),
+        ScopeMode::Deny => patterns.any(|p| match p.split_once('*') {
+            Some((head, _)) => head.starts_with(&ns) || ns.starts_with(head),
+            None => p.starts_with(&ns),
+        }),
     }
 }
 
@@ -308,6 +425,34 @@ fn namespace_reachable(policy: &KeyPolicy, prefix: &str) -> bool {
     }
 }
 
+/// Does a client key's tool scope admit **every** name in `<prefix>__…`?
+/// ([`ToolScope::admits_namespace`].)
+fn namespace_admitted(policy: &KeyPolicy, prefix: &str) -> bool {
+    use lmgw_api_types::scope::fold;
+    let ns = fold(&format!("{prefix}__"));
+    let patterns: Vec<String> = policy
+        .tool_scope_patterns
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(fold)
+        .collect();
+    match policy.tool_scope_mode {
+        ScopeMode::All => true,
+        // One pattern that is a literal head and a single trailing `*`, the
+        // head a prefix of the namespace: it matches every name in it.
+        ScopeMode::Allow => patterns.iter().any(|p| {
+            p.strip_suffix('*')
+                .is_some_and(|head| !head.contains('*') && ns.starts_with(head))
+        }),
+        // No pattern could match a name that starts with the namespace.
+        ScopeMode::Deny => !patterns.iter().any(|p| match p.split_once('*') {
+            Some((head, _)) => head.starts_with(&ns) || ns.starts_with(head),
+            None => p.starts_with(&ns),
+        }),
+    }
+}
+
 /// A run's executor, refusing by name what the caller's scope does not admit
 /// **at the moment of the call**.
 ///
@@ -324,6 +469,50 @@ pub struct ScopedExecutor<E> {
 }
 
 impl<E> ScopedExecutor<E> {
+    /// A device's `lmgw__*` call, checked against its key row as well as
+    /// the snapshot (review P-8): between a key write's commit and the
+    /// snapshot's reload, the snapshot still holds the switch the owner
+    /// just turned off, or a key just disabled. The gateway's self-admin
+    /// level is read from the stored settings for the same reason
+    /// (2026-10-07): a global level lowered is in force from its commit.
+    /// A read that fails refuses.
+    async fn device_row_refuses(&self, name: &str) -> Option<String> {
+        let Principal::Key {
+            id,
+            kind: ApiKeyKind::Device,
+            name: key,
+            ..
+        } = &self.ctx.principal
+        else {
+            return None;
+        };
+        if !selfadmin::owns(name) {
+            return None;
+        }
+        let who = crate::devices::short_name(key);
+        match crate::store::device_admin_now(&self.state.db, *id).await {
+            Ok(crate::config::DeviceAdmin::Off) => Some(format!(
+                "{name} — device '{who}' is no longer allowed lmgw's admin tools"
+            )),
+            Ok(level) if selfadmin::writes(name) && level != crate::config::DeviceAdmin::Full => {
+                Some(selfadmin::device_level_refusal(name, level))
+            }
+            Ok(_) => match crate::store::gateway_self_admin_now(&self.state.db).await {
+                Ok(global) => crate::ops::check_mode(global, selfadmin::writes(name))
+                    .err()
+                    .map(|e| format!("{name} — {e}")),
+                Err(e) => Some(format!(
+                    "{name} — the gateway's self-admin level could not be read ({e}), so the \
+                     call was not made"
+                )),
+            },
+            Err(e) => Some(format!(
+                "{name} — whether device '{who}' may still use lmgw's admin tools could not be \
+                 read ({e}), so the call was not made"
+            )),
+        }
+    }
+
     pub fn new(inner: E, state: SharedState, ctx: RequestCtx) -> Self {
         Self {
             inner,
@@ -347,10 +536,21 @@ impl<E: ToolExecutor> ToolExecutor for ScopedExecutor<E> {
     async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
         let started = Instant::now();
         let scope = ToolScope::of_request(&self.state, &self.ctx).await;
-        if scope.admits(name) {
-            return self.inner.call(name, args).await;
-        }
-        let why = scope.refusal(name);
+        let why = if !scope.admits(name) {
+            scope.refusal(name)
+        } else if let Some(why) = self.device_row_refuses(name).await {
+            why
+        } else {
+            let outcome = self.inner.call(name, args).await;
+            // A call made for a request stamped `X-Lmgw-Run` (a container's
+            // `/v1/responses` or realtime turn) is one of that run's tool
+            // calls, as its `tools/call` on `/mcp` would be (§3.1). A name
+            // refused above never reached a tool, so it is none.
+            if let Some(run) = self.ctx.run {
+                self.state.agent_meters.note_tool_call(run);
+            }
+            return outcome;
+        };
         super::ingress::record_tool_call(
             &self.state,
             &self.ctx,
@@ -386,6 +586,8 @@ mod tests {
                 ..KeyPolicy::default()
             },
             note: String::new(),
+            hosts_label: None,
+            self_admin: crate::config::DeviceAdmin::Off,
         });
         snap
     }
@@ -396,15 +598,67 @@ mod tests {
             name: "ci".into(),
             kind,
             agent_id: None,
+            fingerprint: String::new(),
         }
     }
 
     fn scope_in(snap: &Snapshot, kind: ApiKeyKind) -> ToolScope {
         let p = principal(kind);
         ToolScope {
-            self_admin: p.holds(Cap::Admin, snap),
+            self_admin: self_admin_of(&p, snap),
+            cap: crate::devices::admin_cap(snap, &p),
             list: principal_list(&p, snap),
         }
+    }
+
+    /// A device the owner allowed lmgw's admin tools reaches the whole
+    /// `lmgw` label when its own list says nothing about it; without the
+    /// switch, and for a client key, never (client-apps design L5,
+    /// 2026-10-07).
+    #[test]
+    fn the_admin_tools_switch_takes_in_the_whole_label_beside_a_device_s_list() {
+        let mut snap = snap_with(ApiKeyKind::Device, ScopeMode::Allow, "docs__*");
+        let without = scope_in(&snap, ApiKeyKind::Device);
+        assert!(without.admits("docs__search") && !without.admits("lmgw__status"));
+        assert!(!without.self_admin());
+        snap.api_keys[0].self_admin = crate::config::DeviceAdmin::ReadOnly;
+        let with = scope_in(&snap, ApiKeyKind::Device);
+        assert!(with.self_admin() && with.admits("lmgw__status"));
+        assert!(with.admits("docs__search") && !with.admits("github__search"));
+        let client = scope(ApiKeyKind::Key, ScopeMode::All, "");
+        assert!(!client.self_admin() && !client.admits("lmgw__status"));
+    }
+
+    /// Review P-6: a switched device's own list narrows the label where it
+    /// names the namespace — an allow pattern beginning with `lmgw__`, a
+    /// deny pattern that can match such a name — and never widens it.
+    #[test]
+    fn a_switched_device_s_own_patterns_narrow_the_admin_tools() {
+        let switched = |mode, patterns: &str| {
+            let mut snap = snap_with(ApiKeyKind::Device, mode, patterns);
+            snap.api_keys[0].self_admin = crate::config::DeviceAdmin::ReadOnly;
+            scope_in(&snap, ApiKeyKind::Device)
+        };
+        let allow = switched(ScopeMode::Allow, "docs__*\nLMGW__status");
+        assert!(allow.admits("lmgw__status") && !allow.admits("lmgw__settings_set"));
+        assert!(allow.admits("docs__search"));
+        let deny = switched(ScopeMode::Deny, "lmgw__settings_*\ngithub__*");
+        assert!(deny.admits("lmgw__status") && !deny.admits("lmgw__settings_set"));
+        let broad = switched(ScopeMode::Deny, "*_set");
+        assert!(broad.admits("lmgw__status") && !broad.admits("lmgw__settings_set"));
+        // Silent about the namespace: the whole label.
+        let silent = switched(ScopeMode::Deny, "github__*");
+        assert!(silent.admits("lmgw__settings_set"));
+        let silent = switched(ScopeMode::Allow, "*search*");
+        assert!(silent.admits("lmgw__settings_set"));
+        // The refusal names the list, for the owner to find.
+        assert!(
+            allow
+                .refusal("lmgw__settings_set")
+                .contains("outside the tool scope of"),
+            "{}",
+            allow.refusal("lmgw__settings_set")
+        );
     }
 
     fn scope(kind: ApiKeyKind, mode: ScopeMode, patterns: &str) -> ToolScope {
@@ -463,6 +717,19 @@ mod tests {
     }
 
     #[test]
+    fn a_device_is_scoped_like_a_client_key_and_never_reaches_self_admin() {
+        // Client-apps design §1.1: the client key's arm, its own list, and
+        // no `Admin` to derive self-admin from.
+        let s = scope(ApiKeyKind::Device, ScopeMode::Allow, "docs__*\nlmgw__*");
+        assert!(s.admits("docs__query"));
+        assert!(!s.admits("github__search"));
+        assert!(!s.admits("lmgw__status"));
+        let all = scope(ApiKeyKind::Device, ScopeMode::All, "");
+        assert!(all.admits("github__search"));
+        assert!(!all.admits("lmgw__status"));
+    }
+
+    #[test]
     fn a_client_key_never_reaches_self_admin_even_when_its_list_names_it() {
         let s = scope(ApiKeyKind::Key, ScopeMode::Allow, "lmgw__*");
         assert!(!s.admits("lmgw__status"));
@@ -486,6 +753,7 @@ mod tests {
         let snap = Snapshot::default();
         let s = ToolScope {
             self_admin: Principal::Anonymous.holds(Cap::Admin, &snap),
+            cap: SelfAdmin::Full,
             list: principal_list(&Principal::Anonymous, &snap),
         };
         assert!(s.admits("github__search"));

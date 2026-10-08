@@ -832,7 +832,8 @@ async fn run_loop(
     // attached implicitly), so an ordinary request cannot reach `lmgw__*` by
     // having the model guess a name.
     let docs_exec = {
-        let e = DocsExecutor::new(state.clone(), ctx.clone());
+        let e =
+            DocsExecutor::new(state.clone(), ctx.clone()).charged_to(crate::devices::charged(&ctx));
         // The gateway key's name is the only identity a `/v1/responses` caller
         // has, and `docs__request` exists to tell the owner who asked.
         match &ctx.client_key {

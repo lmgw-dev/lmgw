@@ -365,7 +365,8 @@ async fn file_db_at_version(path: &std::path::Path, version: i64) -> SqlitePool 
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .unwrap()
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(lmgw_core::store::BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -386,7 +387,8 @@ async fn file_db_at_version(path: &std::path::Path, version: i64) -> SqlitePool 
 async fn file_pool(path: &std::path::Path) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .unwrap()
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(lmgw_core::store::BUSY_TIMEOUT);
     SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)

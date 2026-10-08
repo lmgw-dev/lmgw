@@ -11,10 +11,15 @@
 //! renders, which engines read instructions their spec does not declare, and
 //! what a Qwen3-TTS variant does with them, which take a `seed` their spec
 //! does not declare, what an engine does when no voice is named, which
-//! engines refuse to clone a clip without its transcript, and which loaders
-//! choose their weights by the row's `weight`.
+//! engines refuse to clone a clip without its transcript, which refuse a
+//! character their package's vocabulary lacks ([`charset`]), and which
+//! loaders choose their weights by the row's `weight`.
 
 use super::profile::{InstructionsMode, Unvoiced};
+
+/// Which engines refuse a character their package's vocabulary lacks.
+mod charset;
+pub(crate) use charset::{char_vocabulary, CharVocabulary, Nfkd};
 
 /// What each family's engine does with a language, read off its source.
 mod language;

@@ -1,0 +1,64 @@
+[
+ {
+  "nav": "/chat"
+ },
+ {
+  "until": "!!document.querySelector('.thread-folder .folder-hidden')",
+  "timeout": 15,
+  "label": "a folder a device deleted says \"hidden from devices\" in the list"
+ },
+ {
+  "expect": "document.querySelector('.thread-folder .folder-hidden').title.includes('a device deleted it')",
+  "label": "and why, on hover"
+ },
+ {
+  "shot": "folder-hidden-list"
+ },
+ {
+  "js": "(() => { const f = document.querySelector('.folder-hidden').closest('.thread-folder'); window.__folder = f.dataset.folderId; f.querySelector('.row-menu-btn').click(); return window.__folder; })()"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "js": "(() => { const i = [...document.querySelectorAll('.menu-list .menu-item')].find(i => i.textContent.trim() === 'Show to devices again…'); i.click(); return !!i; })()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .folder-devices-hidden')?.textContent.includes('Hidden from devices (a device deleted it).')",
+  "label": "the folder settings say it"
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .folder-devices-hidden').textContent.includes('never Admin Chat')",
+  "label": "and what devices will then see"
+ },
+ {
+  "shot": "folder-hidden-settings"
+ },
+ {
+  "js": "(() => { const b = [...document.querySelectorAll('dialog[open] .folder-devices-hidden button')].find(b => b.textContent.trim() === 'Show to devices again'); b.click(); return !!b; })()"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "[...document.querySelectorAll('dialog[open] .folder-devices-hidden button')].some(b => b.textContent.trim().startsWith('Show it to devices?'))",
+  "label": "it asks once more"
+ },
+ {
+  "shot": "folder-hidden-confirm"
+ },
+ {
+  "js": "(() => { const b = [...document.querySelectorAll('dialog[open] .folder-devices-hidden button')].find(b => b.textContent.trim().startsWith('Show it to devices?')); b.click(); return !!b; })()"
+ },
+ {
+  "until": "!document.querySelector('dialog[open]') && !document.querySelector(`.thread-folder[data-folder-id=\"${window.__folder}\"] .folder-hidden`)",
+  "timeout": 10,
+  "label": "shown to devices again: the mark is gone"
+ },
+ {
+  "shot": "folder-shown"
+ }
+]

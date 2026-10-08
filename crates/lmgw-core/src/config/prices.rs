@@ -2,14 +2,21 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One row of `prices`: what a scope costs, per 1M tokens.
+pub use lmgw_api_types::PriceUnit;
+
+/// One row of `prices`: what a scope costs in one unit (billable-units design
+/// §2.2).
+///
+/// A `per_mtok` row carries the four token rates, per 1M tokens, and no
+/// `price`; a row in any other unit carries `price`, per the unit's scale, and
+/// no token rate. The table's CHECK holds that split.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceRow {
     pub id: i64,
     pub scope_kind: PriceScope,
     /// The alias name, or `"<upstream_id>:<upstream_model_id>"`.
     pub scope_key: String,
-    pub unit: String,
+    pub unit: PriceUnit,
     pub price_in: Option<f64>,
     pub price_out: Option<f64>,
     pub price_cache_read: Option<f64>,
@@ -17,6 +24,9 @@ pub struct PriceRow {
     pub source: crate::pricing::PriceSource,
     pub note: Option<String>,
     pub updated_at: String,
+    /// The rate of a unit other than tokens ([`PriceUnit::scale`]); `None` on
+    /// a `per_mtok` row.
+    pub price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

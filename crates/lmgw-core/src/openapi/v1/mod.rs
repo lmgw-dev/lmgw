@@ -1,7 +1,7 @@
-//! Hand-written `/v1` schemas and examples (api-docs design §4.8): what
-//! lmgw's own parsers read and its serializers emit, not provider docs.
-//! Split per §3.2's file list — `chat`, `responses`, `anthropic`, `aux`,
-//! `media`, `models`, `errors`, `mcp` — each `pub(crate)` so
+//! Hand-written `/v1` schemas and examples: what lmgw's own parsers read
+//! and its serializers emit, not provider docs. Split into `chat`,
+//! `responses`, `anthropic`, `aux`, `media`, `models`, `errors` and `mcp`,
+//! each `pub(crate)` so
 //! `planes::inference` (a sibling under `openapi`, not a descendant of this
 //! module) and `build`/`schemas` (the same) can reach the `SchemaFn`s and
 //! example functions directly.

@@ -179,7 +179,7 @@ pub(crate) struct NewSource {
     /// `llms_txt` | `markdown` | `rustdoc_json` | `html`.
     pub(crate) kind: String,
     /// Domains a fetch may touch. Empty derives the fence from the root's own
-    /// host, which is the safe default (§8) rather than "anywhere".
+    /// host, which is the safe default rather than "anywhere".
     #[serde(default)]
     pub(crate) fence: Vec<String>,
 }
@@ -189,7 +189,7 @@ pub(crate) struct CreateCorpus {
     pub(crate) library: String,
     pub(crate) version: String,
     /// Model alias to embed with. Probed now, and the *resolved* identity is
-    /// what the corpus pins (§4).
+    /// what the corpus pins.
     pub(crate) embed_model: String,
     /// Model alias that will drive extraction. Validated now so the wizard
     /// fails at the form rather than in the job.
@@ -403,7 +403,8 @@ pub(crate) struct SearchBody {
     #[serde(default)]
     corpus: Option<String>,
     query: String,
-    /// Partial §6 overrides; anything absent keeps the configured default.
+    /// Partial overrides of the search stage settings; anything absent keeps
+    /// the configured default.
     #[serde(default)]
     params: Option<Value>,
     /// Convenience override, same precedence as the MCP tool's.
@@ -585,7 +586,7 @@ async fn delete_golden(State(st): State<SharedState>, Path(id): Path<i64>) -> Re
 pub(crate) struct GenerateBody {
     corpus_id: i64,
     /// Chunks to sample. Absent or `0` samples every chunk in the corpus — the
-    /// run is as big as the corpus unless the owner asks for less.
+    /// run is as big as the corpus unless a smaller sample is asked for.
     #[serde(default)]
     sample: Option<usize>,
     /// Questions to ask for per sampled chunk. Absent means one.
@@ -646,9 +647,9 @@ async fn list_candidates_inner(st: &SharedState, q: CandidatesQuery) -> Result<V
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub(crate) struct AcceptBody {
-    /// The query as the owner edited it; absent accepts it as proposed.
+    /// The query as edited before accepting; absent accepts it as proposed.
     query: Option<String>,
-    /// The expectation as the owner edited it; absent keeps the chunk the
+    /// The expectation as edited before accepting; absent keeps the chunk the
     /// candidate was written from.
     expected_chunk_ids: Option<Vec<String>>,
 }

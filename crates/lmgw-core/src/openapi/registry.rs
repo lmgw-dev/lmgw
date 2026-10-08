@@ -63,6 +63,9 @@ pub(crate) enum Req {
     /// No request body (a `GET`, a `DELETE`).
     None,
     Json(SchemaFn),
+    /// A JSON body the route also takes absent (an empty body reads as the
+    /// type's default): `required: false`.
+    OptionalJson(SchemaFn),
     Multipart(SchemaFn),
     /// A raw body of the given mime type (e.g. `POST /api/docs/import`).
     Raw(&'static str),
@@ -185,5 +188,6 @@ pub(crate) fn all_routes() -> Vec<DocRoute> {
     routes.extend(super::planes::docs::routes());
     routes.extend(super::planes::agents::routes());
     routes.extend(super::planes::session::routes());
+    routes.extend(super::planes::chat::routes());
     routes
 }

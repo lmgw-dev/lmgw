@@ -87,8 +87,21 @@ pub async fn open_retriever(
     state: &SharedState,
     corpus: &Corpus,
 ) -> Result<Retriever, GatewayError> {
+    open_retriever_as(state, corpus, None).await
+}
+
+/// [`open_retriever`] for `caller`'s request: its embedder and reranker
+/// calls are checked against the caller's key and charged to it
+/// (`InProcessEmbedder::charged_to`) — a device's Chat turn, client-apps
+/// design L4. `None` is [`open_retriever`].
+pub async fn open_retriever_as(
+    state: &SharedState,
+    corpus: &Corpus,
+    caller: Option<&crate::proxy::RequestCtx>,
+) -> Result<Retriever, GatewayError> {
     let embedder = InProcessEmbedder::for_corpus(state.clone(), corpus)
         .await?
+        .charged_to(caller.cloned())
         .into_arc();
     let retriever = Retriever::load(state.corpus.clone(), corpus.id, embedder)
         .await
@@ -98,7 +111,7 @@ pub async fn open_retriever(
     let snap = state.snapshot();
     Ok(match rerank_alias(&snap) {
         Ok(alias) => match InProcessReranker::for_alias(state.clone(), &alias) {
-            Ok(r) => retriever.with_reranker(r.into_arc()),
+            Ok(r) => retriever.with_reranker(r.charged_to(caller.cloned()).into_arc()),
             Err(e) => retriever.with_rerank_unavailable(e.to_string()),
         },
         Err(reason) => retriever.with_rerank_unavailable(reason),

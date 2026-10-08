@@ -32,7 +32,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::realtime::warm::{warm_group, Reporter, WarmMode};
 use crate::state::SharedState;
 use crate::store::ChatThread;
+use crate::telemetry::RequestClass::Audio;
 
+use super::super::chat_caller::Caller;
 use super::super::chat_repo::ChatRepo;
 
 /// Start one read-aloud of `thread` (§6.3, §6.4), fed by `feed`; its frames
@@ -49,9 +51,12 @@ use super::super::chat_repo::ChatRepo;
 /// speech was stopped or its reader went away first (review n9); and it
 /// speaks ([`run::run`]). Dropping the reader stops it. `planned` (a turn
 /// read as it streams) is told whether the plan stands, once it is made:
-/// the turn's language sentence says the reply is heard only then.
+/// the turn's language sentence says the reply is heard only then. Its TTS
+/// calls are `caller`'s: checked against a device's key and charged to it
+/// (client-apps design L4).
 pub(crate) fn start(
     state: &SharedState,
+    caller: &Caller,
     repo: ChatRepo,
     thread: &ChatThread,
     (started, planned): (Instant, Option<oneshot::Sender<bool>>),
@@ -60,7 +65,8 @@ pub(crate) fn start(
 ) -> SpeechRx {
     let (registered, stop) = state.chat_live.speaking(thread.id);
     let (out, reader) = out::channel();
-    let (state, thread) = (state.clone(), thread.clone());
+    let (state, thread, ctx) = (state.clone(), thread.clone(), caller.ctx());
+    let charged = caller.charged();
     tokio::spawn(async move {
         let _registered = registered;
         let plan = plan::plan(&state, repo, &thread).await;
@@ -71,6 +77,21 @@ pub(crate) fn start(
             Ok(plan) => plan,
             Err(refusal) => return out.frame(run::refused(&refusal)),
         };
+        // A device's read-aloud warms and speaks only with a TTS its key may
+        // use (client-apps design §1.3, review W2-3): scope and budget before
+        // the warm below can load it; the speaker counts each call.
+        if let Some(ctx) = charged.as_ref() {
+            let alias = plan.speech.alias.as_str();
+            let checked =
+                crate::proxy::policy_checked(&state, plan.speech.proto, ctx, alias, Audio).await;
+            if let Err(e) = checked {
+                let data = serde_json::json!({ "code": e.code(), "message": e.to_string() });
+                return out.frame(super::super::chat_turn::TurnFrame::new(
+                    "speech_error",
+                    data.to_string(),
+                ));
+            }
+        }
         let states = (warm && !stop.is_raised() && !out.is_closed()).then(|| {
             let (warmed, states) = mpsc::unbounded_channel();
             let (stage, label, st) = (plan.warm(), plan.speech.label.clone(), state.clone());
@@ -84,6 +105,7 @@ pub(crate) fn start(
             plan,
             stop,
             started,
+            ctx,
         };
         run::run(state, run, feed, states, out).await;
     });

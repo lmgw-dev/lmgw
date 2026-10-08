@@ -27,20 +27,34 @@ impl Task {
         if spoken.is_empty() {
             return Ok(None);
         }
+        let device = self.caller.is_device();
         let thread = match bound::thread_checked(&self.state, self.thread_id).await {
             Ok(Some(thread)) => thread,
-            Ok(None) => return Err(thread_gone(self.thread_id)),
+            Ok(None) => return Err(self.dropped(GONE, device)),
             Err(why) => return Err(self.not_written(new, &why)),
         };
+        // A device's thread out of its reach is not there for it, in the
+        // words a deleted one gets (review W4-18): its session is being
+        // closed, and the turn is not written.
+        if !self.caller.sees(&self.state.snapshot(), &thread) {
+            return Err(self.dropped(OUT_OF_REACH, true));
+        }
         let content = spoken
             .iter()
             .map(|t| t.text.trim())
             .collect::<Vec<_>>()
             .join("\n");
         let voice = user_voice(&spoken);
-        let id = match bound::write_user(&self.state, &thread, &content, &voice).await {
+        let id = match bound::write_user(&self.state, &thread, &content, &voice, &self.caller).await
+        {
             Ok(id) => id,
-            Err(why) => return Err(self.not_written(new, &why)),
+            // The write checks a device's reach again under the thread's
+            // lock: a thread deleted or hidden from it since the read above
+            // is not there, as above, rather than a write the store refused.
+            Err(why) => match self.missing().await {
+                Some(cause) if device => return Err(self.dropped(cause, true)),
+                _ => return Err(self.not_written(new, &why)),
+            },
         };
         for t in &new {
             self.written.insert(t.item_id.clone(), id);
@@ -60,6 +74,31 @@ impl Task {
             response_id: None,
         });
         Ok(Some(id))
+    }
+
+    /// Why the thread is not there for the session's binder now — gone, or
+    /// out of a device's reach — or `None` when it is. A read that fails
+    /// says `None`: the write's own error is then said.
+    async fn missing(&self) -> Option<&'static str> {
+        match bound::thread_checked(&self.state, self.thread_id).await {
+            Ok(Some(t)) if self.caller.sees(&self.state.snapshot(), &t) => None,
+            Ok(Some(_)) => Some(OUT_OF_REACH),
+            Ok(None) => Some(GONE),
+            Err(_) => None,
+        }
+    }
+
+    /// The user entry is not written: the thread is not there for the
+    /// binder (`cause`, for the log). The log names the cause — it is the
+    /// owner's — and the binder is told [`not_there`]'s words, which for a
+    /// device are the same either way (review W4-18).
+    fn dropped(&self, cause: &str, device: bool) -> ErrorObject {
+        tracing::warn!(
+            "{}: chat thread {} {cause}; the spoken turn is not written",
+            self.label,
+            self.thread_id
+        );
+        not_there(self.thread_id, device)
     }
 
     /// The user entry of `turns` could not be written (`why`): kept for
@@ -108,10 +147,16 @@ pub(super) fn user_voice(turns: &[&UserTurn]) -> MessageVoice {
     }
 }
 
-fn thread_gone(id: i64) -> ErrorObject {
+/// Causes [`Task::dropped`] logs, as `row` logs them.
+const GONE: &str = "is gone";
+const OUT_OF_REACH: &str = "is out of this device's reach now";
+
+/// The thread is not there for the binder (`thread::not_there`): deleted,
+/// or out of a device's reach.
+fn not_there(id: i64, device: bool) -> ErrorObject {
     ErrorObject::invalid(
         "chat_thread_not_found",
-        format!("chat thread {id} is gone (deleted, or a temporary chat kept or discarded)"),
+        crate::realtime::thread::not_there(id, device),
     )
 }
 

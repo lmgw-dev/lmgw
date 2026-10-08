@@ -63,11 +63,17 @@ impl ClientProto {
     }
 
     /// Stateful SSE encoder translating IR deltas into this protocol's
-    /// wire framing.
-    pub fn new_stream_encoder(&self, alias: &str) -> Box<dyn ClientStreamEncoder> {
+    /// wire framing. `include_usage` is OpenAI's
+    /// `stream_options.include_usage` ([`openai::stream_include_usage`]); an
+    /// Anthropic stream carries its usage in `message_delta` either way.
+    pub fn new_stream_encoder(
+        &self,
+        alias: &str,
+        include_usage: bool,
+    ) -> Box<dyn ClientStreamEncoder> {
         match self {
             Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => {
-                Box::new(openai::OpenaiStreamEncoder::new(alias))
+                Box::new(openai::OpenaiStreamEncoder::new(alias, include_usage))
             }
             Self::AnthropicMessages => Box::new(anthropic::AnthropicStreamEncoder::new(alias)),
         }

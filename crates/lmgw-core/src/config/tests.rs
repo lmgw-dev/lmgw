@@ -75,6 +75,115 @@ fn stdio_argv_bare_runs_command_verbatim() {
     assert_eq!(argv, vec!["--verbose"]);
 }
 
+/// The connect creates an isolated server's container before its handshake
+/// (MCP gateway design §9, 2026-10-08): `podman create` with `run`'s every
+/// flag, image and command, and the labels it is given. A bare server has
+/// none.
+#[test]
+fn container_create_argv_is_the_run_argv_up_to_the_start() {
+    let s = stdio(Some("ghcr.io/acme/mcp-github"));
+    let (_, mut run) = s.stdio_argv();
+    run[0] = "create".to_string();
+    run.splice(4..4, ["--label".to_string(), "lmgw.mcp=1".to_string()]);
+    let labels = [("lmgw.mcp".to_string(), "1".to_string())];
+    assert_eq!(s.container_create_argv(&labels), Some(run));
+    assert_eq!(stdio(None).container_create_argv(&labels), None);
+    assert_eq!(stdio(Some("  ")).container_create_argv(&labels), None);
+}
+
+/// `podman create` refuses `--sig-proxy` and `--detach-keys`, which `podman
+/// run` took, and `podman start` takes them (the review's R-1): they go to
+/// the start, a `--detach-keys` value of its own token with it, and every
+/// other flag stays with the create.
+#[test]
+fn the_run_flags_only_podman_start_takes_go_to_the_start() {
+    let mut s = stdio(Some("ghcr.io/acme/mcp-github"));
+    s.extra_run_args = [
+        "--sig-proxy=false",
+        "-v",
+        "./data:/data:Z",
+        "--detach-keys",
+        "ctrl-x",
+        "--detach-keys=ctrl-y",
+        "--sig-proxy",
+    ]
+    .map(String::from)
+    .to_vec();
+    let create = s.container_create_argv(&[]).unwrap();
+    assert_eq!(
+        create,
+        [
+            "create",
+            "--rm",
+            "-i",
+            "--quiet",
+            "-v",
+            "./data:/data:Z",
+            "-e",
+            "GITHUB_TOKEN=tok",
+            "ghcr.io/acme/mcp-github",
+            "mcp-server-github",
+            "--verbose",
+        ]
+    );
+    assert_eq!(
+        s.container_start_argv("c0ffee"),
+        [
+            "start",
+            "--attach",
+            "--interactive",
+            "--sig-proxy=false",
+            "--detach-keys",
+            "ctrl-x",
+            "--detach-keys=ctrl-y",
+            "--sig-proxy",
+            "c0ffee",
+        ]
+    );
+    assert_eq!(
+        stdio(Some("img")).container_start_argv("c0ffee"),
+        ["start", "--attach", "--interactive", "c0ffee"]
+    );
+}
+
+/// The `podman run` flags neither `podman create` nor `podman start` takes
+/// are refused by name, with why (R-1): `-d`/`--detach` (a cluster such as
+/// `-dit` too), `--rmi`, `--preserve-fd`, `--preserve-fds` and `--passwd`.
+/// The flags `podman start` takes, a value that merely spells one, and a
+/// shorthand cluster whose `d` is a value are not.
+#[test]
+fn the_run_flags_no_connect_can_pass_are_refused_by_name() {
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for (extra, flag) in [
+        (args(&["-d"]), "`-d`"),
+        (args(&["-dit"]), "`-d`"),
+        (args(&["--detach"]), "`--detach`"),
+        (args(&["--detach=true"]), "`--detach`"),
+        (args(&["--rmi"]), "`--rmi`"),
+        (args(&["--preserve-fd", "3"]), "`--preserve-fd`"),
+        (args(&["--preserve-fds=2"]), "`--preserve-fds`"),
+        (args(&["--passwd=false"]), "`--passwd`"),
+    ] {
+        let why = run_only_refusal(&extra).unwrap_or_else(|| panic!("{extra:?} passed"));
+        assert!(why.contains(flag), "{extra:?}: {why}");
+        assert!(why.contains("only `podman run` takes"), "{why}");
+        assert!(why.contains("`podman create`"), "{why}");
+        assert!(why.contains("remove it from extra_run_args"), "{why}");
+    }
+    let both = run_only_refusal(&args(&["--rmi", "-v", "/a:/b", "-d", "--rmi"])).unwrap();
+    assert!(both.contains("`--rmi`") && both.contains("`-d`"), "{both}");
+    assert_eq!(both.matches("`--rmi`").count(), 1, "{both}");
+    assert!(both.contains("remove them"), "{both}");
+    for fine in [
+        args(&["--sig-proxy=false", "--detach-keys", "ctrl-x"]),
+        args(&["-it", "-v/data:/data:Z", "-edetach=1"]),
+        args(&["--label=--rmi", "--device", "nvidia.com/gpu=all"]),
+        args(&[]),
+    ] {
+        assert_eq!(run_only_refusal(&fine), None, "{fine:?}");
+    }
+}
+
 #[test]
 fn exposed_name_applies_prefix() {
     let s = stdio(None);

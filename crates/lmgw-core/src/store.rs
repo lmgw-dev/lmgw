@@ -1,8 +1,11 @@
 //! SQLite persistence via sqlx (§9). All config reads on the hot path go
 //! through the in-memory [`Snapshot`](crate::config::Snapshot); this module is the cold path.
 
+use std::future::Future;
+use std::panic::Location;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -19,7 +22,8 @@ pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(opts)
@@ -66,14 +70,83 @@ pub(crate) fn clamp_0600(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How long a connection waits for a lock another connection holds before
+/// it gives up with "database is locked" (`SQLITE_BUSY`): sqlx's default,
+/// named so that a wait can be measured against it ([`begin_write`] warns
+/// past half of it). Every pool on the gateway's database files opens with
+/// it: this store's, the knowledge store's, and the tests'.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A write transaction: it holds the write lock from its first statement
+/// (`BEGIN IMMEDIATE`). A deferred transaction that reads before it writes
+/// fails at once with `SQLITE_BUSY_SNAPSHOT` ("database is locked") when
+/// another connection committed in between, and the busy timeout does not
+/// apply to that; this one waits for the lock up front instead (reviews
+/// W4-10, F-6). Every transaction that writes begins here (clippy.toml
+/// refuses the calls that begin a deferred one). One that only reads, for a
+/// consistent snapshot, stays deferred and says so.
+///
+/// The lock is held from here to the commit, and every other writer waits
+/// for it, up to [`BUSY_TIMEOUT`]. So nothing slow goes inside: no network
+/// or model call, no container work, no wait on another lock, a channel or
+/// a task. The wait for a connection and the lock is traced at debug with
+/// the caller's place in the source, and a wait past half the busy timeout
+/// opens a contention episode with one warning ([`write_lock`]).
+#[track_caller]
+pub(crate) fn begin_write(
+    pool: &SqlitePool,
+) -> impl Future<Output = Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error>> + '_ {
+    let at = Location::caller();
+    async move {
+        let db = pool.connect_options().get_filename().to_path_buf();
+        let waiting = write_lock::Waiting::start(db, at);
+        let tx = pool.begin_with("BEGIN IMMEDIATE").await;
+        waiting.end(if tx.is_ok() {
+            write_lock::Outcome::GotIt
+        } else {
+            write_lock::Outcome::GaveUp
+        });
+        tx
+    }
+}
+
+mod write_lock;
+
 /// In-memory DB for tests.
 pub async fn open_in_memory() -> anyhow::Result<SqlitePool> {
-    let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
+    let pool = anchored_memory_pool(1).await?;
+    run_migrations(&pool).await?;
+    Ok(pool)
+}
+
+/// A pool of at most `max` connections on a fresh in-memory database that
+/// lives as long as the pool does: for tests (this store's, the knowledge
+/// store's).
+///
+/// `:memory:` is a named shared-cache database (`file:sqlx-in-memory-<n>`,
+/// named when the options are parsed), and it goes with its last
+/// connection. sqlx closes a pooled connection whose query was cancelled
+/// mid-way — a request dropped because its client went away, such as a
+/// test's feed read to its first event — and the pool's next connection
+/// then opened an empty database: "no such table". An anchor connection
+/// that never queries keeps it, and holds no lock. It is held by the pool's
+/// own `after_connect` hook, so it goes when the pool does (review F-11): a
+/// suite run in one process does not keep every test's database.
+pub(crate) async fn anchored_memory_pool(max: u32) -> anyhow::Result<SqlitePool> {
+    use sqlx::ConnectOptions;
+    let opts = SqliteConnectOptions::from_str("sqlite::memory:")?
+        .foreign_keys(true)
+        .busy_timeout(BUSY_TIMEOUT);
+    let anchor = std::sync::Arc::new(std::sync::Mutex::new(opts.connect().await?));
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(max)
+        .after_connect(move |_, _| {
+            // Held, never used: the hook lives as long as the pool.
+            let _ = &anchor;
+            Box::pin(async { Ok(()) })
+        })
         .connect_with(opts)
         .await?;
-    run_migrations(&pool).await?;
     Ok(pool)
 }
 
@@ -85,6 +158,7 @@ pub async fn open_in_memory() -> anyhow::Result<SqlitePool> {
 pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     repair_before_migrations(pool).await?;
     refuse_if_aliases_pin_the_managed_upstreams(pool).await?;
+    refuse_unmappable_price_rows(pool).await?;
     empty_run_args_notice(pool).await?;
     llama_cpp_notice(pool).await?;
     let migrator = sqlx::migrate!("./migrations");
@@ -165,8 +239,86 @@ macro_rules! seed_held {
     };
 }
 
+/// How far into the self-admin plane a thread reaches, as SQL — the level a
+/// reader must see to read it (client-apps design L3; review W3-1; the
+/// per-device switch of 2026-10-07):
+///
+/// - `2`: an Admin Chat thread, which no device ever sees;
+/// - `1`: a thread with the self-admin toolset (`lmgw`) among its
+///   `mcp_tools`, which a device sees only when it may use lmgw's admin
+///   tools (`api_keys.self_admin`);
+/// - `0`: every other thread.
+///
+/// A reader sees a level below its reach (`AdminThreads::reach`): the owner
+/// all three, a device with the switch `0` and `1`, any other device `0`.
+/// So `NOT self_admin_thread!(…)` is still "no device is kept from it", and
+/// a filter is `self_admin_thread!(…) < ?n`. `$t` qualifies the columns
+/// (`"t."` or `""`). The JSON functions run only on valid JSON and on
+/// objects — `AND` does not keep a malformed value from them, a `CASE`
+/// does — and `IFNULL` reads "no tools" as no. [`ChatThread::reach_level`]
+/// is the same rule in Rust.
+macro_rules! self_admin_thread {
+    ($t:literal) => {
+        concat!(
+            "(CASE WHEN ",
+            $t,
+            "kind = 'admin' THEN 2 WHEN IFNULL(CASE WHEN json_valid(",
+            $t,
+            "mcp_tools) THEN EXISTS (SELECT 1 FROM json_each(",
+            $t,
+            "mcp_tools) WHERE CASE WHEN type = 'object' THEN \
+             trim(json_extract(value, '$.server_label')) = 'lmgw' ELSE 0 END) END, 0) \
+             THEN 1 ELSE 0 END)"
+        )
+    };
+}
+
+/// The same levels for a folder:
+///
+/// - `2`: one a device deleted while it held threads out of the device's
+///   reach, which stays for them (`devices_hidden`, review W6-1) — out of
+///   every device's reach until the owner shows it to devices again;
+/// - `1`: one whose defaults attach the self-admin toolset — every new
+///   thread in it would (review W3-1);
+/// - `0`: every other folder.
+///
+/// `$f` qualifies the columns. [`ChatFolder::reach_level`] is the rule in
+/// Rust.
+macro_rules! self_admin_folder {
+    ($f:literal) => {
+        concat!(
+            "(CASE WHEN ",
+            $f,
+            "devices_hidden != 0 THEN 2 WHEN IFNULL(CASE WHEN json_valid(",
+            $f,
+            "defaults) THEN EXISTS (SELECT 1 FROM json_each(",
+            $f,
+            "defaults, '$.mcp_tools') WHERE CASE WHEN type = 'object' THEN \
+             trim(json_extract(value, '$.server_label')) = 'lmgw' ELSE 0 END) END, 0) \
+             THEN 1 ELSE 0 END)"
+        )
+    };
+}
+
+/// The days the sweep applies to thread `t` for `$col` (`archive_days` or
+/// `purge_days`): its folder's own (client-apps design §11 Q2), else the
+/// global setting, bound as `?1`. A thread in no folder, or in one without
+/// its own, takes the global setting.
+macro_rules! folder_days {
+    ($col:literal) => {
+        concat!(
+            "COALESCE((SELECT f.",
+            $col,
+            " FROM chat_folders f WHERE f.id = t.folder_id), ?1)"
+        )
+    };
+}
+
 mod chat;
 pub use chat::*;
+
+mod chat_ongoing;
+pub use chat_ongoing::*;
 
 mod chat_attachments;
 pub use chat_attachments::*;
@@ -191,6 +343,11 @@ pub use chat_messages::*;
 
 mod chat_voice;
 pub use chat_voice::*;
+
+/// The Chat change feed's table (client-apps design §2.3): addressed as
+/// `store::feed::…`, not re-exported, since its names (`record`, `page`,
+/// `kind`) only make sense under it.
+pub mod feed;
 
 mod responses;
 pub use responses::*;

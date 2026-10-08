@@ -18,7 +18,7 @@ use quickdoc_core::error::{QuickdocError, Result as QResult};
 
 use crate::config::{AuxKind, Snapshot};
 use crate::error::GatewayError;
-use crate::proxy;
+use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
 use crate::telemetry;
 
@@ -33,6 +33,9 @@ pub struct InProcessReranker {
     /// The resolved `upstream/model` behind [`alias`](Self::alias), which is
     /// what the search trace names — an alias is not an identity.
     resolved: String,
+    /// Whose request it ranks for, as the embedder's
+    /// ([`super::embed::InProcessEmbedder::charged_to`]).
+    caller: Option<RequestCtx>,
 }
 
 impl std::fmt::Debug for InProcessReranker {
@@ -71,7 +74,15 @@ impl InProcessReranker {
             state,
             alias: alias.to_string(),
             resolved,
+            caller: None,
         })
+    }
+
+    /// Rank for `caller`'s request (client-apps design L4): each call checked
+    /// against its key, its row the key's. `None` keeps the gateway's own.
+    pub fn charged_to(mut self, caller: Option<RequestCtx>) -> Self {
+        self.caller = caller;
+        self
     }
 
     pub fn alias(&self) -> &str {
@@ -105,6 +116,9 @@ impl Reranker for InProcessReranker {
         // the call returned, exactly as the embedder does it.
         super::embed::refuse_if_held(&self.state, &self.alias, TRACE_PIN)
             .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
+        let key = super::embed::charge(&self.state, self.caller.as_ref(), &self.alias)
+            .await
+            .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
         let (_, headers, resp) = proxy::rerank_once(
             &self.state,
             &self.alias,
@@ -112,6 +126,7 @@ impl Reranker for InProcessReranker {
             documents.to_vec(),
             None,
             telemetry::RERANK_PROTO,
+            key,
         )
         .await
         .map_err(|(_, _, e)| QuickdocError::Reranker(format!("{}: {e}", self.alias)))?;

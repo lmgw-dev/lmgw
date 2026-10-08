@@ -9,6 +9,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use super::chat::err_json;
+use super::chat_caller::Caller;
 use super::chat_extract::ChatQuery;
 use crate::state::SharedState;
 use crate::store::{self, SearchArchived, SEARCH_MIN_CHARS};
@@ -26,8 +27,10 @@ pub struct SearchQuery {
     offset: Option<i64>,
 }
 
+/// A device's search leaves Admin Chat threads out (client-apps design L3).
 pub async fn search(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatQuery(q): ChatQuery<SearchQuery>,
 ) -> Response {
     let archived = match q.archived.as_str() {
@@ -49,8 +52,33 @@ pub async fn search(
             format!("a search needs at least {SEARCH_MIN_CHARS} characters"),
         );
     }
-    match store::search_chat(&state.db, &q.q, archived, q.folder, q.offset.unwrap_or(0)).await {
-        Ok(page) => Json(page).into_response(),
+    let offset = q.offset.unwrap_or(0);
+    let admin = caller.reach(&state.snapshot());
+    // A folder a device cannot see is one that is not there (review W4-7):
+    // nothing in it is found, and no thread is said to be in it.
+    let hidden = if caller.is_device() {
+        match store::self_admin_folder_ids(&state.db, admin).await {
+            Ok(h) => h,
+            Err(e) => {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())
+            }
+        }
+    } else {
+        Default::default()
+    };
+    let folder = match q.folder {
+        Some(f) if hidden.contains(&f) => Some(-1),
+        other => other,
+    };
+    match store::search_chat(&state.db, &q.q, archived, folder, offset, admin).await {
+        Ok(mut page) => {
+            for t in &mut page.threads {
+                if t.folder_id.is_some_and(|f| hidden.contains(&f)) {
+                    t.folder_id = None;
+                }
+            }
+            Json(page).into_response()
+        }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
     }
 }

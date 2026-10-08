@@ -254,6 +254,9 @@ async fn image_json_call(
             headers,
             admission,
             chunked: false,
+            // The images in the answer are counted (billable-units §4.4).
+            answer: super::audio::usage::Answer::Image,
+            measured: Default::default(),
         }),
         Err(e) => Err((Some(Box::new(route)), headers, e)),
     }
@@ -366,6 +369,8 @@ pub async fn handle_image_edit(
                     headers,
                     admission,
                     chunked: false,
+                    answer: super::audio::usage::Answer::Image,
+                    measured: Default::default(),
                 }),
                 Err(e) => Err((Some(Box::new(route)), headers, e)),
             }
@@ -378,7 +383,9 @@ pub async fn handle_image_edit(
 /// `finish_audio` (`proxy/audio.rs`) for the image routes (image-generation design §6): the
 /// same relay, the same "log when the last byte is out", the same moment the
 /// admission guard is dropped — with the row's own [`RequestClass`], because
-/// a generation is not audio traffic and must not average into it.
+/// a generation is not audio traffic and must not average into it. The
+/// images in the answer are counted as it passes, for the row's
+/// `images_out` (`audio/usage/images.rs`), on a local row too.
 pub(super) async fn finish_image(
     state: &SharedState,
     ctx: &RequestCtx,

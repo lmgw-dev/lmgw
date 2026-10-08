@@ -40,21 +40,24 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::json;
 
+use super::chat_caller::Caller;
 use super::chat_knowledge::KbTools;
 use super::chat_turn::{self, Events, Reply, Stopped, Turn, TurnFrame, NOT_SAVED};
 use crate::agent::{
     self, Budget, Cancel, DeltaSink, EventSink, LoopEvent, ResolvedTool, RunConfig, StopReason,
-    TurnRunner,
+    ToolExecutor, TurnRunner,
 };
 use crate::config::Route;
 use crate::error::GatewayError;
 use crate::ingress::responses::{ApprovalRule, McpToolSpec};
+use crate::ingress::ClientProto;
 use crate::ir::{flatten_tool_result, ChatRequest, Completion, ContentPart, Message, Role, Usage};
 use crate::mcp::exec::{
     self as mcp_exec, self_admin_tools, DocsExecutor, KbExecutor, McpExecutor, SelfAdminExecutor,
     SplitExecutor, KB_LABEL, SELF_ADMIN_LABEL,
 };
-use crate::proxy::{self, PerRoute, RequestCtx, StopSignal};
+use crate::mcp::scope::ScopedExecutor;
+use crate::proxy::{self, PerRoute, StopSignal};
 use crate::state::SharedState;
 use crate::store::ThreadMcp;
 use crate::telemetry::{ADMIN_PROTO, CHAT_TOOL_PROTO};
@@ -146,6 +149,10 @@ fn budget(state: &SharedState) -> Budget {
 /// server is still ordinary chat traffic, and Logs should say so.
 struct ChatRunner {
     state: SharedState,
+    /// Who the turn runs as (client-apps design L4): each model call of the
+    /// loop passes a device's key's policy first, and every row is charged
+    /// to it.
+    caller: Caller,
     route: Route,
     /// Why `route` is a fallback, when it is — every turn's row says so.
     fallback: Option<crate::gate::FallbackReason>,
@@ -312,6 +319,16 @@ impl TurnRunner for ChatRunner {
         sink: &mut dyn DeltaSink,
     ) -> Result<Completion, GatewayError> {
         let started = Instant::now();
+        // One model call of a device's turn (L4): its key's check, a refusal
+        // — its row written — failing the loop with the gateway error it was.
+        self.caller
+            .check(
+                &self.state,
+                ClientProto::Chat,
+                &ir.model_alias,
+                crate::telemetry::RequestClass::Chat,
+            )
+            .await?;
         let hold = match self.claim.for_call().await {
             Ok(hold) => hold,
             // A block came on while the claim was let go: the call goes
@@ -326,7 +343,7 @@ impl TurnRunner for ChatRunner {
                         let (alias, proto) = (&ir.model_alias, self.proto);
                         refused::record(
                             &self.state,
-                            alias,
+                            (self.caller.key(), alias),
                             proto,
                             route,
                             fallback,
@@ -344,7 +361,7 @@ impl TurnRunner for ChatRunner {
                     opened.headers.fallback_reason(),
                     ir,
                     self.proto,
-                    proxy::KeyRef::default(),
+                    self.caller.key(),
                     deadline.saturating_sub(started.elapsed()),
                     sink,
                     Some((self, Some(&opened.headers))),
@@ -357,7 +374,7 @@ impl TurnRunner for ChatRunner {
                 let (alias, route) = (&ir.model_alias, &self.route);
                 refused::record(
                     &self.state,
-                    alias,
+                    (self.caller.key(), alias),
                     self.proto,
                     route,
                     self.fallback,
@@ -375,7 +392,7 @@ impl TurnRunner for ChatRunner {
             self.fallback,
             ir,
             self.proto,
-            proxy::KeyRef::default(),
+            self.caller.key(),
             deadline.saturating_sub(started.elapsed()),
             sink,
             Some((self, None)),
@@ -536,6 +553,23 @@ pub(super) async fn run_send(
             let _ = tx.send(TurnFrame::new("done", done)).await;
         }
     };
+    // A device's turn passes its key's scope and budget for the thread's
+    // model before anything is resolved or admitted (review W3-2): the GPU
+    // admission below may load the model and evict others, and a key that
+    // may not use it must not get that far. Not counted: each model call of
+    // the loop is counted as it is made (`ChatRunner::call`).
+    if let Err(e) = turn
+        .caller()
+        .precheck(
+            &state,
+            ClientProto::Chat,
+            &ir.model_alias,
+            crate::telemetry::RequestClass::Chat,
+        )
+        .await
+    {
+        return chat_turn::refuse(&tx, &e).await;
+    }
     // The gate's routing stages — the GPU hold's re-route/refusal, like every
     // other interactive path (gpu-hold design §2). The runner below carries
     // this route for the whole tool loop, so the swap has to happen here or
@@ -598,8 +632,11 @@ pub(super) async fn run_send(
         });
     }
     if !specs.is_empty() {
-        // The owner's own thread: the owner attached these labels.
-        let scope = crate::mcp::scope::ToolScope::gateway();
+        // The owner's own turn: the owner attached these labels, and the
+        // gateway's scope reaches them. A device's turn resolves under its
+        // key's tool scope (client-apps design L4): a label it keeps out is
+        // reported below like a server that could not be reached.
+        let scope = turn.caller().scope(&state).await;
         let resolved = match turn
             .or_stop(&tx, mcp_exec::resolve(&state, &specs, &scope))
             .await
@@ -667,8 +704,17 @@ pub(super) async fn run_send(
             // Its request row, as the plain path writes one (`refused`).
             if let Some(route) = &f.route {
                 let fallback = f.headers.fallback_reason();
-                let e = &f.error;
-                refused::record(&state, &ir.model_alias, proto, route, fallback, started, e).await;
+                let (e, key) = (&f.error, turn.key());
+                refused::record(
+                    &state,
+                    (key, ir.model_alias.as_str()),
+                    proto,
+                    route,
+                    fallback,
+                    started,
+                    e,
+                )
+                .await;
             }
             let sent = chat_turn::SentAs::of(chat_turn::answered_by(&snap, &f.headers), &ir);
             return chat_turn::refuse_sent(&tx, &f.error, sent).await;
@@ -698,7 +744,7 @@ pub(super) async fn run_send(
             let fallback = headers.fallback_reason();
             refused::record(
                 &state,
-                &ir.model_alias,
+                (turn.key(), ir.model_alias.as_str()),
                 proto,
                 &route,
                 fallback,
@@ -713,6 +759,7 @@ pub(super) async fn run_send(
     let llama_server = route.upstream.kind == crate::config::UpstreamKind::LlamaServer;
     let runner = ChatRunner {
         state: state.clone(),
+        caller: turn.caller().clone(),
         route,
         fallback: headers.fallback_reason(),
         proto,
@@ -743,23 +790,38 @@ pub(super) async fn run_send(
     // One executor for both planes, always: with no `lmgw__*` tools attached
     // the admin half simply never matches, which is cheaper than two code
     // paths that have to stay in agreement about which tool goes where.
-    let mut exec = SplitExecutor::new(
-        SelfAdminExecutor::new(state.clone(), RequestCtx::default()),
-        DocsExecutor::new(state.clone(), RequestCtx::default()).with_client(DOCS_CLIENT),
+    //
+    // A device's turn calls them as its key (client-apps design L4): the
+    // tool rows are its, the model calls a docs or knowledge search makes
+    // are checked against it and charged to it, and every call is checked
+    // against its tool scope again at the moment it is made
+    // (`ScopedExecutor`) — a key narrowed mid-turn stops reaching.
+    let (ctx, charged) = (turn.caller().ctx(), turn.caller().charged());
+    let mut split = SplitExecutor::new(
+        SelfAdminExecutor::new(state.clone(), ctx.clone()),
+        DocsExecutor::new(state.clone(), ctx.clone())
+            .with_client(DOCS_CLIENT)
+            .charged_to(charged.clone()),
         builtin_names,
-        McpExecutor::new(state.clone(), RequestCtx::default()).with_proto(CHAT_TOOL_PROTO),
+        McpExecutor::new(state.clone(), ctx.clone()).with_proto(CHAT_TOOL_PROTO),
     );
     // Tool mode: the thread's bases and nothing else, whatever their
     // `mcp_visible` switch says (§9.4), with the thread's budget as the
     // tools' default.
     if let Some(kb) = &plan.kb {
-        exec = exec.with_kb(
-            KbExecutor::new(state.clone(), RequestCtx::default())
+        split = split.with_kb(
+            KbExecutor::new(state.clone(), ctx.clone())
                 .only(kb.ids.iter().copied())
                 .with_default_budget(Some(kb.budget))
-                .with_proto(CHAT_TOOL_PROTO),
+                .with_proto(CHAT_TOOL_PROTO)
+                .charged_to(charged),
         );
     }
+    let exec: Box<dyn ToolExecutor> = if turn.caller().is_device() {
+        Box::new(ScopedExecutor::new(split, state.clone(), ctx).with_proto(CHAT_TOOL_PROTO))
+    } else {
+        Box::new(split)
+    };
     // The thread's own tool names: a call to any other name is the model's
     // invention, and its record says so (`close_trailing_calls` below).
     let known: HashSet<String> = tools.iter().map(|t| t.def.name.clone()).collect();
@@ -772,7 +834,7 @@ pub(super) async fn run_send(
         .with_cancel(Cancel::signal(stop_signal.clone()));
     // A heard voice turn's tools wait for its user row (`heard`), the
     // loop's claim let go meanwhile (`claim`).
-    let exec = heard::HeardTools::new(&exec, turn.user_row(), &stop_run, &runner.claim);
+    let exec = heard::HeardTools::new(&*exec, turn.user_row(), &stop_run, &runner.claim);
     let base_len = ir.messages.len();
     // What the loop's refusal below says its requests carried
     // (`TurnFrame::sent`).

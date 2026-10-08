@@ -33,6 +33,12 @@ pub struct AgentRow {
     /// The dev-server override (§3.4): while it is set, the agent's origin
     /// goes there and **no container is started** for the app. Never exported.
     pub dev_url: Option<String>,
+    /// The paired device whose `lmgw__agent_set` or `lmgw__agent_install`
+    /// created the row (migration 0069, client-apps design L5's note,
+    /// 2026-10-07); `None` for the owner's, a built-in and every row from
+    /// before. A device may replace or delete only an agent it created, and
+    /// the owner's write to the row adopts it (`None` again, [`adopt_agent`]).
+    pub created_by_key: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -46,6 +52,7 @@ fn agent_from_row(row: &sqlx::sqlite::SqliteRow) -> AgentRow {
         source: row.get("source"),
         provenance: row.get("provenance"),
         dev_url: row.get("dev_url"),
+        created_by_key: row.get("created_by_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -78,12 +85,27 @@ pub async fn insert_agent(
     manifest: &str,
     source: &str,
 ) -> DbResult<()> {
-    sqlx::query("INSERT INTO agents (id, manifest, source) VALUES (?1, ?2, ?3)")
-        .bind(id)
-        .bind(manifest)
-        .bind(source)
-        .execute(pool)
-        .await?;
+    insert_agent_by(pool, id, manifest, source, None).await
+}
+
+/// [`insert_agent`], recording the paired device that created it
+/// (`AgentRow::created_by_key`).
+pub async fn insert_agent_by(
+    pool: &SqlitePool,
+    id: &str,
+    manifest: &str,
+    source: &str,
+    created_by_key: Option<i64>,
+) -> DbResult<()> {
+    sqlx::query(
+        "INSERT INTO agents (id, manifest, source, created_by_key) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(id)
+    .bind(manifest)
+    .bind(source)
+    .bind(created_by_key)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -114,19 +136,30 @@ pub async fn update_agent_manifest(pool: &SqlitePool, id: &str, manifest: &str) 
 /// One transaction, not two calls, for `put_builtin_manifest`'s reason: a row
 /// carrying the new manifest against the old config is exactly the broken state
 /// this exists to prevent, and a crash between two statements would leave it.
+///
+/// `by_device` is who writes it: the device that created the row keeps it
+/// its own, and anyone else's write — the owner's — adopts it
+/// (`created_by_key` set to `by_device`, so `NULL` for the owner; the
+/// branch review's verification, V-5). The import path refuses a device's
+/// write over a row it did not create before this runs.
 pub async fn update_agent_manifest_pruned(
     pool: &SqlitePool,
     id: &str,
     manifest: &str,
     keep_config_fields: &[AgentConfigField],
+    by_device: Option<i64>,
 ) -> DbResult<Vec<String>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let dropped = prune_config_tx(&mut tx, id, keep_config_fields).await?;
-    sqlx::query("UPDATE agents SET manifest = ?2, updated_at = datetime('now') WHERE id = ?1")
-        .bind(id)
-        .bind(manifest)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE agents SET manifest = ?2, created_by_key = ?3, updated_at = datetime('now') \
+         WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(manifest)
+    .bind(by_device)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(dropped)
 }
@@ -240,7 +273,7 @@ pub async fn put_builtin_manifest(
     kv_value: &str,
     keep_config_fields: Option<&[AgentConfigField]>,
 ) -> DbResult<Vec<String>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     // Config is kept across the write — that is the whole point — but a field
     // the new manifest no longer declares is not "kept", it is a value the
     // schema will refuse on the next Start ("'x' is not a config field"). An
@@ -361,6 +394,35 @@ pub async fn delete_agent(pool: &SqlitePool, id: &str) -> DbResult<bool> {
     Ok(res.rows_affected() > 0)
 }
 
+/// [`delete_agent`] for paired device `device`: only while the row is still
+/// the device's own (`AgentRow::created_by_key`), checked in the statement
+/// itself, so an owner's write that adopts it ([`adopt_agent`]) between a
+/// read and this delete keeps the row (the branch review's verification,
+/// V-5). Whether a row went.
+pub async fn delete_agent_created_by(pool: &SqlitePool, id: &str, device: i64) -> DbResult<bool> {
+    let res = sqlx::query("DELETE FROM agents WHERE id = ?1 AND created_by_key = ?2")
+        .bind(id)
+        .bind(device)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// The owner wrote agent `id` (the dashboard, or an owner's own tool call):
+/// it is the owner's from now on, `created_by_key` back to `NULL`, so the
+/// device that created it may no longer replace or delete what the owner
+/// has since reviewed (the branch review's verification, V-5). A row that
+/// is not there, or is the owner's already, is left alone.
+pub async fn adopt_agent(pool: &SqlitePool, id: &str) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE agents SET created_by_key = NULL WHERE id = ?1 AND created_by_key IS NOT NULL",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Jobs of one kind carrying one key, newest first — "runs of this agent"
 /// (§3). Finished rows keep the key, which is what makes this the run history
 /// rather than just the live one. `limit <= 0` means every row retention has
@@ -392,12 +454,20 @@ pub async fn list_jobs_by_key(
 /// stay, listed on the Chat page as any other, and stop claiming an agent that
 /// is no longer in the catalog. Returns how many were unlinked, so the op can
 /// say it.
+///
+/// Each thread unlinked is recorded in the change feed (`thread.updated`),
+/// as the owner's: only the owner deletes an agent.
 pub async fn clear_chat_thread_agent(pool: &SqlitePool, agent_id: &str) -> DbResult<u64> {
-    let res = sqlx::query("UPDATE chat_threads SET agent_id = NULL WHERE agent_id = ?1")
-        .bind(agent_id)
-        .execute(pool)
-        .await?;
-    Ok(res.rows_affected())
+    let mut tx = super::begin_write(pool).await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "UPDATE chat_threads SET agent_id = NULL WHERE agent_id = ?1 RETURNING id",
+    )
+    .bind(agent_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    super::feed::record_threads_updated(&mut tx, &ids, Some(super::feed::BY_OWNER)).await?;
+    tx.commit().await?;
+    Ok(ids.len() as u64)
 }
 
 /// How many Chat threads a `chat` agent has opened (§2.5) — the card's "3

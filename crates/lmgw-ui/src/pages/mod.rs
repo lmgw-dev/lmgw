@@ -33,6 +33,8 @@ mod chat_reasoning;
 mod chat_reply;
 /// What a turn retrieved: the summary above an answer and its `[n]` citations.
 mod chat_retrieval;
+/// The open thread's messages taking stored rows in place.
+mod chat_rows;
 /// A chat thread's sampling parameters: draft, checks, fields.
 mod chat_sampling;
 /// Chat search: the sidebar's Messages section and reveal-and-flash of a hit.
@@ -40,6 +42,9 @@ mod chat_search;
 /// The thread settings' fields, shared with a folder's defaults form.
 mod chat_settings;
 mod chat_stream;
+/// The Chat page following what other writers change (`/api/events`' `chat`
+/// frame).
+mod chat_sync;
 /// Temporary chats: sidebar group, banner, Keep, silent discard.
 mod chat_temp;
 /// One streamed turn, however it started.

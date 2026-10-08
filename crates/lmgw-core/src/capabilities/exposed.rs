@@ -63,6 +63,7 @@ fn zero_pricing() -> Pricing {
     Pricing {
         prompt: "0".to_string(),
         completion: "0".to_string(),
+        ..Default::default()
     }
 }
 

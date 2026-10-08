@@ -25,15 +25,23 @@
 //! fetch wrapper, time/money formatters and chart furniture every part below
 //! reuses; [`tile_row`] and [`dashboard`] are the `/usage` overview; the
 //! `cards_*` modules are its chart cards, grouped by what they chart; `keys`,
-//! `key_line`, `key_editor` and `scope_editor` (the alias and tool pickers) are `/usage/keys`; `prices` is `/usage/prices`.
+//! `key_line`, `key_editor`, `scope_editor` (the alias and tool pickers) and
+//! `devices` (the paired client apps) are `/usage/keys`; `prices` is `/usage/prices`.
 
 mod shared;
-pub(crate) use shared::money;
 use shared::*;
+pub(crate) use shared::{money, money_fine};
 
 // The chart card's head and its Chart | Table twin, for the Benchmarks page's
 // charts: one card furniture across the dashboard.
 pub(crate) use shared::{chart_or_table, ChartHead};
+
+// The billable quantities: how they read, what a remainder holds, and
+// from when a window recorded them.
+mod measured;
+// Traffic names a row's quantities the way this page does.
+pub(crate) use measured::quantity_texts;
+use measured::*;
 
 mod tile_row;
 use tile_row::*;
@@ -64,5 +72,10 @@ mod key_editor;
 use key_editor::*;
 mod scope_editor;
 
+/// The Devices card on `/usage/keys` (client-apps design §1.4).
+mod devices;
+use devices::*;
+
+mod price_units;
 mod prices;
 pub use prices::UsagePrices;

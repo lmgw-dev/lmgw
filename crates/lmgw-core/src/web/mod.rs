@@ -45,6 +45,8 @@ pub(crate) mod audio_lab;
 pub(crate) use audio_lab::{library_clips, library_voices, voice_dir_is_library};
 mod aux;
 mod chat;
+/// The thread list's query, which the API document describes.
+pub(crate) use chat::ListThreadsQuery;
 /// Thread-scoped actions that rewrite a conversation: Keep, and the message
 /// actions (chat-complete design §3, §7).
 mod chat_actions;
@@ -58,13 +60,21 @@ mod chat_attach_ingest;
 mod chat_attach_render;
 mod chat_attach_retry;
 mod chat_attach_routes;
+/// Who a Chat request and its turn run as: the owner, or a paired device
+/// (client-apps design §1.3).
+pub(crate) mod chat_caller;
 /// Chat folders (chat-complete design §5): their routes, the defaults'
 /// checks, and starting a thread from a folder.
 mod chat_export;
 /// The Chat API's `Json` / `Query` / `Path` extractors, refused in the flat
 /// `ApiError` shape.
 mod chat_extract;
+/// The Chat change feed (client-apps design §2): `GET /chat/api/feed`.
+pub(crate) mod chat_feed;
+/// Chat folders (chat-complete design §5), ongoing-conversation folders and
+/// a folder's own retention (client-apps design §3, §11 Q2).
 mod chat_folders;
+pub(crate) use chat_folders::FolderLocks;
 /// Knowledge bases in Chat threads (chat-complete design §9.3): which bases a
 /// turn uses, auto mode's retrieval and `<context>` block, the checks.
 mod chat_knowledge;
@@ -81,9 +91,15 @@ mod chat_repo;
 mod chat_sampling;
 /// Chat search (chat-complete design §4): the FTS route.
 mod chat_search;
+/// What a device below `full` may not change in a thread or folder that
+/// carries lmgw's admin tools (client-apps design L5's note).
+mod chat_steer;
 /// Temporary chats' in-memory store. `pub(crate)` because `AppState` holds
 /// it.
 pub(crate) mod chat_temp;
+/// What a device may write: tool labels and knowledge bases within its tool
+/// scope (client-apps design L5).
+mod chat_tool_write;
 /// One assistant turn: `start_turn` (send, edit, regenerate, continue share
 /// it), the request it builds, and its persist step.
 mod chat_turn;
@@ -93,6 +109,9 @@ pub use chat_turn::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnF
 /// the checks its overrides go through. `pub(crate)` for its `bound` seam,
 /// which a realtime session bound to a thread works through (§8).
 pub(crate) mod chat_voice;
+/// The Chat API's bodies as `lmgw-api-types`' typed DTOs (client-apps
+/// design §4.3), written in the byte order the API always had.
+mod chat_wire;
 /// Visible to [`crate::ops`] so the tool plane drives the same download,
 /// re-download and update-check paths as the dashboard rather than a parallel
 /// implementation of them.
@@ -133,6 +152,13 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
         .merge(api_docs::routes(state))
         .merge(api_knowledge::routes(state))
         .merge(
+            chat_routes().route_layer(crate::server::require(state, crate::principal::Cap::Chat)),
+        )
+        .merge(
+            chat_owner_routes()
+                .route_layer(crate::server::require(state, crate::principal::Cap::Admin)),
+        )
+        .merge(
             labs_routes().route_layer(crate::server::require(state, crate::principal::Cap::Admin)),
         )
         // Ahead of `ui::routes`, whose `/{*path}` catch-all takes every path
@@ -144,10 +170,10 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
         .merge(ui::routes(state))
 }
 
-/// Chat, the Audio lab and the Image lab — the three surfaces the owner drives
-/// by hand. All [`Cap::Admin`](crate::principal::Cap::Admin): they spend money
-/// on the owner's aliases with no key of their own.
-fn labs_routes() -> Router<SharedState> {
+/// The Chat API: [`Cap::Chat`](crate::principal::Cap::Chat), held by the
+/// owner and by a paired device (client-apps design §1.2). The owner's own
+/// turns spend under `internal:chat`, as they always have.
+fn chat_routes() -> Router<SharedState> {
     // Bounded by `max_body_mb` like `/v1`, not unbounded like the audio/image
     // labs below: an attachment is a request-shaped upload (design §2). It
     // does *not* share `/v1`'s `body_limit_mw` layer, though — that
@@ -182,6 +208,10 @@ fn labs_routes() -> Router<SharedState> {
         )
         .route("/chat/api/folders/{id}", post(chat_folders::update_folder))
         .route(
+            "/chat/api/folders/{id}/current",
+            post(chat_folders::current),
+        )
+        .route(
             "/chat/api/folders/{id}/delete",
             post(chat_folders::delete_folder),
         )
@@ -190,6 +220,7 @@ fn labs_routes() -> Router<SharedState> {
             post(chat_folders::move_thread),
         )
         .route("/chat/api/search", get(chat_search::search))
+        .route("/chat/api/feed", get(chat_feed::feed))
         .route(
             "/chat/api/threads/{id}/export",
             get(chat_export::export_thread),
@@ -252,6 +283,20 @@ fn labs_routes() -> Router<SharedState> {
             "/chat/api/attachments/{id}/text",
             get(chat_attach_routes::get_text),
         )
+}
+
+/// The Chat API's owner-only reads: the dashboard's Chat page following other
+/// writers ([`Cap::Admin`](crate::principal::Cap::Admin); `chat::thread_rows`
+/// says why). A paired device never holds them: its own feed carries rows.
+fn chat_owner_routes() -> Router<SharedState> {
+    Router::new().route("/chat/api/threads/rows", get(chat::thread_rows))
+}
+
+/// The Audio lab and the Image lab — the two playgrounds the owner drives by
+/// hand. [`Cap::Admin`](crate::principal::Cap::Admin): they spend money on the
+/// owner's aliases with no key of their own, and no device ever holds them.
+fn labs_routes() -> Router<SharedState> {
+    Router::new()
         // Audio lab: the audio.cpp playground (Chat's counterpart for
         // `/v1/audio/*`). Reference clips and TTS input can be arbitrarily
         // large, so the upload and dispatch routes drop axum's body limit the

@@ -106,7 +106,7 @@ async fn sweep_never_archives_a_pinned_thread() {
     let id = store::create_chat_thread(&state.db, "my-model", "chat")
         .await
         .unwrap();
-    store::set_chat_thread_pinned(&state.db, id, true)
+    store::set_chat_thread_pinned(&state.db, id, true, None)
         .await
         .unwrap();
     backdate(&state, id, 100, None).await;
@@ -204,7 +204,9 @@ async fn pinning_an_archived_thread_restores_it_and_bumps_updated_at() {
         .unwrap();
     let id = thread["id"].as_i64().unwrap();
 
-    store::archive_chat_thread(&state.db, id).await.unwrap();
+    store::archive_chat_thread(&state.db, id, None)
+        .await
+        .unwrap();
     // Backdate `updated_at` so the bump is observable.
     sqlx::query("UPDATE chat_threads SET updated_at = datetime('now', '-1 day') WHERE id = ?1")
         .bind(id)
@@ -309,7 +311,9 @@ async fn sending_into_an_archived_thread_restores_it() {
         .await
         .unwrap();
     let id = thread["id"].as_i64().unwrap();
-    store::archive_chat_thread(&state.db, id).await.unwrap();
+    store::archive_chat_thread(&state.db, id, None)
+        .await
+        .unwrap();
     assert!(thread_row(&state, id).await.archived_at.is_some());
 
     let _ = client
@@ -365,7 +369,7 @@ async fn active_list_is_pinned_first_then_most_recently_active() {
         .execute(&state.db)
         .await
         .unwrap();
-    store::set_chat_thread_pinned(&state.db, pinned, true)
+    store::set_chat_thread_pinned(&state.db, pinned, true, None)
         .await
         .unwrap();
 
@@ -413,13 +417,17 @@ async fn archived_query_lists_archived_newest_first_with_purge_at_and_count() {
         .unwrap();
     let id2 = t2["id"].as_i64().unwrap();
 
-    store::archive_chat_thread(&state.db, id1).await.unwrap();
+    store::archive_chat_thread(&state.db, id1, None)
+        .await
+        .unwrap();
     sqlx::query("UPDATE chat_threads SET archived_at = datetime('now', '-1 day') WHERE id = ?1")
         .bind(id1)
         .execute(&state.db)
         .await
         .unwrap();
-    store::archive_chat_thread(&state.db, id2).await.unwrap();
+    store::archive_chat_thread(&state.db, id2, None)
+        .await
+        .unwrap();
 
     let resp: Value = client
         .get(format!("{base}/chat/api/threads?archived=1"))
@@ -474,7 +482,7 @@ async fn archived_all_lists_active_and_archived_together_pinned_first() {
     let archived = new_thread(&base, &client).await;
     let pinned = new_thread(&base, &client).await;
 
-    store::archive_chat_thread(&state.db, archived)
+    store::archive_chat_thread(&state.db, archived, None)
         .await
         .unwrap();
     // Explicit, distinct `updated_at`s rather than relying on wall-clock
@@ -494,7 +502,7 @@ async fn archived_all_lists_active_and_archived_together_pinned_first() {
         .execute(&state.db)
         .await
         .unwrap();
-    store::set_chat_thread_pinned(&state.db, pinned, true)
+    store::set_chat_thread_pinned(&state.db, pinned, true, None)
         .await
         .unwrap();
 
@@ -546,12 +554,14 @@ async fn archiving_a_pinned_thread_unpins_it() {
     let id = store::create_chat_thread(&state.db, "my-model", "chat")
         .await
         .unwrap();
-    store::set_chat_thread_pinned(&state.db, id, true)
+    store::set_chat_thread_pinned(&state.db, id, true, None)
         .await
         .unwrap();
     assert!(thread_row(&state, id).await.pinned);
 
-    store::archive_chat_thread(&state.db, id).await.unwrap();
+    store::archive_chat_thread(&state.db, id, None)
+        .await
+        .unwrap();
     let t = thread_row(&state, id).await;
     assert!(t.archived_at.is_some(), "{t:?}");
     assert!(!t.pinned, "archiving must unpin: {t:?}");
@@ -572,7 +582,7 @@ async fn archive_route_reports_the_thread_as_unpinned() {
         .await
         .unwrap();
     let id = thread["id"].as_i64().unwrap();
-    store::set_chat_thread_pinned(&state.db, id, true)
+    store::set_chat_thread_pinned(&state.db, id, true, None)
         .await
         .unwrap();
 
@@ -627,7 +637,9 @@ async fn listing_with_an_unrepresentable_purge_days_does_not_500() {
         .await
         .unwrap();
     let id = thread["id"].as_i64().unwrap();
-    store::archive_chat_thread(&state.db, id).await.unwrap();
+    store::archive_chat_thread(&state.db, id, None)
+        .await
+        .unwrap();
 
     let mut settings = state.snapshot().settings.clone();
     settings.chat_purge_days = 99_999_999;

@@ -196,3 +196,177 @@ async fn a_stop_ends_a_call_whose_per_route_check_waits() {
         .unwrap_or_default()
         .is_empty());
 }
+
+/// Raises its own stop on the first delta — a consumer that stopped the
+/// stream after the upstream answered — and keeps the cost its row told it
+/// (`DeltaSink::billed_cost`).
+struct StopsOnFirstDelta {
+    handle: crate::proxy::StopHandle,
+    signal: crate::proxy::StopSignal,
+    cost: Option<crate::pricing::RowCost>,
+}
+
+impl StopsOnFirstDelta {
+    fn new() -> Self {
+        let (handle, signal) = crate::proxy::stop_pair();
+        Self {
+            handle,
+            signal,
+            cost: None,
+        }
+    }
+}
+
+impl crate::agent::DeltaSink for StopsOnFirstDelta {
+    fn on_delta(&mut self, _: &StreamDelta) {
+        self.handle.stop();
+    }
+    fn stop(&self) -> Option<crate::proxy::StopSignal> {
+        Some(self.signal.clone())
+    }
+    fn billed_cost(&mut self, row: crate::pricing::RowCost) {
+        self.cost = Some(row);
+    }
+}
+
+/// The `requests` audit (billable-units §4.5): a stream its consumer
+/// stopped after the upstream's 2xx counts its request, so a per-request
+/// fee applies to its `canceled` row; one stopped before anything went out
+/// stays unknown. The caller's meter is told the row's cost either way.
+#[tokio::test]
+async fn a_stream_stopped_after_its_answer_counts_its_request() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let mock = MockServer::start().await;
+    let sse = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({"choices": [{"delta": {"role": "assistant", "content": "Hallo"}}]}),
+        serde_json::json!({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                           "usage": {"prompt_tokens": 7, "completion_tokens": 3}}),
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .mount(&mock)
+        .await;
+    let state = AppState::init_for_tests().await.unwrap();
+    crate::store::upsert_price(
+        &state.db,
+        crate::config::PriceScope::Alias,
+        "m",
+        crate::config::PriceUnit::PerRequest,
+        &crate::pricing::Prices {
+            source: crate::pricing::PriceSource::Manual,
+            ..Default::default()
+        },
+        Some(0.005),
+        None,
+    )
+    .await
+    .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let route = Route {
+        upstream: Upstream {
+            id: 5,
+            name: "cloud".into(),
+            protocol: Protocol::Openai,
+            kind: UpstreamKind::Generic,
+            base_url: format!("{}/v1", mock.uri()),
+            api_key: None,
+            extra_headers: vec![],
+            timeout_ms: 5_000,
+            enabled: true,
+            expose_all: false,
+            expose_prefix: String::new(),
+            supports_responses: false,
+            llama: None,
+        },
+        upstream_model: "gpt".into(),
+        param_defaults: Default::default(),
+        fallback: None,
+    };
+    let ir = ChatRequest {
+        model_alias: "m".into(),
+        messages: vec![Message::text(Role::User, "hello")],
+        params: Default::default(),
+        tools: vec![],
+        tool_choice: None,
+        stream: true,
+        passthrough: Default::default(),
+        llama_kwargs_enabled: None,
+        anthropic_beta: Vec::new(),
+    };
+    let newest = || async {
+        crate::store::query_logs(
+            &state.db,
+            &crate::store::LogFilter {
+                alias: Some("m".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .remove(0)
+    };
+
+    let mut sink = StopsOnFirstDelta::new();
+    let e = stream_once_on(
+        &state,
+        None,
+        &route,
+        None,
+        &ir,
+        "agent",
+        KeyRef::default(),
+        Duration::from_secs(5),
+        &mut sink,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(crate::proxy::is_canceled(&e), "{e}");
+    let row = newest().await;
+    assert_eq!(row.error_kind.as_deref(), Some("canceled"), "{row:?}");
+    assert_eq!(row.status, 200);
+    assert_eq!(
+        row.cost_micro,
+        Some(5_000),
+        "answered, then stopped: {row:?}"
+    );
+    assert_eq!(row.cost_units_micro, Some(5_000));
+    assert_eq!(
+        sink.cost,
+        Some(crate::pricing::RowCost::Priced(5_000)),
+        "the meter is told the row's cost"
+    );
+
+    // Stopped before anything went out: nothing was answered.
+    let mut sink = StopsOnFirstDelta::new();
+    sink.handle.stop();
+    let e = stream_once_on(
+        &state,
+        None,
+        &route,
+        None,
+        &ir,
+        "agent",
+        KeyRef::default(),
+        Duration::from_secs(5),
+        &mut sink,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(crate::proxy::is_canceled(&e), "{e}");
+    let row = newest().await;
+    assert_eq!(row.error_kind.as_deref(), Some("canceled"), "{row:?}");
+    assert_eq!(row.cost_micro, None, "{row:?}");
+    assert_eq!(row.price_per_request, Some(0.005));
+    assert_eq!(
+        sink.cost,
+        Some(crate::pricing::RowCost::Unpriced),
+        "unknown, and said so: a stop is an `ok` row, a gap in any total"
+    );
+}

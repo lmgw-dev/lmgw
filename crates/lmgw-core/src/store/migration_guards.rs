@@ -1,7 +1,7 @@
-//! Pre-migration guard (migration 0023), pre-migration repair (migration
-//! 0018), pre-migration notices (migration 0055, [`empty_run_args`];
-//! migration 0058, [`llama_cpp`]) and the post-migration foreign-key check
-//! ([`foreign_keys`])
+//! Pre-migration guards (migration 0023; migration 0070, [`billable_units`]),
+//! pre-migration repair (migration 0018), pre-migration notices (migration
+//! 0055, [`empty_run_args`]; migration 0058, [`llama_cpp`]) and the
+//! post-migration foreign-key check ([`foreign_keys`])
 
 use sqlx::{Row, SqlitePool};
 
@@ -10,6 +10,9 @@ pub(super) use empty_run_args::empty_run_args_notice;
 
 mod llama_cpp;
 pub(super) use llama_cpp::llama_cpp_notice;
+
+mod billable_units;
+pub(super) use billable_units::{refuse_unmappable_price_rows, BILLABLE_UNITS_MIGRATION};
 
 mod foreign_keys;
 pub(super) use foreign_keys::{check_after_migrations, mark_before_migrations};
@@ -141,6 +144,11 @@ const AUX_MIGRATION: i64 = 18;
 /// * **Already half applied** — finish 0018's remaining steps here, each
 ///   guarded by its own post-condition, and record it as applied with the
 ///   migrator's own checksum so the file is skipped rather than replayed.
+// Also the place for 0062's remedy, should one ever be needed (review
+// W3-16): its case-insensitive unique index on `api_keys.hosts_label` fails
+// on two labels differing only in case; a repair here would clear all but the
+// lowest id's of each such group first (`devices::pairing::label_refusal`
+// says why none is needed today).
 pub(super) async fn repair_before_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     // A database this process has just created has no tables at all: nothing to
     // read, nothing to repair, and the migrator is about to build it.

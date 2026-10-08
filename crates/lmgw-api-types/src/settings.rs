@@ -28,7 +28,7 @@ pub struct SettingsFull {
     pub global_budget_period: String,
     pub max_body_mb: u32,
     /// The system prompt new Chat threads start with, as in force: the
-    /// owner's own, or the built-in one when they never wrote one.
+    /// configured prompt, or the built-in one when none was written.
     pub chat_system_prompt: String,
     /// The built-in default, which saving `chat_system_prompt` as this text
     /// returns to.
@@ -67,15 +67,26 @@ pub struct SettingsFull {
     pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (> 0).
     pub chat_kb_budget_tokens: u32,
-    /// `off | read_only | full`.
-    pub self_admin: String,
+    /// Days the Chat change feed keeps its records; `0` = all.
+    pub chat_feed_retention_days: i64,
+    /// Seconds between the Chat feed's keep-alive comments (≥ 1).
+    pub chat_feed_keepalive_s: u32,
+    /// Records the Chat feed reads per query while a client catches up
+    /// (≥ 1).
+    pub chat_feed_page_size: u32,
+    /// Live Chat feed events held for a slow client before it gets a fresh
+    /// `state` instead (≥ 1).
+    pub chat_feed_live_buffer: u32,
+    /// The gateway's self-admin level: what the `lmgw__*` tools may do, for
+    /// every caller, a paired device's own level capped by it.
+    pub self_admin: crate::AdminLevel,
     pub sampling_alias: String,
     pub responses_max_tool_calls: u32,
     pub responses_timeout_seconds: u64,
     pub responses_store: bool,
     pub responses_retention_hours: i64,
     pub responses_max_chains: i64,
-    /// Room reserved for one extraction reply (quickdoc §8).
+    /// Room reserved for one extraction reply.
     pub docs_ingest_reply_tokens: u32,
     /// Texts per embedding call during ingest and re-embed.
     pub docs_embed_batch: u32,
@@ -84,13 +95,13 @@ pub struct SettingsFull {
     /// Alias the rerank stage calls; empty = the aux router's single enabled
     /// rerank model, and the search trace names the reason when there is none.
     pub docs_rerank_model: String,
-    /// The §6 stage defaults a request that overrides nothing starts from.
+    /// The stage defaults a request that overrides nothing starts from.
     pub docs_search: DocsSearchDefaults,
     pub update_check_enabled: bool,
     pub has_update_token: bool,
     pub has_hf_token: bool,
     /// Where container builds keep their git mirrors, per-run worktrees and
-    /// logs, as configured (container-builds §5). `None` = the default, which
+    /// logs, as configured. `None` = the default, which
     /// `builds_dir_effective` spells out.
     pub builds_dir: Option<String>,
     /// The directory builds actually use: `builds_dir`, else
@@ -99,39 +110,39 @@ pub struct SettingsFull {
     /// Why builds would refuse to run in `builds_dir_effective` (it is on
     /// tmpfs, i.e. RAM); `None` when they would not.
     pub builds_dir_warning: Option<String>,
-    /// Forge API tokens by host (container-builds §7). Values are always the
+    /// Forge API tokens by host. Values are always the
     /// `<set>` placeholder — a token never round-trips.
     pub forge_tokens: std::collections::BTreeMap<String, String>,
     /// How often the build update check runs, in hours. `0` = off.
     pub build_update_check_hours: u32,
-    /// GPU admission control (quickdoc §9b).
+    /// GPU admission control.
     pub vram: VramSettingsDto,
-    /// The manual GPU hold (gpu-hold design §3.1) — orthogonal to `vram`
+    /// The manual GPU hold — orthogonal to `vram`
     /// above: a switch on the resolve/start paths, not a capacity policy.
     pub hold: HoldSettingsDto,
-    /// Podman container name prefix for the per-model container runtime
-    /// (per-model-containers design §3.3): `<container_prefix>-<class>-
+    /// Podman container name prefix for the per-model container runtime:
+    /// `<container_prefix>-<class>-
     /// <slug>-<hash6>`.
     pub container_prefix: String,
-    /// The DNS suffix a service agent's UI is served under (origins §4.1),
+    /// The DNS suffix a service agent's UI is served under,
     /// default `localhost`: `http://<id>.<agent_origin_suffix>:<bind port>/`.
     pub agent_origin_suffix: String,
-    /// Why the **stored** suffix shadows the gateway, when it does (origins
-    /// §4.1). It is validated on write, but `bind_addr`, this machine's host
+    /// Why the **stored** suffix shadows the gateway, when it does. It is validated on write, but
+    /// `bind_addr`, this machine's host
     /// name and its search domains are the other side of that rule and move
     /// without it: this is the same sentence the boot log carries, so a
     /// gateway that started shadowing says so where the setting is read rather
     /// than only where it was typed. `None` on a gateway that shadows nothing.
     pub agent_origin_suffix_warning: Option<String>,
-    /// The stock image a manifest's `script` step runs in (container-runtime
-    /// §4.2), default `docker.io/library/node:24-alpine`.
+    /// The stock image a manifest's `script` step runs in, default
+    /// `docker.io/library/node:24-alpine`.
     pub agent_script_image: String,
     pub router: RouterSettings,
     pub aux_router: RouterSettings,
     pub audio: AudioSettings,
-    /// The stable-diffusion.cpp class (image-generation design §4).
+    /// The stable-diffusion.cpp class.
     pub image: ImageSettings,
-    /// `GET /v1/realtime`, spoken conversations (realtime design §12).
+    /// `GET /v1/realtime`, spoken conversations.
     pub realtime: crate::realtime::RealtimeSettings,
     pub api_keys: Vec<ApiKeyRow>,
     pub data_dir: String,
@@ -142,7 +153,7 @@ pub struct SettingsFull {
     pub host_cpu: HostCpu,
 }
 
-/// This machine's CPUs (`SettingsFull::host_cpu`).
+/// This machine's CPUs (reported as `host_cpu`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -157,7 +168,7 @@ pub struct HostCpu {
     pub source: String,
 }
 
-/// Mirror of `config::HoldSettings` (gpu-hold design §3.1). `active` is
+/// The GPU hold settings. `active` is
 /// reported here but never settable through `SettingsFullPatch` — it is
 /// toggled only through the `hold_set` op, because engaging it has the side
 /// effect of stopping containers.
@@ -169,7 +180,8 @@ pub struct HoldSettingsDto {
     pub fallback_alias: Option<String>,
 }
 
-/// Mirror of `config::VramSettings`.
+/// The GPU admission (VRAM) settings.
+// Mirror of `config::VramSettings`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -183,8 +195,8 @@ pub struct VramSettingsDto {
     pub queue_timeout_seconds: u64,
     pub load_timeout_seconds: u64,
     pub unload_timeout_seconds: u64,
-    /// Fall back when VRAM outside lmgw's control is short (candidate-aliases
-    /// design §4.7). Absent reads as on, like the server's own default.
+    /// Fall back when VRAM outside lmgw's control is short. Absent reads as on, like the server's
+    /// own default.
     #[serde(default = "default_fallback_on_external")]
     pub fallback_on_external: bool,
 }
@@ -193,8 +205,8 @@ fn default_fallback_on_external() -> bool {
     true
 }
 
-/// Mirror of `config::RouterSettings` — the chat/aux *class* settings
-/// (per-model-containers §6). `container_name`/`listen_port`/`models_max`/
+/// The chat/aux *class* settings.
+/// `container_name`/`listen_port`/`models_max`/
 /// `auto_start` left with router mode: names are derived, ports are dynamic,
 /// and auto-start is the per-model `warm_start` flag.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -213,9 +225,9 @@ pub struct RouterSettings {
     pub request_timeout_seconds: u64,
 }
 
-/// Mirror of `config::AudioSettings`. Same shape change as
-/// [`RouterSettings`], plus the four engine fields that flow into every audio
-/// model's own `server.json` (§3.6).
+/// The audio class settings: the same fields as the chat/aux class settings,
+/// plus the engine fields that flow into every audio model's own
+/// `server.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -243,7 +255,8 @@ pub struct AudioSettings {
     pub voice_dir: String,
     pub extra_run_args: Vec<String>,
     pub public_prefix: String,
-    /// See [`RouterSettings::request_timeout_seconds`].
+    /// Per-request ceiling for the class, in seconds. 0 = the maximum possible — no deadline of
+    /// lmgw's own.
     pub request_timeout_seconds: u64,
     /// The speech-to-text model that writes voice-library clip transcripts
     /// (its configured fallback answers as for any request). Empty = none:
@@ -254,9 +267,9 @@ pub struct AudioSettings {
     pub catalog_revision: String,
 }
 
-/// Mirror of `config::ImageSettings`. The same four fields as
-/// [`RouterSettings`] and no engine ones: sd-server has no config file, so
-/// everything per-process is a flag in some row's `args`.
+/// The image class settings: the same fields as the chat/aux class settings
+/// and no engine ones. sd-server has no config file, so everything
+/// per-process is a flag in some row's `args`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -265,7 +278,8 @@ pub struct ImageSettings {
     pub models_dir: String,
     pub extra_run_args: Vec<String>,
     pub public_prefix: String,
-    /// See [`RouterSettings::request_timeout_seconds`].
+    /// Per-request ceiling for the class, in seconds. 0 = the maximum possible — no deadline of
+    /// lmgw's own.
     pub request_timeout_seconds: u64,
 }
 

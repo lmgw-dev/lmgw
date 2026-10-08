@@ -624,11 +624,11 @@ async fn a_second_start_returns_the_run_already_in_flight() {
 #[tokio::test]
 async fn the_self_admin_tool_refuses_to_apply() {
     let state = AppState::init_for_tests().await.unwrap();
-    let e = lmgw_core::ops::agent_run(&state, "labeler", "apply")
+    let e = lmgw_core::ops::agent_run(&state, "labeler", "apply", None)
         .await
         .unwrap_err();
     assert!(e.contains("human action"), "{e}");
-    let e = lmgw_core::ops::agent_run(&state, "labeler", "rerun")
+    let e = lmgw_core::ops::agent_run(&state, "labeler", "rerun", None)
         .await
         .unwrap_err();
     assert!(e.contains("'rerun'"), "{e}");

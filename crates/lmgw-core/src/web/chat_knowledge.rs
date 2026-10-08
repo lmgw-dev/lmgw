@@ -33,6 +33,7 @@ use std::collections::HashSet;
 
 use serde_json::json;
 
+use super::chat_caller::Caller;
 use super::chat_live::Ticket;
 use super::chat_repo::ChatRepo;
 use super::chat_turn::TurnMode;
@@ -307,18 +308,43 @@ fn query_of(current: &ChatMessageRow, previous: Option<&ChatMessageRow>) -> Stri
 /// is a note in the event.
 pub(super) async fn run_auto(
     state: &SharedState,
-    repo: ChatRepo,
-    thread_id: i64,
+    caller: &Caller,
+    (repo, thread_id): (ChatRepo, i64),
     history: &mut [ChatMessageRow],
     auto: Auto,
     ticket: &Ticket,
     tx: &super::chat_turn::Events,
 ) {
+    let skipped = super::chat_tool_write::kb_reach(state, caller).await.err();
     let (message_id, context, reused) = match auto {
         Auto::Reuse {
             message_id,
             context,
         } => (message_id, context, true),
+        // A device reads the owner's bases only through `kb__search` in its
+        // tool scope (client-apps design L5, review W2-4): without it the
+        // retrieval is skipped, said in the event, and nothing is stored —
+        // the owner's own later turn still searches.
+        Auto::Retrieve {
+            kb_ids,
+            query,
+            budget,
+            message_id,
+            ..
+        } if skipped.is_some() => {
+            let context = ChatContext {
+                excerpts: Vec::new(),
+                tokens: 0,
+                dropped: 0,
+                budget_tokens: budget,
+                notes: skipped.into_iter().collect(),
+                searched: Vec::new(),
+                kb_ids,
+                query,
+                ms: 0.0,
+            };
+            (message_id, context, false)
+        }
         Auto::Retrieve {
             message_id,
             kb_refs,
@@ -333,6 +359,9 @@ pub(super) async fn run_auto(
                 &Options {
                     budget_tokens: Some(budget),
                     params: None,
+                    // A device's turn embeds and ranks as its key (client-apps
+                    // design L4).
+                    caller: caller.charged(),
                 },
             )
             .await;

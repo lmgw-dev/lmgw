@@ -59,6 +59,7 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     fallback: headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 200,
                 None,
@@ -85,6 +86,7 @@ pub async fn handle_embeddings(state: SharedState, ctx: RequestCtx, body: Value)
                     fallback: headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
@@ -324,18 +326,22 @@ pub(crate) async fn embed_in_process(
 /// own error is where that surfaces — it is a configuration fault, not traffic.
 ///
 /// Pinned ([`embed_in_process`]'s `pinned`): every caller is quickdoc, whose
-/// corpus must never take vectors from a fallback.
+/// corpus must never take vectors from a fallback. The row is `key`'s: a
+/// device's, when a turn of one embeds its query (client-apps design L4), or
+/// nobody's — the label's internal identity.
 pub(crate) async fn embed_once(
     state: &SharedState,
     alias: &str,
     inputs: Vec<String>,
     ingress_proto: &str,
+    key: KeyRef,
 ) -> Result<(Route, GateHeaders, EmbeddingsResponse), Failed> {
     let started = Instant::now();
     state.telemetry.request_started();
     let result = embed_in_process(state, alias, inputs, None, true).await;
     log_in_process_aux(
         state,
+        key,
         alias,
         ingress_proto,
         started,
@@ -392,6 +398,7 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     fallback: headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 200,
                 None,
@@ -418,6 +425,7 @@ pub async fn handle_rerank(state: SharedState, ctx: RequestCtx, body: Value) -> 
                     fallback: headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
@@ -576,7 +584,8 @@ pub(crate) async fn rerank_in_process(
 /// [`rerank_in_process`] plus the `request_logs` row — [`embed_once`] for the
 /// rerank stage, and logged for the same reason: a query whose time went to the
 /// reranker should say so in Logs rather than look like a slow search. Pinned,
-/// like [`embed_once`]: every caller is quickdoc's retrieval.
+/// like [`embed_once`]: every caller is quickdoc's retrieval. The row is
+/// `key`'s, as [`embed_once`]'s.
 pub(crate) async fn rerank_once(
     state: &SharedState,
     alias: &str,
@@ -584,12 +593,14 @@ pub(crate) async fn rerank_once(
     documents: Vec<String>,
     top_n: Option<usize>,
     ingress_proto: &str,
+    key: KeyRef,
 ) -> Result<(Route, GateHeaders, RerankResponse), Failed> {
     let started = Instant::now();
     state.telemetry.request_started();
     let result = rerank_in_process(state, alias, query, documents, top_n, true).await;
     log_in_process_aux(
         state,
+        key,
         alias,
         ingress_proto,
         started,
@@ -610,6 +621,7 @@ pub(crate) async fn rerank_once(
 /// varies between them is which outcome carried which usage.
 async fn log_in_process_aux(
     state: &SharedState,
+    key: KeyRef,
     alias: &str,
     ingress_proto: &str,
     started: Instant,
@@ -633,7 +645,7 @@ async fn log_in_process_aux(
     };
     record_in_process(
         InProcessLog {
-            key: KeyRef::default(),
+            key,
             ingress_proto,
             alias,
             route,
@@ -645,6 +657,7 @@ async fn log_in_process_aux(
             fallback,
             rung: None,
             degraded: None,
+            quantities: Default::default(),
         },
         status,
         Some(started.elapsed().as_millis() as i64),

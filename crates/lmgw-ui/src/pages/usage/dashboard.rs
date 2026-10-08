@@ -215,6 +215,28 @@ pub fn Usage() -> impl IntoView {
         v
     });
     let sub = Memo::new(move |_| win.get().label);
+    // From when this window's quantities were recorded (billable units §5.5):
+    // "since 15 Jan 2026" while the window starts before the counting did.
+    let since = Signal::derive(move || {
+        let from = win.get().from;
+        series.data.with(|d| {
+            d.as_ref()
+                .and_then(|r| since_note(&from, r.units_since.as_deref()))
+        })
+    });
+    // The tiles' "vs previous window" compares against the window of the
+    // same length before this one: no delta while *that* window starts
+    // before the recording, or it compares against hours nobody counted.
+    let prev_unrecorded = Signal::derive(move || {
+        let w = win.get();
+        let Some(prev_from) = previous_from(&w.from, &w.to) else {
+            return false;
+        };
+        series.data.with(|d| {
+            d.as_ref()
+                .is_some_and(|r| starts_before(&prev_from, r.units_since.as_deref()))
+        })
+    });
 
     // Colour slots, page-scoped (§6.3): a named series keeps its colour for
     // as long as it is on screen, whatever the filters do to the others. The
@@ -357,7 +379,13 @@ pub fn Usage() -> impl IntoView {
             head_extra=move || view! { <UsageTabs keys=keys prices=prices/> }
             toolbar=filters
         >
-            <TileRow series=series by_alias=by_alias local=local/>
+            <TileRow
+                series=series
+                by_alias=by_alias
+                local=local
+                since=since
+                prev_unrecorded=prev_unrecorded
+            />
 
             // Rows of related cards: spend and its budget; the three time
             // series; where it went and when; local share beside the failures.
@@ -374,6 +402,7 @@ pub fn Usage() -> impl IntoView {
                     key_id=key_id
                     slots=alias_slots
                     group_by=group_by
+                    since=since
                     entry=entry
                     tips=tips
                 />
@@ -418,12 +447,17 @@ fn bump_current(r: &mut UsageSeriesResponse, row: &RequestRow, group_by: &str) {
             None => return,
         }
     };
+    // A quantity the row did not measure adds 0, as the rollup's does: the
+    // totals are what was measured (billable units §5.3).
     let mut delta = UsageCell {
         requests: 1,
         tokens_in: row.prompt_tokens.unwrap_or(0),
         tokens_out: row.completion_tokens.unwrap_or(0),
         tokens_cached: row.cached_in_tokens.unwrap_or(0),
         tokens_cache_write: row.cache_write_tokens.unwrap_or(0),
+        audio_in_ms: row.audio_in_ms.unwrap_or(0),
+        chars_in: row.chars_in.unwrap_or(0),
+        images_out: row.images_out.unwrap_or(0),
         ..Default::default()
     };
     // The frame carries the money now, so the current bucket grows with the
@@ -435,6 +469,9 @@ fn bump_current(r: &mut UsageSeriesResponse, row: &RequestRow, group_by: &str) {
         None => {
             delta.cost_unknown_requests = 1;
             delta.cost_unknown_tokens = delta.tokens_in + delta.tokens_out;
+            delta.cost_unknown_audio_in_ms = delta.audio_in_ms;
+            delta.cost_unknown_chars_in = delta.chars_in;
+            delta.cost_unknown_images_out = delta.images_out;
         }
     }
     if row.status >= 400 {

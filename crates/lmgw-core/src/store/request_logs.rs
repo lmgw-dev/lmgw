@@ -3,7 +3,7 @@
 use sqlx::{Row, SqlitePool};
 
 use crate::ir::Timings;
-use crate::pricing::Cost;
+use crate::pricing::{Cost, RowCost};
 use crate::telemetry::{outcome_of, RequestClass};
 
 use super::*;
@@ -64,6 +64,23 @@ pub struct RequestLogRow {
     /// capability ([`crate::degraded`]): "fallback 'x' lacks vision: 3
     /// images sent as placeholders". `NULL` = nothing — migration 0060.
     pub degraded: Option<String>,
+    // --- billable units (billable-units design §5.2), migration 0070 ---
+    /// What the request processed besides tokens, each `NULL` when it was
+    /// neither measured nor reported: input audio in milliseconds, input
+    /// characters as sent, generated images.
+    pub audio_in_ms: Option<i64>,
+    pub chars_in: Option<i64>,
+    pub images_out: Option<i64>,
+    /// The part of `cost_micro` priced in units other than tokens. `NULL`
+    /// when the scope has no row in any of them, and with `cost_micro` when
+    /// any priced part was unknown.
+    pub cost_units_micro: Option<i64>,
+    /// The non-token rates as used, snapshotted like `price_in`, each `NULL`
+    /// where the scope has no row in that unit.
+    pub price_per_audio_minute: Option<f64>,
+    pub price_per_mchar: Option<f64>,
+    pub price_per_image: Option<f64>,
+    pub price_per_request: Option<f64>,
 }
 
 fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
@@ -107,6 +124,14 @@ fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
         fallback_reason: row.get("fallback_reason"),
         rung: row.get("rung"),
         degraded: row.get("degraded"),
+        audio_in_ms: row.get("audio_in_ms"),
+        chars_in: row.get("chars_in"),
+        images_out: row.get("images_out"),
+        cost_units_micro: row.get("cost_units_micro"),
+        price_per_audio_minute: row.get("price_per_audio_minute"),
+        price_per_mchar: row.get("price_per_mchar"),
+        price_per_image: row.get("price_per_image"),
+        price_per_request: row.get("price_per_request"),
     }
 }
 
@@ -159,6 +184,15 @@ pub struct NewRequestLog {
     /// What the request's content lost on its way to a model that lacks a
     /// capability ([`crate::degraded`]); `None` = nothing.
     pub degraded: Option<String>,
+    /// What the request processed besides tokens (billable-units design
+    /// §4.1): input audio in milliseconds, input characters as sent,
+    /// generated images. Each `None` unless it was measured or the provider
+    /// reported it — never estimated, and never 0 for "unknown". Recorded on
+    /// local rows too: a quantity is what the request processed, not what
+    /// someone billed.
+    pub audio_in_ms: Option<i64>,
+    pub chars_in: Option<i64>,
+    pub images_out: Option<i64>,
 }
 
 impl Default for NewRequestLog {
@@ -191,7 +225,34 @@ impl Default for NewRequestLog {
             fallback_reason: None,
             rung: None,
             degraded: None,
+            audio_in_ms: None,
+            chars_in: None,
+            images_out: None,
         }
+    }
+}
+
+impl NewRequestLog {
+    /// What this row adds to a total over rows (usage-analytics §2.3): its
+    /// price, or — unpriced — a gap exactly where the rollup counts it in the
+    /// unpriced remainder ([`in_remainder`]), and nothing where it does not.
+    /// What a run's meters sum by, so a run's cost never reads lower than its
+    /// rows, nor than Usage says.
+    pub fn row_cost(&self) -> RowCost {
+        let n = |v: Option<i64>| v.unwrap_or(0);
+        let gap = in_remainder(
+            self.cost.total_micro.is_none(),
+            self.class == RequestClass::Tool,
+            outcome_of(self.status, self.error_kind.as_deref()),
+            spent_any(
+                n(self.prompt_tokens),
+                n(self.completion_tokens),
+                n(self.audio_in_ms),
+                n(self.chars_in),
+                n(self.images_out),
+            ),
+        );
+        RowCost::of(self.cost.total_micro, gap)
     }
 }
 
@@ -227,7 +288,7 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     // periodic batch over recent rows: a batch's window and the retention
     // pruner's window are two clocks that eventually disagree, and the failure
     // mode is silent under-counting of exactly the busiest hour.
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
 
     // **One clock read for the row and its bucket.** Both used to call
     // `datetime('now')` / `strftime(... 'now')` in separate statements, and
@@ -246,10 +307,12 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
             price_in, price_out, price_cache_read, price_cache_write, price_source,
             cached_in_tokens, cache_write_tokens, reasoning_tokens,
             prefill_ms, decode_ms, decode_tok_s, prompt_n, cache_n, draft_n, draft_accepted,
-            predicted_n, fallback_reason, rung, degraded)
+            predicted_n, fallback_reason, rung, degraded,
+            audio_in_ms, chars_in, images_out, cost_units_micro,
+            price_per_audio_minute, price_per_mchar, price_per_image, price_per_request)
          VALUES (?39,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,
-                 ?38,?40,?41,?42)",
+                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50)",
     )
     .bind(&l.client_key)
     .bind(&l.ingress_proto)
@@ -295,6 +358,16 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(&l.fallback_reason)
     .bind(l.rung)
     .bind(&l.degraded)
+    .bind(l.audio_in_ms)
+    .bind(l.chars_in)
+    .bind(l.images_out)
+    // The non-token part of the cost and the rates it used (billable-units
+    // §3.4), so a row explains its own cost after the prices change.
+    .bind(l.cost.units_micro)
+    .bind(l.cost.used_units.audio_minute)
+    .bind(l.cost.used_units.mchar)
+    .bind(l.cost.used_units.image)
+    .bind(l.cost.used_units.request)
     .execute(&mut *tx)
     .await?;
     let id = res.last_insert_rowid();
@@ -302,6 +375,49 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     roll_up(&mut tx, l, &bucket).await?;
     tx.commit().await?;
     Ok(id)
+}
+
+/// Whether anything was spent: tokens, or any measured quantity
+/// (billable-units §5.3) — an error that transcribed a minute of audio spent
+/// something too. Unmeasured counts are passed as 0.
+fn spent_any(
+    tokens_in: i64,
+    tokens_out: i64,
+    audio_in_ms: i64,
+    chars_in: i64,
+    images_out: i64,
+) -> bool {
+    tokens_in + tokens_out > 0 || audio_in_ms > 0 || chars_in > 0 || images_out > 0
+}
+
+/// Whether a row counts in the unpriced remainder (§2.3): its cost is
+/// unknown, it is no tool call, and it was answered or spent something. The
+/// one rule [`roll_up`] applies, [`RequestLogRow::in_unpriced_remainder`]
+/// reads back for a row's detail, `rebuild_usage` states in SQL, and a run's
+/// meters sum by ([`NewRequestLog::row_cost`]).
+fn in_remainder(cost_unknown: bool, tool: bool, outcome: &str, spent: bool) -> bool {
+    cost_unknown && !tool && (outcome == "ok" || spent)
+}
+
+impl RequestLogRow {
+    /// Whether this stored row is counted in the unpriced remainder the
+    /// rollup states beside every total ([`in_remainder`]), so a row's
+    /// detail says "unpriced" exactly where the Usage page counts it.
+    pub fn in_unpriced_remainder(&self) -> bool {
+        let n = |v: Option<i64>| v.unwrap_or(0);
+        in_remainder(
+            self.cost_micro.is_none(),
+            self.class.as_deref() == Some(RequestClass::Tool.as_str()),
+            outcome_of(self.status, self.error_kind.as_deref()),
+            spent_any(
+                n(self.prompt_tokens),
+                n(self.completion_tokens),
+                n(self.audio_in_ms),
+                n(self.chars_in),
+                n(self.images_out),
+            ),
+        )
+    }
 }
 
 /// Fold one logged request into its hourly bucket.
@@ -329,22 +445,35 @@ async fn roll_up(
     // spent no tokens cost nothing to be missing. Counting those made an agent
     // retry-looping into 500 `gpu_hold` refusals read as a 500-request hole in
     // the price sheet, which is the opposite of what the line is telling you.
-    let spent_tokens = l.prompt_tokens.unwrap_or(0) + l.completion_tokens.unwrap_or(0);
-    let unknown = l.cost.total_micro.is_none()
-        && l.class != RequestClass::Tool
-        && (outcome == "ok" || spent_tokens > 0);
+    // Work is tokens **or any measured quantity** (billable-units §5.3): an
+    // error that transcribed a minute of audio spent something too.
+    // `rebuild_usage` states the same predicate in SQL.
     let tokens_in = l.prompt_tokens.unwrap_or(0);
     let tokens_out = l.completion_tokens.unwrap_or(0);
+    // A quantity nobody measured adds 0, as an unreported token count does.
+    let audio_in_ms = l.audio_in_ms.unwrap_or(0);
+    let chars_in = l.chars_in.unwrap_or(0);
+    let images_out = l.images_out.unwrap_or(0);
+    let spent = spent_any(tokens_in, tokens_out, audio_in_ms, chars_in, images_out);
+    let unknown = in_remainder(
+        l.cost.total_micro.is_none(),
+        l.class == RequestClass::Tool,
+        outcome,
+        spent,
+    );
+    let remainder = |v: i64| if unknown { v } else { 0 };
 
     sqlx::query(
         "INSERT INTO usage_hourly (bucket_utc, key_id, alias, upstream_id, class, outcome,
             requests, tokens_in, tokens_out, tokens_cached, tokens_cache_write, tokens_reasoning,
             cost_micro, cost_unknown_requests, cost_unknown_tokens,
             ttfb_sum, ttfb_count, total_sum, total_count, total_min, total_max,
-            decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted)
+            decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted,
+            audio_in_ms, chars_in, images_out,
+            cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out)
          VALUES (?26, ?1, ?2, ?3, ?4, ?5,
             1, ?6, ?7, ?8, ?25, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?27, ?28, ?29, ?30, ?31, ?32)
          ON CONFLICT(bucket_utc, key_id, alias, upstream_id, class, outcome) DO UPDATE SET
             requests              = requests + 1,
             tokens_in             = tokens_in + excluded.tokens_in,
@@ -370,7 +499,15 @@ async fn roll_up(
             prompt_n              = prompt_n + excluded.prompt_n,
             cache_n               = cache_n + excluded.cache_n,
             draft_n               = draft_n + excluded.draft_n,
-            draft_accepted        = draft_accepted + excluded.draft_accepted",
+            draft_accepted        = draft_accepted + excluded.draft_accepted,
+            audio_in_ms           = audio_in_ms + excluded.audio_in_ms,
+            chars_in              = chars_in + excluded.chars_in,
+            images_out            = images_out + excluded.images_out,
+            cost_unknown_audio_in_ms = cost_unknown_audio_in_ms
+                                       + excluded.cost_unknown_audio_in_ms,
+            cost_unknown_chars_in    = cost_unknown_chars_in + excluded.cost_unknown_chars_in,
+            cost_unknown_images_out  = cost_unknown_images_out
+                                       + excluded.cost_unknown_images_out",
     )
     .bind(key_id)
     .bind(&l.requested_alias)
@@ -383,7 +520,7 @@ async fn roll_up(
     .bind(l.reasoning_tokens.unwrap_or(0))
     .bind(l.cost.total_micro.unwrap_or(0))
     .bind(i64::from(unknown))
-    .bind(if unknown { tokens_in + tokens_out } else { 0 })
+    .bind(remainder(tokens_in + tokens_out))
     .bind(l.ttfb_ms.unwrap_or(0))
     .bind(i64::from(l.ttfb_ms.is_some()))
     .bind(l.total_ms.unwrap_or(0))
@@ -398,6 +535,12 @@ async fn roll_up(
     .bind(l.timings.and_then(|t| t.draft_n_accepted).unwrap_or(0) as i64)
     .bind(l.cache_write_tokens.unwrap_or(0))
     .bind(bucket)
+    .bind(audio_in_ms)
+    .bind(chars_in)
+    .bind(images_out)
+    .bind(remainder(audio_in_ms))
+    .bind(remainder(chars_in))
+    .bind(remainder(images_out))
     .execute(&mut **tx)
     .await?;
 

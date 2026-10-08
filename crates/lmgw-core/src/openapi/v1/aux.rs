@@ -1,6 +1,6 @@
 //! The small OpenAI-family routes: `POST /v1/completions` (legacy),
 //! `POST /v1/embeddings`, `POST /v1/rerank` and lmgw's own
-//! `POST /v1/count_tokens` (api-docs design §4.8). Read from
+//! `POST /v1/count_tokens`. Read from
 //! `proxy::legacy::handle_legacy_completions`, `proxy::embeddings` and
 //! `proxy::count::handle_count_tokens`.
 
@@ -28,7 +28,7 @@ pub(crate) fn completions_request(g: &mut SchemaGenerator) -> Schema {
                 "stream": {"type": "boolean", "default": false},
                 "max_tokens": {"type": "integer"},
                 "n_predict": {"type": "integer", "description": "llama.cpp spelling of \
-                    max_tokens; folded into it on guarded or ladder rows."},
+                    max_tokens; folded into it for local models with a guard or a ladder."},
                 "max_completion_tokens": {"type": "integer"}
             },
             "additionalProperties": true,
@@ -61,7 +61,7 @@ pub(crate) fn completions_example() -> Value {
     json!({"model": "<pick a model>", "prompt": "Once upon a time"})
 }
 
-/// The SSE frame `stream: true` answers with (WP4 "Extra" gap): loosely typed
+/// The SSE frame `stream: true` answers with (see `completions_response`): loosely typed
 /// like [`completions_response`] itself — the legacy route's own upstreams
 /// vary more than the chat completions shape does, and this is `additional
 /// Properties: true` for the same reason. Ends with the literal `data:
@@ -224,10 +224,11 @@ pub(crate) fn count_request(g: &mut SchemaGenerator) -> Schema {
                 "model": {"type": "string"},
                 "input": {"type": "string"}
             },
-            "description": "Routed by model exactly like the chat endpoints — counting a \
-                cold local model's tokens starts its container. Now enforces the key's alias \
-                scope (§0 finding 3; a refusal is a logged 403 key_scope, a success is not \
-                logged). No budget applies, the key's or the gateway's: a count costs nothing."
+            "description": "Routed by model exactly like the chat endpoints, so counting a \
+                cold local model's tokens starts its container. The key's alias scope \
+                applies: a refused count answers 403 key_scope and is logged; a successful \
+                count is not logged. No budget applies, neither the key's nor the \
+                gateway's: a count costs nothing."
         }),
     )
 }

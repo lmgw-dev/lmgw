@@ -67,6 +67,7 @@ pub async fn handle_legacy_completions(
                 fallback: None,
                 rung: None,
                 degraded: None,
+                quantities: Default::default(),
             },
             e.http_status().as_u16(),
             None,
@@ -119,6 +120,7 @@ pub async fn handle_legacy_completions(
                     fallback: f.headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 f.error.http_status().as_u16(),
                 None,
@@ -208,6 +210,7 @@ async fn serve_legacy(
                         fallback: headers.fallback_reason(),
                         rung: f.rung.as_ref().map(crate::gate::RungTag::log),
                         degraded: None,
+                        quantities: Default::default(),
                     },
                     e.http_status().as_u16(),
                     None,
@@ -290,6 +293,7 @@ async fn serve_legacy(
                     fallback: headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 f.error.http_status().as_u16(),
                 None,
@@ -317,6 +321,7 @@ async fn serve_legacy(
                     fallback: headers.fallback_reason(),
                     rung,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
@@ -337,19 +342,10 @@ async fn serve_legacy(
         lease.end(bytes.is_ok());
         let bytes = bytes.unwrap_or_default();
         let (status_out, usage, error) = if status.is_success() {
+            // The chat route's own reader, so a cache write is read here too.
             let usage = serde_json::from_slice::<Value>(&bytes)
                 .ok()
-                .and_then(|v| {
-                    v.get("usage").map(|u| Usage {
-                        prompt_tokens: u.get("prompt_tokens").and_then(Value::as_u64),
-                        completion_tokens: u.get("completion_tokens").and_then(Value::as_u64),
-                        cached_input_tokens: u
-                            .get("prompt_tokens_details")
-                            .and_then(|d| d.get("cached_tokens"))
-                            .and_then(Value::as_u64),
-                        ..Default::default()
-                    })
-                })
+                .map(|v| crate::egress::openai_wire::parse_usage(v.get("usage")))
                 .unwrap_or_default();
             (200u16, usage, None)
         } else {
@@ -380,6 +376,7 @@ async fn serve_legacy(
                 fallback: headers.fallback_reason(),
                 rung,
                 degraded: None,
+                quantities: Default::default(),
             },
             status_out,
             Some(started.elapsed().as_millis() as i64),
@@ -461,6 +458,9 @@ async fn serve_legacy(
                 fallback,
                 rung,
                 degraded: None,
+                // Past the upstream's 2xx: answered, a client gone
+                // mid-stream (`canceled`) included (billable-units §4.5).
+                quantities: crate::pricing::Quantities::answered(),
             },
             200,
             None,

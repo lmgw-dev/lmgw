@@ -221,10 +221,17 @@ Cost per run is stored in the job's `result` alongside `usage`,
 `cost_micro`, `model_calls`, `tool_calls`, exactly as catalog §4.5 does. The
 in-process executor keeps folding into its `Meter`; requests that arrive over
 HTTP with `X-Lmgw-Run` are already priced individually when they complete, so
-`agents::RunMeters` on `AppState` sums those per-request costs and
-`RunMeters::fold_into` merges the sum into the result at close. `model_calls`
-counts requests that reached an upstream and got a response, not refused ones,
-so the two paths mean the same thing (WP1 amendment). **No `run_id` column on `request_logs`**: the
+`agents::RunMeters` on `AppState` sums those per-request costs, and an
+in-process run's report absorbs them as one more `Meter` at close. Both sum by
+the rollup's own rule for an unpriced row (`NewRequestLog::row_cost`, revised
+2026-10-08). `model_calls` counts calls answered without an error, on both
+paths: a refused, failed or stopped (`canceled`) call is no model call, though
+its row's cost still counts (WP1 amendment, revised 2026-10-08). Every row of a
+stamped request lands on the run where it is written: a `/v1` relay's, a
+native `/v1/responses` passthrough's, an in-process `/v1/responses` or
+realtime turn's, and the tool calls lmgw runs for those turns. A run's meter
+is open from its job going live until the run is read at close; a call noted
+after that is dropped. **No `run_id` column on `request_logs`**: the
 job row is already the durable home of a run's totals and a second one would
 drift. A gateway restart mid-run loses the partial meter, but
 `AppState::init`'s `fail_orphaned_jobs` already fails that run, so there is no

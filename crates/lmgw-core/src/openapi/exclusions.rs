@@ -55,78 +55,58 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
     // decision 2026-09-28 (api-docs design §1, §3, §4.2 amendment): the
     // dashboard's own backend is not a contract, so it comes out of the
     // description entirely rather than being documented `x-lmgw-internal`.
-    ("GET", "/chat/api/threads", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads", DASHBOARD_BACKEND),
-    ("GET", "/chat/api/threads/{id}", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/settings", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/delete", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/send", DASHBOARD_BACKEND),
-    (
-        "POST",
-        "/chat/api/threads/{id}/voice/warm",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/chat/api/threads/{id}/transcribe",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/chat/api/threads/{id}/speech/stop",
-        DASHBOARD_BACKEND,
-    ),
-    ("POST", "/chat/api/threads/{id}/pin", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/move", DASHBOARD_BACKEND),
-    ("GET", "/chat/api/search", DASHBOARD_BACKEND),
-    ("GET", "/chat/api/threads/{id}/export", DASHBOARD_BACKEND),
-    ("GET", "/chat/api/folders/{id}/export", DASHBOARD_BACKEND),
-    ("GET", "/chat/api/export", DASHBOARD_BACKEND),
-    ("GET", "/chat/api/folders", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/folders", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/folders/{id}", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/folders/{id}/delete", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/archive", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/persist", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/threads/{id}/continue", DASHBOARD_BACKEND),
+    // The Chat subset a desktop client uses is documented since 2026-10-07
+    // (client-apps design §4.3, the owner's decision D of 2026-10-06):
+    // the thread and folder lists, a folder create, `current` and the feed
+    // (`planes/chat.rs`). The rows below wait for a client that needs them.
+    ("POST", "/chat/api/threads", CHAT_API),
+    ("GET", "/chat/api/threads/{id}", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/settings", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/delete", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/send", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/voice/warm", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/transcribe", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/speech/stop", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/pin", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/move", CHAT_API),
+    ("GET", "/chat/api/search", CHAT_API),
+    ("GET", "/chat/api/threads/{id}/export", CHAT_API),
+    ("GET", "/chat/api/folders/{id}/export", CHAT_API),
+    ("GET", "/chat/api/export", CHAT_API),
+    ("POST", "/chat/api/folders/{id}", CHAT_API),
+    ("POST", "/chat/api/folders/{id}/delete", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/archive", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/persist", CHAT_API),
+    ("POST", "/chat/api/threads/{id}/continue", CHAT_API),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/delete",
-        DASHBOARD_BACKEND,
+        CHAT_API,
     ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/edit",
-        DASHBOARD_BACKEND,
+        CHAT_API,
     ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/speak",
-        DASHBOARD_BACKEND,
+        CHAT_API,
     ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/regenerate",
-        DASHBOARD_BACKEND,
+        CHAT_API,
     ),
-    (
-        "POST",
-        "/chat/api/threads/{id}/attachments",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/chat/api/attachments/{id}/delete",
-        DASHBOARD_BACKEND,
-    ),
-    ("GET", "/chat/api/attachments/{id}", DASHBOARD_BACKEND),
-    ("POST", "/chat/api/attachments/{id}/mode", DASHBOARD_BACKEND),
-    (
-        "POST",
-        "/chat/api/attachments/{id}/transcribe",
-        DASHBOARD_BACKEND,
-    ),
-    ("GET", "/chat/api/attachments/{id}/text", DASHBOARD_BACKEND),
+    ("POST", "/chat/api/threads/{id}/attachments", CHAT_API),
+    ("POST", "/chat/api/attachments/{id}/delete", CHAT_API),
+    ("GET", "/chat/api/attachments/{id}", CHAT_API),
+    ("POST", "/chat/api/attachments/{id}/mode", CHAT_API),
+    ("POST", "/chat/api/attachments/{id}/transcribe", CHAT_API),
+    ("GET", "/chat/api/attachments/{id}/text", CHAT_API),
+    // The owner's alone (`Cap::Admin`): the Chat page's lighter re-read of
+    // the rows a `chat` frame named (review CL-11, 2026-10-08).
+    ("GET", "/chat/api/threads/rows", DASHBOARD_BACKEND),
     ("GET", "/audio-lab/api/models", DASHBOARD_BACKEND),
     ("GET", "/audio-lab/api/voices", DASHBOARD_BACKEND),
     ("GET", "/audio-lab/api/refs", DASHBOARD_BACKEND),
@@ -199,3 +179,9 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
 /// decision 2026-09-28): its shape follows the UI, not a published contract.
 const DASHBOARD_BACKEND: &str =
     "The dashboard's own backend; its shapes follow the UI and are no contract.";
+
+/// The Chat API's rows not documented yet (review W2-24): a paired device
+/// calls them too, so they are no longer the dashboard's alone. The subset
+/// a client uses is documented as it is typed (client-apps design §4.3).
+const CHAT_API: &str = "The Chat API, the dashboard's and a paired device's: not documented \
+     yet. Until it is, its shapes are the ones the dashboard reads.";

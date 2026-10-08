@@ -111,12 +111,24 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
     Ok(snap)
 }
 
+/// The stored settings row's blob as [`Settings`]: no row is the defaults,
+/// and so is a blob that does not parse, whole. The parse [`load_settings`]
+/// builds on, and the one the reads of a single field from the store go
+/// through too ([`gateway_self_admin_in`]), so the published snapshot and
+/// the store's reading agree on a missing or malformed blob as on any
+/// other (review B-9: the reads without a row took `SelfAdmin::default()`,
+/// a second source for the same answer). What `load_settings` does after
+/// it never touches such a field.
+pub(super) fn settings_from_row(raw: Option<&str>) -> Settings {
+    raw.map_or_else(Settings::default, parse_json_or)
+}
+
 pub async fn load_settings(pool: &SqlitePool) -> DbResult<Settings> {
     let row = sqlx::query("SELECT value FROM settings WHERE key = 'settings'")
         .fetch_optional(pool)
         .await?;
     let Some(r) = row else {
-        return Ok(Settings::default());
+        return Ok(settings_from_row(None));
     };
     let raw: String = r.get("value");
     // `migrations/0018` rewrites the key, so seeing the old one means this blob
@@ -129,7 +141,7 @@ pub async fn load_settings(pool: &SqlitePool) -> DbResult<Settings> {
              the next settings save stores the new spelling"
         );
     }
-    let mut settings: Settings = parse_json_or(raw.as_str());
+    let mut settings = settings_from_row(Some(&raw));
     capture_legacy_container_names(&raw, &mut settings);
     if !crate::config::CHAT_PDF_MODES.contains(&settings.chat_pdf_mode.as_str()) {
         tracing::warn!(
@@ -141,6 +153,9 @@ pub async fn load_settings(pool: &SqlitePool) -> DbResult<Settings> {
     }
     // The Chat's voice settings (chat-voice design §2.1).
     crate::ops::normalise_loaded_chat_voice(&mut settings);
+    // The Chat feed's buffer and page, into their stated range (review
+    // W4-1): a stored value past it would allocate at every start.
+    crate::ops::clamp_loaded_chat_feed(&mut settings);
     // Both WebSocket limits at "no bound" leaves nothing to bound a frame
     // with, and tungstenite reserves a frame's declared length up front — one
     // header could abort the process (realtime design §10.4,
@@ -215,15 +230,30 @@ fn capture_legacy_container_names(raw: &str, settings: &mut Settings) {
     settings.legacy_container_names.extend(found);
 }
 
+/// Store `s` whole. A save that moves the gateway's self-admin level
+/// records it in the Chat feed in the same transaction
+/// (`feed::record_gateway_reach`, client-apps design L3's note,
+/// 2026-10-07), whichever path saved it: it caps every device's admin
+/// tools, and what a device sees follows them, so each device's feed reads
+/// the move in commit order. Before the first save the level in force is
+/// the default (`load_settings`, the feed's `bounds_and_switch`), so a
+/// first save away from it is a move too (review G-5).
 pub async fn save_settings(pool: &SqlitePool, s: &Settings) -> DbResult<()> {
     let json = serde_json::to_string(s).map_err(|e| GatewayError::Internal(e.to_string()))?;
+    // Reads before it writes: the write lock first.
+    let mut tx = begin_write(pool).await?;
+    let was = gateway_self_admin_in(&mut tx).await?;
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('settings', ?1)
          ON CONFLICT(key) DO UPDATE SET value = ?1",
     )
     .bind(json)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if was != s.self_admin {
+        feed::record_gateway_reach(&mut tx, s.self_admin, was).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

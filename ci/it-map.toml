@@ -34,6 +34,8 @@ smoke = [
     "router",
     "migrations",
     "web_pages::the_spa_is_served_at_the_root_and_the_api_backs_its_pages",
+    "store_begin_scan",  # every deferred BEGIN the clippy lint cannot see, in any crate
+    "chat_repo_seam_scan",  # every message write goes through ChatRepo, which marks it for the Chat page
 ]
 
 [[map]]
@@ -53,7 +55,7 @@ paths = ["crates/lmgw-core/src/server.rs", "crates/lmgw-core/src/principal.rs",
          "crates/lmgw-core/src/web/mod.rs", "crates/lmgw-core/src/web/wiring.rs",
          "crates/lmgw-core/src/web/admin.rs", "crates/lmgw-core/src/web/session.rs"]
 modules = ["route_walk", "principal_gate", "owner_keys", "session_login", "key_policy",
-           "openapi_", "web_pages", "body_limit", "dev_boot_prefix"]
+           "openapi_", "web_pages", "body_limit", "dev_boot_prefix", "device_keys"]
 why = "the routing table and the gate in front of it (dev_boot_prefix: server::bind/serve)"
 
 [[map]]
@@ -131,8 +133,55 @@ why = "the agent runtime"
 [[map]]
 paths = ["crates/lmgw-core/src/web/api_usage.rs", "crates/lmgw-core/src/policy.rs",
          "crates/lmgw-core/src/pricing.rs"]
-modules = ["key_policy", "key_set", "owner_keys", "models_endpoint"]
+modules = ["key_policy", "key_set", "owner_keys", "models_endpoint", "device_keys"]
 why = "keys, budgets and usage"
+
+[[map]]
+paths = ["crates/lmgw-core/src/devices.rs", "crates/lmgw-core/src/devices/*",
+         "crates/lmgw-core/src/web/api_settings/device_keys.rs", "crates/lmgw-core/src/ops/keys.rs",
+         "crates/lmgw-core/src/store/keys.rs", "crates/lmgw-core/src/realtime/session.rs"]
+modules = ["device_keys", "device_chat", "key_set", "owner_keys"]
+why = "device keys: pairing, the key ops, and the realtime session's revocation close"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat*.rs", "crates/lmgw-core/src/web/chat_*/*",
+         "crates/lmgw-core/src/web/agentchat.rs", "crates/lmgw-core/src/web/agentchat/*",
+         "crates/lmgw-core/src/realtime/thread.rs", "crates/lmgw-core/src/realtime/thread/*",
+         "crates/lmgw-core/src/store/chat*.rs", "crates/lmgw-core/src/mcp/scope.rs",
+         "crates/lmgw-core/src/quickdoc/embed.rs", "crates/lmgw-core/src/quickdoc/rerank.rs",
+         "crates/lmgw-core/src/proxy/recording.rs", "crates/lmgw-core/src/telemetry.rs"]
+modules = ["device_chat"]
+why = "a paired device in the Chat: what it reaches and what it runs as (client-apps WP3)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/store/feed.rs", "crates/lmgw-core/src/store/chat*.rs",
+         "crates/lmgw-core/src/store/agent_catalog.rs", "crates/lmgw-core/src/web/chat*.rs",
+         "crates/lmgw-core/src/web/chat_*/*", "crates/lmgw-core/src/web/api_agents.rs",
+         "crates/lmgw-core/src/agents/chat.rs", "crates/lmgw-core/src/realtime/session.rs",
+         "crates/lmgw-core/src/realtime/thread/*", "crates/lmgw-core/src/devices/*",
+         "crates/lmgw-core/src/state.rs", "crates/lmgw-core/src/server.rs",
+         "crates/lmgw-core/src/ops/chat_feed_settings.rs", "crates/lmgw-api-types/src/chat_feed.rs",
+         "crates/lmgw-core/migrations/0063_chat_feed.sql"]
+modules = ["chat_feed"]
+why = "the Chat change feed: every thread and folder write records, turns and voice report live, the hold and the revocation reach it (client-apps WP4)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat_feed.rs", "crates/lmgw-core/src/web/chat_feed/*",
+         "crates/lmgw-core/src/web/chat_repo.rs", "crates/lmgw-core/src/web/api.rs",
+         "crates/lmgw-core/src/store/feed.rs", "crates/lmgw-api-types/src/chat_changed.rs"]
+modules = ["chat_events", "openapi_live::events_initial_frames_validate"]
+why = "the dashboard's chat frame on /api/events: the feed's records and the message marks every message write leaves (client-apps §3.6, 2026-10-08)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat/rows.rs", "crates/lmgw-core/src/web/chat_repo.rs",
+         "crates/lmgw-core/src/store/chat.rs", "crates/lmgw-core/src/web/chat_folders/current.rs"]
+modules = ["chat_live_reads"]
+why = "what the Chat page reads while it follows: the owner's rows route, and a rescued draft making nothing until Send (client-apps §3.6, reviews CL-11, CL-14)"
+
+[[map]]
+paths = ["crates/lmgw-ui/src/pages/chat_sync/gone.rs", "crates/lmgw-ui/src/pages/chat_sync/gone/*"]
+modules = ["chat_page_gone_scan"]
+why = "the Chat page's delete-elsewhere path requests only at the owner's Send (reviews CL-14, CF-7)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/candidates/*"]
@@ -155,7 +204,7 @@ why = "admission and the container lifecycle"
 paths = ["crates/lmgw-core/src/proxy.rs", "crates/lmgw-core/src/proxy/*",
          "crates/lmgw-core/src/sse.rs"]
 modules = ["e2e_proxy", "count_compat", "key_policy", "body_limit", "responses_api",
-           "embeddings_params", "anthropic_beta", "chat_live", "reasoning_off_fit",
+           "embeddings_params", "anthropic_beta", "chat_live", "reasoning_off_fit", "stream_usage",
            "realtime_chat_thread::reasoning::a_voice_turn_answers_on_a_model_without_reasoning"]
 why = "the inference proxy"
 
@@ -164,7 +213,7 @@ paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
          "crates/lmgw-core/src/ir.rs", "crates/lmgw-core/src/responses.rs"]
 modules = ["egress_adapters", "ingress_roundtrip", "ingress_tool_results", "e2e_proxy",
            "count_compat", "responses_api", "responses_key_ref", "anthropic_beta",
-           "chat_replay_shapes"]
+           "chat_replay_shapes", "stream_usage"]
 why = "the protocol adapters"
 
 [[map]]
@@ -210,3 +259,10 @@ why = "the DTOs the dashboard reads"
 paths = ["crates/quickdoc-core/*"]
 modules = ["quickdoc_", "knowledge"]
 why = "lmgw-core's corpus store"
+
+[[map]]
+paths = ["crates/lmgw-core/src/proxy/synthesize.rs", "crates/lmgw-core/src/proxy/synthesize/*",
+         "crates/lmgw-core/src/proxy/audio.rs", "crates/lmgw-core/src/proxy/audio/*",
+         "crates/lmgw-core/tests/fixtures/audio/supertonic3_unicode_indexer_trimmed.json"]
+modules = ["audio_speech_chars", "audio_expressive", "realtime_expressive", "audio_backend"]
+why = "every TTS path shapes its speech through these (the task routes too)"

@@ -31,7 +31,6 @@ mod keys;
 mod live;
 mod machine;
 mod panel;
-mod protocol;
 mod reload;
 mod socket;
 
@@ -291,6 +290,14 @@ pub(crate) fn use_realtime() -> Option<Realtime> {
 impl Realtime {
     fn on_untracked(&self) -> bool {
         self.pv.voice_mode.get_untracked()
+    }
+
+    /// A session holds the open thread's transcript (tracked): connecting,
+    /// live, or one left whose close has not come. The Ended panel does not
+    /// (review CL-13): that session is over, and what it stored is read
+    /// back by `reload.rs`, so the page follows other writers beside it.
+    pub(crate) fn holds_transcript(&self) -> bool {
+        matches!(self.phase.get(), Phase::Connecting | Phase::Live) || self.closing.get()
     }
 
     /// Why the voice button cannot enter now, in one line (tracked):

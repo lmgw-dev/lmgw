@@ -22,13 +22,16 @@ use crate::telemetry::RequestClass;
 use super::*;
 
 /// `headers` learn the rung, as for [`unary_chat`](crate::proxy::chat); they leave with the SSE
-/// response's own headers, before the first event.
+/// response's own headers, before the first event. `include_usage` is the
+/// client's `stream_options.include_usage`: the upstream is asked for usage
+/// regardless, and the row gets it either way.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_chat(
     state: &SharedState,
     proto: ClientProto,
     ctx: &RequestCtx,
     ir: &ChatRequest,
+    include_usage: bool,
     route: &Route,
     headers: &mut GateHeaders,
     egress: &'static dyn Egress,
@@ -87,7 +90,7 @@ pub(super) async fn stream_chat(
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
-    let mut encoder = proto.new_stream_encoder(&ir.model_alias);
+    let mut encoder = proto.new_stream_encoder(&ir.model_alias, include_usage);
     let decoder = egress.new_decoder();
     let state2 = state.clone();
     let ctx2 = ctx.clone();
@@ -161,6 +164,9 @@ pub(super) async fn stream_chat(
                 fallback,
                 rung,
                 degraded,
+                // Past the upstream's 2xx: answered, a client gone
+                // mid-stream (`canceled`) included (billable-units §4.5).
+                quantities: crate::pricing::Quantities::answered(),
             },
             StatusCode::OK.as_u16(),
             outcome.ttfb_ms,

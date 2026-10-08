@@ -497,6 +497,12 @@ async fn proxy_agent(
     face: Face,
 ) -> Response {
     let id = agent.row.id.clone();
+    // The server this request came in on: an app's streamed answer ends at
+    // its stop (review F-4), as every other long-lived stream does.
+    let served_at = req
+        .extensions()
+        .get::<crate::server::ServedAt>()
+        .map(|crate::server::ServedAt(at)| *at);
     if service::service_of(&agent).is_none() {
         return err(
             StatusCode::NOT_FOUND,
@@ -586,8 +592,8 @@ async fn proxy_agent(
             headers,
             inbound,
             guard,
-            &origin,
-            &upstream_base,
+            (&origin, &upstream_base),
+            served_at,
         )
         .await;
     }
@@ -648,6 +654,9 @@ async fn proxy_agent(
         }
         chunk
     });
+    // Until the server stops, then the end: an app's event stream open in a
+    // frame or a tab does not hold the drain (review F-4).
+    let stream = crate::server::until_stopped(&st.stops, served_at, stream, None);
     out.body(Body::from_stream(stream)).unwrap_or_else(|e| {
         err(
             StatusCode::BAD_GATEWAY,
@@ -821,8 +830,8 @@ async fn upgrade(
     // `None` when the upstream is a `dev_url`: there is no container to keep
     // awake and no counter to hold (§4.7).
     guard: Option<service::InFlight>,
-    origin: &str,
-    container_base: &str,
+    (origin, container_base): (&str, &str),
+    served_at: Option<u64>,
 ) -> Response {
     let Some(inbound) = inbound else {
         return err(
@@ -865,6 +874,7 @@ async fn upgrade(
             }
             chunk
         });
+        let stream = crate::server::until_stopped(&st.stops, served_at, stream, None);
         return out.body(Body::from_stream(stream)).unwrap_or_else(|e| {
             err(
                 StatusCode::BAD_GATEWAY,
@@ -879,6 +889,9 @@ async fn upgrade(
         *h = forwarded_response_headers(upstream.headers(), true, origin, container_base);
     }
     let agent_id = id.to_string();
+    // The tunnel ends at its server's stop too: both sockets are dropped, as
+    // when either end goes. A byte pipe has no frame of its own to say why.
+    let stopped = st.stops.stopped_after(st.stops.at_or_now(served_at));
     // Both halves are awaited in the task, not here: hyper hands over the
     // inbound socket only once this 101 has actually been written, so awaiting
     // it before returning would deadlock.
@@ -915,12 +928,13 @@ async fn upgrade(
         let to_container = tokio::io::copy(&mut browser_r, &mut container_w);
         let to_browser = tokio::io::copy(&mut container_r, &mut browser_w);
         let ended = tokio::select! {
-            r = to_container => r.map(|n| ("the browser", n)),
-            r = to_browser => r.map(|n| ("the container", n)),
+            r = to_container => r.map(|n| format!("the browser sent {n} bytes and then EOF")),
+            r = to_browser => r.map(|n| format!("the container sent {n} bytes and then EOF")),
+            () = stopped => Ok("the gateway stopped".to_string()),
         };
         match ended {
-            Ok((who, n)) => {
-                tracing::debug!(agent = %agent_id, "the WebSocket tunnel closed: {who} sent {n} bytes and then EOF")
+            Ok(why) => {
+                tracing::debug!(agent = %agent_id, "the WebSocket tunnel closed: {why}")
             }
             Err(e) => tracing::debug!(agent = %agent_id, "the WebSocket tunnel ended: {e}"),
         }

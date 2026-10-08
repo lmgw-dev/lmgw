@@ -429,8 +429,10 @@ pub struct ChatThreadRef {
     pub title: String,
     pub temporary: bool,
     /// The thread's turns may dispatch lmgw's own admin tools: the
-    /// self-admin toolset is attached and `self_admin` is `full` (§8.1, the
-    /// panel's flag). Re-read before each response.
+    /// self-admin toolset is attached and what the binder's admin tools may
+    /// do is `full` — the gateway's `self_admin`, capped by a device's own
+    /// level (§8.1, the panel's flag). Re-read before each response, so a
+    /// level that moved shows at the next one, in `lmgw.chat.thread`.
     #[serde(default)]
     pub admin_tools: bool,
 }

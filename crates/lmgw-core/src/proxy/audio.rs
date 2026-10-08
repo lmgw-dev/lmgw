@@ -36,9 +36,12 @@ use crate::telemetry::RequestClass;
 use super::*;
 
 mod asr_language;
+pub(super) mod measure;
 mod speech;
 pub use speech::{handle_audio_speech, SPEECH_HEADER};
 pub(crate) use speech::{local_speech, remote_rules, rules_on, shape_on};
+mod task;
+pub(super) mod usage;
 mod voices;
 pub use voices::{handle_audio_voices, VoicesProbe, VOICES_SOURCE_HEADER};
 
@@ -115,6 +118,13 @@ pub(super) struct MediaOutcome {
     /// counted as streamed, and its model counted as having run only once
     /// the relay ends whole, as for SSE (audio-class gap 8).
     pub(super) chunked: bool,
+    /// Which route answered, for the usage its row records ([`usage`]).
+    pub(super) answer: usage::Answer,
+    /// What lmgw measured of the request itself ([`measure`]): an upload's
+    /// WAV length, a speech request's characters. Carried here because this
+    /// exists only for a 2xx — a refused request has no quantities
+    /// (billable-units design §4.1). What the answer reports wins over it.
+    pub(super) measured: crate::pricing::Quantities,
 }
 
 /// Response headers worth carrying back from the upstream. `content-length`
@@ -162,6 +172,8 @@ pub(super) async fn finish_media(
         ttfb_ms,
         admission,
         chunked,
+        answer,
+        measured,
     } = match result {
         Ok(o) => o,
         Err((route, headers, e)) => {
@@ -184,6 +196,7 @@ pub(super) async fn finish_media(
                     fallback: headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
@@ -216,6 +229,9 @@ pub(super) async fn finish_media(
     let state2 = state.clone();
     let ctx2 = ctx.clone();
     let fallback = headers.fallback_reason();
+    // What a cloud answer says it used, and an image answer's images, read
+    // as they pass (`usage`).
+    let mut tap = usage::UsageTap::new(state, &route, &resp, answer);
     tokio::spawn(async move {
         let mut upstream = resp.bytes_stream();
         let mut error: Option<(String, String)> = None;
@@ -223,6 +239,7 @@ pub(super) async fn finish_media(
         while let Some(chunk) = upstream.next().await {
             match chunk {
                 Ok(b) => {
+                    tap.feed(&b);
                     // The header is in the first bytes: read once they
                     // name the rate, or the window is full.
                     if let Some((model, buf)) = head.as_mut() {
@@ -247,6 +264,13 @@ pub(super) async fn finish_media(
         if let Some((model, buf)) = head {
             state2.audio_rates.learn(&model, &buf);
         }
+        let reported = tap.finish(error.is_none());
+        // Reported over measured, and one answered request: the 2xx headers
+        // arrived, a client gone mid-relay included (§4.5).
+        let quantities = crate::pricing::Quantities {
+            requests: Some(1),
+            ..reported.quantities().over(measured)
+        };
         record(
             LogParams {
                 state: &state2,
@@ -262,10 +286,11 @@ pub(super) async fn finish_media(
                 fallback,
                 rung: None,
                 degraded: None,
+                quantities,
             },
             status.as_u16(),
             Some(ttfb_ms),
-            Usage::default(),
+            reported.usage,
             error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
         )
         .await;
@@ -355,13 +380,26 @@ async fn audio_json_call(
         .map_err(|f| (f.route, f.headers, f.error))?;
     let mut out = body.clone();
     out["model"] = Value::String(route.upstream_model.clone());
+    send_json(state, endpoint, (route, admission, headers), &out, started).await
+}
+
+/// Send `out` to `endpoint` on the route the gate opened, with its claim
+/// and headers: the shared send of [`audio_json_call`] and the task routes
+/// ([`task`]).
+async fn send_json(
+    state: &SharedState,
+    endpoint: &str,
+    (route, admission, headers): (Route, Option<crate::vram::LocalHold>, GateHeaders),
+    out: &Value,
+    started: Instant,
+) -> Result<MediaOutcome, Failed> {
     if let Some(hold) = admission.as_ref() {
         hold.note_sending();
     }
     let sent = audio_send(admission.as_ref(), &route, |r| {
         let url = format!("{}{endpoint}", r.upstream.base());
         Ok(apply_bearer_auth(
-            state.http.post(url).json(&out),
+            state.http.post(url).json(out),
             &r.upstream,
         ))
     })
@@ -376,6 +414,12 @@ async fn audio_json_call(
                 headers,
                 admission,
                 chunked: false,
+                answer: usage::Answer::of_path(endpoint),
+                // Nothing to measure: a JSON transcription names a file on
+                // the container, which lmgw never holds (§4.2), and a task's
+                // request is relayed unread but for its text's characters
+                // ([`task`]).
+                measured: Default::default(),
             })
         }
         Err(e) => Err((Some(Box::new(route)), headers, e)),
@@ -398,7 +442,10 @@ pub(super) fn body_alias(body: &Value) -> String {
 /// The body is `{"model": <alias>, "request": {...}}`: `model` sits at the top
 /// level exactly like the speech route, so alias rewriting is the shared path,
 /// and the nested `request` object is relayed untouched — its fields are the
-/// CLI's request-sequence format, which the gateway has no reason to model.
+/// CLI's request-sequence format, which the gateway has no reason to model —
+/// but for its `text` on a row whose engine refuses a character its package
+/// lacks (Supertonic): that is fitted to the vocabulary as speech's `input`
+/// is, and `x-lmgw-speech` says what changed ([`task`]).
 /// Answers are one JSON document (base64 audio, named tracks, segments,
 /// speaker turns, word timings — whatever the task produced).
 pub async fn handle_task_run(state: SharedState, ctx: RequestCtx, body: Value) -> Response {
@@ -417,8 +464,12 @@ pub async fn handle_task_run(state: SharedState, ctx: RequestCtx, body: Value) -
     {
         return r;
     }
-    let result = audio_json_call(&state, "/tasks/run", &body, started).await;
-    finish_audio(&state, &ctx, alias, started, result).await
+    let tasked = task::task_call(&state, "/tasks/run", &body, started).await;
+    let mut resp = finish_audio(&state, &ctx, alias, started, tasked.result).await;
+    if let Some(v) = tasked.report.header_value() {
+        resp.headers_mut().insert(SPEECH_HEADER, v);
+    }
+    resp
 }
 
 /// `POST /v1/tasks/stream` — the streaming-mode sibling of [`handle_task_run`].
@@ -441,8 +492,12 @@ pub async fn handle_task_stream(state: SharedState, ctx: RequestCtx, body: Value
     {
         return r;
     }
-    let result = audio_json_call(&state, "/tasks/stream", &body, started).await;
-    finish_audio(&state, &ctx, alias, started, result).await
+    let tasked = task::task_call(&state, "/tasks/stream", &body, started).await;
+    let mut resp = finish_audio(&state, &ctx, alias, started, tasked.result).await;
+    if let Some(v) = tasked.report.header_value() {
+        resp.headers_mut().insert(SPEECH_HEADER, v);
+    }
+    resp
 }
 
 /// [`handle_audio_voices`] for a reader that must not start anything — the
@@ -805,6 +860,8 @@ pub(super) async fn multipart_send(
                 headers,
                 admission,
                 chunked: false,
+                answer: usage::Answer::of_path(which.path()),
+                measured: measure::upload(fields),
             })
         }
         Err(e) => Err((

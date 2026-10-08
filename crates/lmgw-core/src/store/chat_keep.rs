@@ -32,15 +32,17 @@ pub struct KeptAttachment {
 /// Insert `thread` with its `messages` (in the order given, which is the
 /// conversation's) and `attachments` in one transaction, and return the new
 /// thread's id. The timestamps come along: a kept chat is as old as it is.
-/// It starts unpinned and active, as every new thread does.
+/// It starts unpinned and active, as every new thread does, and is recorded
+/// in the feed (`thread.created`) as `by`'s, in the same transaction.
 pub async fn insert_kept_chat_thread(
     pool: &SqlitePool,
     thread: &ChatThread,
     messages: &[ChatMessageRow],
     attachments: &[KeptAttachment],
+    by: feed::By<'_>,
 ) -> DbResult<i64> {
     let mcp = serde_json::to_string(&thread.mcp_tools).unwrap_or_else(|_| "[]".to_string());
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let thread_id = sqlx::query(
         "INSERT INTO chat_threads
            (title, model_alias, system_prompt, temperature, max_tokens, kind, mcp_tools,
@@ -147,6 +149,9 @@ pub async fn insert_kept_chat_thread(
         }
     }
 
+    // The thread is new to every client: a kept chat was temporary, and the
+    // feed never carries a temporary one (client-apps design L7).
+    feed::record_thread(&mut tx, feed::kind::THREAD_CREATED, thread_id, by).await?;
     tx.commit().await?;
     Ok(thread_id)
 }

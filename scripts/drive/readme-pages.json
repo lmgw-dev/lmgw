@@ -6,7 +6,7 @@
   "nav": "/"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -18,7 +18,7 @@
   "nav": "/models"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -30,7 +30,7 @@
   "nav": "/usage"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -42,7 +42,7 @@
   "nav": "/traffic"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -54,7 +54,7 @@
   "nav": "/backends"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -66,7 +66,7 @@
   "nav": "/mcp-servers"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -78,7 +78,7 @@
   "nav": "/chat"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5
@@ -96,7 +96,7 @@
   "nav": "/api-reference"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "wait": 2.5

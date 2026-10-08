@@ -14,7 +14,12 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Create, update, delete, enable or disable an upstream provider. Update is \
                  partial — pass only the fields to change, everything else is kept. Omit \
-                 api_key on update to leave the stored key untouched.",
+                 api_key on update to leave the stored key untouched. A call that moves \
+                 base_url to another address (update, enable or disable) must pass the \
+                 api_key for that address in the same call when the upstream holds one, or \
+                 it is refused and nothing changes: a stored key is never sent to a host it \
+                 was not given for. An upstream that sends extra headers moves on the \
+                 dashboard only.",
             props: vec![
                 (
                     "action",
@@ -51,7 +56,11 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "base_url",
-                    str_p("Base URL, e.g. https://api.openai.com/v1. Required on create."),
+                    str_p(
+                        "Base URL, e.g. https://api.openai.com/v1. Required on create. \
+                         Moving it needs api_key in the same call when the upstream holds \
+                         a key.",
+                    ),
                 ),
                 ("api_key", str_p("Provider API key. Write-only.")),
                 (
@@ -118,7 +127,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "capabilities_override",
                     str_p(
-                        "Owner-set capability facts merged over what lmgw derives for \
+                        "Capability facts set on the row, merged over what lmgw derives for \
                          /v1/models: a JSON object with optional keys capabilities \
                          (deep-merged; e.g. {\"input_modalities\":[\"text\",\"image\"],\
                          \"reasoning\":{\"kind\":\"levels\",\"levels\":[\"low\",\"high\"]}}), \

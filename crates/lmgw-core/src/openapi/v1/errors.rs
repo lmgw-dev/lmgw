@@ -1,15 +1,15 @@
-//! The `default`-response error envelopes (api-docs design §4.8 tail): one
+//! The `default`-response error envelopes : one
 //! schema per [`Dialect`], registered into `g` the first time a route of that
 //! dialect is built ([`super::super::schemas::error_ref`]) rather than up
-//! front — a document with no routes of some dialect (`ApiError`, until WP4
-//! lands a dashboard route) never grows a component nothing points at.
+//! front — a document with no routes of some dialect never grows a
+//! component nothing points at.
 //!
 //! Shapes read from the code that actually builds them, not from provider
 //! docs: [`crate::error::GatewayError::to_openai_json`],
 //! [`crate::error::GatewayError::to_anthropic_json`],
-//! `proxy::tokenize::llama_error` (§5.3), the JSON-RPC error frame
+//! `proxy::tokenize::llama_error`, the JSON-RPC error frame
 //! `mcp::ingress.rs` sends (`rpc_err`), and api-types `ApiError`, which is
-//! already `JsonSchema`-derived (§3.1) so the dashboard plane just needs its
+//! already `JsonSchema`-derived so the dashboard plane just needs its
 //! own `$ref`.
 
 use schemars::generate::SchemaGenerator;
@@ -46,7 +46,7 @@ pub(crate) fn register(g: &mut SchemaGenerator, dialect: Dialect) -> Schema {
     schema
 }
 
-/// `GatewayError::to_openai_json` (`error.rs:495`): `error.code` is the
+/// `GatewayError::to_openai_json`: `error.code` is the
 /// gateway's own machine word ([`crate::error::GatewayError::code`], e.g.
 /// `gpu_hold`, `not_found`), not an HTTP status — `param` is always `null` in
 /// this implementation, kept for OpenAI SDK shape compatibility.
@@ -67,8 +67,8 @@ fn openai_error(g: &mut SchemaGenerator) -> Schema {
                             authentication_error, not_found_error, rate_limit_error, api_error."},
                         "param": {"type": ["string", "null"], "description": "Always null: lmgw \
                             does not attribute an error to one request field."},
-                        "code": {"type": "string", "description": "GatewayError::code(), lmgw's \
-                            own machine word (e.g. gpu_hold, gpu_benchmark), not the HTTP \
+                        "code": {"type": "string", "description": "lmgw's own machine-readable \
+                            error code (e.g. gpu_hold, gpu_benchmark), not the HTTP \
                             status."}
                     }
                 }
@@ -77,7 +77,7 @@ fn openai_error(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-/// `GatewayError::to_anthropic_json` (`error.rs:507`).
+/// `GatewayError::to_anthropic_json`.
 fn anthropic_error(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
         g,
@@ -101,11 +101,11 @@ fn anthropic_error(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-/// `proxy::tokenize::llama_error` (§5.3): `lmgw_code` is
+/// `proxy::tokenize::llama_error`: `lmgw_code` is
 /// [`crate::error::GatewayError::code`], kept alongside llama.cpp's own
 /// `type` word so a client already checking for `gpu_hold` still can. Not
 /// used by the gate layer's own 401/403/429 or a declared-Content-Length 413,
-/// which stay in the shared `/v1` OpenAI dialect (§5.3 exception).
+/// which stay in the shared `/v1` OpenAI dialect.
 fn llamacpp_error(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
         g,
@@ -133,7 +133,7 @@ fn llamacpp_error(g: &mut SchemaGenerator) -> Schema {
                                 "server_error"
                             ]
                         },
-                        "lmgw_code": {"type": "string", "description": "GatewayError::code(), \
+                        "lmgw_code": {"type": "string", "description": "lmgw's own machine-readable error code, \
                             e.g. gpu_hold, gpu_benchmark."}
                     }
                 }
@@ -169,11 +169,9 @@ fn jsonrpc_error(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-/// The dashboard plane's uniform error body (api-types `ApiError`,
-/// `status.rs:9`), already `JsonSchema`-derived (§3.1) — a WP4 route is the
-/// first to actually reach this arm; WP6 only has to keep the match
-/// exhaustive so the ops plane (`Dialect::Dashboard`, `build.rs`'s
-/// `op_operation`) compiles.
+/// The dashboard plane's uniform error body (api-types `ApiError`),
+/// already `JsonSchema`-derived; the ops plane (`Dialect::Dashboard`,
+/// `build.rs`'s `op_operation`) refers to it.
 fn api_error(g: &mut SchemaGenerator) -> Schema {
     g.subschema_for::<lmgw_api_types::ApiError>()
 }

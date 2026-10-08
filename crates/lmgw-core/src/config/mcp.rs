@@ -109,27 +109,193 @@ impl McpServer {
     /// image. A bare subprocess returns `command`/`args` verbatim — its env is
     /// applied by the spawner, not the argv.
     pub fn stdio_argv(&self) -> (String, Vec<String>) {
-        match &self.container_image {
-            Some(image) if !image.trim().is_empty() => {
-                let mut argv = vec![
-                    "run".to_string(),
-                    "--rm".to_string(),
-                    "-i".to_string(),
-                    "--quiet".to_string(),
-                ];
-                argv.extend(self.extra_run_args.iter().cloned());
-                for (k, v) in &self.env {
-                    argv.push("-e".to_string());
-                    argv.push(format!("{k}={v}"));
-                }
-                argv.push(image.trim().to_string());
-                if let Some(cmd) = self.command.as_deref().filter(|c| !c.trim().is_empty()) {
-                    argv.push(cmd.to_string());
-                }
-                argv.extend(self.args.iter().cloned());
-                ("podman".to_string(), argv)
-            }
-            _ => (self.command.clone().unwrap_or_default(), self.args.clone()),
+        match self.podman_argv("run", &[], &self.extra_run_args) {
+            Some(argv) => ("podman".to_string(), argv),
+            None => (self.command.clone().unwrap_or_default(), self.args.clone()),
         }
     }
+
+    /// The `podman create` argv of a Podman-isolated server: what
+    /// [`stdio_argv`](Self::stdio_argv)'s `podman run` does before the
+    /// container starts, the image pull when the run flags ask for one
+    /// included, with `labels` as `--label k=v`. The connect creates the
+    /// container with it, then starts it with
+    /// [`container_start_argv`](Self::container_start_argv), so that only
+    /// the start and the MCP handshake count against `timeout_ms` (MCP
+    /// gateway design §9). The run flags only `podman start` takes
+    /// (`--sig-proxy`, `--detach-keys`) go there instead. `None` for a bare
+    /// subprocess.
+    pub fn container_create_argv(&self, labels: &[(String, String)]) -> Option<Vec<String>> {
+        let (create, _) = split_start_flags(&self.extra_run_args);
+        self.podman_argv("create", labels, &create)
+    }
+
+    /// The `podman start` argv of the container
+    /// [`container_create_argv`](Self::container_create_argv) made, `id`:
+    /// attached to its stdio, with the run flags `podman create` refuses and
+    /// `podman start` takes.
+    pub fn container_start_argv(&self, id: &str) -> Vec<String> {
+        let (_, start) = split_start_flags(&self.extra_run_args);
+        let mut argv: Vec<String> = ["start", "--attach", "--interactive"]
+            .map(String::from)
+            .to_vec();
+        argv.extend(start);
+        argv.push(id.to_string());
+        argv
+    }
+
+    /// `podman <verb>` of a Podman-isolated server (`run` or `create`), its
+    /// labels, flags, image and command; `None` for a bare subprocess.
+    fn podman_argv(
+        &self,
+        verb: &str,
+        labels: &[(String, String)],
+        extra_run_args: &[String],
+    ) -> Option<Vec<String>> {
+        let image = self.container_image.as_deref()?.trim();
+        if image.is_empty() {
+            return None;
+        }
+        let mut argv = vec![
+            verb.to_string(),
+            "--rm".to_string(),
+            "-i".to_string(),
+            "--quiet".to_string(),
+        ];
+        for (k, v) in labels {
+            argv.push("--label".to_string());
+            argv.push(format!("{k}={v}"));
+        }
+        argv.extend(extra_run_args.iter().cloned());
+        for (k, v) in &self.env {
+            argv.push("-e".to_string());
+            argv.push(format!("{k}={v}"));
+        }
+        argv.push(image.to_string());
+        if let Some(cmd) = self.command.as_deref().filter(|c| !c.trim().is_empty()) {
+            argv.push(cmd.to_string());
+        }
+        argv.extend(self.args.iter().cloned());
+        Some(argv)
+    }
+}
+
+/// One token of an isolated server's `extra_run_args`, read as `podman run`
+/// reads it, against what `podman create` and `podman start` take (podman
+/// 5.8.7: `podman create --help` against `podman run --help`).
+#[derive(Debug, PartialEq, Eq)]
+enum RunFlag {
+    /// Taken by `podman create` as by `podman run`, or not a flag at all.
+    Create,
+    /// Refused by `podman create`, taken by `podman start`; `takes_next`
+    /// when its value is the next token.
+    Start { takes_next: bool },
+    /// Taken by neither: the flag, and why it cannot apply.
+    Refused { flag: String, why: &'static str },
+}
+
+const DETACHED: &str = "the server speaks MCP over the container's stdio, so lmgw always \
+                        attaches to it";
+
+fn run_flag(token: &str) -> RunFlag {
+    if let Some(long) = token.strip_prefix("--") {
+        let (name, inline_value) = match long.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (long, false),
+        };
+        let why = match name {
+            "sig-proxy" => return RunFlag::Start { takes_next: false },
+            "detach-keys" => {
+                return RunFlag::Start {
+                    takes_next: !inline_value,
+                }
+            }
+            "detach" => DETACHED,
+            "rmi" => {
+                "the container is created --rm and goes when it ends; its image stays for the \
+                 next connect"
+            }
+            "preserve-fd" | "preserve-fds" => {
+                "lmgw hands the container its stdio and no other file descriptor"
+            }
+            "passwd" => {
+                "a created container always gets the /etc/passwd entries --passwd=false would \
+                 leave out"
+            }
+            _ => return RunFlag::Create,
+        };
+        return RunFlag::Refused {
+            flag: format!("--{name}"),
+            why,
+        };
+    }
+    // A cluster of shorthands (`-it`): each letter is a flag, until one that
+    // takes a value, which takes the rest of the token (`-v/a:/b`). `podman
+    // run`'s boolean shorthands are d, i, P, q and t.
+    if let Some(short) = token.strip_prefix('-') {
+        for c in short.chars() {
+            match c {
+                'd' => {
+                    return RunFlag::Refused {
+                        flag: "-d".into(),
+                        why: DETACHED,
+                    }
+                }
+                'i' | 'P' | 'q' | 't' => {}
+                _ => break,
+            }
+        }
+    }
+    RunFlag::Create
+}
+
+/// `extra_run_args` split into the flags `podman create` takes and the ones
+/// that go to `podman start` instead (`--sig-proxy`, `--detach-keys`). A
+/// refused flag stays with `create`, which says so in podman's own words;
+/// a row is not saved with one ([`run_only_refusal`]).
+fn split_start_flags(extra_run_args: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut create, mut start) = (Vec::new(), Vec::new());
+    let mut tokens = extra_run_args.iter();
+    while let Some(token) = tokens.next() {
+        match run_flag(token) {
+            RunFlag::Start { takes_next } => {
+                start.push(token.clone());
+                if takes_next {
+                    start.extend(tokens.next().cloned());
+                }
+            }
+            RunFlag::Create | RunFlag::Refused { .. } => create.push(token.clone()),
+        }
+    }
+    (create, start)
+}
+
+/// Why `extra_run_args` cannot be a Podman-isolated server's, when they
+/// cannot: they hold a flag only `podman run` takes, which neither the
+/// `podman create` nor the `podman start` of its connect accepts (MCP
+/// gateway design §9). The flags `podman start` takes are moved there and
+/// are fine. Checked when a row is saved, so that the owner hears it then,
+/// not as podman's "unknown flag" at every connect.
+pub fn run_only_refusal(extra_run_args: &[String]) -> Option<String> {
+    let mut refused: Vec<String> = Vec::new();
+    for token in extra_run_args {
+        if let RunFlag::Refused { flag, why } = run_flag(token) {
+            let said = format!("`{flag}`: {why}");
+            if !refused.contains(&said) {
+                refused.push(said);
+            }
+        }
+    }
+    let (flags, them) = match refused.len() {
+        0 => return None,
+        1 => ("a flag", "it"),
+        _ => ("flags", "them"),
+    };
+    Some(format!(
+        "extra_run_args holds {flags} only `podman run` takes ({}). lmgw creates an isolated \
+         server's container with `podman create` and starts it with `podman start --attach \
+         --interactive` (MCP gateway design §9), and neither accepts {them}: remove {them} from \
+         extra_run_args.",
+        refused.join("; ")
+    ))
 }

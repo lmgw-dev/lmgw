@@ -36,7 +36,7 @@ use crate::runtime::image::ImageCapabilities;
 // Schema (design §2.1)
 // ---------------------------------------------------------------------------
 
-/// The `capabilities` object of one model on `GET /v1/models` (design §2.1).
+/// The `capabilities` object of one model on `GET /v1/models`.
 ///
 /// `task`, `endpoints` and `source` are always present — they are what makes
 /// the entry actionable at all ("this id exists, here is where to send it,
@@ -47,7 +47,7 @@ use crate::runtime::image::ImageCapabilities;
 pub struct ModelCapabilities {
     /// `chat` | `embedding` | `rerank` | `tts` | `asr` | an audio.cpp task
     /// name | an image task | `realtime` (an OpenAI Realtime model, no lmgw
-    /// route). Drives [`endpoints`](Self::endpoints) ([`task::endpoints`]).
+    /// route). Determines `endpoints`.
     pub task: String,
     /// The lmgw routes that accept this model id.
     pub endpoints: Vec<String>,
@@ -58,9 +58,9 @@ pub struct ModelCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_modalities: Option<Vec<String>>,
     /// `input_modalities` contains `image`. Redundant with the list on
-    /// purpose: the consuming application reads this one boolean to decide
-    /// whether a session gets a screenshot tool. Absent exactly when
-    /// `input_modalities` is absent.
+    /// purpose: a client can read this one boolean to decide whether to
+    /// send images, e.g. whether a session gets a screenshot tool. Absent
+    /// exactly when `input_modalities` is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,17 +71,16 @@ pub struct ModelCapabilities {
     pub structured_output: Option<StructuredOutputCaps>,
     /// A text-to-speech model's expressive controls — what `instructions`,
     /// inline tags, `language` and `stream_format` do on it
-    /// ([`speech::SpeechCaps`]). A local audio row's is derived; a cloud
-    /// alias has one only through the owner's override.
+    /// (the speech capabilities object). A local audio model's is derived; a
+    /// cloud alias has one only through an alias's capabilities override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speech: Option<speech::SpeechCaps>,
-    /// Where the facts came from: `gguf+config`, `catalog`, `config`,
-    /// `owner`.
+    /// Where the facts came from: `gguf+config`, `catalog`, `config`, or
+    /// `owner` (an alias's capabilities override).
     pub source: String,
 }
 
-/// Reasoning / thinking support and how a request controls it (design §2.1,
-/// §3.2, §4).
+/// Reasoning / thinking support and how a request controls it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningCaps {
@@ -116,7 +115,7 @@ pub struct ReasoningCaps {
     pub control: Vec<String>,
 }
 
-/// Tool-calling support (design §2.1, §3.4).
+/// Tool-calling support.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCallCaps {
@@ -136,7 +135,7 @@ pub struct ToolCallCaps {
     pub format: Option<String>,
 }
 
-/// `response_format` support (design §2.1).
+/// `response_format` support.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StructuredOutputCaps {

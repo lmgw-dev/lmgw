@@ -15,6 +15,12 @@ use crate::principal::{Cap, Principal, Refusal};
 use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
 
+mod stop;
+pub use stop::{
+    quit_signal, signal_exit_code, until_stopped, InFlight, Running, ServedAt, Stops,
+    CLOSE_GOING_AWAY, SESSIONS_END_WITHIN, STOPPING, STOP_WITHIN,
+};
+
 /// Build the full application router (API + UI + events + assets).
 pub fn build_router(state: SharedState) -> Router {
     // The JSON routes, bounded by the `max_body_mb` setting (§13). axum's
@@ -333,55 +339,65 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("GET", "/api/knowledge/files/{id}/text", Cap::Admin),
     ("GET", "/api/knowledge/files/{id}/original", Cap::Admin),
     ("POST", "/api/knowledge/search", Cap::Admin),
-    // -- The three user-facing mini-APIs -----------------------------------
-    ("GET", "/chat/api/threads", Cap::Admin),
-    ("POST", "/chat/api/threads", Cap::Admin),
-    ("GET", "/chat/api/threads/{id}", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/settings", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/delete", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/send", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/voice/warm", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/transcribe", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/speech/stop", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/pin", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/move", Cap::Admin),
-    ("GET", "/chat/api/search", Cap::Admin),
-    ("GET", "/chat/api/threads/{id}/export", Cap::Admin),
-    ("GET", "/chat/api/folders/{id}/export", Cap::Admin),
-    ("GET", "/chat/api/export", Cap::Admin),
-    ("GET", "/chat/api/folders", Cap::Admin),
-    ("POST", "/chat/api/folders", Cap::Admin),
-    ("POST", "/chat/api/folders/{id}", Cap::Admin),
-    ("POST", "/chat/api/folders/{id}/delete", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/archive", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/persist", Cap::Admin),
-    ("POST", "/chat/api/threads/{id}/continue", Cap::Admin),
+    // -- The Chat API (client-apps design §1.2) ----------------------------
+    // `Chat`, not `Admin`: an owner holds it, and so does a paired device —
+    // the three exports included, since a device reads every thread it may
+    // see through list and get anyway (L2). What a device may *not* see of
+    // it (admin threads, L3) is the Chat's own rule, not the gate's.
+    ("GET", "/chat/api/threads", Cap::Chat),
+    ("POST", "/chat/api/threads", Cap::Chat),
+    ("GET", "/chat/api/threads/{id}", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/settings", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/delete", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/send", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/voice/warm", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/transcribe", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/speech/stop", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/pin", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/move", Cap::Chat),
+    ("GET", "/chat/api/search", Cap::Chat),
+    ("GET", "/chat/api/feed", Cap::Chat),
+    ("GET", "/chat/api/threads/{id}/export", Cap::Chat),
+    ("GET", "/chat/api/folders/{id}/export", Cap::Chat),
+    ("GET", "/chat/api/export", Cap::Chat),
+    ("GET", "/chat/api/folders", Cap::Chat),
+    ("POST", "/chat/api/folders", Cap::Chat),
+    ("POST", "/chat/api/folders/{id}", Cap::Chat),
+    ("POST", "/chat/api/folders/{id}/delete", Cap::Chat),
+    ("POST", "/chat/api/folders/{id}/current", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/archive", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/persist", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/continue", Cap::Chat),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/delete",
-        Cap::Admin,
+        Cap::Chat,
     ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/edit",
-        Cap::Admin,
+        Cap::Chat,
     ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/regenerate",
-        Cap::Admin,
+        Cap::Chat,
     ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/speak",
-        Cap::Admin,
+        Cap::Chat,
     ),
-    ("POST", "/chat/api/threads/{id}/attachments", Cap::Admin),
-    ("POST", "/chat/api/attachments/{id}/delete", Cap::Admin),
-    ("GET", "/chat/api/attachments/{id}", Cap::Admin),
-    ("POST", "/chat/api/attachments/{id}/mode", Cap::Admin),
-    ("POST", "/chat/api/attachments/{id}/transcribe", Cap::Admin),
-    ("GET", "/chat/api/attachments/{id}/text", Cap::Admin),
+    ("POST", "/chat/api/threads/{id}/attachments", Cap::Chat),
+    ("POST", "/chat/api/attachments/{id}/delete", Cap::Chat),
+    ("GET", "/chat/api/attachments/{id}", Cap::Chat),
+    ("POST", "/chat/api/attachments/{id}/mode", Cap::Chat),
+    ("POST", "/chat/api/attachments/{id}/transcribe", Cap::Chat),
+    ("GET", "/chat/api/attachments/{id}/text", Cap::Chat),
+    // The owner's alone: the dashboard's Chat page reads the rows a `chat`
+    // frame named (review CL-11). A device's feed carries rows already.
+    ("GET", "/chat/api/threads/rows", Cap::Admin),
+    // -- The two labs: the owner's own playgrounds -------------------------
     ("GET", "/audio-lab/api/models", Cap::Admin),
     ("GET", "/audio-lab/api/voices", Cap::Admin),
     ("GET", "/audio-lab/api/refs", Cap::Admin),
@@ -493,17 +509,45 @@ pub async fn serve(
             crate::agents::token::OWNER_DASHBOARD
         ),
     }
-    spawn_background_tasks(state);
-    // With the peer address on every request: the agent proxy tells an app
-    // who reached lmgw in `X-Forwarded-For` (origins §4.6), and that address
-    // is the TCP peer's, never a header a client wrote.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await?;
-    Ok(())
+    spawn_background_tasks(state.clone());
+    serve_app(&state, listener, app, shutdown).await
+}
+
+/// Serve `app` until `shutdown` resolves, then stop within [`STOP_WITHIN`]
+/// (`server::stop`): the long-lived streams opened on this server end at
+/// once ([`Stops`]), the drain waits for the requests that finish by
+/// themselves, then the sessions and turns opened on it are waited for —
+/// all of it within the one bound, and what was still open when it ran out
+/// said in the log. Public for the suites that shut a server down.
+pub async fn serve_app<L>(
+    state: &SharedState,
+    listener: L,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener<Addr = std::net::SocketAddr>,
+    for<'a> std::net::SocketAddr:
+        axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
+{
+    serve_app_within(state, listener, app, shutdown, STOP_WITHIN).await
+}
+
+/// [`serve_app`] with its stop bounded by `within` instead of
+/// [`STOP_WITHIN`]: for the suites that run a stop out of time.
+pub async fn serve_app_within<L>(
+    state: &SharedState,
+    listener: L,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    within: std::time::Duration,
+) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener<Addr = std::net::SocketAddr>,
+    for<'a> std::net::SocketAddr:
+        axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
+{
+    stop::serve_stopping(state, listener, app, shutdown, within).await
 }
 
 /// Fires its sender when dropped: [`serve`]'s "the listener is closed".
@@ -519,6 +563,54 @@ impl Drop for ReleasedOnDrop {
         if let Some(tx) = self.0.take() {
             let _ = tx.send(());
         }
+    }
+}
+
+/// The Chat's step of the hourly maintenance tick: the thread sweep
+/// (auto-archive and purge, chat-archive-pin-attachments design §1) and the
+/// change feed's retention (client-apps design §2.3). Public for the suites
+/// that run the tick's step themselves.
+pub async fn chat_upkeep(state: &crate::state::AppState) {
+    let settings = state.snapshot().settings.clone();
+    // Chat auto-archive + purge (chat-archive-pin-attachments design
+    // §1). Two visible knobs, the same "0 disables that step" convention
+    // as every other retention rule of the tick; pinned threads are
+    // exempt from both, enforced in the query itself.
+    match crate::store::sweep_chat_threads_ids(
+        &state.db,
+        settings.chat_archive_days,
+        settings.chat_purge_days,
+    )
+    .await
+    {
+        Ok((0, purged)) if purged.is_empty() => {}
+        Ok((archived, purged)) => {
+            // The purged threads go as a delete makes them go — their live
+            // events out of every device's reach, their turns cancelled, a
+            // device's session closed — before the open feeds read the
+            // records (client-apps design §2.2, §1.6's close-code note).
+            state.chat_live.purged(&purged).await;
+            state.chat_feed.threads_deleted(&purged);
+            state.chat_feed.wake();
+            tracing::info!(
+                "chat sweep: archived {archived}, purged {} threads",
+                purged.len()
+            )
+        }
+        Err(e) => tracing::warn!("chat sweep failed: {e}"),
+    }
+    // The deleted threads no live turn or session refers to any more.
+    state.chat_live.feed().forget_gone();
+    // The Chat change feed's records (client-apps design §2.3), by
+    // their own visible setting; `0` keeps every record.
+    match crate::store::feed::prune(&state.db, settings.chat_feed_retention_days).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            "pruned {n} chat feed records older than {} days \
+             (Settings → Chat → Change feed → retention)",
+            settings.chat_feed_retention_days
+        ),
+        Err(e) => tracing::warn!("chat feed pruning failed: {e}"),
     }
 }
 
@@ -595,6 +687,13 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
     // dev-instance step, between `init` and this (chat-voice WP5 review B1).
     let st = state.clone();
     tokio::spawn(async move { crate::agents::container::boot_reconcile(&st).await });
+
+    // The MCP server containers an earlier run left behind (MCP gateway
+    // design §9), this instance's only, beside the agents' and for the same
+    // reasons. The boot reconcile above may connect servers meanwhile; a
+    // container younger than this process is never a leftover.
+    let st = state.clone();
+    tokio::spawn(async move { crate::mcp::container::boot_sweep(&st).await });
 
     // The idle reaper (§3.7). Its own task rather than a rider on the 5 s
     // status tick: it is the one background job that *stops containers*, and
@@ -684,23 +783,7 @@ pub fn spawn_background_tasks(state: SharedState) -> bool {
                 Ok(n) => tracing::info!("pruned {n} finished job rows"),
                 Err(e) => tracing::warn!("job pruning failed: {e}"),
             }
-            // Chat auto-archive + purge (chat-archive-pin-attachments design
-            // §1). Two visible knobs, same "0 disables that step" convention
-            // as every other retention rule above; pinned threads are exempt
-            // from both, enforced in the query itself.
-            match crate::store::sweep_chat_threads(
-                &st.db,
-                settings.chat_archive_days,
-                settings.chat_purge_days,
-            )
-            .await
-            {
-                Ok((0, 0)) => {}
-                Ok((archived, purged)) => {
-                    tracing::info!("chat sweep: archived {archived}, purged {purged} threads")
-                }
-                Err(e) => tracing::warn!("chat sweep failed: {e}"),
-            }
+            chat_upkeep(&st).await;
         }
     });
 
@@ -906,6 +989,11 @@ fn reasoning_or_400(ctx: &RequestCtx, dialect: fn(&GatewayError) -> Value) -> Op
 /// dashboard's, whichever this route speaks. Every registered route carries a
 /// `require` (the §3.2 table has no gaps), so nothing slips past a pending one.
 async fn principal_mw(State(state): State<SharedState>, mut req: Request, next: Next) -> Response {
+    // The revocation mark before the snapshot the credential is resolved
+    // against (review W2-5): a Disable or Rotate whose reload this snapshot
+    // missed raised its signal after this mark, so the request's
+    // connections still see it.
+    let mark = state.devices.revocations.mark();
     let snap = state.snapshot();
     // Parsed for every route in one place, but **enforced by none of them
     // here**: only the three chat-shaped routes consume a reasoning control,
@@ -925,6 +1013,12 @@ async fn principal_mw(State(state): State<SharedState>, mut req: Request, next: 
                 }))
             }),
         anthropic_beta: crate::egress::anthropic::client_betas(req.headers()),
+        // Read before the snapshot the credential is resolved against: a
+        // revocation raised from then on is one this request's connections
+        // must still see.
+        revocation_mark: Some(mark),
+        // The server it came in on (`serve_app` puts it on every request).
+        served_at: req.extensions().get::<ServedAt>().map(|ServedAt(at)| *at),
         ..Default::default()
     };
 
@@ -985,6 +1079,7 @@ async fn principal_mw(State(state): State<SharedState>, mut req: Request, next: 
         name,
         kind,
         agent_id,
+        ..
     } = &who
     {
         ctx.client_key = Some(name.clone());
@@ -1124,6 +1219,36 @@ fn gate(
             return refuse(&state, &ctx, cap, refusal, req.headers(), label).await;
         }
 
+        // A key's expiry on `Chat` too (client-apps design §1.2, L17): a
+        // device past its `expires_at` is refused at the door, 401
+        // `key_expired` with the date. Expiry alone — no slot is taken and no
+        // window counted: a feed or a host link holds no slot, and the model
+        // calls inside a turn are checked one by one.
+        if cap == Cap::Chat {
+            if let Some(id) = ctx.principal.key_id() {
+                // Gone, or rotated, between the root's resolution and this
+                // gate (review W2-5): the credential opens nothing now. A
+                // device is told to pair again, as the root tells one whose
+                // row was already gone.
+                let Some(key) = snap
+                    .api_keys
+                    .iter()
+                    .find(|k| k.id == id && ctx.principal.presents(k))
+                else {
+                    let refusal = if ctx.principal.is_device_key() {
+                        Refusal::device_key_unknown()
+                    } else {
+                        Refusal::session_required()
+                    };
+                    return refuse(&state, &ctx, cap, refusal, req.headers(), label).await;
+                };
+                if let Err(at) = crate::policy::check_expiry(key, chrono::Utc::now()) {
+                    let refusal = Refusal::key_expired(key, &at);
+                    return refuse(&state, &ctx, cap, refusal, req.headers(), label).await;
+                }
+            }
+            return next.run(req).await;
+        }
         // Expiry, requests/minute, tokens/minute and concurrency
         // (usage-analytics §4.2) — on `Inference` and nowhere else (§3.5). An
         // agent flushing a hundred ledger events a minute is not spending its
@@ -1644,10 +1769,10 @@ async fn image_edits(
     proxy::handle_image_edit(state, ctx_of(Some(ctx)), req).await
 }
 
-/// `pub(crate)` and `JsonSchema`-derived so `openapi::planes::inference`
-/// (api-docs design §4.1 "`/api` query parameters ... the handler's `Query<T>`
-/// struct") can turn it into `GET /v1/audio/voices`'s one query parameter
-/// instead of hand-describing it a second time.
+// `pub(crate)` and `JsonSchema`-derived so `openapi::planes::inference`
+// (api-docs design §4.1 "`/api` query parameters ... the handler's `Query<T>`
+// struct") can turn it into `GET /v1/audio/voices`'s one query parameter
+// instead of hand-describing it a second time.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct VoicesQuery {
     #[serde(default)]

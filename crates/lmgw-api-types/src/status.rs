@@ -28,11 +28,10 @@ pub struct GatewayStatus {
     pub uptime_seconds: u64,
     pub bind_addr: String,
     pub auth_enabled: bool,
-    pub self_admin: String,
+    /// The gateway's self-admin level: what the `lmgw__*` tools may do.
+    pub self_admin: crate::AdminLevel,
     pub requests: RequestStats,
-    /// One row per model lmgw believes is running (per-model-containers
-    /// design §3.2/§8) — replaces the old fixed three-container `containers`
-    /// list now that a "container" is a per-model, not per-class, concept.
+    /// One row per model lmgw believes is running (a container is per model, not per class).
     #[serde(default)]
     pub runtime: Vec<RuntimeStatus>,
     #[serde(default)]
@@ -40,7 +39,8 @@ pub struct GatewayStatus {
     pub counts: ObjectCounts,
 }
 
-/// Mirror of `runtime::registry::RuntimeView` (per-model-containers §3.2).
+/// One model container's runtime state.
+// Mirror of `runtime::registry::RuntimeView`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -56,19 +56,19 @@ pub struct RuntimeStatus {
     pub in_flight: u32,
     pub started_at_age_seconds: u64,
     pub last_used_age_seconds: u64,
-    /// Non-fatal problems this model's start found (image-generation §3).
+    /// Non-fatal problems this model's start found.
     /// Empty for a clean one, and absent from a frame older than the class.
     pub warnings: Vec<String>,
     /// What an image container reported about its loaded pipeline. `None` for
     /// every other class, and for an image container whose capabilities route
     /// answered anything but a 200.
     pub image_capabilities: Option<ImageCapabilities>,
-    /// What a llama-server container said about itself in `GET /props`
-    /// (llama egress design §4). `None` for every other engine, and when the
-    /// read failed — [`Self::warnings`] then says why.
+    /// What a llama-server container said about itself in `GET /props`.
+    /// `None` for every other engine, and when the
+    /// read failed — `warnings` then says why.
     #[serde(default)]
     pub llama_props: Option<LlamaProps>,
-    /// The rung this container runs (ladder design §6). `None` for a row
+    /// The rung this container runs. `None` for a row
     /// without a ladder, and `#[serde(default)]` so a frame from before this
     /// field existed still decodes.
     #[serde(default)]
@@ -80,15 +80,17 @@ pub struct RuntimeStatus {
     /// Only ladder sends are counted, so this is zero on every other row.
     #[serde(default)]
     pub sends: u32,
-    /// Whom the container runs for (candidate-aliases design §4.4):
-    /// `"background"` when a background candidate alias started it and the
-    /// owner has not claimed it since. `None` — absent from the frame — is
-    /// the owner's, which is every container of an install without
-    /// background traffic.
+    /// Whom the container runs for:
+    /// `"background"` when a background candidate alias started it and
+    /// foreground traffic has not claimed it since. `None` — absent from the
+    /// frame — is foreground: every request that is not a background candidate
+    /// alias's, every warm, boot or operator start, and lmgw's own in-process
+    /// callers. That is every container of an install without background
+    /// traffic.
     #[serde(default)]
     pub owner: Option<String>,
-    /// An owner admission is waiting for room, and background traffic takes
-    /// no new work on this model until it is over (§4.5). Absent = false.
+    /// A foreground admission is waiting for room, and background traffic takes
+    /// no new work on this model until it is over. Absent = false.
     #[serde(default)]
     pub draining_for_owner: bool,
     /// `"cpu"` for an audio container started on the CPU (the per-row CPU
@@ -98,8 +100,8 @@ pub struct RuntimeStatus {
     pub placement: Option<String>,
 }
 
-/// Mirror of `egress::llama_cpp::props::LlamaFacts` (llama egress design
-/// §4.1), read once per start, climb and adoption. Every field is optional,
+/// The facts a llama.cpp server reports about its loaded model, read once per start,
+/// climb and adoption. Every field is optional,
 /// and `None` is unknown — the server did not say — never `false`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -120,8 +122,7 @@ pub struct LlamaProps {
     pub build_info: Option<String>,
 }
 
-/// Mirror of `runtime::registry::climb::RungStatus` (ladder design §6): the
-/// rung a container runs, 1-based (the base is rung 1).
+/// The rung a container runs, 1-based (the base is rung 1).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -132,8 +133,7 @@ pub struct RungStatus {
     pub gguf: String,
 }
 
-/// Mirror of `runtime::registry::climb::ClimbStatus` (ladder design §6): a
-/// climb in progress, and why — "climbing to 3/3 — prompt 41,210 + 8,192 >
+/// A climb in progress, and why — "climbing to 3/3 — prompt 41,210 + 8,192 >
 /// 30,000".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -150,8 +150,7 @@ pub struct ClimbStatus {
     pub seconds: u64,
 }
 
-/// Mirror of `runtime::image::ImageCapabilities` — one sd-server's own answer
-/// about the pipeline it loaded (image-generation §3).
+/// One sd-server's own answer about the pipeline it loaded.
 ///
 /// Every field defaults, because this is the one payload in the class that
 /// comes from a moving container tag: a build that stops reporting a number
@@ -189,7 +188,7 @@ pub struct ImageLimits {
 }
 
 /// Which optional inputs the loaded pipeline admits to accepting. Not an edit
-/// gate — the row's `edit` column is (design §12.8).
+/// gate — the row's `edit` column is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -266,8 +265,8 @@ pub struct RequestStats {
     pub completion_tokens: u64,
 }
 
-/// `GET /api/vram` and the `vram` SSE frame — mirror of `vram::VramView`
-/// (quickdoc §9b). Measured figures and estimated ones are separate fields on
+/// `GET /api/vram` and the `vram` SSE frame — measured figures and
+/// estimated ones are separate fields on
 /// purpose: the UI must be able to say which is which.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -292,7 +291,7 @@ pub struct VramStatus {
     pub resident: Vec<VramResident>,
     pub queue: Vec<VramWaiter>,
     pub note: String,
-    /// The `hold.active` setting (gpu-hold design §6) — hold is a switch on
+    /// The `hold.active` setting — hold is a switch on
     /// the resolve/start paths, orthogonal to `enabled`/`active` above.
     pub hold_active: bool,
     /// `settings.hold.fallback_alias`, for the titlebar pill and the
@@ -303,27 +302,26 @@ pub struct VramStatus {
     /// response. Empty whenever hold is not active.
     pub draining: Vec<String>,
     /// The token ledger of every guarded unified-KV chat model with a request
-    /// in flight or waiting (unified-KV design §3.3) — `vram::VramView`'s
+    /// in flight or waiting — `vram::VramView`'s
     /// `kv_pools`. Absent from an older gateway's frame, hence the default.
     pub kv_pools: Vec<VramKvPool>,
     /// lmgw's own share of the pooled devices' used memory, measured per
-    /// process (candidate-aliases design §4.7, §12.26). `None` when it
+    /// process. `None` when it
     /// cannot be measured — see `external_trigger_reason`.
     pub lmgw_share_bytes: Option<u64>,
     /// Used memory that is not lmgw's — games, the desktop, other apps.
     /// `None` exactly when `lmgw_share_bytes` is.
     pub outside_share_bytes: Option<u64>,
-    /// Whether the outside-VRAM fallback (§4.7) can fire right now.
+    /// Whether the outside-VRAM fallback can fire right now.
     pub external_trigger_active: bool,
     /// Why it cannot, when it cannot (the switch, admission, the hold, no
     /// telemetry, an unattributable lmgw model).
     pub external_trigger_reason: Option<String>,
-    /// The benchmark run holding the card, if one does (benchmark design
-    /// §3.2): no local model is admitted until it ends.
+    /// The benchmark run holding the card, if one does: no local model is admitted until it ends.
     pub benchmark: Option<VramBenchmark>,
 }
 
-/// A benchmark run's GPU lease — mirror of `vram::VramBenchmarkView`.
+/// A benchmark run's GPU lease.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -332,7 +330,7 @@ pub struct VramBenchmark {
     pub model_id: String,
 }
 
-/// One guarded model's shared KV pool — mirror of `gate::pool::KvPoolView`.
+/// One guarded model's shared KV pool.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -351,8 +349,7 @@ pub struct VramKvPool {
     pub queue: Vec<VramKvPoolWaiter>,
 }
 
-/// One request waiting for room in a pool — mirror of
-/// `gate::pool::KvPoolWaiterView`.
+/// One request waiting for room in a pool.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -382,20 +379,19 @@ pub struct VramResident {
     pub container: String,
     pub model: String,
     /// `starting | ready` as the runtime registry holds it, or `reserved` for
-    /// a start the scheduler has admitted whose container is not up yet
-    /// (per-model-containers §3.2/§4).
+    /// a start the scheduler has admitted whose container is not up yet.
     pub state: String,
     pub estimated_bytes: u64,
     pub in_flight: usize,
     pub idle_seconds: Option<u64>,
     /// What one generation of a resident image pipeline has been measured to
-    /// need *above* its idle residency, and what admission keeps free for it
-    /// (image-generation §9). `None` for every other class, and for an image
+    /// need *above* its idle residency, and what admission keeps free for it. `None` for every
+    /// other class, and for an image
     /// model that has not generated anything yet — `note` says which.
     pub peak_extra_bytes: Option<u64>,
     /// What a `ready` audio container will still load on its first request,
-    /// kept free by admission on top of the measured use (realtime design
-    /// §9.4): its expected residency less what it was read holding at rest,
+    /// kept free by admission on top of the measured use: its expected residency less what it was
+    /// read holding at rest,
     /// or all of it where that could not be read. `None` once loaded, and for
     /// every other class.
     pub pending_bytes: Option<u64>,
@@ -415,7 +411,10 @@ pub struct VramWaiter {
     pub stage: String,
 }
 
-/// Mirror of `mcp::McpStatusView`.
+/// One registered MCP server's connection state: `status` is `connecting` |
+/// `ready` | `stopped` | `error`, `tool_count` the tools it offers, and
+/// `detail` says why on an error, or that a stopped server was idle-reaped
+/// and reconnects on next use.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct McpStatus {
@@ -438,7 +437,7 @@ pub struct ObjectCounts {
     pub api_keys: u64,
 }
 
-/// Mirror of `telemetry::StatsView` — the `stats` SSE frame.
+/// Aggregate request statistics — the `stats` SSE frame.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StatsView {
@@ -464,8 +463,9 @@ pub struct LogsResponse {
     pub logs: Vec<RequestRow>,
 }
 
-/// Mirror of `telemetry::RequestSummary` — the `request` SSE frame and the
-/// row shape of `GET /api/logs` (log rows additionally carry `mcp_tool`).
+/// One request's summary — the `request` SSE frame and the
+/// row shape of `GET /api/logs` (log rows additionally carry `mcp_tool` and
+/// `pricing`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RequestRow {
@@ -521,8 +521,7 @@ pub struct RequestRow {
     #[serde(default)]
     pub key_id: Option<i64>,
     /// `max_tokens` lmgw lowered a client-set value to, on a ladder rung or a
-    /// guarded unified-KV pool (ladder design §3.2, unified-KV design §3.3
-    /// step 1). `None` = not clamped — either the row is unguarded, or the
+    /// guarded unified-KV pool. `None` = not clamped — either the row is unguarded, or the
     /// client's value already fit.
     #[serde(default)]
     pub max_tokens_clamped: Option<i64>,
@@ -534,7 +533,7 @@ pub struct RequestRow {
     #[serde(default)]
     pub fallback_reason: Option<String>,
     /// The rung a ladder row answered from — or, for a refusal, the rung it
-    /// was judged on — 1-based (ladder design §6). `None` for a row without
+    /// was judged on — 1-based. `None` for a row without
     /// a ladder, and for a request its fallback answered.
     #[serde(default)]
     pub rung: Option<i64>,
@@ -544,4 +543,55 @@ pub struct RequestRow {
     /// "; ". `None` = nothing was degraded.
     #[serde(default)]
     pub degraded: Option<String>,
+    /// What the request processed besides tokens, each only when it was
+    /// measured or the provider reported it: input audio in milliseconds,
+    /// input characters as sent, generated images. `None` = not measured,
+    /// which is not the same as zero — render a dash.
+    #[serde(default)]
+    pub audio_in_ms: Option<i64>,
+    #[serde(default)]
+    pub chars_in: Option<i64>,
+    #[serde(default)]
+    pub images_out: Option<i64>,
+    // Billable-units design §3.4, §8.4.
+    /// How the row was priced: the rates it recorded when it was written,
+    /// so each priced part can be shown as quantity × rate even after the
+    /// price has changed. On `GET /api/logs` rows only; absent on SSE
+    /// frames, which carry the cost and the quantities alone.
+    #[serde(default)]
+    pub pricing: Option<RowPricing>,
+}
+
+/// The rates a request row was priced with and its cost's parts, each as
+/// the row snapshotted it. `None` = that part or rate did not apply, or
+/// (for the costs) was unknown — never 0.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RowPricing {
+    /// The gateway's configured currency, which every amount here is in.
+    pub currency: String,
+    /// `catalog`, `manual`, `free_local` or `unknown`.
+    pub source: Option<String>,
+    /// Whether this row is counted in the unpriced remainder the usage
+    /// totals state beside their cost (`cost_unknown_requests`): its cost is
+    /// unknown, it is no tool call, and it was answered or spent something
+    /// (tokens or a measured quantity). `false` for a priced row, a tool
+    /// call, and a refusal or failure that spent nothing: nothing billed is
+    /// missing from a total.
+    pub in_remainder: bool,
+    /// The token rates, per 1M tokens.
+    pub price_in: Option<f64>,
+    pub price_out: Option<f64>,
+    /// The cost's token parts and its part in every other unit, in currency
+    /// micro-units.
+    pub cost_in_micro: Option<i64>,
+    pub cost_out_micro: Option<i64>,
+    pub cost_units_micro: Option<i64>,
+    /// The other units' rates: per minute of input audio, per 1M input
+    /// characters, per generated image, per answered request.
+    pub price_per_audio_minute: Option<f64>,
+    pub price_per_mchar: Option<f64>,
+    pub price_per_image: Option<f64>,
+    pub price_per_request: Option<f64>,
 }

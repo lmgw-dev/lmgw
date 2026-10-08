@@ -71,7 +71,7 @@
  },
  {
   "click": "dialog[open] input.mono",
-  "nth": 3
+  "nth": 5
  },
  {
   "type": "40"

@@ -40,6 +40,19 @@ pub mod builds;
 /// `CandidateAliasView` (candidate-aliases design §4.1) — its own module
 /// because the derived half alone is a dozen-plus fields.
 pub mod candidate_alias;
+// The client-apps design record, §4.3.
+/// The Chat API's thread and folder shapes: the list rows, an open thread,
+/// a folder, what a folder create takes — the types the gateway serializes
+/// and the API document is generated from.
+pub mod chat;
+// The client-apps design record, §2.
+/// The Chat change feed's events and cursor: what `GET /chat/api/feed`
+/// sends, a namespace of its own like [`chat_voice`].
+pub mod chat_feed;
+// The client-apps design record, §3.
+/// Ongoing-conversation folders: a folder's `ongoing` field and
+/// `POST /chat/api/folders/{id}/current`.
+pub mod chat_folders;
 /// The Chat's voice rules (chat-voice design §2): turn-detection names and
 /// labels, the language hint's shape — checked by the gateway and said
 /// before Save by the dashboard.
@@ -83,7 +96,13 @@ mod wiring;
 pub use wiring::*;
 mod docs;
 pub use docs::*;
+mod billable_units;
+pub use billable_units::*;
 mod usage;
 pub use usage::*;
+mod chat_changed;
+pub use chat_changed::*;
+mod admin_level;
+pub use admin_level::*;
 mod agents;
 pub use agents::*;

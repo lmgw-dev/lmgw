@@ -5,8 +5,8 @@
 //! 1. Does every registered route appear in `server::CAPABILITY_TABLE`, and
 //!    does every row of that table answer a real route? §3.2 says "there is no
 //!    route that is unlisted", and a table nobody checks is a comment.
-//! 2. For each of the five principal kinds, does every row answer the status
-//!    class its capability implies?
+//! 2. For each of the six principal kinds (a paired device among them), does
+//!    every row answer the status class its capability implies?
 //!
 //! Direction 1 is answered by reading the crate's own source: axum's `Router`
 //! keeps no public list of what was registered, so the registrations are
@@ -206,8 +206,9 @@ fn is_ident(b: u8) -> bool {
 // 2. Every row answers what the table implies
 // ---------------------------------------------------------------------------
 
-/// The five principals of §3.1, as a request sees them — plus the **sixth
-/// caller**, which is the owner again by the other door.
+/// The five principals of §3.1 and a paired device (client-apps §1.2), as a
+/// request sees them — plus the **seventh caller**, which is the owner again
+/// by the other door.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Who {
     /// No credential, **Require API key** off — the default install.
@@ -216,6 +217,9 @@ enum Who {
     AnonClosed,
     Client,
     Agent,
+    /// A paired client app (client-apps design §1.2): a client key that also
+    /// holds `Chat`.
+    Device,
     Owner,
     /// The same owner key in the **session cookie**: what the dashboard is,
     /// and the only credential that is additionally held to §3.6. Every route
@@ -251,25 +255,32 @@ fn expected(cap: Cap, who: Who) -> Expect {
             AnonClosed => Unauthorized,
             _ => Admitted,
         },
+        // The Chat API (client-apps design §1.2): the owner and a paired
+        // device, and nobody else — an agent included (R16).
+        Cap::Chat => match who {
+            AnonOpen | AnonClosed => Unauthorized,
+            Client | Agent => Forbidden,
+            Device | Owner | OwnerCookie => Admitted,
+        },
         Cap::Ledger => match who {
             AnonOpen | AnonClosed => Unauthorized,
             // `Ledger` is deliberately agent-only (§3.2), so an owner is
             // refused by the *layer* exactly as a client is: a run is written
             // by the agent that owns it.
-            Client | Owner | OwnerCookie => Forbidden,
+            Client | Device | Owner | OwnerCookie => Forbidden,
             // The layer admits an agent; the handler is what says whose run
             // it is (`run_not_owned`), and a probe id nothing owns is that.
             Agent => NotUnauthorized,
         },
         Cap::AgentSelf => match who {
             AnonOpen | AnonClosed => Unauthorized,
-            Client => Forbidden,
+            Client | Device => Forbidden,
             Agent => NotUnauthorized,
             Owner | OwnerCookie => Admitted,
         },
         Cap::Admin => match who {
             AnonOpen | AnonClosed => Unauthorized,
-            Client | Agent => Forbidden,
+            Client | Agent | Device => Forbidden,
             Owner | OwnerCookie => Admitted,
         },
     }
@@ -292,6 +303,7 @@ struct Walk {
     gw: Gw,
     client: String,
     agent: String,
+    device: String,
     /// One HTTP client for the whole walk. Building one loads the system's
     /// trust store, and a client per request made that the bulk of this
     /// test's run time; no credential lives in it (every request sets its
@@ -312,6 +324,8 @@ async fn walk_gateway(auth_enabled: bool) -> Walk {
     let agent = "lmgw-agent-route-walk".to_string();
     insert_key(&state, "walk-client", &client, "key", None).await;
     insert_key(&state, "agent:walker", &agent, "agent", Some("walker")).await;
+    let device = "lmgw-device-route-walk".to_string();
+    insert_key(&state, "device:walker", &device, "device", None).await;
     state.reload_snapshot().await.unwrap();
 
     // No redirect following: `/ui/*` answers with one, and what is being
@@ -325,6 +339,7 @@ async fn walk_gateway(auth_enabled: bool) -> Walk {
         gw: common::serve(state).await,
         client,
         agent,
+        device,
         http,
     }
 }
@@ -353,6 +368,7 @@ impl Walk {
             Who::AnonOpen | Who::AnonClosed | Who::OwnerCookie => None,
             Who::Client => Some(&self.client),
             Who::Agent => Some(&self.agent),
+            Who::Device => Some(&self.device),
             Who::Owner => Some(&self.gw.key),
         }
     }
@@ -428,6 +444,7 @@ async fn every_table_row_answers_the_status_class_its_capability_implies() {
             Who::AnonOpen,
             Who::Client,
             Who::Agent,
+            Who::Device,
             Who::Owner,
             Who::OwnerCookie,
         ] {

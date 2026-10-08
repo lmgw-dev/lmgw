@@ -15,7 +15,20 @@ large-error-threshold = 224
 # new live tracks. Holding one and stopping its tracks leaves the microphone
 # open (chat-voice WP6's media probe caught exactly that). A handle is copied
 # with `Clone::clone(&stream)`; a real JS clone needs an `#[allow]` and a reason.
+#
+# A transaction on the gateway's SQLite files that reads before it writes
+# fails at once with "database is locked" when another connection committed
+# in between (`SQLITE_BUSY_SNAPSHOT`; the busy timeout does not cover it).
+# Every write transaction begins with `store::begin_write` (lmgw-core) or
+# `quickdoc_core::store::begin_write`, which take the write lock at BEGIN
+# (`BEGIN IMMEDIATE`). The calls below begin a deferred transaction; a
+# transaction that only reads, for one consistent snapshot, may `#[allow]`
+# one with its reason.
 disallowed-methods = [
   { path = "web_sys::MediaStream::clone", reason = "the JS clone: new live tracks that must be stopped too; copy the handle with Clone::clone(&stream)" },
   { path = "web_sys::MediaStreamTrack::clone", reason = "the JS clone: a new live track that must be stopped too; copy the handle with Clone::clone(&track)" },
+  { path = "sqlx::Pool::begin", reason = "a deferred transaction: a write transaction begins with store::begin_write (BEGIN IMMEDIATE); a read-only snapshot may #[allow] it with its reason" },
+  { path = "sqlx::Pool::try_begin", reason = "a deferred transaction: a write transaction begins with store::begin_write (BEGIN IMMEDIATE); a read-only snapshot may #[allow] it with its reason" },
+  { path = "sqlx::Connection::begin", reason = "a deferred transaction: a write transaction begins with store::begin_write (BEGIN IMMEDIATE); a read-only snapshot may #[allow] it with its reason" },
+  { path = "sqlx::Acquire::begin", reason = "a deferred transaction: a write transaction begins with store::begin_write (BEGIN IMMEDIATE); a read-only snapshot may #[allow] it with its reason" },
 ]

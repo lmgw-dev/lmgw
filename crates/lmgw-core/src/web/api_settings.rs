@@ -19,6 +19,9 @@ use crate::principal::Refusal;
 use crate::state::SharedState;
 use crate::store;
 
+/// The device half of the credential ops (client-apps design §1.4).
+mod device_keys;
+
 /// The chat/aux *class* settings (per-model-containers §6). Four fields left
 /// with router mode — the container name is derived (§3.3), the port is
 /// dynamic (§3.5), `models_max` has no router left to cap, and auto-start is
@@ -151,7 +154,7 @@ pub async fn settings_full(State(st): State<SharedState>) -> Response {
         "global_budget_micro": s.global_budget_micro,
         "global_budget_period": s.global_budget_period.as_str(),
         "max_body_mb": s.max_body_mb,
-        "self_admin": s.self_admin.as_str(),
+        "self_admin": lmgw_api_types::AdminLevel::from(s.self_admin),
         "sampling_alias": s.sampling_alias,
         "responses_max_tool_calls": s.responses_max_tool_calls,
         "responses_timeout_seconds": s.responses_timeout_seconds,
@@ -187,6 +190,11 @@ pub async fn settings_full(State(st): State<SharedState>) -> Response {
     });
     body["chat_archive_days"] = json!(s.chat_archive_days);
     body["chat_purge_days"] = json!(s.chat_purge_days);
+    // The Chat change feed's limits (client-apps design §2.3).
+    body["chat_feed_retention_days"] = json!(s.chat_feed_retention_days);
+    body["chat_feed_keepalive_s"] = json!(s.chat_feed_keepalive_s);
+    body["chat_feed_page_size"] = json!(s.chat_feed_page_size);
+    body["chat_feed_live_buffer"] = json!(s.chat_feed_live_buffer);
     // The default new Chat threads start with, as in force now, and the
     // built-in one beside it: the page's Reset puts that back in the box.
     body["chat_pdf_mode"] = json!(s.chat_pdf_mode);
@@ -384,13 +392,12 @@ pub struct SettingsFullPatch {
     retention_max_rows: Option<i64>,
     jobs_retention_days: Option<i64>,
     jobs_max_rows: Option<i64>,
-    /// Keep hourly usage rollups this many months (usage-analytics §3.3).
-    /// `0` = forever.
+    /// Keep hourly usage rollups this many months. `0` = forever.
     usage_retention_months: Option<i64>,
     /// The label every amount on the Usage page is shown under. One currency,
-    /// no conversion (§9).
+    /// no conversion.
     currency: Option<String>,
-    /// Alias whose price answers the local/cloud counterfactual (§2.5).
+    /// Alias whose price answers the local/cloud counterfactual.
     /// `""` clears it back to "no reference configured".
     local_reference_alias: Option<String>,
     /// Spend ceiling across every key, in currency micro-units. `0` = none.
@@ -398,11 +405,25 @@ pub struct SettingsFullPatch {
     global_budget_period: Option<String>,
     max_body_mb: Option<u32>,
     /// Archive an idle Chat thread this many days after its last activity.
-    /// `0` disables auto-archive (chat-archive-pin-attachments design §1).
+    /// `0` disables auto-archive. A folder's own `archive_days` overrides it
+    /// for the threads in that folder, and an ongoing conversation's current
+    /// thread is never archived.
     chat_archive_days: Option<i64>,
     /// Delete an archived, unpinned Chat thread this many days after it was
-    /// archived. `0` keeps archived threads forever (design §1).
+    /// archived. `0` keeps archived threads forever. A folder's own
+    /// `purge_days` overrides it for the threads in that folder.
     chat_purge_days: Option<i64>,
+    /// Keep the Chat change feed's records this many days; `0` keeps every
+    /// record. A client away longer resumes with a `resync`.
+    chat_feed_retention_days: Option<i64>,
+    /// Seconds between the Chat feed's keep-alive comments, at least 1.
+    chat_feed_keepalive_s: Option<i64>,
+    /// Records the Chat feed reads per query while a client catches up,
+    /// from 1 to 10000.
+    chat_feed_page_size: Option<i64>,
+    /// Live events the Chat feed holds for a slow client before it sends it
+    /// a fresh `state` instead, from 1 to 65536.
+    chat_feed_live_buffer: Option<i64>,
     /// The system prompt new Chat threads start with. The built-in text
     /// returns to the built-in default (and follows it from then on); `""`
     /// starts new threads with no system prompt.
@@ -453,20 +474,18 @@ pub struct SettingsFullPatch {
     docs_search: Option<DocsSearchPatch>,
     docs_rerank_model: Option<String>,
     vram: Option<VramSettingsPatch>,
-    /// GPU-hold global fallback (gpu-hold design §3.1). `active` is
-    /// deliberately not reachable through this patch — see
-    /// [`HoldSettingsPatch`].
+    /// The GPU hold's global fallback. `active` is deliberately not reachable
+    /// through this patch: the hold is switched only through the `hold_set`
+    /// operation.
     hold: Option<HoldSettingsPatch>,
-    /// Podman container name prefix for the per-model container runtime
-    /// (§3.3).
+    /// Podman container name prefix for the per-model container runtime.
     container_prefix: Option<String>,
-    /// The DNS suffix a service agent's UI is served under (origins §4.1):
+    /// The DNS suffix a service agent's UI is served under:
     /// `http://<id>.<agent_origin_suffix>:<bind port>/`. Refused when it would
     /// shadow a name the gateway itself answers on, and a **change** stops
-    /// every running app container (§4.10).
+    /// every running app container.
     agent_origin_suffix: Option<String>,
-    /// The stock image a manifest's `script` step runs in (container-runtime
-    /// §4.2). Empty restores the shipped default rather than leaving a script
+    /// The stock image a manifest's `script` step runs in. Empty restores the shipped default rather than leaving a script
     /// step with no image to run in.
     agent_script_image: Option<String>,
     update_check_enabled: Option<bool>,
@@ -474,29 +493,28 @@ pub struct SettingsFullPatch {
     clear_update_token: Option<bool>,
     hf_token: Option<String>,
     clear_hf_token: Option<bool>,
-    /// Where container builds keep their files (container-builds §5). `""`
+    /// Where container builds keep their files. `""`
     /// clears it back to the default; otherwise an absolute path.
     builds_dir: Option<String>,
-    /// Forge tokens to set, by host (container-builds §7). Secrets like
+    /// Forge tokens to set, by host. Secrets like
     /// `hf_token`: a non-empty value replaces that host's token, an empty one
     /// keeps it, and a host not named is untouched.
     #[schemars(transform = lmgw_api_types::openapi_ext::secret)]
     forge_tokens: Option<std::collections::BTreeMap<String, String>>,
     /// Hosts whose forge token to erase.
     clear_forge_tokens: Option<Vec<String>>,
-    /// Build update check interval in hours; `0` = off (§8), at most
-    /// [`MAX_CHECK_HOURS`](crate::backends::updates::MAX_CHECK_HOURS).
+    /// Build update check interval in hours; `0` = off, at most 8760.
     build_update_check_hours: Option<u32>,
     router: Option<RouterSettingsPatch>,
     aux_router: Option<RouterSettingsPatch>,
     audio: Option<AudioSettingsPatch>,
     image: Option<ImageSettingsPatch>,
-    /// `GET /v1/realtime`'s settings (realtime design §12) — the same patch
+    /// `GET /v1/realtime`'s settings — the same patch
     /// `settings_set` takes, with the same checks.
     realtime: Option<crate::ops::RealtimeSettingsPatch>,
 }
 
-/// VRAM admission control (§9b). Every field is optional so one knob moves
+/// VRAM admission control. Every field is optional so one knob moves
 /// without restating the rest.
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -507,8 +525,7 @@ pub struct VramSettingsPatch {
     queue_timeout_seconds: Option<u64>,
     load_timeout_seconds: Option<u64>,
     unload_timeout_seconds: Option<u64>,
-    /// Fall back when VRAM outside lmgw's control is short (candidate-aliases
-    /// design §4.7).
+    /// Fall back when VRAM outside lmgw's control is short.
     fallback_on_external: Option<bool>,
 }
 
@@ -551,12 +568,12 @@ impl VramSettingsPatch {
     }
 }
 
-/// GPU hold's global fallback (gpu-hold design §3.1). Deliberately carries no
-/// `active` field: engaging the hold runs the sweep (§5), a side effect this
-/// generic settings patch must not grow, so the switch itself is flipped only
-/// through the `hold_set` op. A patch that names `active` is rejected by
-/// `deny_unknown_fields` here, same as any other field this route does not
-/// carry.
+/// The GPU hold's global fallback. Carries no `active` field: engaging the
+/// hold runs the GPU sweep, a side effect a generic settings patch must not
+/// have, so the switch itself is flipped only through the `hold_set`
+/// operation. A patch that names `active` is rejected, like any other field
+/// this route does not carry.
+// Design: gpu-hold §3.1, sweep §5. The rejection is `deny_unknown_fields`.
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct HoldSettingsPatch {
@@ -565,8 +582,8 @@ pub struct HoldSettingsPatch {
     fallback_alias: Option<String>,
 }
 
-/// The §6 stage defaults. Every field is optional so the Docs tab can move one
-/// knob without restating the rest.
+/// The Docs search stage defaults. Every field is optional so the Docs tab can
+/// move one knob without restating the rest.
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DocsSearchPatch {
@@ -700,7 +717,7 @@ fn secret(current: &mut String, supplied: Option<String>, clear: Option<bool>) {
 /// renders — so nothing else about this surface moved.
 pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result<Value, Refusal> {
     // Held across the whole read-modify-write: see `AppState::settings_write`.
-    let _guard = st.settings_write.lock().await;
+    let guard = st.settings_write.lock().await;
     let mut s = st.snapshot().settings.clone();
     let mut notes: Vec<String> = Vec::new();
 
@@ -770,6 +787,15 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.chat_purge_days {
         s.chat_purge_days = v.max(0);
     }
+    crate::ops::apply_chat_feed(
+        &mut s,
+        crate::ops::ChatFeedPatch {
+            chat_feed_retention_days: p.chat_feed_retention_days,
+            chat_feed_keepalive_s: p.chat_feed_keepalive_s,
+            chat_feed_page_size: p.chat_feed_page_size,
+            chat_feed_live_buffer: p.chat_feed_live_buffer,
+        },
+    )?;
     if let Some(v) = p.chat_system_prompt {
         s.set_default_chat_prompt(&v);
     }
@@ -1096,7 +1122,21 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     store::save_settings(&st.db, &s)
         .await
         .map_err(|e| e.to_string())?;
-    st.reload_snapshot().await.map_err(|e| e.to_string())?;
+    // Saved is saved (review G-6): a reload that fails is said beside it,
+    // and these settings apply all the same.
+    let published = st.settings_saved(&s).await;
+    // Published under the lock; the MCP reconcile and the agents' resync
+    // and stops below run after it (`settings_saved`). None of them writes
+    // the settings blob. The reconcile reads the snapshot of then
+    // (`reconcile_mcp`).
+    drop(guard);
+    st.reconcile_mcp().await;
+    if let Some(e) = published.reload_failed {
+        notes.push(format!(
+            "the rest of the configuration could not be reloaded ({e}); these settings apply \
+             now, and the rest at the next reload"
+        ));
+    }
     if bind_addr_moved {
         // An `agent:<id>` MCP row's url is built from `bind_addr` when the
         // *manifest* is written (container-runtime §3.3), so a bind address
@@ -1332,6 +1372,22 @@ pub(super) async fn key_op(
                 .and_then(Value::as_str)
                 .unwrap_or("client")
                 .to_string();
+            // A device is created with its whole policy and its pairing link
+            // (client-apps design §1.4), not with the scope alone.
+            if kind.trim() == "device" {
+                return device_keys::create(st, name.trim(), &args).await;
+            }
+            // The admin-tools level is a paired device's (client-apps
+            // design L3/L5): asked of any other kind, said, not dropped.
+            if args
+                .get("self_admin")
+                .is_some_and(|v| !v.is_null() && v.as_str().map(str::trim) != Some("off"))
+            {
+                return Err(bad_request(
+                    "self_admin is a paired device's level (kind 'device'); an owner key \
+                     uses lmgw's admin tools as the owner, and a client key never",
+                ));
+            }
             let scope = KeyPatch {
                 scope_mode: str_arg(&args, "scope_mode"),
                 scope_patterns: str_arg(&args, "scope_patterns"),
@@ -1347,7 +1403,15 @@ pub(super) async fn key_op(
         }
         "key_delete" => key_delete(st, id(&args)?).await,
         "key_reveal" => key_reveal(st, id(&args)?).await,
-        "key_rotate" => key_rotate(st, id(&args)?).await,
+        "key_rotate" => {
+            let id = id(&args)?;
+            // A device rotates by re-pairing: a new path, because its row
+            // keeps no plaintext to replace (L1).
+            match key_by_id(st, id)? {
+                key if key.kind == ApiKeyKind::Device => device_keys::rotate(st, &key, &args).await,
+                _ => key_rotate(st, id).await,
+            }
+        }
         other => Err(bad_request(format!("unknown op '{other}'"))),
     }
 }
@@ -1382,7 +1446,7 @@ pub async fn key_create(
         "owner" => true,
         other => {
             return Err(bad_request(format!(
-                "unknown key kind '{other}' — 'client' or 'owner'"
+                "unknown key kind '{other}' — 'client', 'owner' or 'device'"
             )))
         }
     };
@@ -1489,9 +1553,14 @@ pub async fn key_delete(st: &SharedState, id: i64) -> Result<Value, Refusal> {
     store::delete_api_key(&st.db, id)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    st.reload_snapshot()
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
+    // The row is gone: what it opened ends now, whether or not the reload
+    // succeeds (review W2-6).
+    let reloaded = st.reload_snapshot().await;
+    if reloaded.is_err() {
+        st.key_written(key.id, crate::state::KeyWritten::Deleted);
+    }
+    device_keys::deleted(st, &key);
+    reloaded.map_err(|e| bad_request(e.to_string()))?;
     Ok(json!({ "ok": true, "message": "key revoked" }))
 }
 
@@ -1525,6 +1594,7 @@ fn owner_plaintext(key: &ApiKey) -> Result<String, Refusal> {
              create a new one",
             key.name
         ))),
+        ApiKeyKind::Device => Err(device_keys::reveal_refusal(key)),
     }
 }
 
@@ -1557,14 +1627,36 @@ pub async fn key_rotate(st: &SharedState, id: i64) -> Result<Value, Refusal> {
     // plaintext to replace, only a row to delete and re-create.
     owner_plaintext(&key)?;
     let plaintext = token::mint_owner();
-    token::set_owner_key(st, &key.name, &plaintext, key.enabled)
+    token::write_owner_key(st, &key.name, &plaintext, key.enabled)
         .await
         .map_err(bad_request)?;
-    let message = if key.name == token::OWNER_DASHBOARD {
+    // What the old value opened ends now, as a device's does (§1.6) —
+    // whether or not the reload succeeds (review W2-6, W3-7): the new value
+    // is written, and the old one must not keep working.
+    let reloaded = st.reload_snapshot().await;
+    if reloaded.is_err() {
+        st.key_written(
+            key.id,
+            crate::state::KeyWritten::Rehashed {
+                hash: crate::config::hash_api_key(&plaintext),
+                plain: Some(plaintext.clone()),
+            },
+        );
+    }
+    crate::devices::revoke(st, key.id, crate::devices::RevokeReason::Rotated);
+    let mut message = if key.name == token::OWNER_DASHBOARD {
         "the dashboard key is rotated — every other open tab lands on the login view".to_string()
     } else {
         format!("'{}' is rotated — the old value no longer works", key.name)
     };
+    // The new value goes back either way: it is written, and a failed
+    // reload is said beside it.
+    if let Err(e) = reloaded {
+        message.push_str(&format!(
+            " (the key is written, but the configuration could not be reloaded: {e} — it takes \
+             effect at the next reload)"
+        ));
+    }
     Ok(json!({
         "ok": true,
         "id": key.id,

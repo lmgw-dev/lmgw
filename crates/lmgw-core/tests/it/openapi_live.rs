@@ -455,7 +455,7 @@ fn parse_sse_frames(buf: &str) -> Vec<SseFrame> {
 
 #[tokio::test]
 async fn events_initial_frames_validate() {
-    const INITIAL: &[&str] = &["stats", "jobs", "runtime", "vram", "mcp", "updates"];
+    const INITIAL: &[&str] = &["stats", "jobs", "runtime", "vram", "mcp", "updates", "chat"];
 
     let fx = fixtures().await;
     let doc = admin_doc();

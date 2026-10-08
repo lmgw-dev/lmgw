@@ -14,9 +14,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::chat::{err_json, thread_json};
+use super::chat_caller::Caller;
 use super::chat_extract::{ChatJson, ChatOptJson, ChatPath};
 use super::chat_knowledge;
 use super::chat_repo::{ChatRepo, KeepOutcome};
+use super::chat_steer::Change;
 use super::chat_turn::{self, TurnMode};
 use super::chat_voice::ReadAloud;
 use crate::state::SharedState;
@@ -29,19 +31,25 @@ use crate::store::{ChatMessageRow, ChatMessageUpdate, ChatThread, MessageVoice};
 /// another Keep of the same thread runs (`409 keep_in_progress` — it is
 /// stored once), and so is a Keep while a realtime session is bound to it
 /// (`409 voice_session_active`, chat-voice design §8.1); an unknown
-/// temporary one is a 404.
+/// temporary one is a 404 — and so, for a device, is a stored thread it
+/// cannot reach (client-apps design L3).
 pub async fn persist_thread(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
 ) -> Response {
-    if !ChatRepo::of(id).is_temp() {
+    let repo = ChatRepo::of(id);
+    if caller.is_device() && !matches!(repo.thread_as(&state, &caller, id).await, Ok(Some(_))) {
+        return thread_not_found();
+    }
+    if !repo.is_temp() {
         return err_json(
             StatusCode::CONFLICT,
             "not_temporary",
             "this chat is already saved",
         );
     }
-    let new_id = match ChatRepo::keep(&state, id).await {
+    let new_id = match ChatRepo::keep(&state, id, &caller).await {
         Ok(KeepOutcome::Kept(new_id)) => new_id,
         Ok(KeepOutcome::Busy) => {
             return err_json(
@@ -99,15 +107,31 @@ fn internal(e: impl std::fmt::Display) -> Response {
     err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())
 }
 
+/// The thread in the path as `caller` may reach it (client-apps design L3),
+/// or the 404.
+async fn reachable_thread(
+    state: &SharedState,
+    caller: &Caller,
+    repo: ChatRepo,
+    id: i64,
+) -> Result<ChatThread, Response> {
+    match repo.thread_as(state, caller, id).await {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => Err(thread_not_found()),
+        Err(e) => Err(internal(e)),
+    }
+}
+
 /// The thread in the path and its message `mid` — the message must belong
 /// to that thread, or it is a 404 like an unknown one.
 async fn thread_and_message(
     state: &SharedState,
+    caller: &Caller,
     repo: ChatRepo,
     id: i64,
     mid: i64,
 ) -> Result<(ChatThread, ChatMessageRow), Response> {
-    let thread = match repo.thread(state, id).await {
+    let thread = match repo.thread_as(state, caller, id).await {
         Ok(Some(t)) => t,
         Ok(None) => return Err(thread_not_found()),
         Err(e) => return Err(internal(e)),
@@ -138,9 +162,23 @@ async fn message_json(state: &SharedState, repo: ChatRepo, m: &ChatMessageRow) -
 /// message (its attachments go with it). Nothing after it moves.
 pub async fn delete_message(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
 ) -> Response {
-    match ChatRepo::of(id).delete_message(&state, id, mid).await {
+    let repo = ChatRepo::of(id);
+    let thread = match reachable_thread(&state, &caller, repo, id).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    // What drives the owner's later turns in a thread with lmgw's admin
+    // tools is not a read-only device's to change (L5's note, 2026-10-07).
+    if let Some(refused) =
+        super::chat_steer::refusal(&state, &caller, thread.reach_level(), Change::Messages(id))
+            .await
+    {
+        return refused;
+    }
+    match repo.delete_message(&state, id, mid).await {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
         Ok(false) => message_not_found(),
         Err(e) => internal(e),
@@ -190,14 +228,21 @@ pub struct TurnReq {
 ///   dropped request never leaves half of it (review R1 finding 9).
 pub async fn edit_message(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
     ChatJson(req): ChatJson<EditReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
-    let (thread, msg) = match thread_and_message(&state, repo, id, mid).await {
+    let (thread, msg) = match thread_and_message(&state, &caller, repo, id, mid).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    if let Some(refused) =
+        super::chat_steer::refusal(&state, &caller, thread.reach_level(), Change::Messages(id))
+            .await
+    {
+        return refused;
+    }
     match msg.role.as_str() {
         "assistant" => {
             // A spoken reply stays spoken, but what was not heard and the
@@ -238,6 +283,14 @@ pub async fn edit_message(
                     );
                 }
             }
+            // The device's reach before the bases' existence (review W3-5).
+            if let Some(ids) = &req.kb_refs {
+                if let Err(refused) =
+                    super::chat_tool_write::check_kbs(&state, &caller, ids, &msg.kb_refs).await
+                {
+                    return refused;
+                }
+            }
             let kb_refs = match &req.kb_refs {
                 Some(ids) => match chat_knowledge::check_kb_ids(&state, ids, &msg.kb_refs).await {
                     Ok(ids) => ids,
@@ -247,14 +300,19 @@ pub async fn edit_message(
             };
             let caps = super::chat_attach_gate::thread_caps(&state, repo, &thread).await;
             match repo
-                .rewrite_user_message(&state, id, mid, &content, &kb_refs)
+                .rewrite_user_message(&state, id, mid, &content, &kb_refs, &caller)
                 .await
             {
                 Ok(true) => {}
                 Ok(false) => return message_not_found(),
+                // Out of a device's reach since the route resolved it
+                // (review W4-3).
+                Err(crate::error::GatewayError::NotFound(_)) => {
+                    return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found")
+                }
                 Err(e) => return internal(e),
             }
-            answer(&state, repo, &thread, Some(mid), caps, req.speak).await
+            answer(&state, &caller, repo, &thread, Some(mid), caps, req.speak).await
         }
         other => err_json(
             StatusCode::BAD_REQUEST,
@@ -277,14 +335,21 @@ pub async fn edit_message(
 /// The body is optional (`{speak}`, [`TurnReq`]); an empty one is accepted.
 pub async fn regenerate_message(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
     ChatOptJson(req): ChatOptJson<TurnReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
-    let (thread, msg) = match thread_and_message(&state, repo, id, mid).await {
+    let (thread, msg) = match thread_and_message(&state, &caller, repo, id, mid).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    if let Some(refused) =
+        super::chat_steer::refusal(&state, &caller, thread.reach_level(), Change::Messages(id))
+            .await
+    {
+        return refused;
+    }
     match msg.role.as_str() {
         "assistant" => {
             let history = match repo.messages(&state, id).await {
@@ -307,14 +372,14 @@ pub async fn regenerate_message(
             if let Err(e) = repo.truncate(&state, id, mid, true).await {
                 return internal(e);
             }
-            answer(&state, repo, &thread, None, caps, req.speak).await
+            answer(&state, &caller, repo, &thread, None, caps, req.speak).await
         }
         "user" => {
             let caps = super::chat_attach_gate::thread_caps(&state, repo, &thread).await;
             if let Err(e) = repo.truncate(&state, id, mid, false).await {
                 return internal(e);
             }
-            answer(&state, repo, &thread, Some(mid), caps, req.speak).await
+            answer(&state, &caller, repo, &thread, Some(mid), caps, req.speak).await
         }
         other => err_json(
             StatusCode::BAD_REQUEST,
@@ -328,6 +393,7 @@ pub async fn regenerate_message(
 /// before it was rewritten; `speak` reads it aloud as it streams.
 async fn answer(
     state: &SharedState,
+    caller: &Caller,
     repo: ChatRepo,
     thread: &ChatThread,
     user_message_id: Option<i64>,
@@ -336,7 +402,7 @@ async fn answer(
 ) -> Response {
     let mode = TurnMode::Fresh { user_message_id };
     let speak = speak.then(ReadAloud::default);
-    chat_turn::start_turn(state, repo, thread, mode, caps, speak).await
+    chat_turn::start_turn(state, caller, repo, thread, mode, caps, speak).await
 }
 
 /// `POST /chat/api/threads/{id}/continue` — the model continues the
@@ -350,14 +416,14 @@ async fn answer(
 /// continuation is read aloud as it streams.
 pub async fn continue_reply(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatOptJson(req): ChatOptJson<TurnReq>,
 ) -> Response {
     let repo = ChatRepo::of(id);
-    let thread = match repo.thread(&state, id).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return thread_not_found(),
-        Err(e) => return internal(e),
+    let thread = match reachable_thread(&state, &caller, repo, id).await {
+        Ok(t) => t,
+        Err(resp) => return resp,
     };
     let last = match repo.last_message(&state, id).await {
         Ok(m) => m,
@@ -377,5 +443,5 @@ pub async fn continue_reply(
     };
     // Read from the clause the stored reply broke off in (§6.4).
     let speak = req.speak.then(|| ReadAloud::continuing(&last.content));
-    chat_turn::start_turn(&state, repo, &thread, mode, caps, speak).await
+    chat_turn::start_turn(&state, &caller, repo, &thread, mode, caps, speak).await
 }

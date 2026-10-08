@@ -6,22 +6,25 @@ use crate::pages::usage::money;
 use crate::widgets::{Facet, FacetSet, FilterBar, GroupRow, Modal, ModalFooter};
 
 /// What a finished run cost (§4.5), as one line — or nothing for a run that
-/// made no model call.
+/// made no model call and spent nothing ([`no_model_call`]). A run with no
+/// model call can still have a cost: failed or stopped calls whose rows were
+/// priced.
 pub fn cost_text(result: &Value, currency: &str) -> Option<String> {
     let calls = result["model_calls"].as_u64().unwrap_or(0);
-    if calls == 0 {
+    let tokens_in = result["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+    let tokens_out = result["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    let cost_micro = result["cost_micro"].as_i64();
+    if no_model_call(Some(calls), Some(tokens_in + tokens_out), cost_micro) {
         return None;
     }
-    let cost = match result["cost_micro"].as_i64() {
+    let cost = match cost_micro {
         Some(m) => money(m, currency),
         // NULL is "nobody priced this", which is not zero.
         None => "unpriced".to_string(),
     };
     Some(format!(
-        "{calls} model call(s), {} tool call(s), {} in / {} out tokens · {cost}",
+        "{calls} model call(s), {} tool call(s), {tokens_in} in / {tokens_out} out tokens · {cost}",
         result["tool_calls"].as_u64().unwrap_or(0),
-        result["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
-        result["usage"]["completion_tokens"].as_u64().unwrap_or(0),
     ))
 }
 

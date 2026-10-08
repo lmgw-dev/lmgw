@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Usage: scripts/shell-check.py [--no-build] [--keep] [--port 8899] [--json OUT] [--skip-route]
+#                               [--only quit]
 """Live check of the Tauri shell's voice plumbing (chat-voice WP5), in the real
 shell binary, with nothing reaching the desktop, the real audio graph or the
 installed app.
@@ -81,6 +82,16 @@ Checks (§15 WP5):
   appends at 24 kHz, captions and bubbles, a barge-in's truncate, stop
   talking, push-to-talk, M, a takeover with Re-enter, Esc releasing every
   track.
+
+- quit (the final review's F-1): SIGTERM quits the real shell as its
+  tray's Quit does (both ask Tauri to exit, and every exit runs the same
+  sequence, src-tauri gateway::quit): with the Chat change feed open as a
+  client holds it, the server stops first — the feed ends whole, its last
+  chunk sent — and is waited for, and only then the model containers stop
+  (the log says each step, in that order); the process exits 0 within the
+  quit's bound. It is the last check of a full run, which ends the shell
+  this way, and `--only quit` runs it alone (seed, shell, quit: no audio
+  graph, no inspector checks).
 
 The debug shell keeps its webview store (cookies, local storage, cache) in the
 data dir, so the installed app's is not touched either. Needs broadwayd (gtk3),
@@ -486,6 +497,61 @@ def document_checks(insp, port, shell_log, res):
                "commands refused at the shell's gate": refused[:3], "of": len(refused)})
 
 
+# The quit's bound (src-tauri gateway::QUIT_WITHIN: the server's 10 s and a
+# 2 s margin), and what the check allows on top for the process to go.
+QUIT_WITHIN_S = 12
+QUIT_SLACK_S = 5
+
+
+def quit_check(shell, shell_log, port, res):
+    """F-1: SIGTERM quits the shell as the tray's Quit does — the server stops
+    and is waited for, the open feed ends whole, then the model containers'
+    stop, and the process exits 0 within the bound."""
+    db = sqlite3.connect(WORK / "data" / "lmgw.sqlite")
+    key = db.execute("SELECT key_plain FROM api_keys WHERE name = 'owner:dashboard'").fetchone()[0]
+    db.close()
+    feed = socket.create_connection(("127.0.0.1", port), timeout=20)
+    feed.sendall((f"GET /chat/api/feed HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                  f"Authorization: Bearer {key}\r\nAccept: text/event-stream\r\n\r\n").encode())
+    got = b""
+    while b"event: hello" not in got:
+        chunk = feed.recv(65536)
+        if not chunk:
+            break
+        got += chunk
+    opened = b"event: hello" in got
+    t0 = time.monotonic()
+    os.kill(shell.pid, signal.SIGTERM)
+    ended_whole = False
+    try:
+        while True:
+            chunk = feed.recv(65536)
+            if not chunk:
+                break
+            got += chunk
+        ended_whole = got.endswith(b"0\r\n\r\n")
+    except OSError as e:
+        got += f"<{e}>".encode()
+    feed_after = round(time.monotonic() - t0, 2)
+    feed.close()
+    try:
+        code = shell.wait(timeout=QUIT_WITHIN_S + QUIT_SLACK_S)
+    except subprocess.TimeoutExpired:
+        code = "still running"
+    took = round(time.monotonic() - t0, 2)
+    text = shell_log.read_text(errors="replace")
+    steps = ["SIGTERM: quitting", "the server stops", "quit: the gateway has stopped"]
+    at = [text.find(s) for s in steps]
+    in_order = all(i >= 0 for i in at) and at == sorted(at)
+    res.check("SIGTERM quits the shell as Quit does: the server stops first and is waited for, "
+              "the open feed ends whole, then the model containers stop (F-1)",
+              opened and ended_whole and in_order and code == 0
+              and took < QUIT_WITHIN_S + QUIT_SLACK_S,
+              {"feed opened": opened, "feed ended whole": ended_whole, "feed ended after s": feed_after,
+               "exit": code, "exited after s": took, "log steps in order": in_order,
+               "log positions": dict(zip(steps, at))})
+
+
 def taken_port_check(env, port, res):
     """Review m3: a debug shell whose port another process holds refuses to start, so it
     never builds a window on (or grants the microphone and its commands to) whoever holds
@@ -587,7 +653,10 @@ def main():
                     help="keep target/shell-check-<pid> (logs, data dir)")
     ap.add_argument("--skip-route", action="store_true", help="media checks only, no audio server at all")
     ap.add_argument("--json", help="write the results here")
+    ap.add_argument("--only", choices=["quit"],
+                    help="run one check alone (quit: seed, shell, the quit check)")
     args = ap.parse_args()
+    only_quit = args.only == "quit"
 
     # SIGTERM/SIGHUP (a harness timeout, a closed terminal) unwind through the
     # `finally` below like Ctrl-C does.
@@ -612,10 +681,11 @@ def main():
         n, socks = broadway(run)
         # GTK3's broadwayd aborts when a second client leaves, so the other
         # WebKitGTK app of the routing checks gets a display of its own.
-        n2, socks2 = (None, []) if args.skip_route else broadway(run)
+        no_audio = args.skip_route or only_quit
+        n2, socks2 = (None, []) if no_audio else broadway(run)
         socks += socks2
-        client = None if args.skip_route else audio_graph(run, bus)
-        if client is None and not args.skip_route:
+        client = None if no_audio else audio_graph(run, bus)
+        if client is None and not no_audio:
             log("pipewire/wireplumber/pipewire-pulse/pw-dump not all found: routing checks skipped")
         iaddr = f"127.0.0.1:{free_port()}"
         env = private_env(run)
@@ -627,25 +697,31 @@ def main():
         env.update(GDK_BACKEND="broadway", BROADWAY_DISPLAY=f":{n}", DBUS_SESSION_BUS_ADDRESS=bus,
                    LMGW_DATA_DIR=str(WORK / "data"), LMGW_DEV="1", LMGW_MOCK_CAPTURE="1",
                    SHELL_CHECK_WHO="shell",
-                   WEBKIT_INSPECTOR_HTTP_SERVER=iaddr, RUST_LOG="lmgw=info,lmgw_core=warn",
+                   WEBKIT_INSPECTOR_HTTP_SERVER=iaddr,
+                   RUST_LOG="lmgw=info,lmgw_core=warn,lmgw_core::server=info",
                    # No GStreamer path to a sound card that bypasses the audio server.
                    GST_PLUGIN_FEATURE_RANK="alsasink:0,alsasrc:0,alsadeviceprovider:0,oss4sink:0,osssink:0")
         if client:
             env.update(client)
         else:
             env.update(PIPEWIRE_REMOTE="lmgw-shell-check-none", PULSE_SERVER="unix:/nonexistent/lmgw-shell-check")
-        taken_port_check(env, args.port, res)
+        if not only_quit:
+            taken_port_check(env, args.port, res)
         shell_log = WORK / "shell.log"
         shell = spawn([str(REPO / "target/debug/lmgw")], env, shell_log)
         log(f"shell pid {shell.pid} on broadway :{n}, inspector {iaddr}")
-        insp = Inspector(iaddr, f"http://{addr}/")
-        media_checks(insp, args.port, shell_log, res)
-        if client:
-            route_checks(insp, client, shell.pid, n2, res)
-            popover_checks(insp, client, shell.pid, args.port, shell_log, res)
-        dictation_checks(insp, args.port, res)
-        realtime_checks(insp, args.port, res)
-        document_checks(insp, args.port, shell_log, res)
+        if not only_quit:
+            insp = Inspector(iaddr, f"http://{addr}/")
+            media_checks(insp, args.port, shell_log, res)
+            if client:
+                route_checks(insp, client, shell.pid, n2, res)
+                popover_checks(insp, client, shell.pid, args.port, shell_log, res)
+            dictation_checks(insp, args.port, res)
+            realtime_checks(insp, args.port, res)
+            document_checks(insp, args.port, shell_log, res)
+        wait_for("the shell's gateway", lambda: http_ok(f"http://{addr}/api/version"), 120)
+        # The last check ends the shell, the way a logout or `kill` would.
+        quit_check(shell, shell_log, args.port, res)
         stop(shell, signal.SIGTERM, 30)
     except Exception as e:  # report what ran, and why the rest did not
         res.check("the check ran to the end", False, f"{type(e).__name__}: {e}")

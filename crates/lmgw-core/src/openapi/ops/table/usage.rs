@@ -9,8 +9,15 @@ pub(super) const OPS: &[OpDoc] = &[
     OpDoc {
         name: "price_set",
         tag: TAG,
-        summary: "Set a manual price sheet for one alias or upstream model",
-        description: None,
+        summary: "Set a manual price for one alias or upstream model, in one billable unit",
+        description: Some(
+            "`unit` says what is counted: `per_mtok` (the default) takes `price_in`, \
+             `price_out` and the two cache rates, per 1M tokens; `per_audio_minute`, \
+             `per_mchar`, `per_image` and `per_request` take one `price`, per minute of input \
+             audio, per 1M input characters, per generated image and per answered request. A \
+             scope holds one row per unit, and a request costs the sum of every unit priced \
+             for it; a manual row wins over a catalog row of the same scope and unit.",
+        ),
         tool: Some("lmgw__price_set"),
         args: OpArgs::Hand(args::price_set),
         response: Resp::OpOutcome,
@@ -19,7 +26,7 @@ pub(super) const OPS: &[OpDoc] = &[
         confirm_note: None,
         deprecated: false,
         example: Some(
-            r#"{"scope_kind":"alias","scope_key":"my-alias","price_in":3.5,"price_out":10.5}"#,
+            r#"{"scope_kind":"alias","scope_key":"my-alias","unit":"per_mtok","price_in":3.5,"price_out":10.5}"#,
         ),
     },
     OpDoc {

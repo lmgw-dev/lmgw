@@ -126,8 +126,18 @@ pub(crate) fn audio_catalog() -> Value {
 
 /// `price_set` (§4.7 table B divergence: `scope_kind` defaults to `alias`
 /// here, where the tool requires it) — `web/api.rs`'s `"price_set"` arm
-/// (`ops::price_set`).
+/// (`ops::price_set`). `unit` and `price` are the billable units' (design
+/// 2026-10-07 §8.2), from the same table the tool's are.
 pub(crate) fn price_set() -> Value {
+    use crate::config::PriceUnit;
+    let units: Vec<&str> = PriceUnit::ALL.iter().map(|u| u.as_str()).collect();
+    let price_scales = PriceUnit::ALL
+        .iter()
+        .filter(|u| !u.is_tokens())
+        .map(|u| format!("{u} {}", u.scale()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let num = |desc: &str| json!({ "type": "number", "description": desc });
     obj(
         json!({
             "scope_kind": enum_p(
@@ -139,16 +149,23 @@ pub(crate) fn price_set() -> Value {
                  for scope_kind=upstream_model — /api/upstream-models lists existing \
                  scope_keys.",
             ),
-            "price_in": json!({ "type": "number", "description": "Input price per 1M tokens." }),
-            "price_out": json!({ "type": "number", "description": "Output price per 1M tokens." }),
-            "price_cache_read": json!({
-                "type": "number",
-                "description": "Cache-read price per 1M tokens. Omit to bill at price_in.",
-            }),
-            "price_cache_write": json!({
-                "type": "number",
-                "description": "Cache-write price per 1M tokens. Omit to bill at price_in.",
-            }),
+            "unit": enum_p(
+                "What the price counts. Default per_mtok (tokens). A row's unit is part of \
+                 its key: setting another unit adds a row beside the existing one rather \
+                 than changing it.",
+                &units,
+            ),
+            "price_in": num("per_mtok only: input price per 1M tokens."),
+            "price_out": num("per_mtok only: output price per 1M tokens."),
+            "price_cache_read": num(
+                "per_mtok only: cache-read price per 1M tokens. Omit to bill at price_in.",
+            ),
+            "price_cache_write": num(
+                "per_mtok only: cache-write price per 1M tokens. Omit to bill at price_in.",
+            ),
+            "price": num(&format!(
+                "Every unit but per_mtok: its one rate — {price_scales}."
+            )),
             "note": str_p("Free-text note, e.g. where this number came from."),
         }),
         &["scope_key"],
@@ -159,26 +176,69 @@ pub(crate) fn price_set() -> Value {
 // Credential ops (web/api_settings.rs `fn key_op`)
 // ---------------------------------------------------------------------------
 
-/// `key_create { name*, kind }` — a client key (default) or an owner key.
+/// `key_create { name*, kind }` — a client key (default), an owner key, or a
+/// device key with its policy and pairing URL (client-apps design §1.4).
 pub(crate) fn key_create() -> Value {
     obj(
         json!({
-            "name": str_p("Display name for the new key."),
-            "kind": enum_p("Default 'client'.", &["client", "owner"]),
+            "name": str_p(
+                "Display name for the new key. The server adds the kind's prefix: a device \
+                 named `desktop` is listed as `device:desktop`.",
+            ),
+            "kind": enum_p("Default 'client'.", &["client", "owner", "device"]),
             "scope_mode": enum_p(
-                "Client keys only: which model aliases the key may ask for. Default 'all'.",
+                "Client and device keys: which model aliases the key may ask for. Default 'all'.",
                 &["all", "allow", "deny"],
             ),
             "scope_patterns": str_p(
                 "Newline-delimited `*` globs over alias names, for scope_mode allow/deny.",
             ),
             "tool_scope_mode": enum_p(
-                "Client keys only: which MCP tools the key may see and call. Default 'all'.",
+                "Client and device keys: which MCP tools the key may see and call. Default 'all'.",
                 &["all", "allow", "deny"],
             ),
             "tool_scope_patterns": str_p(
                 "Newline-delimited `*` globs over exposed tool names (e.g. `docs__*`, \
                  `github__search`), for tool_scope_mode allow/deny.",
+            ),
+            "budget_micro": int_p(
+                "Device keys: the budget in currency micro-units, 0 for none (the default).",
+            ),
+            "budget_period": enum_p(
+                "Device keys: the budget's period. Default 'month'.",
+                &["day", "month", "total"],
+            ),
+            "rpm_limit": int_p("Device keys: requests per minute, 0 for no limit."),
+            "tpm_limit": int_p("Device keys: tokens per minute, 0 for no limit."),
+            "concurrency_limit": int_p("Device keys: concurrent requests, 0 for no limit."),
+            "expires_at": str_p(
+                "Device keys: YYYY-MM-DD (the whole of that day) or an RFC3339 timestamp. At \
+                 that moment the device's open connections end.",
+            ),
+            "note": str_p("Device keys: a free-text note."),
+            "hosts_label": str_p(
+                "Device keys: the label (tool prefix) the device may host MCP tools under. \
+                 Unique among the MCP servers' prefixes and names, and not one of lmgw's own \
+                 namespaces.",
+            ),
+            "self_admin": enum_p(
+                "Device keys: the device's level of lmgw's admin tools. read_only reads lmgw's \
+                 configuration and state; full also changes it, which includes registering \
+                 programs that run on the gateway's machine as the lmgw user (an MCP server's \
+                 command, containers, agents, builds). Above off the device sees and uses the \
+                 Chat threads and folders that carry the self-admin toolset (lmgw), in text \
+                 and in voice, and its tool scope takes in the lmgw label; the self-admin \
+                 level in Settings caps what the tools may do, and Admin Chat stays hidden from \
+                 every device. Below full (after that cap) it reads those threads and sends to \
+                 them, but does not attach the toolset to a thread or folder, change such a \
+                 thread's settings or messages, nor such a folder's defaults (403 \
+                 chat_toolset_needs_full); at full it may. Default off. Refused for any other \
+                 kind of key.",
+                &["off", "read_only", "full"],
+            ),
+            "url": str_p(
+                "Device keys: the address the pairing link points the device at. Default: this \
+                 gateway's primary address; a phone needs the name it reaches the gateway by.",
             ),
         }),
         &["name"],
@@ -201,10 +261,16 @@ pub(crate) fn key_reveal() -> Value {
     )
 }
 
-/// `key_rotate { id* }`.
+/// `key_rotate { id*, url? }`.
 pub(crate) fn key_rotate() -> Value {
     obj(
-        json!({ "id": int_p("Owner key id, from the Keys table.") }),
+        json!({
+            "id": int_p("Owner or device key id, from the Keys table."),
+            "url": str_p(
+                "Device keys: the address the new pairing link points the device at. Default: \
+                 this gateway's primary address.",
+            ),
+        }),
         &["id"],
     )
 }

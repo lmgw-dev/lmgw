@@ -19,7 +19,8 @@ async fn corpus_file_at_version(path: &std::path::Path, version: i64) {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .unwrap()
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(quickdoc_core::store::BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)
@@ -117,7 +118,8 @@ async fn a_file_from_a_newer_build_is_refused_by_version() {
     // The same file, plus a migration this build has never heard of.
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
         .unwrap()
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(quickdoc_core::store::BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)

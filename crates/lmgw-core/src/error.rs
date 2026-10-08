@@ -226,7 +226,8 @@ pub enum GatewayError {
     )]
     CandidateUnavailable { alias: String, detail: String },
     /// The key's scope does not admit this alias (usage-analytics §4.2).
-    #[error("key '{key}' is not allowed to use '{alias}' — {reason}")]
+    /// `key` is the key as a refusal names it ([`crate::config::ApiKey::described`]).
+    #[error("{key} is not allowed to use '{alias}' — {reason}")]
     KeyScope {
         key: String,
         alias: String,
@@ -253,15 +254,16 @@ pub enum GatewayError {
     /// A rate or concurrency limit. Unlike a budget this *does* clear in
     /// seconds, so it keeps 429 and carries a `Retry-After` that is a real
     /// number rather than a shrug.
-    #[error("key '{key}' is over its {limit_kind} limit of {limit} — retry in {retry_after}s")]
+    #[error("{key} is over its {limit_kind} limit of {limit} — retry in {retry_after}s")]
     KeyRate {
         key: String,
         limit_kind: &'static str,
         limit: i64,
         retry_after: u64,
     },
-    /// The key is past its expiry date.
-    #[error("key '{key}' expired on {expired_at}")]
+    /// The key is past its expiry date. `key` is the key as a refusal names
+    /// it ([`crate::config::ApiKey::described`]).
+    #[error("{key} expired on {expired_at}")]
     KeyExpired { key: String, expired_at: String },
     /// The counted prompt (plus max output, when known) does not fit the
     /// model's per-request context — a ladder's top rung (ladder design §3.1

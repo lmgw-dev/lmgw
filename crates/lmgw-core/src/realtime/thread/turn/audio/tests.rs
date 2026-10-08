@@ -317,7 +317,7 @@ async fn respond_until(
     let (row_tx, user_row) = watch::channel(None);
     let job = super::super::Job {
         state: state.clone(),
-        ctx: Default::default(),
+        ctx: crate::proxy::RequestCtx::dashboard_for_tests(&state.snapshot()),
         gen: 1,
         label: "realtime test".into(),
         thread_id: tid,

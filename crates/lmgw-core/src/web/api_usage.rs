@@ -60,7 +60,7 @@ pub struct SeriesQuery {
     upstream_id: Option<i64>,
     tz: Option<i64>,
     /// Series past this rank (by cost, then tokens) fold into `Other`.
-    /// Defaults to 6 — the number of chart colour slots (design §6.3).
+    /// Defaults to 6, the number of chart colour slots.
     limit: Option<i64>,
 }
 
@@ -354,6 +354,12 @@ fn cell_to_dto(c: &UsageCell) -> dto::UsageCell {
         cache_n: c.cache_n,
         draft_n: c.draft_n,
         draft_accepted: c.draft_accepted,
+        audio_in_ms: c.audio_in_ms,
+        chars_in: c.chars_in,
+        images_out: c.images_out,
+        cost_unknown_audio_in_ms: c.cost_unknown_audio_in_ms,
+        cost_unknown_chars_in: c.cost_unknown_chars_in,
+        cost_unknown_images_out: c.cost_unknown_images_out,
     }
 }
 
@@ -380,6 +386,12 @@ fn merge_into(acc: &mut UsageCell, c: &UsageCell) {
     acc.cache_n += c.cache_n;
     acc.draft_n += c.draft_n;
     acc.draft_accepted += c.draft_accepted;
+    acc.audio_in_ms += c.audio_in_ms;
+    acc.chars_in += c.chars_in;
+    acc.images_out += c.images_out;
+    acc.cost_unknown_audio_in_ms += c.cost_unknown_audio_in_ms;
+    acc.cost_unknown_chars_in += c.cost_unknown_chars_in;
+    acc.cost_unknown_images_out += c.cost_unknown_images_out;
 }
 
 /// Fold every series past the first `limit` of `ranked` (already ordered
@@ -581,6 +593,9 @@ async fn series_inner(
         .await
         .map_err(|e| e.to_string())?;
     let previous = previous_window_totals(&st.db, &filter).await?;
+    let units_since = store::units_since(&st.db)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let p_total = store::usage_percentiles(&st.db, &filter, "total", &[0.5, 0.95])
         .await
@@ -635,6 +650,7 @@ async fn series_inner(
         p50_ttfb_ms: p_ttfb.first().copied().flatten(),
         p95_ttfb_ms: p_ttfb.get(1).copied().flatten(),
         latency,
+        units_since,
     })
 }
 
@@ -848,7 +864,7 @@ async fn local_inner(st: &SharedState, q: LocalQuery) -> Result<dto::UsageLocalR
             .unwrap_or((None, None));
         let prices = snap.prices_for(&reference_alias, up_id, up_model.as_deref());
         let counterfactual = prices.as_ref().and_then(|p| {
-            pricing::price_request(
+            pricing::price_tokens(
                 &TokenUsage {
                     prompt: Some(local_in as u64),
                     completion: Some(local_out as u64),
@@ -920,6 +936,16 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
             .await
             .map_err(|e| e.to_string())?;
         let last_used = key_last_used(&st.db, k.id).await?;
+        // A device's own connection facts (client-apps design §1.6); every
+        // other kind has none.
+        let device = k.kind == crate::config::ApiKeyKind::Device;
+        let last_seen_at = if device {
+            store::key_last_seen(&st.db, k.id)
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            None
+        };
 
         keys.push(dto::KeyRow {
             id: k.id,
@@ -942,6 +968,26 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
             spent_unknown_tokens: period_totals.cost_unknown_tokens,
             requests: period_totals.requests,
             last_used,
+            last_seen_at,
+            hosts_label: k.hosts_label.clone(),
+            self_admin: k.self_admin.into(),
+            online: st
+                .devices
+                .links
+                .online(k.id)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            open_links: st
+                .devices
+                .links
+                .counts(k.id)
+                .into_iter()
+                .map(|(kind, count)| lmgw_api_types::OpenLinks {
+                    kind: kind.to_string(),
+                    count,
+                })
+                .collect(),
         });
     }
 
@@ -967,6 +1013,7 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
         global_spent_micro,
         global_budget_period: snap.settings.global_budget_period.as_str().to_string(),
         global_spent_unknown_requests: global_totals.cost_unknown_requests,
+        auth_enabled: snap.settings.auth_enabled,
     })
 }
 
@@ -989,7 +1036,7 @@ async fn prices_inner(st: &SharedState) -> Result<dto::PricesResponse, String> {
             id: p.id,
             scope_kind: p.scope_kind.as_str().to_string(),
             scope_key: p.scope_key.clone(),
-            unit: p.unit.clone(),
+            unit: p.unit.as_str().to_string(),
             price_in: p.price_in,
             price_out: p.price_out,
             price_cache_read: p.price_cache_read,
@@ -997,6 +1044,7 @@ async fn prices_inner(st: &SharedState) -> Result<dto::PricesResponse, String> {
             source: p.source.as_str().to_string(),
             note: p.note.clone(),
             updated_at: p.updated_at.clone(),
+            price: p.price,
         })
         .collect();
 
@@ -1035,12 +1083,18 @@ fn csv_field(s: &str) -> String {
     }
 }
 
+/// The billable units' six columns (billable-units design §8.5) are the
+/// last: a spreadsheet that reads the older columns by position keeps
+/// working. A quantity is what was measured, and 0 in an hour before
+/// `units_since`, when nothing was recorded.
 const CSV_HEADER: &str =
     "bucket_utc,key_id,key_name,alias,upstream_id,upstream_name,class,outcome,\
 requests,tokens_in,tokens_out,tokens_cached,tokens_cache_write,tokens_reasoning,\
 cost_micro,cost_unknown_requests,cost_unknown_tokens,\
 ttfb_sum,ttfb_count,total_sum,total_count,total_min,total_max,\
-decode_tokens,decode_ms,prefill_ms,prompt_n,cache_n,draft_n,draft_accepted\n";
+decode_tokens,decode_ms,prefill_ms,prompt_n,cache_n,draft_n,draft_accepted,\
+audio_in_ms,chars_in,images_out,\
+cost_unknown_audio_in_ms,cost_unknown_chars_in,cost_unknown_images_out\n";
 
 async fn export_csv_inner(st: &SharedState, q: ExportQuery) -> Result<(String, String), String> {
     let filter = parse_filter(RangeInput {
@@ -1060,7 +1114,9 @@ async fn export_csv_inner(st: &SharedState, q: ExportQuery) -> Result<(String, S
                 tokens_reasoning,
                 cost_micro, cost_unknown_requests, cost_unknown_tokens,
                 ttfb_sum, ttfb_count, total_sum, total_count, total_min, total_max,
-                decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted
+                decode_tokens, decode_ms, prefill_ms, prompt_n, cache_n, draft_n, draft_accepted,
+                audio_in_ms, chars_in, images_out,
+                cost_unknown_audio_in_ms, cost_unknown_chars_in, cost_unknown_images_out
          FROM usage_hourly WHERE bucket_utc >= ",
     );
     qb.push_bind(filter.from.clone());
@@ -1125,6 +1181,12 @@ async fn export_csv_inner(st: &SharedState, q: ExportQuery) -> Result<(String, S
             r.get::<i64, _>("cache_n").to_string(),
             r.get::<i64, _>("draft_n").to_string(),
             r.get::<i64, _>("draft_accepted").to_string(),
+            r.get::<i64, _>("audio_in_ms").to_string(),
+            r.get::<i64, _>("chars_in").to_string(),
+            r.get::<i64, _>("images_out").to_string(),
+            r.get::<i64, _>("cost_unknown_audio_in_ms").to_string(),
+            r.get::<i64, _>("cost_unknown_chars_in").to_string(),
+            r.get::<i64, _>("cost_unknown_images_out").to_string(),
         ];
         out.push_str(
             &fields
@@ -1345,6 +1407,40 @@ mod tests {
             other.prefill_ms, 200.0,
             "a folded series keeps its prefill clock; 0 ms reads as infinitely fast prefill"
         );
+    }
+
+    #[tokio::test]
+    async fn fold_carries_the_measured_quantities_and_their_remainder_into_other() {
+        let mut c = cell("d1", "c", 200, 0);
+        c.audio_in_ms = 27_000;
+        c.images_out = 2;
+        c.cost_unknown_audio_in_ms = 27_000;
+        let mut d = cell("d1", "d", 100, 0);
+        d.chars_in = 1_234;
+        d.cost_unknown_chars_in = 1_234;
+        d.cost_unknown_images_out = 1;
+        let ranked = vec!["a".to_string(), "c".to_string(), "d".to_string()];
+        let (out, _) = fold_tail_to_other(vec![c, d], &ranked, 1);
+        let other = out
+            .iter()
+            .find(|c| c.series == OTHER_KEY)
+            .expect("the tail folded");
+        // Billable-units §8.3: a column is carried end to end or not at all.
+        assert_eq!(
+            (other.audio_in_ms, other.chars_in, other.images_out),
+            (27_000, 1_234, 2)
+        );
+        assert_eq!(
+            (
+                other.cost_unknown_audio_in_ms,
+                other.cost_unknown_chars_in,
+                other.cost_unknown_images_out
+            ),
+            (27_000, 1_234, 1)
+        );
+        let wire = cell_to_dto(other);
+        assert_eq!(wire.audio_in_ms, 27_000);
+        assert_eq!(wire.cost_unknown_images_out, 1);
     }
 
     #[tokio::test]

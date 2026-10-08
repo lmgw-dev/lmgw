@@ -16,6 +16,9 @@ use leptos::task::spawn_local;
 use lmgw_api_types::{KeysResponse, LogsResponse, RequestRow, UsageTopResponse, VramStatus};
 
 use crate::fmt::{count_of, grouped, hue_for, human_bytes, log_time};
+
+// A row's measured quantities and its priced parts (billable units §8.4).
+mod row_cost;
 use crate::live::use_live;
 use crate::url_state::use_query_signal;
 use crate::widgets::{
@@ -445,6 +448,11 @@ pub fn Traffic() -> impl IntoView {
     let gpu_open = RwSignal::new(false);
 
     let expanded = RwSignal::new(None::<i64>);
+    // The Measured column shows while any row in view measured something
+    // (billable units §8.4): a chat-only log has nothing to put in it.
+    let any_measured =
+        Memo::new(move |_| rows.with(|r| r.iter().any(|row| row_cost::measured(row).is_some())));
+    let cols = Signal::derive(move || if any_measured.get() { COLS } else { COLS - 1 });
     let items = Memo::new(move |_| {
         rows.with(|r| {
             let mut out = Vec::with_capacity(r.len() + 4);
@@ -570,6 +578,14 @@ pub fn Traffic() -> impl IntoView {
                             <th class="num-h col-p3">"TTFB"</th>
                             <th class="num-h">"Total"</th>
                             <th class="num-h">"Tokens"</th>
+                            <Show when=move || any_measured.get()>
+                                <th
+                                    class="num-h"
+                                    title="what the request processed besides tokens: input audio, input characters, generated images — as measured or reported; a dash where nothing was"
+                                >
+                                    "Measured"
+                                </th>
+                            </Show>
                         </tr>
                     </thead>
                     <tbody>
@@ -578,12 +594,15 @@ pub fn Traffic() -> impl IntoView {
                                 Item::Day(_, label) => {
                                     view! {
                                         <tr class="day-sep">
-                                            <td colspan="8">{label}</td>
+                                            <td colspan=move || cols.get()>{label}</td>
                                         </tr>
                                     }
                                         .into_any()
                                 }
-                                Item::Row(r) => view! { <TrafficRow r=r expanded=expanded/> }.into_any(),
+                                Item::Row(r) => {
+                                    view! { <TrafficRow r=r expanded=expanded measured_col=any_measured/> }
+                                        .into_any()
+                                }
                             }}
                         </For>
                     </tbody>
@@ -614,6 +633,9 @@ pub fn Traffic() -> impl IntoView {
         </PageFrame>
     }
 }
+
+/// The log table's columns with Measured, for a row that spans them all.
+const COLS: u32 = 9;
 
 /// One entry of the log table: a day's separator, or a request.
 #[derive(Clone, PartialEq)]
@@ -1021,7 +1043,12 @@ fn fallback_label(reason: &str) -> String {
 }
 
 #[component]
-fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
+fn TrafficRow(
+    r: RequestRow,
+    expanded: RwSignal<Option<i64>>,
+    /// Whether the table shows its Measured column.
+    measured_col: Memo<bool>,
+) -> impl IntoView {
     let id = r.log_id;
     let ok = r.status < 400;
     let t = log_time(&r.ts);
@@ -1093,6 +1120,13 @@ fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
             </span>
         }
     });
+    // What it processed besides tokens: a dash where nothing was measured,
+    // never a 0 (billable units §8.4).
+    let measured = row_cost::measured(&r);
+    let measured_cell = measured.clone().unwrap_or_else(|| "—".into());
+    let unmeasured = measured.is_none();
+    let cost_line = row_cost::cost_line(&r);
+    let parts = row_cost::parts(&r);
     let is_open = move || expanded.get() == Some(id);
     let detail = r.clone();
     view! {
@@ -1126,10 +1160,15 @@ fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
             <td class="num" title=tokens_title>
                 {tokens}
             </td>
+            <Show when=move || measured_col.get()>
+                <td class="num" class:dim=unmeasured>
+                    {measured_cell.clone()}
+                </td>
+            </Show>
         </tr>
         <Show when=is_open>
             <tr class="detail-row">
-                <td colspan="8">
+                <td colspan=move || if measured_col.get() { COLS } else { COLS - 1 }>
                     <div class="detail-grid">
                         <span class="dim">"Log id"</span>
                         <span class="mono-sm">{detail.log_id}</span>
@@ -1151,6 +1190,32 @@ fn TrafficRow(r: RequestRow, expanded: RwSignal<Option<i64>>) -> impl IntoView {
                         <span class="mono-sm">
                             {detail.ttfb_ms.map(|v| format!("{v} ms")).unwrap_or_else(|| "—".into())}
                         </span>
+                        {measured
+                            .clone()
+                            .map(|m| {
+                                view! {
+                                    <span class="dim">"Measured"</span>
+                                    <span class="mono-sm">{m}</span>
+                                }
+                            })}
+                        {cost_line
+                            .clone()
+                            .map(|c| {
+                                view! {
+                                    <span class="dim">"Cost"</span>
+                                    <span class="mono-sm">{c}</span>
+                                }
+                            })}
+                        {parts
+                            .clone()
+                            .into_iter()
+                            .map(|(what, how)| {
+                                view! {
+                                    <span class="dim">{what}</span>
+                                    <span class="mono-sm">{how}</span>
+                                }
+                            })
+                            .collect_view()}
                         {split
                             .map(|(fresh, read, write)| {
                                 view! {

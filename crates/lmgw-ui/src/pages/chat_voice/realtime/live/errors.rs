@@ -14,8 +14,8 @@
 use std::rc::Rc;
 
 use super::super::super::state::{refusal_link, turn_refusal, Note, NoteKind, Surface, TURN_KEY};
-use super::super::protocol::ErrorFacts;
 use super::Live;
+use lmgw_client::realtime::ErrorFacts;
 
 /// The key of a turn's own notes (a transcription that failed, a reply that
 /// stopped): the next response clears it.

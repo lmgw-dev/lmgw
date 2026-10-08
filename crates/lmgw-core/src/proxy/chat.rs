@@ -71,6 +71,7 @@ pub async fn handle_chat(
                     fallback: None,
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
@@ -82,6 +83,9 @@ pub async fn handle_chat(
         }
     };
     ir.anthropic_beta = ctx.anthropic_beta.clone();
+    // What a stream shows the client, never what goes upstream (the egress
+    // asks for usage itself), so it rides beside the IR, not in it.
+    let include_usage = openai::stream_include_usage(&body);
     unanswered.alias(&ir.model_alias);
     unanswered.streamed(ir.stream);
 
@@ -146,6 +150,7 @@ pub async fn handle_chat(
                     fallback: f.headers.fallback_reason(),
                     rung: None,
                     degraded: None,
+                    quantities: Default::default(),
                 },
                 f.error.http_status().as_u16(),
                 None,
@@ -156,7 +161,17 @@ pub async fn handle_chat(
             return f.headers.stamp(resp);
         }
     };
-    serve_opened(&state, proto, &ctx, &ir, opened, started, &mut unanswered).await
+    serve_opened(
+        &state,
+        proto,
+        &ctx,
+        &ir,
+        include_usage,
+        opened,
+        started,
+        &mut unanswered,
+    )
+    .await
 }
 
 /// The post-admission half of [`handle_chat`]: the route's own defaults, the
@@ -167,11 +182,15 @@ pub async fn handle_chat(
 ///
 /// `unanswered` holds the request's row until a row is written: it is handed
 /// over right before each write here, and to the relay task with a stream.
+/// `include_usage` is the client's `stream_options.include_usage`, for the
+/// stream's encoder.
+#[allow(clippy::too_many_arguments)]
 async fn serve_opened(
     state: &SharedState,
     proto: ClientProto,
     ctx: &RequestCtx,
     ir: &ChatRequest,
+    include_usage: bool,
     opened: crate::gate::Opened,
     started: Instant,
     unanswered: &mut Unanswered,
@@ -247,6 +266,7 @@ async fn serve_opened(
                     proto,
                     ctx,
                     &gated,
+                    include_usage,
                     &route,
                     &mut headers,
                     egress,
@@ -292,7 +312,14 @@ async fn serve_opened(
         // candidate-aliases §12 entry 45) — nothing was sent on this one.
         Ok(Turn::Rerouted(Ok(opened))) => {
             return Box::pin(serve_opened(
-                state, proto, ctx, ir, opened, started, unanswered,
+                state,
+                proto,
+                ctx,
+                ir,
+                include_usage,
+                opened,
+                started,
+                unanswered,
             ))
             .await;
         }
@@ -328,6 +355,7 @@ async fn serve_opened(
                     fallback: headers.fallback_reason(),
                     rung: headers.rung().map(crate::gate::RungTag::log),
                     degraded,
+                    quantities: Default::default(),
                 },
                 e.http_status().as_u16(),
                 None,
@@ -426,6 +454,7 @@ async fn unary_chat(
             fallback: headers.fallback_reason(),
             rung,
             degraded,
+            quantities: Default::default(),
         },
         StatusCode::OK.as_u16(),
         Some(ttfb),

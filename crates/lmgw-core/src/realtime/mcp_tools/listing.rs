@@ -49,10 +49,13 @@ use std::time::Instant;
 use futures::FutureExt;
 use tokio::sync::mpsc;
 
-use super::super::protocol::{ErrorObject, Item, McpListToolsItem, McpListedTool, ServerEvent};
+use super::super::protocol::{
+    ErrorObject, Item, McpListToolsItem, McpListedTool, ServerEvent, Tool,
+};
 use super::super::session::Core;
+use super::spec_of;
 use super::table::{McpTable, Plan};
-use crate::mcp::exec::{list_label, LabelError, LabelTool, LabelTools};
+use crate::mcp::exec::{list_label, LabelError, LabelTool, LabelTools, SELF_ADMIN_LABEL};
 use crate::mcp::scope::ToolScope;
 use crate::mcp::spec::McpToolSpec;
 
@@ -79,6 +82,10 @@ pub(crate) struct McpSession {
     /// A response's server-side calls ended, and no response has started
     /// since: the next one renders their results (`lifecycle::refusal`).
     pub results_in: bool,
+    /// What the session's device's admin tools could do when its `lmgw`
+    /// label was last listed (its level capped by the gateway's); `None`
+    /// before, and for a session that is not a device's (review P-8).
+    admin_listed: Option<crate::config::SelfAdmin>,
 }
 
 impl McpSession {
@@ -104,8 +111,59 @@ impl Core {
         }
     }
 
+    /// What the session's device's admin tools may do now — its level
+    /// capped by the gateway's; `None` for a session that is not a device's.
+    fn device_admin_now(&self) -> Option<crate::config::SelfAdmin> {
+        match &self.ctx.principal {
+            crate::principal::Principal::Key {
+                id,
+                kind: crate::config::ApiKeyKind::Device,
+                ..
+            } => {
+                let snap = self.state.snapshot();
+                Some(crate::devices::self_admin(&snap, *id).capped(snap.settings.self_admin))
+            }
+            _ => None,
+        }
+    }
+
+    /// A device's admin-tools level moved, or the gateway's that caps it
+    /// (`devices::ReachMoves`, review P-8, P-3, 2026-10-07). When what this
+    /// session's device may do moved with it, and its `lmgw` label was
+    /// listed under another level, the label is listed again (module
+    /// doc): its tools come or go as for a `session.update` that redefined
+    /// it, and a listing refused now says why. Its calls were refused
+    /// already, by the per-call checks; now its model is no longer offered
+    /// them either.
+    pub(in crate::realtime) fn mcp_reach_moved(&mut self) {
+        let now = self.device_admin_now();
+        if now.is_none() || self.mcp.admin_listed.is_none() || self.mcp.admin_listed == now {
+            return;
+        }
+        let spec = self
+            .session
+            .tools
+            .iter()
+            .flatten()
+            .filter_map(Tool::as_mcp)
+            .find(|t| t.server_label == SELF_ADMIN_LABEL)
+            .and_then(|t| spec_of(t).ok());
+        if let Some(spec) = spec {
+            tracing::info!(
+                "realtime {}: the device's admin tools are at {} now; MCP server_label \
+                 '{SELF_ADMIN_LABEL}' is listed again",
+                self.id(),
+                now.map_or("off", |l| l.as_str()),
+            );
+            self.mcp_list(spec);
+        }
+    }
+
     /// Steps 1 and 2 (module doc), and the task.
     fn mcp_list(&mut self, spec: McpToolSpec) {
+        if spec.server_label == SELF_ADMIN_LABEL {
+            self.mcp.admin_listed = self.device_admin_now();
+        }
         let seq = self.mcp.table.start(&spec);
         self.mcp_superseded(&spec.server_label);
         // A response not launched yet waits for this one too.

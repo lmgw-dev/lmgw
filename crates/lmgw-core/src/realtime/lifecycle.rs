@@ -437,7 +437,14 @@ impl Core {
             longest_pause_ms: s.longest_pause_ms,
             progress: Some(progress),
         });
-        tokio::spawn(responder::run(responder::Job {
+        // Held until the call has ended and written its row, also when the
+        // session drops it at its end: a stopping server waits for it
+        // (review F-2).
+        let running = self
+            .state
+            .stops
+            .running_at(self.state.stops.at_or_now(self.ctx.served_at));
+        let job = responder::Job {
             state: self.state.clone(),
             ctx: self.ctx.clone(),
             gen: active.output.gen,
@@ -447,7 +454,11 @@ impl Core {
             stop: signal,
             speech,
             tools: served.tools,
-        }));
+        };
+        tokio::spawn(async move {
+            let _running = running;
+            responder::run(job).await
+        });
         self.launched(stop);
     }
 

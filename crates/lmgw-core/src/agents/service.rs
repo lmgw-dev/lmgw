@@ -1855,6 +1855,17 @@ pub async fn sync_mcp_registration(state: &SharedState, agent: &Agent) -> Result
             let Some(new) = new_row(state, agent) else {
                 return Ok(());
             };
+            // The agent's id is its tools' prefix: never a device's hosting
+            // label, as `mcp_server_set` refuses for a hand-made row
+            // (client-apps design §1.1, review W2-8).
+            crate::ops::reject_device_label(&state.snapshot(), &new.tool_prefix).map_err(
+                |why| {
+                    format!(
+                        "agent '{}': its tools cannot register — {why}",
+                        agent.row.id
+                    )
+                },
+            )?;
             store::insert_mcp_server(&state.db, &new)
                 .await
                 .map_err(|e| e.to_string())?;

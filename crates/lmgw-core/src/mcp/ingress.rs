@@ -318,13 +318,16 @@ impl ToolPlane for AggregatePlane {
         }
         // The knowledge bases shared on `/mcp` (chat-complete §9.4): only
         // the `mcp_visible` ones exist here.
+        // A device's retrieval is charged to it (review W3-3); any other
+        // key's stays the gateway's own.
+        let charged = crate::devices::charged(&self.ctx);
         if super::kb::owns(name) {
             let result = super::kb::call(
                 &self.state,
                 name,
                 args,
                 &super::kb::KbAccess::McpVisible,
-                None,
+                (None, charged.as_ref()),
             )
             .await;
             let (server, outcome) = match &result {
@@ -340,8 +343,14 @@ impl ToolPlane for AggregatePlane {
             return result;
         }
         if super::docs::owns(name) {
-            let result =
-                super::docs::call(&self.state, name, args, self.client_name.as_deref()).await;
+            let result = super::docs::call(
+                &self.state,
+                name,
+                args,
+                self.client_name.as_deref(),
+                charged.as_ref(),
+            )
+            .await;
             let (server, outcome) = match &result {
                 Ok(v) => (
                     Some(DOCS_SERVER_NAME.to_string()),
@@ -850,6 +859,7 @@ async fn dispatch(
 /// never leaks. Keep-alive comments pace at [`SSE_KEEPALIVE`].
 async fn mcp_get(
     axum::extract::State(state): axum::extract::State<SharedState>,
+    ctx: Option<axum::Extension<RequestCtx>>,
     headers: HeaderMap,
 ) -> Response {
     // Origin first — same DNS-rebinding defense as POST, auth-independent.
@@ -895,6 +905,19 @@ async fn mcp_get(
     // frame is the first change. `stream::empty()` chained keeps the type a plain
     // notification stream.
     let stream = stream::empty::<Result<SseFrame, Infallible>>().chain(live);
+    // The key it was opened with revoked — disabled, rotated, deleted,
+    // expired — ends it (client-apps design §1.6, review W2-2): a stream that
+    // outlived its credential tells the client nothing more. No frame says
+    // so: MCP has no notification for it, and the client's next POST meets
+    // the gate's refusal.
+    let served_at = ctx.as_ref().and_then(|axum::Extension(ctx)| ctx.served_at);
+    let watch = ctx.and_then(|axum::Extension(ctx)| {
+        crate::devices::watch(&state, &ctx.principal, ctx.revocation_mark)
+    });
+    let stream = crate::devices::until_revoked(stream, watch, |_| None);
+    // And it ends when the server it came in on stops, likewise without a
+    // frame.
+    let stream = crate::server::until_stopped(&state.stops, served_at, stream, None);
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE))
         .into_response()

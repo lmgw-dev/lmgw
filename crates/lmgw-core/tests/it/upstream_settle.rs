@@ -4,7 +4,7 @@
 //! ones by name, and say the same about what they stored differently.
 
 use lmgw_core::config::{Protocol, UpstreamKind};
-use lmgw_core::ops::{upstream_set, UpstreamPatch};
+use lmgw_core::ops::{upstream_set, RowWriter, UpstreamPatch};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewUpstream};
 use serde_json::{json, Value};
@@ -237,7 +237,7 @@ async fn via_tool_plane(
         supports_responses: c.supports_responses,
         ..Default::default()
     };
-    upstream_set(state, patch)
+    upstream_set(state, patch, RowWriter::Tool)
         .await
         .map(|v| v["message"].as_str().unwrap().to_string())
 }

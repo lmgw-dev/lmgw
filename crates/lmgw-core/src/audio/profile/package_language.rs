@@ -104,6 +104,7 @@ fn config(
         Some(raw) => raw,
         None => {
             let path = gguf?.parent()?.join("config.json");
+            p.note_beside(path.clone());
             let len = std::fs::metadata(&path).ok()?.len();
             if len > MAX_EMBEDDED_FILE {
                 p.problems.push(format!(
@@ -171,6 +172,40 @@ mod tests {
         let mut p = SpeechProfile::default();
         read(&mut p, &row("pocket_tts", "voices/x", None), None, None);
         assert_eq!(p.package_language, None, "nothing says");
+    }
+
+    /// The `config.json` read from beside the GGUF is an input of the
+    /// profile cache (review TC-7): noted with a stamp (TC-17: the stamp
+    /// order is pinned by `profile::tests`).
+    #[test]
+    fn sanotts_and_kroko_track_the_config_beside_the_gguf() {
+        let d = tempfile::tempdir().unwrap();
+        let gguf = d.path().join("m.gguf");
+        let config = d.path().join("config.json");
+        for (family, json) in [
+            ("sanotts", r#"{"architecture":"sanotts","language":"de"}"#),
+            (
+                "kroko_asr",
+                r#"{"model_type":"zipformer2","language":{"iso":"en"}}"#,
+            ),
+        ] {
+            let _ = std::fs::remove_file(&config);
+            let mut p = SpeechProfile::default();
+            read(&mut p, &row(family, "x", None), None, Some(&gguf));
+            assert_eq!(p.beside.paths(), [config.as_path()], "{family}: looked for");
+            assert_eq!(
+                p.beside.stamp_of(&config),
+                Some(None),
+                "{family}: not there"
+            );
+
+            std::fs::write(&config, json).unwrap();
+            let mut p = SpeechProfile::default();
+            read(&mut p, &row(family, "x", None), None, Some(&gguf));
+            assert_eq!(p.beside.paths(), [config.as_path()], "{family}");
+            let stamp = p.beside.stamp_of(&config).unwrap();
+            assert_eq!(stamp.map(|s| s.0), Some(json.len() as u64));
+        }
     }
 
     #[test]

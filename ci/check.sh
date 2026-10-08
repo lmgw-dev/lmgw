@@ -187,6 +187,18 @@ else
   fi
 fi
 
+# lmgw-client is sans-IO and builds for wasm32 (the dashboard) and natively
+# (a desktop client): the workspace build and clippy check it natively, and
+# trunk compiles it for wasm32 only when trunk runs. This checks the crate's
+# library for wasm32 on its own, so a change to it is checked for the
+# dashboard's target also when trunk is skipped (client-apps design §4.1).
+if $changed && [[ "$RUN_CLIENT_WASM" == 0 ]]; then
+  echo "==> lmgw-client wasm32 check skipped (see the selection above)"
+else
+  stage "lmgw-client for wasm32 (cargo check)"
+  cargo check -p lmgw-client --target wasm32-unknown-unknown
+fi
+
 # The page's audio worklets are JavaScript that no Rust test reaches: the
 # resampler's quality and the player's barge-in accounting are checked offline
 # in Node (scripts/worklet-check.mjs, chat-voice §11). Skipped, visibly, where

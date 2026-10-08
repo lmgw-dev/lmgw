@@ -1,6 +1,11 @@
 // The radial spectrum ring (chat-voice §10, variant B of the owner's sample):
 // frequency bands around a circle, mirrored left/right — compact and
 // technical, an instrument's look. Plain Canvas2D.
+//
+// `mount(canvas, {...inputs, transparent: true})` draws it with no
+// background: the context has alpha and each frame clears the canvas where
+// it would fill it with the palette's `bg`, so the ring floats over whatever
+// is behind the canvas. Without the flag it draws as it always has.
 
 import { run, BANDS, S, TAU, follow, css, mixRgb } from "./engine.js";
 
@@ -24,8 +29,9 @@ export const RING = {
   driveGrow: 0.06, // the ring itself grows a little with the voice
 };
 
-function createRing(canvas) {
-  const ctx = canvas.getContext("2d", { alpha: false });
+function createRing(canvas, opts) {
+  const transparent = !!(opts && opts.transparent);
+  const ctx = canvas.getContext("2d", { alpha: transparent });
   const P = RING;
   const len = new Float32Array(P.maxBars);
   const sinA = new Float32Array(P.maxBars);
@@ -68,8 +74,12 @@ function createRing(canvas) {
       ctx.setTransform(F.dpr, 0, 0, F.dpr, 0, 0);
       ctx.globalCompositeOperation = "source-over";
       ctx.shadowBlur = 0;
-      ctx.fillStyle = F.bgCss;
-      ctx.fillRect(0, 0, W, H);
+      if (transparent) {
+        ctx.clearRect(0, 0, W, H);
+      } else {
+        ctx.fillStyle = F.bgCss;
+        ctx.fillRect(0, 0, W, H);
+      }
 
       // bar lengths: band energy, idle swell, thinking crests, barge-in retract
       const breath = 0.5 + 0.5 * Math.sin(F.t * TAU * 0.16 * motion);

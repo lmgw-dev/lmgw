@@ -5,27 +5,11 @@
 //! for the GPU hold and a benchmark run's lease alike ([`Block`]).
 //! Pure, so it is tested natively.
 
-use serde::Deserialize;
-
 use super::{StageResolved, VoiceResolved};
 
 /// One `state` frame: `{stage, alias, state, ms, cause, answered_by,
-/// reason, message}`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub(crate) struct ModelState {
-    pub stage: String,
-    pub alias: String,
-    pub state: String,
-    pub ms: Option<u64>,
-    /// `held`: `gpu_hold` or `benchmark`.
-    pub cause: Option<String>,
-    /// `fallback`: the alias that answers in its place.
-    pub answered_by: Option<String>,
-    /// `skipped`: `full`, `does_not_fit` or `cannot_speak`.
-    pub reason: Option<String>,
-    pub message: Option<String>,
-}
+/// reason, message}` — the shape clients share (`lmgw-api-types`).
+pub(crate) use lmgw_api_types::chat_voice::ModelState;
 
 /// How a note is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

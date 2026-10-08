@@ -20,7 +20,7 @@ async fn bound_core() -> crate::realtime::session::Core {
         model_alias: "m".into(),
         ..Default::default()
     };
-    let bind = state.chat_live.bind_voice(thread.id);
+    let bind = state.chat_live.bind_voice(thread.id, "the dashboard");
     let binding = crate::realtime::thread::Binding {
         thread_id: thread.id,
         title: "t".into(),
@@ -31,6 +31,7 @@ async fn bound_core() -> crate::realtime::session::Core {
         warm: vec![],
         guard: Some(bind.guard),
         taken: bind.taken,
+        taken_by: bind.taken_by,
         fence: bind.fence,
     };
     let (sink, _frames) = futures::channel::mpsc::unbounded();
@@ -43,6 +44,7 @@ async fn bound_core() -> crate::realtime::session::Core {
         .await
         .unwrap();
     let init = crate::realtime::session::SessionInit {
+        running: None,
         state,
         ctx: Default::default(),
         requested_model: None,

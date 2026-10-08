@@ -206,10 +206,7 @@ pub(super) fn RunsTab(
                                             </td>
                                             <td
                                                 class="num col-p2"
-                                                title=match (r.tokens, r.cost_micro) {
-                                                    (Some(_), None) => "no price is known for this model",
-                                                    _ => "",
-                                                }
+                                                title=cost_note(&r).unwrap_or_default()
                                             >
                                                 // NULL is "nobody priced this", which is
                                                 // not zero and must not read as free.
@@ -229,6 +226,7 @@ pub(super) fn RunsTab(
                                                     r.tokens.map(crate::fmt::grouped).unwrap_or_else(|| "no".into()),
                                                     match r.cost_micro {
                                                         Some(m) => money(m, &currency.get_value()),
+                                                        None if made_no_model_call(&r) => "no model call".to_string(),
                                                         None => "unpriced".to_string(),
                                                     },
                                                 )

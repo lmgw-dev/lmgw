@@ -35,6 +35,7 @@ is kept stable.
 | 2026-10-06 | [The registry owns the start](2026-10-06-registry-owns-start.md): a request that goes away mid-load no longer leaves its model's container running unowned; reconciliation after boot; `499` rows |
 | 2026-10-06 | [llama.cpp egress](2026-10-06-llama-egress-design.md) (draft): llama-server and ik_llama.cpp as their own `llama_cpp` protocol, `/props` facts, tool-result images |
 | 2026-10-06 | [Client apps](2026-10-06-client-apps-design.md) (draft): device keys and a Chat capability, the Chat change feed, ongoing-conversation folders, device-hosted MCP, approvals, MCP resources |
+| 2026-10-07 | [Billable units](2026-10-07-billable-units-design.md) (draft): prices per minute of audio, per character, per image and per request next to tokens, measured quantities on the request row |
 
 ## Dashboard rebuild (2026-08)
 

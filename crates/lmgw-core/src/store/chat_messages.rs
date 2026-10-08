@@ -68,7 +68,7 @@ pub enum ContinueSave {
 /// Append a turn's reply as a new assistant row and bump the thread's
 /// `updated_at`; its id.
 pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply) -> DbResult<i64> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let id = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages,
@@ -107,7 +107,7 @@ pub async fn continue_chat_reply(
     prefix: &str,
     r: &ChatReply,
 ) -> DbResult<ContinueSave> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let now: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT content, voice FROM chat_messages
          WHERE id = ?1 AND thread_id = ?2 AND role = 'assistant'",
@@ -161,7 +161,7 @@ pub async fn rewrite_chat_user_message(
     content: &str,
     kb_refs: &[i64],
 ) -> DbResult<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content = ?3, kb_refs = ?4, context = NULL,
            voice = CASE WHEN content = ?3 THEN voice ELSE NULL END
@@ -224,7 +224,7 @@ pub async fn update_chat_message(
     id: i64,
     m: &ChatMessageUpdate,
 ) -> DbResult<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
            completion_tokens=?6, ir_messages=?7, voice=?8
@@ -252,7 +252,7 @@ pub async fn update_chat_message(
 /// key cascades, migration 0038). `false` when no such message is in this
 /// thread.
 pub async fn delete_chat_message(pool: &SqlitePool, thread_id: i64, id: i64) -> DbResult<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query("DELETE FROM chat_messages WHERE id=?1 AND thread_id=?2")
         .bind(id)
         .bind(thread_id)
@@ -281,7 +281,7 @@ pub async fn truncate_chat_messages(
     } else {
         "DELETE FROM chat_messages WHERE thread_id=?1 AND id > ?2"
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(sql)
         .bind(thread_id)
         .bind(id)
@@ -301,4 +301,27 @@ async fn touch_thread(tx: &mut sqlx::SqliteConnection, thread_id: i64) -> DbResu
         .execute(tx)
         .await?;
     Ok(())
+}
+
+/// When the newest message of each of `ids` was written, in unix seconds:
+/// a thread without messages is not in the map. One query for a whole list
+/// (the thread list's `last_message_at`; client-apps design §3.3, where an
+/// ongoing folder's idleness is measured from it).
+pub async fn chat_last_message_at(
+    pool: &SqlitePool,
+    ids: &[i64],
+) -> DbResult<std::collections::HashMap<i64, i64>> {
+    if ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let ids = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT thread_id, CAST(strftime('%s', MAX(created_at)) AS INTEGER)
+         FROM chat_messages WHERE thread_id IN (SELECT value FROM json_each(?1))
+         GROUP BY thread_id",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
 }

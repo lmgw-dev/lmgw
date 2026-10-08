@@ -1163,6 +1163,20 @@ temporary thread. It is decided before the 101, so a bound session starts bound.
 | 409 | `chat_thread_admin` | §8.1 below |
 | 400 | `owned_by_thread` | `?model=` beside `chat_thread` |
 
+*Changed 2026-10-06 (client-apps design §1.3, WP3):* the capability is `Cap::Chat`, which every
+`/chat/api` route needs now: the dashboard's cookie, an owner key, or a paired device's key. For a
+device, an Admin Chat thread is the 404 `chat_thread_not_found` (it does not exist for a device);
+the owner still gets the 409. A device binds as its key: the thread's chat, ASR and TTS aliases
+pass realtime §10.2's check against it before the 101 (`403 key_scope` / `key_budget`), and each
+of its refusals writes a request row. A takeover names the binder: "voice mode moved to device
+'phone'", or "… to the dashboard".
+
+*Changed 2026-10-07 (client-apps design §1.7, W6-5):* the refusals are realtime's OpenAI error
+shape, `{"error": {code, message, type, param}}`, not flat JSON. **`takeover=never`** joins the
+query: while another session is bound to the thread the bind is refused, 409
+`chat_thread_bound` ("voice is in use on device 'phone'"), and nothing is taken over; a client's
+automatic rebind uses it, a user's explicit press binds without it and takes over.
+
 **No Admin Chat (ruling 7).** The bind is refused when `thread.kind == "admin"`, and only then.
 - The same check runs again **before each response**, against the thread as re-read. A failing
   check refuses the response with `error {code: "chat_thread_admin"}` before `response.created`;
@@ -1327,7 +1341,10 @@ confused with `realtime/writer.rs`, the socket writer.
     past the core's generation filter, so a cancelled response's `done` still lands;
   - from the **core**: the heard cut, at drain or cancel.
 - **Late truncates.** The page's `truncate` follows a barge-in by a round trip. When it arrives
-  after the finalize, it queues a re-cut, applied only under the guard below. *Stated (WP8 review
+  after the finalize, it queues a re-cut, applied only under the guard below. *Stated
+  2026-10-07 (client-apps review):* the finalize and the re-cut each send their
+  `lmgw.chat.reply` for the same message, a few ms apart; the later one replaces the earlier
+  (the realtime DocRoute and `lmgw-client` say so). *Stated (WP8 review
   NIT 1):* the next response's user message moves the generation too, so a truncate that arrives
   after it — rare: the page truncates before its next commit — is skipped like one after another
   window's turn, though the only turn since is the session's own.
@@ -1669,6 +1686,11 @@ same bubble code as a text send renders it.
   - ASR and TTS rows carry `realtime`, one TTS row per response.
   - The per-call key checks pass trivially, since a bound session is admin-only. The concurrency
     slot is taken as today.
+  - *Corrected 2026-10-06 (client-apps design §1.3, WP3):* a bound session is no longer
+    admin-only. Its per-call checks run as an unbound session's (realtime §10.3) against the
+    session's key: for a device's session they count and can refuse. The Chat engine checks the
+    chat model's calls against the device's key and charges them to it (rows labelled `chat`).
+    For the owner's session they still pass as they always did.
   - *Fixed after the WP11 server review (M2):* a stopped plain (no-tools) turn — the page's Stop,
     a barge-in or `response.cancel`, the truncate-first stop, a leave mid-reply, a takeover —
     writes its row as the stock path's cooperative stop does: status 200, `canceled`, the
@@ -1679,7 +1701,10 @@ same bubble code as a text send renders it.
     the relay keeps what it read outside the dropped future (`web/chat/stopped.rs`). The reply's
     own token counts and `done` keep what the upstream reported.
 - **Docs.** The `/v1/realtime` `DocRoute` gains `chat_thread` (dashboard only), the extension
-  events and table skipping. The new `/chat/api` routes are `DASHBOARD_BACKEND` exclusions.
+  events and table skipping. *Changed 2026-10-06 (client-apps WP3):* `chat_thread` is any `Chat`
+  principal's (the dashboard, an owner key, a paired device), and the DocRoute says so. The new
+  `/chat/api` routes are `CHAT_API` exclusions (they were `DASHBOARD_BACKEND` ones before
+  2026-10-06).
   - *Built (WP8):* the query parameter is documented from `RealtimeQuery::chat_thread`'s own doc
     (the schema the DocRoute derives), and the description names the binding's refusals, what the
     thread owns, the takeover, the announcements and each `lmgw.*` event's shape.
@@ -1697,7 +1722,9 @@ same bubble code as a text send renders it.
   - For WP9 (NIT 11): a re-answer (a response with no new words, owed turns only) sends no
     `turn` frame — its `user_message_id` is none — so the bubble code must not wait for one.
   - The binding's refusals (403/400/404/409) write no request row (NIT 12), unlike realtime's
-    anonymous cross-origin refusal; they are the dashboard's own requests.
+    anonymous cross-origin refusal; they are the dashboard's own requests. *Amended 2026-10-06
+    (client-apps design §1.3):* this holds for the owner's binds only. A device's refusals write
+    their row, as realtime's own handshake refusals do.
   - Fixed in the same batch: a cancelled response's late `done` and plan reach the stored timing
     through the responder's save (NIT 6), and a user write lets go of the text of the replies it
     made un-re-cuttable (NIT 7).
@@ -1971,6 +1998,7 @@ export function mount(canvas, inputs) // → handle
 //   inputs.input          AnalyserNode | null   mic tap; null while the mic is closed
 //   inputs.palette        {bg, fg, accent, accent2, warn, muted}  colours from app.css tokens
 //   inputs.reducedMotion  boolean
+//   inputs.transparent    boolean, default false  no background of its own (ring.js only; 2026-10-07)
 handle.setState(state, info)  // "idle"|"listening"|"thinking"|"speaking"|"interrupted"
                               // info: {since: DOMHighResTimeStamp, muted, loading: string|null, held}
 handle.setTiming(timing)      // optional: the lmgw.response.timing object
@@ -2021,6 +2049,14 @@ ships.
   the ratio in effect, while the host follows the window's ratio.
 - *Measured (WP9):* headless Chrome, SwiftShader, 640×184: the ribbon 0.24 ms, the ring 0.07 ms,
   the orb (WebGL2) 0.03 ms of main-thread work per frame.
+- *Added (client-apps design §8, 2026-10-07):* **`inputs.transparent`** (boolean, default
+  false). `engine.js` hands the factory `{palette, transparent}`; `ring.js` then takes a 2D
+  context with alpha and clears the canvas each frame where it filled it with `palette.bg`, so
+  the ring floats over whatever is behind the canvas (a desktop client's overlay mounts it with
+  `{...inputs, transparent: true}`). The ribbon and the orb ignore the flag and paint their
+  background as always. Without the flag every variant renders byte for byte as before; the
+  dashboard passes none. The viz harness checks the ring's corner pixels transparent with it,
+  opaque without it, and the ribbon's opaque with it.
 
 - *Changed after the WP11 UI review (NIT 8):* idle with both taps quiet for 1.5 s, and in reduced
   motion, the engine draws at 15 fps (`IDLE_FPS`); a state change, a voice on either tap, new

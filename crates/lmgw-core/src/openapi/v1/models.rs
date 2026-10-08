@@ -1,8 +1,7 @@
-//! `GET /v1/models` and `GET /v1/models/{id}` (api-docs design §4.8), read
+//! `GET /v1/models` and `GET /v1/models/{id}`, read
 //! from `server::openai_model_object`/`anthropic_model_object`/`lmgw_block`
-//! (`server.rs:1516-1637`) — the model-capabilities design's §2.1/§2.2 wire
-//! shape. Served OpenAI-shaped unless the caller sends `anthropic-version`
-//! (`wants_anthropic`, `server.rs:1643`); both shapes publish the same
+//! (the model-capabilities wire shape). Served OpenAI-shaped unless the
+//! caller sends `anthropic-version` (`wants_anthropic`); both shapes publish the same
 //! [`crate::capabilities::ModelCapabilities`] object.
 
 use schemars::generate::SchemaGenerator;
@@ -35,8 +34,8 @@ fn lmgw_block(g: &mut SchemaGenerator) -> serde_json::Value {
                     "anthropic": {"type": "array", "items": {"type": "string"}},
                     "other": {"type": "array", "items": {"type": "string"}}
                 },
-                "description": "Generated from the route registry (§4.11) — every path here \
-                    exists and carries the capability its own operation documents."
+                "description": "Every path listed here exists in this API and carries the capability \
+                    its own operation documents."
             },
             "headers": headers.to_value(),
             "notes": {"type": "array", "items": {"type": "string"}}
@@ -57,8 +56,9 @@ pub(crate) fn openai_model(g: &mut SchemaGenerator) -> Schema {
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["model"]},
-                "created": {"type": "integer", "description": "Stable per gateway process, \
-                    not now() on every poll — the catalog's own timestamp when it has one."},
+                "created": {"type": "integer", "description": "Stable for the life of the gateway process \
+                    rather than the time of each request; the catalog's own timestamp when \
+                    it has one."},
                 "owned_by": {"type": "string"},
                 "context_length": {"type": "integer"},
                 "max_output_tokens": {"type": "integer"},
@@ -87,8 +87,7 @@ pub(crate) fn anthropic_model(g: &mut SchemaGenerator) -> Schema {
                 "created_at": {"type": "string", "format": "date-time"},
                 "context_window": {"type": "integer"},
                 "max_input_tokens": {"type": "integer", "description": "Alias of \
-                    context_window — the Anthropic SDK's own typed name for the same \
-                    number."},
+                    context_window, under the name the Anthropic SDK types it by."},
                 "max_output_tokens": {"type": "integer"},
                 "max_tokens": {"type": "integer", "description": "Alias of \
                     max_output_tokens."},

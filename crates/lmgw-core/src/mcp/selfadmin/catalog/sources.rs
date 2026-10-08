@@ -13,7 +13,12 @@ pub(super) fn tools() -> Vec<Builtin> {
                  lmgw aggregates. List-valued fields are newline-delimited text: args and \
                  extra_run_args one per line, env as KEY=VALUE lines, headers as \
                  'Name: Value' lines. Omit env/headers on update to keep the stored values. \
-                 A successful change reconnects the server and pushes tools/list_changed.",
+                 A call that moves url to another address (update, enable or disable) must \
+                 pass headers as text in the same call when the server holds any (\"\" sends \
+                 none; null keeps the stored ones, so it does not count), or it is refused \
+                 and nothing changes: stored headers, which may hold its credential, are \
+                 never sent to a host they were not given for. A successful change \
+                 reconnects the server and pushes tools/list_changed.",
             props: vec![
                 (
                     "action",
@@ -33,7 +38,10 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "url",
-                    str_p("Endpoint URL for http/sse transports."),
+                    str_p(
+                        "Endpoint URL for http/sse transports. Moving it needs headers, as \
+                         text, in the same call when the server holds any.",
+                    ),
                 ),
                 (
                     "command",
@@ -64,7 +72,15 @@ pub(super) fn tools() -> Vec<Builtin> {
                          'lmgw' is reserved.",
                     ),
                 ),
-                ("timeout_ms", int_p("Per tool-call timeout in ms. Default 60000.")),
+                (
+                    "timeout_ms",
+                    int_p(
+                        "Timeout in ms for each tool call and for the connect handshake. Not \
+                         bounded by it: the pull of a container image before the handshake, and \
+                         the whole start of a stdio server without a container image (an npx \
+                         or uvx command may install its package first). Default 60000.",
+                    ),
+                ),
                 ("autostart", bool_p("Connect at startup instead of on first use.")),
                 (
                     "idle_seconds",

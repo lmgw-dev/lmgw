@@ -830,7 +830,7 @@ pub fn result_of(
         "usage": totals.usage,
         // NULL, never 0, when nothing could be priced: "we do not know" and
         // "it was free" are different answers.
-        "cost_micro": totals.cost_micro,
+        "cost_micro": totals.cost_micro(),
         "model_calls": totals.model_calls,
         "tool_calls": totals.tool_calls,
         "phase": phase.as_str(),

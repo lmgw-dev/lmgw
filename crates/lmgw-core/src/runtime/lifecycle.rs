@@ -444,18 +444,31 @@ async fn legacy_sweep(state: &SharedState, snap: &Snapshot, adopted: &[String]) 
     // (gpu-hold design §3.1) — this runs at boot, concurrently with nothing
     // today, but the lock is cheap and the alternative is a silent exception
     // to a rule every other settings writer follows.
-    let _guard = state.settings_write.lock().await;
-    let mut settings = state.snapshot().settings.clone();
-    settings.legacy_container_names.clear();
-    match crate::store::save_settings(&state.db, &settings).await {
-        Ok(()) => {
-            if let Err(e) = state.reload_snapshot().await {
-                tracing::warn!("reloading settings after the router-mode sweep: {e}");
+    // The snapshot is published under it, and MCP reconciled once it is let
+    // go (`AppState::settings_saved`), against the snapshot of then
+    // (`AppState::reconcile_mcp`).
+    let published = {
+        let _guard = state.settings_write.lock().await;
+        let mut settings = state.snapshot().settings.clone();
+        settings.legacy_container_names.clear();
+        match crate::store::save_settings(&state.db, &settings).await {
+            Ok(()) => match state.publish_snapshot().await {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!("reloading settings after the router-mode sweep: {e}");
+                    false
+                }
+            },
+            // Not fatal: the sweep already happened, and a list that survives
+            // it only costs the next boot an inspect per name.
+            Err(e) => {
+                tracing::warn!("clearing the swept router-mode container names: {e}");
+                false
             }
         }
-        // Not fatal: the sweep already happened, and a list that survives it
-        // only costs the next boot an inspect per name.
-        Err(e) => tracing::warn!("clearing the swept router-mode container names: {e}"),
+    };
+    if published {
+        state.reconcile_mcp().await;
     }
 }
 

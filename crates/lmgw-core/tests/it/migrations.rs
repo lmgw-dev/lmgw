@@ -18,6 +18,8 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
+mod billable_units;
+mod device_keys;
 mod llama_cpp;
 
 /// An in-memory database migrated up to `version` and no further — the state an
@@ -25,7 +27,8 @@ mod llama_cpp;
 pub(crate) async fn db_at_version(version: i64) -> SqlitePool {
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")
         .unwrap()
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(lmgw_core::store::BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(opts)

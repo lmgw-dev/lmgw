@@ -198,6 +198,40 @@ fn an_attention_row_explains_itself() {
     assert_eq!(attention_note(None, None), None);
 }
 
+/// A run with no cost says why: one that made no model call had nothing to
+/// price, which is not the "no price is known" of a run that spent tokens
+/// (review WP2b #3). A priced run, and one with no result yet, say nothing.
+#[test]
+fn a_run_without_a_cost_says_why() {
+    let run =
+        |model_calls: Option<u64>, tokens: Option<u64>, cost_micro: Option<i64>| AgentRunSummary {
+            model_calls,
+            tokens,
+            cost_micro,
+            ..Default::default()
+        };
+    let no_call = run(Some(0), Some(0), None);
+    assert!(made_no_model_call(&no_call));
+    assert_eq!(cost_note(&no_call), Some("no model call was made"));
+    assert_eq!(
+        cost_note(&run(Some(2), Some(40), None)),
+        Some("no price is known for this model")
+    );
+    assert_eq!(
+        cost_note(&run(Some(0), Some(40), None)),
+        Some("no price is known for this model"),
+        "failed calls that spent tokens nobody priced"
+    );
+    assert_eq!(
+        cost_note(&run(None, Some(0), None)),
+        Some("no price is known for this model"),
+        "without a model call count, the tokens decide"
+    );
+    assert_eq!(cost_note(&run(Some(0), Some(0), Some(0))), None, "free");
+    assert_eq!(cost_note(&run(Some(1), Some(9), Some(5))), None);
+    assert_eq!(cost_note(&run(None, None, None)), None, "no result yet");
+}
+
 /// Cancel applies to a run that is going, and to nothing else.
 #[test]
 fn only_a_live_run_can_be_cancelled() {
@@ -350,11 +384,19 @@ fn the_runtime_folds_to_the_image_and_its_bounds() {
     );
 }
 
-/// No model call, no cost line; an unpriced one says so rather than
-/// printing a zero.
+/// No model call and nothing spent, no cost line; an unpriced one says so
+/// rather than printing a zero.
 #[test]
 fn the_cost_line_only_speaks_for_a_run_that_called_a_model() {
     assert_eq!(cost_text(&json!({ "model_calls": 0 }), "USD"), None);
+    assert_eq!(
+        cost_text(
+            &json!({ "model_calls": 0, "cost_micro": null,
+                     "usage": { "prompt_tokens": 0, "completion_tokens": 0 } }),
+            "USD"
+        ),
+        None
+    );
     let line = cost_text(
         &json!({ "model_calls": 3, "tool_calls": 1, "usage": { "prompt_tokens": 10, "completion_tokens": 2 } }),
         "USD",
@@ -365,6 +407,35 @@ fn the_cost_line_only_speaks_for_a_run_that_called_a_model() {
         "{line}"
     );
     assert!(line.ends_with("unpriced"), "{line}");
+}
+
+/// A run with no model call can still have spent (review WP2b, second
+/// pass): a classify stage that aborted on failures whose rows were priced,
+/// a container whose calls were all stopped. Its line shows the spend.
+#[test]
+fn the_cost_line_shows_spend_without_a_model_call() {
+    let priced = cost_text(
+        &json!({ "model_calls": 0, "tool_calls": 9, "cost_micro": 300,
+                 "usage": { "prompt_tokens": 30, "completion_tokens": 0 } }),
+        "USD",
+    )
+    .expect("a cost is shown");
+    assert!(
+        priced.starts_with("0 model call(s), 9 tool call(s), 30 in / 0 out tokens"),
+        "{priced}"
+    );
+    assert!(!priced.ends_with("unpriced"), "{priced}");
+
+    let unpriced = cost_text(
+        &json!({ "model_calls": 0, "cost_micro": null,
+                 "usage": { "prompt_tokens": 40, "completion_tokens": 9 } }),
+        "USD",
+    )
+    .expect("tokens nobody priced are shown");
+    assert!(unpriced.ends_with("unpriced"), "{unpriced}");
+
+    let free = cost_text(&json!({ "model_calls": 0, "cost_micro": 0 }), "USD");
+    assert!(free.is_some(), "a known 0 is a cost, not nothing");
 }
 
 /// The inline report says what happened and then every warning verbatim —

@@ -1,7 +1,6 @@
-//! `POST /v1/responses` and its stored-response siblings (api-docs design
-//! §4.8), read from `ingress::responses::parse_request` (`responses.rs:146`)
-//! and `ResponsesEncoder` (`:756`, `:1304` `snapshot`) — not from OpenAI's
-//! own Responses docs. lmgw implements this itself (llama-server has none);
+//! `POST /v1/responses` and its stored-response siblings, read from
+//! `ingress::responses::parse_request` and `ResponsesEncoder` — not from
+//! OpenAI's own Responses docs. lmgw implements this itself (llama-server has none);
 //! see the module doc there for what is faithful and what is refused rather
 //! than silently approximated.
 
@@ -33,7 +32,7 @@ fn mcp_tool() -> Value {
             "type": {"type": "string", "enum": ["mcp"]},
             "server_label": {"type": "string", "description": "Matches a registered MCP \
                 server's own tool prefix (or its name when it has none) — lmgw resolves this \
-                against its own servers, never a client-supplied server_url."},
+                against its own servers, never against a client-supplied server_url."},
             "allowed_tools": {
                 "oneOf": [
                     {"type": "array", "items": {"type": "string"}},
@@ -89,10 +88,14 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                 "tool_choice": {"description": "\"auto\" | \"none\" | \"required\" | \
                     {type:function,name}."},
                 "stream": {"type": "boolean", "default": false},
-                "store": {"type": "boolean", "description": "This stage stores nothing \
-                    regardless of the value sent; the response object always answers \
-                    store: false so a client can see previous_response_id will not work \
-                    before it tries."},
+                "store": {"type": "boolean", "description": "Whether lmgw keeps this \
+                    response, so a later call can continue it with previous_response_id \
+                    (default true). Storing also needs the gateway's response store, which \
+                    is on by default: a request can turn storing off, never on. The \
+                    response object's store says whether this response was kept, so a \
+                    client can see up front whether previous_response_id will work. On an \
+                    upstream that implements the Responses API itself the body goes there \
+                    as sent, and storing is the provider's."},
                 "metadata": {"description": "Echoed back verbatim on the response object."},
                 "temperature": {"type": "number"},
                 "top_p": {"type": "number"},
@@ -100,9 +103,12 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                 "max_output_tokens": {"type": "integer"},
                 "max_tool_calls": {"type": "integer"},
                 "parallel_tool_calls": {"type": "boolean", "default": true},
-                "previous_response_id": {"type": "string", "description": "Refused: this \
-                    stage stores nothing, so a chained call would silently lose the earlier \
-                    conversation."},
+                "previous_response_id": {"type": "string", "description": "Continues a \
+                    stored response: its conversation, tool calls and results included, \
+                    goes ahead of this call's input, and mcp_approval_response items settle \
+                    the calls it stopped at. 400 while the gateway's response store is \
+                    switched off; 404 when no stored response has this id (it was evicted, \
+                    or created with storing off)."},
                 "reasoning": {
                     "type": "object",
                     "properties": {"effort": {"type": "string"}},
@@ -118,7 +124,7 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
                 },
                 "include": {"type": "array", "items": {"type": "string"}},
                 "background": {"type": "boolean", "description": "Refused: responses always \
-                    run synchronously here."},
+                    run synchronously."},
                 "truncation": {"type": "string", "description": "Refused when \"auto\": lmgw \
                     never silently drops conversation history."}
             },
@@ -134,7 +140,12 @@ fn usage_schema() -> Value {
             "input_tokens": {"type": "integer"},
             "input_tokens_details": {
                 "type": "object",
-                "properties": {"cached_tokens": {"type": "integer"}}
+                "properties": {
+                    "cached_tokens": {"type": "integer"},
+                    "cache_write_tokens": {"type": "integer"}
+                },
+                "description": "Tokens read from and written to the prompt cache, both \
+                    part of input_tokens; 0 when the upstream reported none."
             },
             "output_tokens": {"type": "integer"},
             "output_tokens_details": {
@@ -146,7 +157,7 @@ fn usage_schema() -> Value {
     })
 }
 
-/// `ResponsesEncoder::snapshot` (`:1304`). The non-streaming shape — the one
+/// `ResponsesEncoder::snapshot`. The non-streaming shape — the one
 /// this operation documents; `stream: true` instead answers
 /// `text/event-stream` with 22 distinct `response.*` event names
 /// (`response.created` … `response.completed`/`.incomplete`/`.failed`,
@@ -171,7 +182,8 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
                 "error": {"type": ["object", "null"]},
                 "incomplete_details": {"type": ["object", "null"], "properties": {"reason": {"type": "string"}}},
                 "usage": usage_schema(),
-                "store": {"type": "boolean", "enum": [false]}
+                "store": {"type": "boolean", "description": "Whether lmgw stored this response, so a later \
+                    request can continue from it with previous_response_id."}
             },
             "additionalProperties": true
         }),
@@ -186,8 +198,8 @@ pub(crate) fn example() -> Value {
 }
 
 /// One of the 22 distinct `response.*` SSE events `response`'s own doc
-/// comment lists (WP4 "Extra" gap — that doc comment explains why this did
-/// not exist until now): `{type, sequence_number, ...}`, event-specific
+/// comment lists (that doc comment explains why it is a separate
+/// schema): `{type, sequence_number, ...}`, event-specific
 /// fields carried by `additionalProperties` rather than re-deriving all 22
 /// shapes here.
 pub(crate) fn stream_event(g: &mut SchemaGenerator) -> Schema {
@@ -210,8 +222,8 @@ pub(crate) fn stream_event(g: &mut SchemaGenerator) -> Schema {
 }
 
 /// `GET /v1/responses/{id}/input_items`: this turn's `input` array as sent
-/// (`ResponsesRequest::input_items`), for a client that stored `store: true`
-/// and wants to see what it originally sent.
+/// (`ResponsesRequest::input_items`), for a client that wants to see what it
+/// originally sent.
 pub(crate) fn input_items(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
         g,

@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which of the three engines lmgw runs a build produces (§3). ik_llama.cpp is
+/// Which of the three engines lmgw runs a build produces. ik_llama.cpp is
 /// `Llama` with its own repo preset, not an engine of its own: its images run
 /// in the same classes.
 #[derive(
@@ -84,8 +84,7 @@ pub fn moving_tag(engine: Engine, slug: &str) -> String {
     format!("{}:{slug}", engine.image_repo())
 }
 
-/// Where a build's repository lives, which decides how PR extras are found
-/// (§4, §7).
+/// Where a build's repository lives, which decides how PR extras are found.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -120,7 +119,7 @@ impl Forge {
     }
 }
 
-/// The GPU backend a build targets (§4). Labelled **GPU backend** on the
+/// The GPU backend a build targets. Labelled **GPU backend** on the
 /// Backends page, so it does not read as the page's own subject. Picks the
 /// preset's Dockerfile candidate.
 #[derive(
@@ -157,7 +156,7 @@ impl GpuBackend {
     }
 }
 
-/// One entry of a build's ordered extras list (§4): something merged on top
+/// One entry of a build's ordered extras list: something merged on top
 /// of the base ref, in order.
 ///
 /// With no `pin`, a run follows the head. A pin is a full commit SHA and
@@ -212,9 +211,9 @@ impl BuildExtra {
     }
 }
 
-/// What a Dockerfile edit is for (§14.2). The role is what lets the build's
+/// What a Dockerfile edit is for. The role is what lets the build's
 /// own switches reach an edit that was customized: `ccache` off drops every
-/// [`Ccache`](Self::Ccache) and [`Cache`](Self::Cache) edit, whether it came
+/// `ccache` and `cache` edit, whether it came
 /// from the preset or was typed by hand.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
@@ -259,7 +258,7 @@ impl EditRole {
     }
 }
 
-/// One Dockerfile edit (§4, §5 step 4, §14.2): a literal find/replace of
+/// One Dockerfile edit: a literal find/replace of
 /// **every** occurrence, applied to a copy of the Dockerfile, never to the
 /// checkout, in list order (a later edit sees what the earlier ones wrote).
 /// Each one is logged as applied or not matched; a `required` edit that does
@@ -290,7 +289,7 @@ pub struct BuildEdit {
 /// value (§4).
 pub const DEFAULT_CCACHE_MAX_SIZE: &str = "10G";
 
-/// Every editable field of a build (§4) — the `builds` row minus its id and
+/// Every editable field of a build — the `builds` row minus its id and
 /// timestamps. What the editor sends, what `duplicate` copies, and what a run
 /// snapshots into its `inputs` as "the config as built".
 ///
@@ -394,7 +393,7 @@ impl Build {
     }
 }
 
-/// Where a build run is, or how it ended (§5).
+/// Where a build run is, or how it ended.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -497,7 +496,7 @@ pub struct ResolvedExtra {
 }
 
 /// What every "auto" and every "follow the head" of a build became for one
-/// run (§5 steps 1–4). Filled by the run executor; the config hash is computed
+/// run. Filled by the run executor; the config hash is computed
 /// over these values, never over the unresolved definition.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
@@ -522,7 +521,7 @@ pub struct ResolvedInputs {
     pub edits: Vec<BuildEdit>,
 }
 
-/// A run's `inputs` column: the full snapshot (§3 "Build run").
+/// A run's `inputs` column: the full snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -537,7 +536,7 @@ pub struct BuildRunInputs {
     pub cfg_hash: Option<String>,
 }
 
-/// One `build_runs` row (§3 "Build run"): append-only, and kept when its
+/// One `build_runs` row: append-only, and kept when its
 /// build is deleted (`build_id` becomes `None`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -569,7 +568,7 @@ pub struct BuildRun {
     /// moved by hand is not reflected here.
     pub promoted: bool,
     pub size_bytes: Option<u64>,
-    /// The verify checks' results (§5 step 6), shaped by the executor.
+    /// The verify checks' results, shaped by the executor.
     pub verify: Option<serde_json::Value>,
     pub error: Option<String>,
     /// The full, never-truncated build log.
@@ -586,7 +585,7 @@ pub struct BuildRun {
 // a typo'd argument is an error that names it, never a silent default.
 
 /// `build_get` args: one build's detail plus a page of its run history,
-/// newest first (§15). `limit` is explicit — the UI pages with ShowMore
+/// newest first. `limit` is explicit — the UI pages with ShowMore
 /// rather than an unbounded fetch. `before` pages further back: the id of
 /// the oldest run already shown, so the next page starts strictly older
 /// than it. It is an exclusive run-id cursor and need not name an existing
@@ -600,7 +599,7 @@ pub struct BuildsGetArgs {
     pub before: Option<i64>,
 }
 
-/// `build_set`'s `action` (§15).
+/// `build_set`'s `action`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -614,11 +613,11 @@ pub enum BuildSetAction {
     Duplicate,
 }
 
-/// `build_set` args (§15): create, update, delete or duplicate a build.
+/// `build_set` args: create, update, delete or duplicate a build.
 /// `spec` carries the fields for `create`/`update`; `slug`/`name` rename the
 /// copy on `duplicate`; `delete_images` extends `delete` to also remove the
 /// build's images (refused while any is in use, like
-/// [`ContainerImageDeleteArgs`]).
+/// `container_image_delete`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -631,7 +630,7 @@ pub struct BuildSetArgs {
     pub delete_images: bool,
 }
 
-/// `build_resolve` args (§15): preview what a spec resolves to right now,
+/// `build_resolve` args: preview what a spec resolves to right now,
 /// without building — the build editor's "Resolve" button.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -640,7 +639,7 @@ pub struct BuildResolveArgs {
     pub spec: BuildSpec,
 }
 
-/// `build_check_merge` args (§15, §7, §14.1): either a saved build (`id`) or
+/// `build_check_merge` args: either a saved build (`id`) or
 /// an unsaved spec straight from the editor.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -650,7 +649,7 @@ pub struct BuildCheckMergeArgs {
     pub spec: Option<BuildSpec>,
 }
 
-/// `build_run` args (§15, §5 step 2). `rebuild` forces `--pull=newer` and a
+/// `build_run` args. `rebuild` forces `--pull=newer` and a
 /// full build even when the immutable tag already exists and is verified
 /// ("Rebuild anyway").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,7 +660,7 @@ pub struct BuildRunArgs {
     pub rebuild: bool,
 }
 
-/// `build_run_log` args (§15, §5 step 5): a byte-offset chunk of the run's
+/// `build_run_log` args: a byte-offset chunk of the run's
 /// log file (at most 1 MiB per reply). The UI polls with the previous
 /// response's `next_offset`, only while `done` is false.
 ///
@@ -679,7 +678,7 @@ pub struct BuildRunLogArgs {
     pub tail: Option<usize>,
 }
 
-/// `build_promote` args (§15, §6 "Make current" / rollback): move the
+/// `build_promote` args: move the
 /// build's moving tag to this run's image.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -688,7 +687,7 @@ pub struct BuildPromoteArgs {
     pub run_id: i64,
 }
 
-/// `build_verify` args (§15, §5 step 6): re-run the help/device-probe checks
+/// `build_verify` args: re-run the help/device-probe checks
 /// for a run that was built but not GPU-verified ("Verify now").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -697,7 +696,7 @@ pub struct BuildVerifyArgs {
     pub run_id: i64,
 }
 
-/// `forge_refs` args (§15, §4 "ref"): branch/tag suggestions for the ref
+/// `forge_refs` args: branch/tag suggestions for the ref
 /// combobox.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -706,7 +705,7 @@ pub struct ForgeRefsArgs {
     pub repo_url: String,
 }
 
-/// `forge_prs` args (§15, §7): one page of the extras picker's PR/MR list.
+/// `forge_prs` args: one page of the extras picker's PR/MR list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -717,7 +716,7 @@ pub struct ForgePrsArgs {
     pub page: Option<u32>,
 }
 
-/// `forge_pr` args (§15, §5 step 1 "pr extras also get forge state"): one
+/// `forge_pr` args: one
 /// PR/MR's current forge state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -728,13 +727,13 @@ pub struct ForgePrArgs {
     pub number: u64,
 }
 
-/// `container_images` args (§15, §9.1 Images tab): every local image, or
+/// `container_images` args: every local image, or
 /// only one engine's.
 ///
 /// `disk: false` skips the disk footer — `podman system df` and the scan for
 /// buildah leftovers, most of this op's time — for a caller that shows no
 /// footer (the image picker); the response then says so in
-/// [`ContainerImagesResponse::disk_skipped`]. Absent means `true`, as before.
+/// `disk_skipped`. Absent means `true`, as before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -752,9 +751,9 @@ impl Default for ContainerImagesArgs {
     }
 }
 
-/// `container_image_delete` args (§15): `image` is a tag or an ID. While
+/// `container_image_delete` args: `image` is a tag or an ID. While
 /// `used_by` is non-empty it is refused (the error lists the users and what
-/// `force` would do) unless `force` is set; refused on a dev instance (§10)
+/// `force` would do) unless `force` is set; refused on a dev instance
 /// either way.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -771,7 +770,7 @@ pub struct ContainerImageDeleteArgs {
     pub force: bool,
 }
 
-/// `container_image_tag` args (§15): add and/or remove one tag on an image.
+/// `container_image_tag` args: add and/or remove one tag on an image.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -781,7 +780,7 @@ pub struct ContainerImageTagArgs {
     pub remove: Option<String>,
 }
 
-/// `build_updates_check` args (§15, §8, WP6): one build, or every build when
+/// `build_updates_check` args: one build, or every build when
 /// `id` is absent. Without `id` the registry images in use are checked too
 /// (their results are on `container_images`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -791,8 +790,8 @@ pub struct BuildUpdatesCheckArgs {
     pub id: Option<i64>,
 }
 
-/// `container_image_pull` args (§8 **Pull update**): the registry reference
-/// to pull — normally a [`RegistryUpdate::reference`].
+/// `container_image_pull` args: the registry reference
+/// to pull — normally a registry update's `reference`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -800,8 +799,8 @@ pub struct ContainerImagePullArgs {
     pub image: String,
 }
 
-/// `container_image_pull_status` args: the `image_pull` job to read — a
-/// [`ContainerImagePullStarted::job_id`].
+/// `container_image_pull_status` args: the `image_pull` job to read — the
+/// `job_id` the pull start returned.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -813,9 +812,9 @@ pub struct ContainerImagePullStatusArgs {
 // API contract (container-builds design §15): responses
 // ---------------------------------------------------------------------------
 
-/// How something is using an image (§15): what
-/// [`ContainerImageDeleteArgs`] refuses to delete out from under, and what
-/// the promote success panel (§6) offers to recreate.
+/// How something is using an image: what
+/// `container_image_delete` refuses to delete out from under, and what
+/// the promote success panel offers to recreate.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -832,14 +831,13 @@ pub enum ImageUseKind {
     StoppedContainer,
 }
 
-/// One user of an image (§15 `ImageUse`).
+/// One user of an image.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ImageUse {
     pub kind: ImageUseKind,
-    /// The lmgw class (`chat` | `aux` | `audio` | `image` —
-    /// `lmgw_core::runtime::Class::as_str`).
+    /// The lmgw class (`chat` | `aux` | `audio` | `image`).
     pub class: String,
     /// Which model row: set for `model_override`, and for a
     /// `running_container` or `stopped_container` that is one of lmgw's model
@@ -859,14 +857,14 @@ pub struct ImageUse {
 /// separately invented UI limit.
 pub const MAX_BUILD_UPDATE_CHECK_HOURS: u32 = 8760;
 
-/// A build's update badge state (§15, §8): the result of the periodic (or
+/// A build's update badge state: the result of the periodic (or
 /// "Check now") comparison of the resolved ref and extras against the last
 /// verified run.
 ///
-/// `Some` on a [`BuildView`] once the build has been checked against a run it
+/// `Some` on a build view once the build has been checked against a run it
 /// can be compared with; `None` before its first check, and for a build with
 /// no succeeded (or unverified) run. A status with no `reasons` is **up to
-/// date as of `checked_at`** — [`Self::has_update`] is what the Backends nav
+/// date as of `checked_at`** — `has_update` is what the Backends nav
 /// badge counts. What could not be checked is in `errors`, never in `reasons`:
 /// a rate-limited forge is not an update.
 ///
@@ -880,7 +878,7 @@ pub const MAX_BUILD_UPDATE_CHECK_HOURS: u32 = 8760;
 pub struct UpdateStatus {
     /// When the remote facts behind this status were fetched (RFC 3339).
     pub checked_at: String,
-    /// Human sentences, one per reason (§8: `"master +37 commits"`,
+    /// Human sentences, one per reason (`"master +37 commits"`,
     /// `"master moved (abc1234 → def5678)"` when the count is not known
     /// without fetching, `"PR #1234 pushed"`, `"PR #1234 closed unmerged"`,
     /// `"definition changed since last run (ref, extras)"`). A PR the forge
@@ -892,7 +890,7 @@ pub struct UpdateStatus {
     /// was proven false or is simply unknown.
     pub reasons: Vec<String>,
     /// The base `ref` itself moved (a branch or tag; a pinned commit never
-    /// updates, §8).
+    /// updates).
     pub ref_moved: bool,
     pub extras: Vec<ExtraChange>,
     /// What the check could not find out, one sentence each, starting
@@ -910,18 +908,18 @@ impl UpdateStatus {
     }
 }
 
-/// One unpinned extra's change since the last verified run (§15, §8).
+/// One unpinned extra's change since the last verified run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExtraChange {
     pub label: String,
-    /// The badge's own wording (§8): `"pushed"`, `"closed unmerged"`, or one
-    /// of the two "merged upstream" readings ([`UpdateStatus::reasons`]).
+    /// The badge's own wording: `"pushed"`, `"closed unmerged"`, or one
+    /// of the two "merged upstream" readings (see `reasons` of the update status).
     pub change: String,
 }
 
-/// One row of the Builds tab (§15, §9.1): a build plus what it is doing and
+/// One row of the Builds tab: a build plus what it is doing and
 /// what is using it right now. `current_run` is the promoted run — its
 /// image holds the moving tag; `last_run` is simply the most recent one,
 /// which may be a failed or unverified attempt after `current_run`.
@@ -936,15 +934,15 @@ pub struct BuildView {
     pub live_job_id: Option<i64>,
     pub used_by: Vec<ImageUse>,
     pub update: Option<UpdateStatus>,
-    /// The build's moving tag **on the answering instance**: [`moving_tag`]
+    /// The build's moving tag **on the answering instance**: `<engine repo>:<slug>`
     /// in production, `localhost/lmgw-dev-<engine repo>:<slug>` on a dev
     /// instance (which tags into a namespace of its own). Computed by the
     /// server, the same way its runs tag, so it is right for a build that
-    /// has never run too — prefer it to [`Build::moving_tag`].
+    /// has never run too — prefer it to computing the tag client-side.
     pub moving_tag: String,
 }
 
-/// `builds` response (§15): every build, for the Builds tab.
+/// `builds` response: every build, for the Builds tab.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -957,7 +955,7 @@ pub struct BuildsResponse {
     pub usage_error: Option<String>,
 }
 
-/// `build_get` response (§15): one build's detail plus a page of its run
+/// `build_get` response: one build's detail plus a page of its run
 /// history, newest first. `more` says whether an older page exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -966,13 +964,12 @@ pub struct BuildGetResponse {
     pub view: BuildView,
     pub runs: Vec<BuildRun>,
     pub more: bool,
-    /// As [`BuildsResponse::usage_error`], for `view.used_by`.
+    /// As `usage_error` of the builds response, for `view.used_by`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_error: Option<String>,
 }
 
-/// A tag that was left in place, and why: one a `keep_runs` prune kept (§5
-/// step 7 "each one kept is logged with the reason"), or one a `build_set`
+/// A tag that was left in place, and why: one a `keep_runs` prune kept, or one a `build_set`
 /// delete with `delete_images` did not remove (in use, a name from outside
 /// the build, a dev instance).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -983,12 +980,12 @@ pub struct KeptImage {
     pub reason: String,
 }
 
-/// `build_set` response (§15). `build` is `None` after a `delete`. With
+/// `build_set` response. `build` is `None` after a `delete`. With
 /// `delete_images`, `removed_images` lists the tags actually removed (an
 /// image goes with its last one) and `kept` the tags left in place, each with
 /// its reason; both are empty otherwise. A `delete` (regardless of
 /// `delete_images`) also removes the build's own per-build ccache and npm
-/// cache directories (§14.2) and lists them in `removed_caches`, each entry
+/// cache directories and lists them in `removed_caches`, each entry
 /// naming the cache-mount id and, when it could be read for free, its size
 /// (`"lmgw-llama-cuda-master-pr1 (572.1 MiB)"`) — empty when the build never
 /// had one (no extras were ever built), a run of it was live (the delete
@@ -1008,29 +1005,28 @@ pub struct BuildSetResponse {
     pub notes: Vec<String>,
 }
 
-/// `build_resolve` response (§15): what a spec resolves to right now — the
+/// `build_resolve` response: what a spec resolves to right now — the
 /// editor's "Resolve" button and tag preview.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ResolvedPreview {
     pub base_sha: String,
-    /// `rev-list --count <base>` (§14.1) — `llama` engines only; `None` for
+    /// `rev-list --count <base>` — `llama` engines only; `None` for
     /// `audio`/`sdcpp`.
     pub build_number: Option<u64>,
     pub dockerfile: String,
     pub target: String,
-    /// The matched `DockerfileProfile`'s label
-    /// (`lmgw_core::backends::presets`).
+    /// The label of the matched Dockerfile profile.
     pub profile: String,
     /// The preset's edits for the resolved Dockerfile, or the build's own
-    /// explicit list — each already carries its [`EditRole`].
+    /// explicit list — each already carries its role.
     pub edits: Vec<BuildEdit>,
     /// Extra `--build-arg KEY=VALUE` pairs, in order.
     pub build_args: Vec<(String, String)>,
     pub moving_tag: String,
     pub immutable_tag: String,
-    /// E.g. the build asks for a newer CUDA than the driver supports (§4).
+    /// E.g. the build asks for a newer CUDA than the driver supports.
     pub warnings: Vec<String>,
     /// How each of `edits` fared against the resolved Dockerfile, in the same
     /// order — which matched and how often. Checked against the **base**'s
@@ -1039,7 +1035,7 @@ pub struct ResolvedPreview {
     pub edit_outcomes: Vec<EditApplied>,
 }
 
-/// One Dockerfile edit's result in a [`ResolvedPreview`]: the run log's
+/// One Dockerfile edit's result in a resolved preview: the run log's
 /// "applied (N matches)" / "not matched", as data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1055,7 +1051,7 @@ pub struct EditApplied {
     pub applied: u32,
 }
 
-/// One outcome an extra can have when assembled (§15, §5 step 3, §14.1).
+/// One outcome an extra can have when assembled.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
@@ -1065,19 +1061,18 @@ pub enum MergeOutcome {
     #[default]
     Merged,
     /// Its head was already an ancestor of `HEAD`, or the merge's diff
-    /// against its first parent was empty (§14.1 "squash-merged PRs").
+    /// against its first parent was empty.
     AlreadyInBase,
-    /// Skipped on the forge's word (`merged_at` set, §14.1).
+    /// Skipped on the forge's word (`merged_at` set).
     MergedUpstream,
     /// No shared history with the assembled `HEAD`: applied as a squash of
-    /// its changes since its fork point instead of a merge (§14.1).
+    /// its changes since its fork point instead of a merge.
     SquashApplied,
-    /// Only in a [`CheckMergeStep`] or a failed run — assemble stops here
-    /// (§5 phase 3 "On a conflict").
+    /// Only in a check-merge step or a failed run — assemble stops here.
     Conflict,
 }
 
-/// One extra's row in a [`CheckMergeReport`] (§15, §7 "Check merge").
+/// One extra's row in a `build_check_merge` report.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1090,7 +1085,7 @@ pub struct CheckMergeStep {
     pub note: String,
 }
 
-/// `build_check_merge` response (§15, §7, §14.1): fetches, then merges into
+/// `build_check_merge` response: fetches, then merges into
 /// a throwaway worktree running the same code as the run's assemble phase,
 /// and reports the outcome without building or touching the run's worktree.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1103,7 +1098,7 @@ pub struct CheckMergeReport {
     pub steps: Vec<CheckMergeStep>,
 }
 
-/// `build_run` response (§15): the background job started, and the run row
+/// `build_run` response: the background job started, and the run row
 /// it will fill in as it goes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1113,7 +1108,7 @@ pub struct BuildRunStarted {
     pub run_id: i64,
 }
 
-/// `build_run_log` response (§15): a tail of the run's log file starting at
+/// `build_run_log` response: a tail of the run's log file starting at
 /// the requested byte offset. `next_offset` is what the next poll should
 /// send; `done` stops the UI's polling.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1125,7 +1120,7 @@ pub struct RunLogChunk {
     pub done: bool,
 }
 
-/// `build_promote` response (§15, §6 "Make current"): the moving tag's new
+/// `build_promote` response: the moving tag's new
 /// target, and who was using the old one — the success panel's "Recreate N
 /// running containers" / "Set as default for …" offers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1140,26 +1135,26 @@ pub struct PromoteResponse {
     pub used_by: Vec<ImageUse>,
 }
 
-/// `build_verify` response (§15, §5 step 6, §14.3): also updates the run's
+/// `build_verify` response: also updates the run's
 /// status (`succeeded`, `unverified` or `broken`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VerifyReport {
-    /// The `--help` probe (§14.3) parsed cleanly.
+    /// The `--help` probe parsed cleanly.
     pub help_ok: bool,
     /// Devices the `--list-devices` (or engine equivalent) probe reported.
     pub devices: Vec<String>,
-    /// The device probe matched the build's backend (§14.3's success
+    /// The device probe matched the build's backend (the success
     /// pattern). `false` under GPU hold or a CUDA OOM while probing —
     /// "not GPU-verified", not "broken".
     pub gpu_verified: bool,
     pub notes: Vec<String>,
 }
 
-/// One entry of the build editor's repository picker (§15, §9.1) — the
-/// owned-data mirror, for the wire, of
-/// `lmgw_core::backends::presets::RepoPreset`'s `REPO_PRESETS` table.
+/// One entry of the build editor's repository picker: a preset source repository for a
+/// build.
+// Wire form of `lmgw_core::backends::presets::RepoPreset` (the `REPO_PRESETS` table).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1173,35 +1168,35 @@ pub struct RepoPreset {
     pub default_ref: String,
 }
 
-/// `build_env` response (§15): static and host-detected context the build
+/// `build_env` response: static and host-detected context the build
 /// editor needs, fetched once when it opens.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BuildEnv {
     pub repo_presets: Vec<RepoPreset>,
-    /// `DEFAULT_CUDA_VERSION` (§14.2): `13.0.0`, prefilled unless the build
+    /// `DEFAULT_CUDA_VERSION`: `13.0.0`, prefilled unless the build
     /// overrides it.
     pub cuda_default: String,
-    /// The host GPUs' unique `compute_cap` values (§4 "arch" auto).
+    /// The host GPUs' unique `compute_cap` values, for an `arch` of "auto".
     pub arch_auto: Vec<String>,
     /// The driver's max supported CUDA version, for the "asks for more than
-    /// the driver supports" warning (§4).
+    /// the driver supports" warning.
     pub driver_cuda_max: Option<String>,
-    /// Whether a working `git` was found (§10 "git dependency").
+    /// Whether a working `git` was found.
     pub git_ok: bool,
     pub builds_dir: String,
     /// Set when `builds_dir` is on tmpfs — a dev instance must move it
-    /// before it can run builds (§5 "Workspace", §10 "Dev instance").
+    /// before it can run builds.
     pub builds_dir_warning: Option<String>,
     /// Free space on the filesystem of `builds_dir` (or of its nearest
     /// existing ancestor), for the editor's "free disk next to the last run's
-    /// footprint" (§9.1 — a warning, never a block). `None` when it could not
+    /// footprint" (a warning, never a block). `None` when it could not
     /// be read.
     pub builds_dir_free_bytes: Option<u64>,
 }
 
-/// One branch or tag as `git ls-remote` reports it (§15, §4 "ref").
+/// One branch or tag as `git ls-remote` reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1210,9 +1205,9 @@ pub struct RefEntry {
     pub sha: String,
 }
 
-/// `forge_refs` response (§15): ref suggestions for the editor's ref
+/// `forge_refs` response: ref suggestions for the editor's ref
 /// combobox, from `git ls-remote --heads --tags` (annotated tags peeled to
-/// `^{}`, §14.1).
+/// `^{}`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1222,7 +1217,7 @@ pub struct RemoteRefsView {
     pub tags: Vec<RefEntry>,
 }
 
-/// One PR (GitHub) or MR (GitLab) as the extras picker shows it (§15, §7).
+/// One PR (GitHub) or MR (GitLab) as the extras picker shows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1236,8 +1231,7 @@ pub struct ForgePr {
     pub state: String,
     pub head_sha: String,
     pub base_sha: String,
-    /// Set once the forge reports it merged (§5 step 1, §14.1 "the forge's
-    /// `merged_at` is the primary signal").
+    /// Set once the forge reports it merged.
     pub merged_at: Option<String>,
     pub url: String,
     /// The commit the merge put on its target branch — the merge, squash or
@@ -1248,9 +1242,9 @@ pub struct ForgePr {
     pub merge_commit_sha: String,
 }
 
-/// The forge API's remaining quota (§7: "Without a token GitHub allows 60
-/// requests/h. When the limit is hit, the picker shows the reset time
-/// instead of an empty list").
+/// The forge API's remaining quota. Without a token GitHub allows 60 requests
+/// an hour; when the limit is hit, the extras picker shows the reset time
+/// instead of an empty list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1259,7 +1253,7 @@ pub struct RateLimit {
     pub reset_at: String,
 }
 
-/// `forge_prs` response (§15): one page of the extras picker's PR/MR list.
+/// `forge_prs` response: one page of the extras picker's PR/MR list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1269,7 +1263,7 @@ pub struct ForgePrPage {
     pub rate_limit: Option<RateLimit>,
 }
 
-/// An image's build provenance (§15 `container_images`, §5 "Labels"): read
+/// An image's build provenance: read
 /// from the `dev.lmgw.*` OCI labels, so an image stays self-describing even
 /// after its `builds`/`build_runs` rows are gone.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1288,7 +1282,7 @@ pub struct ImageProvenance {
     /// Base SHA the run built from (`dev.lmgw.base`).
     pub base: String,
     /// The extras merged in, each with its resolved SHA (`dev.lmgw.extras`,
-    /// stored on the image as JSON) — reuses [`ResolvedExtra`], the same
+    /// stored on the image as JSON) — the same
     /// shape a run's `inputs.resolved` carries.
     pub extras: Vec<ResolvedExtra>,
     /// The lmgw instance that built it (`dev.lmgw.instance`: one per data
@@ -1301,7 +1295,7 @@ pub struct ImageProvenance {
     pub other_instance: bool,
 }
 
-/// One local or external image of the three engines (§15, §9.1 Images tab).
+/// One local or external image of the three engines.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1317,22 +1311,21 @@ pub struct ContainerImage {
     pub backend: Option<String>,
     pub size: u64,
     pub created: String,
-    /// `None` for an external image lmgw did not build (§3 "Image").
+    /// `None` for an external image lmgw did not build.
     pub provenance: Option<ImageProvenance>,
-    /// No `dev.lmgw.run` label — a `build.sh` image or a registry pull
-    /// (§3 "Image").
+    /// No `dev.lmgw.run` label — a `build.sh` image or a registry pull.
     pub external: bool,
     pub used_by: Vec<ImageUse>,
     /// The run this image came from, when it is one lmgw built.
     pub run_status: Option<BuildRunStatus>,
-    /// The registry update check (§8, last bullet) for an image a class
+    /// The registry update check for an image a class
     /// default or model override uses under a registry name (not
     /// `localhost/`). `None` for every other image, and before the first
     /// check.
     pub registry_update: Option<RegistryUpdate>,
 }
 
-/// A registry image's update state (§8): the digest the registry serves for
+/// A registry image's update state: the digest the registry serves for
 /// the tag now, against the digests podman recorded when the image was
 /// pulled. Checked anonymously (the registry's bearer-token flow), by the same
 /// schedule and **Check now** as the builds.
@@ -1365,9 +1358,9 @@ pub struct RegistryUpdate {
     pub error: Option<String>,
 }
 
-/// `container_images`' `disk` field (§15, §9.1 Images tab footer):
+/// `container_images`' `disk` field:
 /// `podman system df` totals plus orphaned build leftovers, shown for
-/// information only — nothing is pruned from here (§11.3).
+/// information only — nothing is pruned from here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1375,11 +1368,11 @@ pub struct DiskInfo {
     pub images_total: u64,
     pub reclaimable: u64,
     /// `/var/tmp/buildahNNN` dirs and `Storage` containers not yet cleaned
-    /// up (§14.4).
+    /// up.
     pub buildah_orphans: Vec<String>,
 }
 
-/// `container_images` response (§15): one entry per image ID, every tag of
+/// `container_images` response: one entry per image ID, every tag of
 /// it in `tags`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1392,7 +1385,7 @@ pub struct ContainerImagesResponse {
     pub disk_skipped: bool,
 }
 
-/// `container_image_delete` response (§15).
+/// `container_image_delete` response.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1405,7 +1398,7 @@ pub struct ContainerImageDeleteResponse {
     pub still_named_by: Vec<ImageUse>,
 }
 
-/// `container_image_tag` response (§15): the image's tags after the change.
+/// `container_image_tag` response: the image's tags after the change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1413,7 +1406,7 @@ pub struct ContainerImageTagResponse {
     pub tags: Vec<String>,
 }
 
-/// One build's slot in a [`BuildUpdatesResponse`] (§15 `build_updates_check`).
+/// One build's slot in a `build_updates_check` response.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1422,7 +1415,7 @@ pub struct BuildUpdateEntry {
     pub update: Option<UpdateStatus>,
 }
 
-/// `build_updates_check` response (§15, §8, WP6).
+/// `build_updates_check` response.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1430,8 +1423,8 @@ pub struct BuildUpdatesResponse {
     pub updates: Vec<BuildUpdateEntry>,
 }
 
-/// The live `updates` frame on `/api/events` (§8 "the nav item shows the
-/// count"): sent when a dashboard connects, and again whenever a check ends,
+/// The live `updates` frame on `/api/events`: sent when a dashboard connects, and again whenever a
+/// check ends,
 /// a run finishes, a build is saved, promoted or verified, or an image is
 /// pulled — so the Backends badge is current without the page polling
 /// anything.
@@ -1439,9 +1432,9 @@ pub struct BuildUpdatesResponse {
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpdatesSummary {
-    /// Builds whose [`UpdateStatus::has_update`] is true.
+    /// Builds whose update status has `has_update` true.
     pub builds_with_updates: u32,
-    /// Registry images in use whose [`RegistryUpdate::update_available`] is
+    /// Registry images in use whose registry update has `update_available`
     /// true.
     pub images_with_updates: u32,
     /// When the last full check (every build and image) ended; `None` before
@@ -1449,7 +1442,7 @@ pub struct UpdatesSummary {
     pub checked_at: Option<String>,
 }
 
-/// `container_image_pull` response (§8 **Pull update**): the background job
+/// `container_image_pull` response: the background job
 /// running `podman pull` (`JobRow.kind = "image_pull"`, `key =
 /// "image:<reference>"`). A second pull of the same reference while one runs
 /// answers with the running job's id.
@@ -1512,7 +1505,7 @@ pub struct ContainerImagePullStatus {
     pub error: Option<String>,
 }
 
-/// A `build_run` job's phase (§15 "Jobs feed", §5), shown in the job detail
+/// A `build_run` job's phase, shown in the job detail
 /// and as the log's section headers.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
@@ -1520,7 +1513,7 @@ pub struct ContainerImagePullStatus {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BuildPhase {
-    /// Waiting for the machine-wide build lock (§5 "Serialization") — shown
+    /// Waiting for the machine-wide build lock — shown
     /// as "waiting for <build>", named in `waiting_for`.
     #[default]
     Waiting,
@@ -1534,8 +1527,7 @@ pub enum BuildPhase {
     Cleanup,
 }
 
-/// `JobRow.detail` for `kind = "build_run"`, `key = "build:<id>"` (§15
-/// "Jobs feed").
+/// `JobRow.detail` for `kind = "build_run"`, `key = "build:<id>"`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1544,7 +1536,7 @@ pub struct BuildRunJobDetail {
     pub build_id: i64,
     pub phase: BuildPhase,
     /// `"n/m"` progress within the current phase (podman's `STEP n/m:`,
-    /// cmake/ninja's `[123/456]`, §5 step 5), when the phase has one. A
+    /// cmake/ninja's `[123/456]`), when the phase has one. A
     /// multi-stage Dockerfile restarts podman's count in every stage.
     pub step: Option<String>,
     /// `"k/N"`: the podman stage `step` belongs to, when the line carried

@@ -28,8 +28,8 @@ pub struct SpeechCaps {
     /// What `instructions` do: `none` (dropped — said in `x-lmgw-speech`),
     /// `style` (a speaking style for the voice), `voice_design` (the voice
     /// is designed from them), `passthrough` (sent; the model reads them —
-    /// its spec declares an instruction option, or lmgw's family table says
-    /// its engine reads one anyway — and decides what they do).
+    /// it declares an instruction option, or lmgw knows its engine reads
+    /// one anyway — and decides what they do).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     /// A request without instructions is refused (`instructions_required`)

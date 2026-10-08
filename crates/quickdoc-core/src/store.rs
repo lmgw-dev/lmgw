@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,13 +30,30 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
         .map_err(QuickdocError::Db)?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(opts)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
+}
+
+/// How long a connection waits for a lock another connection holds before
+/// it gives up with "database is locked": sqlx's default, named. [`open`]
+/// and the test database open with it.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A write transaction: it holds the write lock from its first statement
+/// (`BEGIN IMMEDIATE`). A deferred transaction that reads before it writes
+/// fails at once with `SQLITE_BUSY_SNAPSHOT` ("database is locked") when
+/// another connection committed in between, and the busy timeout does not
+/// apply to that; this one waits for the lock up front instead. Every
+/// transaction that writes begins here. The lock is held to the commit and
+/// every other writer waits for it, so nothing slow goes inside.
+pub async fn begin_write(pool: &SqlitePool) -> Result<sqlx::Transaction<'static, Sqlite>> {
+    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
 }
 
 /// Open a corpus DB with the caller's own connect and pool options, and run
@@ -55,11 +73,22 @@ pub async fn open_with(
 
 /// In-memory corpus DB for tests.
 pub async fn open_in_memory() -> Result<SqlitePool> {
+    use sqlx::ConnectOptions;
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")
         .map_err(QuickdocError::Db)?
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(BUSY_TIMEOUT);
+    // `:memory:` goes with its last connection, and sqlx closes a pooled
+    // connection whose query was cancelled: a connection that never queries
+    // keeps the database, held by the pool's own hook so it goes with the
+    // pool.
+    let anchor = std::sync::Arc::new(std::sync::Mutex::new(opts.connect().await?));
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        .after_connect(move |_, _| {
+            let _ = &anchor;
+            Box::pin(async { Ok(()) })
+        })
         .connect_with(opts)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
@@ -610,11 +639,21 @@ pub async fn insert_chunks(
     }
     let corpus_id = chunks[0].corpus_id;
     let corpus_label = corpus_id.to_string();
+    // Ids hashed and vectors narrowed before the write lock: CPU work every
+    // other writer would wait on.
+    let rows = chunks
+        .iter()
+        .map(|c| {
+            Ok((
+                c,
+                chunk_id(document_url, &c.payload),
+                embedding_blob(c, dims, &corpus_label)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut ids = Vec::with_capacity(chunks.len());
-    let mut tx = pool.begin().await?;
-    for c in chunks {
-        let id = chunk_id(document_url, &c.payload);
-        let blob = embedding_blob(c, dims, &corpus_label)?;
+    let mut tx = begin_write(pool).await?;
+    for (c, id, blob) in rows {
         sqlx::query(
             "INSERT INTO chunk (id, document_id, corpus_id, heading_path, span_start, span_end,
                 payload, embedding, derived_title, derived_summary)
@@ -1118,6 +1157,12 @@ pub async fn record_eval_run(pool: &SqlitePool, run: &NewEvalRun) -> Result<Eval
         return Err(QuickdocError::CorpusNotFound(run.corpus_id.to_string()));
     }
     let params = to_json(&run.params)?;
+    let report = to_json(&run.report)?;
+    // The best so far is read inside the write transaction: two runs on one
+    // corpus under the same settings each read it before the other's
+    // commit, and the later commit stored a best below the other run's
+    // score, or a wrong regression flag.
+    let mut tx = begin_write(pool).await?;
     // `params` is compared as stored text: serde_json orders object keys, so
     // two runs under the same settings serialize identically.
     let best: Option<f64> = sqlx::query_scalar(
@@ -1126,12 +1171,11 @@ pub async fn record_eval_run(pool: &SqlitePool, run: &NewEvalRun) -> Result<Eval
     .bind(run.corpus_id)
     .bind(run.k)
     .bind(&params)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     let regression = best.is_some_and(|b| run.hit_at_k + EVAL_EPSILON < b);
     let new_best = best.map_or(run.hit_at_k, |b| b.max(run.hit_at_k));
 
-    let mut tx = pool.begin().await?;
     sqlx::query(
         "UPDATE corpus SET eval_score=?2, eval_best=?3, eval_regression=?4, eval_k=?5,
          eval_at=datetime('now'), updated_at=datetime('now') WHERE id=?1",
@@ -1156,7 +1200,7 @@ pub async fn record_eval_run(pool: &SqlitePool, run: &NewEvalRun) -> Result<Eval
     .bind(run.orphaned_queries)
     .bind(i64::from(regression))
     .bind(&params)
-    .bind(to_json(&run.report)?)
+    .bind(report)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1556,7 +1600,7 @@ async fn copy_chunks(
         .bind(src_doc)
         .fetch_all(src)
         .await?;
-    let mut tx = dest.begin().await?;
+    let mut tx = begin_write(dest).await?;
     for r in &rows {
         sqlx::query(
             "INSERT INTO chunk (id, document_id, corpus_id, heading_path, span_start, span_end,

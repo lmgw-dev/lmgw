@@ -22,7 +22,10 @@ pub use dev_models_dir::*;
 /// Deliberately **not** settable through the self-admin tools themselves — an
 /// agent that can widen its own gate has no gate (see
 /// [`crate::ops::settings_set`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Ordered `Off < ReadOnly < Full`: a device's own level is capped by this
+/// one with `min` ([`DeviceAdmin::capped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfAdmin {
     /// No `lmgw__*` tool is listed or callable.
@@ -60,6 +63,16 @@ impl SelfAdmin {
     /// Whether the mutating tool set is exposed.
     pub fn allows_write(&self) -> bool {
         matches!(self, Self::Full)
+    }
+}
+
+impl From<SelfAdmin> for lmgw_api_types::AdminLevel {
+    fn from(level: SelfAdmin) -> Self {
+        match level {
+            SelfAdmin::Off => Self::Off,
+            SelfAdmin::ReadOnly => Self::ReadOnly,
+            SelfAdmin::Full => Self::Full,
+        }
     }
 }
 
@@ -248,6 +261,35 @@ pub struct Settings {
     /// full period too.
     #[serde(default = "default_chat_purge_days")]
     pub chat_purge_days: i64,
+    /// Keep the Chat change feed's records this many days (client-apps
+    /// design §2.3; the owner's answer to §11 Q4: 7 days, persisted). A
+    /// client away longer resumes with a `resync` that names this setting.
+    /// `0` keeps every record. Pruned on the hourly tick that runs the Chat
+    /// sweep.
+    #[serde(default = "default_chat_feed_retention_days")]
+    pub chat_feed_retention_days: i64,
+    /// Seconds between the Chat feed's keep-alive comments (§2.1), said in
+    /// its `hello` as `keepalive_s` so a client derives its dead-link
+    /// timeout from a stated value. A feed keeps the interval it opened
+    /// with. At least 1.
+    #[serde(default = "default_chat_feed_keepalive_s")]
+    pub chat_feed_keepalive_s: u32,
+    /// Records the Chat feed reads per query while a client catches up
+    /// (§2.3): a bound on the memory one catch-up holds, not on what it
+    /// delivers — every record is sent, page after page. At least 1, at
+    /// most `lmgw_api_types::chat_feed::MAX_PAGE_SIZE` (review W4-1).
+    #[serde(default = "default_chat_feed_page_size")]
+    pub chat_feed_page_size: u32,
+    /// Live events (`turn.*`, `voice.*`, `hold`) the Chat feed holds for
+    /// a client that reads slower than they happen (§2.3). One that falls
+    /// further behind gets a fresh `state` frame naming this setting, never
+    /// a silent drop; its stored events are read from the table and never
+    /// lost. A change applies at once: open feeds move to the new buffer
+    /// with a `state` frame. At least 1, at most
+    /// `lmgw_api_types::chat_feed::MAX_LIVE_BUFFER`: it is allocated whole
+    /// (review W4-1).
+    #[serde(default = "default_chat_feed_live_buffer")]
+    pub chat_feed_live_buffer: u32,
     /// How a text PDF attached in Chat starts out (chat-complete design §8,
     /// §11): `text` (the extracted text), `images` (every page as an image,
     /// needs vision) or `ask` (the chip starts unset and Send waits for a
@@ -467,6 +509,10 @@ impl Default for Settings {
             max_body_mb: default_max_body_mb(),
             chat_archive_days: default_chat_archive_days(),
             chat_purge_days: default_chat_purge_days(),
+            chat_feed_retention_days: default_chat_feed_retention_days(),
+            chat_feed_keepalive_s: default_chat_feed_keepalive_s(),
+            chat_feed_page_size: default_chat_feed_page_size(),
+            chat_feed_live_buffer: default_chat_feed_live_buffer(),
             chat_system_prompt: None,
             chat_pdf_mode: default_chat_pdf_mode(),
             chat_stt_alias: String::new(),
@@ -569,6 +615,25 @@ fn default_chat_kb_budget_tokens() -> u32 {
 /// change your mind before the purge.
 fn default_chat_purge_days() -> i64 {
     30
+}
+/// A week (the owner's answer to client-apps §11 Q4): a client switched off
+/// over a holiday weekend still resumes where it was.
+fn default_chat_feed_retention_days() -> i64 {
+    7
+}
+/// The value client-apps §2.1 names: frequent enough that a client notices
+/// a dead link within a minute, rare enough to cost nothing.
+fn default_chat_feed_keepalive_s() -> u32 {
+    15
+}
+/// A few hundred records: one query's worth of small rows, so a week's
+/// catch-up is a handful of queries.
+fn default_chat_feed_page_size() -> u32 {
+    500
+}
+/// Live events come a few per turn; 256 is minutes of a busy gateway.
+fn default_chat_feed_live_buffer() -> u32 {
+    256
 }
 
 /// The one prefix every existing container-name field already spells out by

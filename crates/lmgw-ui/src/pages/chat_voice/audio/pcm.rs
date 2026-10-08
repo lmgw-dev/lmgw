@@ -4,7 +4,7 @@
 //! Everything here is PCM16 mono: realtime's `pcm16` at 24 kHz both ways, the
 //! Chat's `speech` frames at 24 kHz, and dictation's WAV at 16 kHz.
 
-use crate::pages::audio_stream::{b64_encode, pcm_to_wav};
+use crate::pages::audio_stream::pcm_to_wav;
 
 /// The rate of the player, of realtime's audio both ways, and of the Chat's
 /// `speech` frames.
@@ -24,12 +24,7 @@ pub(crate) fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
     pcm_to_wav(&le_bytes(samples), rate, 1, 16)
 }
 
-/// `samples` as realtime's `input_audio_buffer.append` carries them.
-pub(crate) fn b64_pcm(samples: &[i16]) -> String {
-    b64_encode(&le_bytes(samples))
-}
-
-/// Milliseconds of audio in `samples` at `rate` (`truncate.audio_end_ms`).
+/// Milliseconds of audio in `samples` at `rate`: how long a dictation ran.
 pub(crate) fn ms_of(samples: u64, rate: u32) -> u64 {
     samples * 1000 / u64::from(rate.max(1))
 }
@@ -104,7 +99,6 @@ pub(crate) fn meter_level(samples: &[f32]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::audio_stream::b64_decode;
 
     #[test]
     fn a_dictation_wav_is_mono_pcm16_at_its_rate() {
@@ -125,16 +119,6 @@ mod tests {
             &wav[44..],
             &[0, 0, 1, 0, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x80]
         );
-    }
-
-    #[test]
-    fn realtime_audio_is_base64_of_little_endian_samples() {
-        let b64 = b64_pcm(&[1, -2, 300]);
-        assert_eq!(
-            b64_decode(&b64).unwrap(),
-            vec![1, 0, 0xFE, 0xFF, 0x2C, 0x01]
-        );
-        assert_eq!(b64_pcm(&[]), "");
     }
 
     #[test]

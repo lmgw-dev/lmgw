@@ -35,14 +35,14 @@ pub struct UpstreamView {
     pub supports_responses: bool,
     /// A `llama_cpp` row's server: what `GET /props` said, when, or why it
     /// is unknown — one entry for the server, and for a router one more per
-    /// model ([`UpstreamLlamaFacts::model`]). Empty on every other protocol,
+    /// model (its `model`). Empty on every other protocol,
     /// and on a `llama_cpp` row until a chat request or its Test makes lmgw
     /// ask in the background.
     pub llama_facts: Vec<UpstreamLlamaFacts>,
 }
 
 /// What an external llama.cpp server said about itself, or a router about
-/// one model (`GET /props`, llama egress design §4.2). Asked in the
+/// one model (`GET /props`). Asked in the
 /// background, one probe per row at a time, and kept until the row is
 /// edited, unreachable, refuses a medium or is tested.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

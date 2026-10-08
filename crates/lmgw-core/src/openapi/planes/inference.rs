@@ -54,8 +54,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
     vec![
         // -- Chat -----------------------------------------------------------
         DocRoute {
-            description: "The chat-completions ingress this gateway understands \
-                (ingress/openai.rs) plus lmgw's own reasoning controls and \
+            description: "The chat-completions API, plus lmgw's own reasoning controls and \
                 chat_template_kwargs passthrough. `model` may be an alias, a local model id, \
                 a candidate alias, or an exposed upstream's `prefix/…` id. An anthropic-beta \
                 header is forwarded when the route is an Anthropic upstream.",
@@ -78,8 +77,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- Responses --------------------------------------------------------
         DocRoute {
-            description: "lmgw's own Responses API implementation (ingress/responses.rs) — \
-                llama-server has none. MCP tools run server-side on lmgw's registered MCP \
+            description: "lmgw's own Responses API implementation; llama-server has none. MCP tools run server-side on lmgw's registered MCP \
                 servers; background:true, truncation:\"auto\" and hosted tools are refused \
                 rather than approximated. An anthropic-beta header is forwarded when the route \
                 is an Anthropic upstream.",
@@ -95,8 +93,13 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             ..base("POST", "/v1/responses", "openai", "Create a response")
         },
         DocRoute {
-            description: "A stored response (crate::responses) — only present when the \
-                creating call ran with store: true and the gateway's own retention allows it.",
+            description: "A stored response, exactly as it was served. It is present only \
+                when lmgw stored it — the creating call left store on (the default) while \
+                the gateway's response store was on, and it did not go to an upstream that \
+                implements the Responses API itself — and only until retention evicts its \
+                conversation as a whole: by default 168 hours after the conversation's last \
+                activity, or once it falls outside the 500 most recently active \
+                conversations. 404 otherwise.",
             response: Resp::Json(responses::response),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
@@ -128,7 +131,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- Legacy completions -----------------------------------------------
         DocRoute {
-            description: "The legacy text-completions shape (proxy/legacy.rs). Refuses a \
+            description: "The legacy text-completions shape. Refuses a \
                 non-OpenAI-protocol upstream with 400 rather than sending it a request its \
                 own API cannot answer. A missing model is a 400 (missing 'model'), as on \
                 every other ingress.",
@@ -177,8 +180,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- Anthropic messages -------------------------------------------------
         DocRoute {
-            description: "The /v1/messages ingress this gateway understands \
-                (ingress/anthropic.rs:14). A server tool (no input_schema) is refused with \
+            description: "The Anthropic Messages API. A server tool (no input_schema) is refused with \
                 400; redacted_thinking is accepted and dropped. A missing max_tokens is \
                 filled in rather than refused (x-lmgw-max-tokens-defaulted). anthropic-beta \
                 reaches an Anthropic upstream as one header, merged with the upstream row's \
@@ -196,7 +198,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             ..base("POST", "/v1/messages", "anthropic", "Create a message")
         },
         DocRoute {
-            description: "The Anthropic SDKs' messages.count_tokens() (§5.2): on an \
+            description: "The Anthropic SDKs' messages.count_tokens(): on an \
                 Anthropic-protocol upstream, the client body is sent through verbatim (only \
                 model replaced), with its anthropic-beta flags, so server tools and new fields \
                 count exactly. \
@@ -220,7 +222,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- lmgw's own counters -------------------------------------------------
         DocRoute {
-            description: "lmgw's own universal counter (proxy/count.rs): routed by model \
+            description: "lmgw's own universal token counter: routed by model \
                 exactly like the chat endpoints, so counting on a cold local model starts \
                 its container. x-lmgw-count-approximate explains tokenizer_guess (an \
                 OpenAI-protocol upstream tiktoken cannot identify) and message_framing (an \
@@ -241,7 +243,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
-            description: "llama.cpp's own /tokenize, for llama.cpp clients (§5.3): the \
+            description: "llama.cpp's own /tokenize, for llama.cpp clients: the \
                 client object is forwarded to the backend's own /tokenize with model \
                 rewritten, and the answer — token ids, or {id,piece} with with_pieces — \
                 comes back verbatim, the backend's own errors included (but an upstream \
@@ -336,11 +338,12 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             ..base("GET", "/v1/audio/voices", "openai", "List a model's voices")
         },
         // -- Images ---------------------------------------------------------------
+        // lmgw-api-types image_lab.rs is the reference for the <sd_cpp_extra_args> block.
         DocRoute {
             description: "OpenAI's images shape; sd.cpp CLI arguments may ride along in a \
                 trailing <sd_cpp_extra_args>{…}</sd_cpp_extra_args> block on prompt (the \
-                api-types image_lab.rs builder is the reference for its contents). Answers \
-                base64 only (b64_json), never a URL.",
+                dashboard's Image lab builds this block and is the reference for its \
+                contents). Answers base64 only (b64_json), never a URL.",
             request: Req::Json(media::image_generations_request),
             response: Resp::Json(media::image_response),
             dialect: Dialect::OpenAi,
@@ -369,7 +372,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         // -- Tasks (audio.cpp generic) ---------------------------------------------
         DocRoute {
             description: "audio.cpp's own generic task route; request is relayed to the \
-                backend untouched.",
+                backend untouched, but for its text on a local model whose engine refuses a \
+                character its package lacks (Supertonic): that is fitted as speech's input is \
+                (x-lmgw-speech says how), and a text left with nothing to say is 400 \
+                empty_input.",
             request: Req::Json(media::task_request),
             response: Resp::Untyped("audio.cpp's own per-task JSON, relayed verbatim"),
             dialect: Dialect::OpenAi,
@@ -403,8 +409,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 answered by a cascade of this gateway's own aliases: voice activity and \
                 end-of-turn detection inside lmgw (Silero VAD; Smart Turn for semantic_vad), \
                 speech to text with realtime.asr_alias, the chat model, and text to speech with \
-                realtime.tts_alias — local models first, any of them a cloud alias if the owner \
-                chooses (Settings → Realtime, which also shows what the cascade holds on the \
+                realtime.tts_alias — local models first, any of them a cloud alias if so \
+                configured (Settings → Realtime, which also shows what the cascade holds on the \
                 GPU). `model` is resolved in this order: a realtime.model_map name, an OpenAI \
                 Realtime name (gpt-realtime*, never taken as an alias), which \
                 realtime.default_model answers, or a chat alias; it may be left out and named \
@@ -417,8 +423,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 tools, and MCP tools the gateway runs itself on a session not bound to a Chat \
                 thread. An MCP session tool {\"type\": \"mcp\", \"server_label\"} names one of \
                 this gateway's own MCP servers (by its tool prefix or name) or a built-in \
-                toolset (docs, kb, and lmgw for an owner credential while the self-admin tools \
-                are on), resolved as on /v1/responses under the key's tool scope; GET \
+                toolset (docs, kb, and lmgw for an owner credential or a device allowed lmgw's \
+                admin tools, while the self-admin tools are on), resolved as on /v1/responses under the key's tool scope; GET \
                 /v1/mcp/servers lists the labels a caller may use and GET \
                 /v1/mcp/servers/{label} one label's tools. server_url, connector_id, headers, \
                 authorization and server_description are accepted and never used: lmgw dials \
@@ -453,7 +459,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 Credentials as on every /v1 route; a browser, which cannot set headers on a \
                 WebSocket, may offer its key as the subprotocol \
                 `openai-insecure-api-key.<key>` alongside `realtime` — accepted on this route \
-                only. A beta client (OpenAI-Beta: realtime=v1) is refused with 400 \
+                only. A paired device's key is refused before the upgrade with 401 \
+                device_key_unknown when it matches no device (pair it again), 401 \
+                device_disabled while the device is disabled, and 401 key_expired past its \
+                expiry date, as on every Chat route. A beta client (OpenAI-Beta: realtime=v1) is refused with 400 \
                 beta_protocol_unsupported, and with Require API key off an anonymous upgrade \
                 from another page's Origin is refused with 403. Chat models list this route in \
                 their capabilities.endpoints on GET /v1/models once an ASR and a TTS alias are \
@@ -472,13 +481,27 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 instructions 'style'), the tags that open a sentence, or a part of one \
                 spoken on its own, are a delivery cue instead ([laughing]): sent after the \
                 style as the instructions until that sentence ends, best effort, never read \
-                out (resolved.speech.cues). The dashboard's voice mode binds a session to a \
-                Chat thread with chat_thread=<id> (negative for a temporary chat): the admin \
-                capability only — the dashboard's cookie or an owner key; refused before the \
-                upgrade, as flat JSON and checked in this order, with 403 \
+                out (resolved.speech.cues). A voice mode binds a session to a Chat thread \
+                with chat_thread=<id> (negative for a temporary chat): the chat capability \
+                only — the dashboard's cookie, an owner key or a paired device's key; refused \
+                before the upgrade, in the OpenAI error shape ({\"error\": {code, message, \
+                type, param}}) and checked in this order, with 403 \
                 chat_thread_not_allowed, 400 owned_by_thread beside model, 404 \
-                chat_thread_not_found, and 409 chat_thread_admin for an Admin Chat thread (no \
-                voice mode there). session.created then names the thread in \
+                chat_thread_not_found (also an Admin Chat thread a device names, and a thread \
+                with the self-admin toolset a device not allowed lmgw's admin tools names: \
+                for that device they do not exist), 409 chat_thread_admin for an Admin Chat thread the \
+                owner names (no voice mode there), and, with takeover=never, 409 \
+                chat_thread_bound while another session is bound to the thread (\"voice is in \
+                use on device 'phone'\"; nothing is taken over). A session bound with the same \
+                key, or one that is already ending (after its 1001, a revocation or its close, \
+                while it writes its last turns), does not count: takeover=never takes it over, \
+                so a client's rebind after a restart or a dropped link is not refused in its \
+                own name. A device binds as its key: the thread's \
+                chat, speech-to-text and text-to-speech aliases pass its scope and budget \
+                before the upgrade (refused as an unbound session's aliases are, 403 \
+                key_scope or key_budget), every model call of the session is checked and \
+                counted against it as an unbound session's, and each refusal writes its \
+                request row. session.created then names the thread in \
                 session.lmgw.resolved.chat_thread ({id, title, temporary, admin_tools}), and \
                 the connect warm loads the thread's chat, speech-to-text and text-to-speech \
                 models as one group, which may evict idle models as the requests it announces \
@@ -523,7 +546,11 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 names the audio or the transcript retry answered (a server that went away under \
                 the audio is not retried, and its later turns go as text too). \
                 One session per thread: a second bind takes the thread over, and \
-                the older session gets error chat_thread_taken_over and the close 4000. A \
+                the older session gets error chat_thread_taken_over and the close 4000, both \
+                naming who bound it (\"voice mode moved to device 'phone'\", \"… to the \
+                dashboard\") — unless the second bind gives takeover=never, which a client \
+                uses for its own automatic rebinds so it never takes the voice from another \
+                device; a user's explicit choice to talk binds without it. A \
                 bound session — and no other — also sends lmgw's own events: \
                 lmgw.chat.frame ({response_id, event, data}: the chat turn's frames \
                 verbatim — turn, retrieval, delta, reasoning, tool, usage, stats, stop, \
@@ -541,7 +568,11 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 refused, and when a llama-server that went away under the audio sends the \
                 session's later turns to it as text; never with chat_voice_audio_input off), \
                 lmgw.chat.reply ({message_id, content, unheard, voice}, {message_id, \
-                removed: true} or {message_id, skipped, voice}), lmgw.model.state ({stage, alias, \
+                removed: true} or {message_id, skipped, voice}: the reply as stored once its \
+                response ended, cut to what lmgw knew was heard; a conversation.item.truncate \
+                that arrives after that cuts it again at the position the client heard, and \
+                sends a second lmgw.chat.reply for the same message_id, which replaces the \
+                first), lmgw.model.state ({stage, alias, \
                 state, ms, …}: the connect warm's and each turn's model loading), \
                 lmgw.chat.thread ({chat_thread: {id, title, temporary, admin_tools}}: the thread \
                 as a response re-read it, when that differs from session.lmgw.resolved.\
@@ -568,7 +599,21 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 thread's speech, judged per \
                 response after response.created), chat_history_write_failed (the store refused \
                 the spoken turn; its words lead the next user message), and \
-                chat_thread_taken_over before the takeover's close.",
+                chat_thread_taken_over before the takeover's close. A session opened with a \
+                key ends when the key is revoked — disabled, rotated or deleted on the Keys \
+                page, or past its expires_at — with the close 4003 (any key's session, a \
+                device's or not). Its reason starts with a token saying what to do, then a \
+                colon and the sentence: device_disabled (a paired device was disabled), \
+                key_expired (a paired device's key expired), key_unknown (a paired device's key \
+                was rotated or deleted: pair it again) or revoked (any other kind of key), e.g. \
+                \"device_disabled: device 'desktop' was disabled\"; reconnecting with the same \
+                key is refused. A device's session bound to a thread that leaves the device's \
+                reach — the self-admin toolset attached to it, or what the device's admin tools \
+                may do set to off — closes with 4004 and the neutral reason \"chat thread <id> \
+                is out of reach for this key\": the key is still good, and a client asks for \
+                its current thread again. Another client binding the thread closes the \
+                session with 4000. Every session closes with 1001 \
+                (\"lmgw is stopping or restarting\") when the gateway stops or restarts.",
             query: Some(|g| g.root_schema_for::<crate::realtime::RealtimeQuery>()),
             response: Resp::WebSocket {
                 subprotocol: crate::realtime::REALTIME_PROTOCOL,
@@ -589,10 +634,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Aggregates enabled aliases, public local models and expose-all \
                 upstream catalogs. Served OpenAI-shaped unless the caller sends \
-                anthropic-version, in which case the Anthropic SDK's own shape (model-\
-                capabilities design §2.2) — this document names the OpenAI error dialect as \
-                default; the Anthropic-dialect caller gets an Anthropic-shaped error body in \
-                practice.",
+                anthropic-version, in which case the Anthropic SDK's own shape. This \
+                document names the OpenAI error dialect as default; an Anthropic-dialect \
+                caller gets an Anthropic-shaped error body in practice.",
             response: Resp::Json(models::model_list),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI, endpoint_group::ANTHROPIC],
@@ -613,7 +657,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 \"server_label\"} tool on /v1/realtime or /v1/responses, for a tool picker. \
                 Connects nothing: read from the configuration under the caller's tool scope — \
                 enabled servers only, and the lmgw self-admin toolset only for an owner \
-                credential while the self-admin tools are on.",
+                credential or a device allowed lmgw's admin tools, while the self-admin tools \
+                are on.",
             response: Resp::Json(mcp::servers_list),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
@@ -622,7 +667,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "One label's tools, exactly as a /v1/realtime session's \
                 mcp_list_tools item lists them (the server's own tool names, description \
-                always a string), under the caller's tool scope and the owner's per-tool \
+                always a string), under the caller's tool scope and the per-tool \
                 switches. Connects that one server if it is not up (up to the lazy-list \
                 budget). 404 for a label this caller may not use, naming the available ones; \
                 502 when the server cannot be listed.",
@@ -638,7 +683,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- This document itself ----------------------------------------------------
         DocRoute {
-            description: "This description, filtered to the inference plane (§4.5).",
+            description: "This description, filtered to the inference plane.",
             response: Resp::Doc,
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OTHER],
@@ -651,7 +696,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- MCP ----------------------------------------------------------------------
         DocRoute {
-            description: "MCP Streamable HTTP (mcp/ingress.rs): single JSON-RPC \
+            description: "MCP Streamable HTTP: single JSON-RPC \
                 request/notification/response per POST, no batching. initialize negotiates \
                 MCP-Protocol-Version and assigns Mcp-Session-Id, which every later request on \
                 the session must carry; a notification answers 202 with no body. tools/list \
@@ -666,7 +711,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Opens the server→client notification stream for a valid session \
                 (a session-less GET is 400/404): pushes notifications/tools/list_changed when \
-                the aggregate's composition changes.",
+                the aggregate's composition changes. The stream ends, without a frame (MCP has \
+                no notification for it), when the API key that opened it is disabled, rotated, \
+                deleted or expires.",
             response: Resp::Sse(&[("notification", mcp::notification_event)]),
             dialect: Dialect::JsonRpc,
             ..base("GET", "/mcp", "mcp", "Open the MCP notification stream")
@@ -678,11 +725,11 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             ..base("DELETE", "/mcp", "mcp", "End an MCP session")
         },
         DocRoute {
-            description: "The self-admin plane (mcp/selfadmin/catalog.rs): the built-in \
-                lmgw__* tools and nothing else — a much narrower grant than /mcp, gated on an \
-                owner credential rather than any gateway key. Also accepts the \
+            description: "The self-admin plane: the built-in lmgw__* tools and nothing \
+                else, a much narrower grant than /mcp, gated on an owner credential rather \
+                than any gateway key. Also accepts the \
                 x-lmgw-admin-token header as a third bearer spelling (adminToken security \
-                scheme), which is how the MCP client configs that dial this plane \
+                scheme), which is how MCP client configs that dial this plane \
                 authenticate.",
             request: Req::JsonRpc,
             response: Resp::Json(mcp::jsonrpc_response),

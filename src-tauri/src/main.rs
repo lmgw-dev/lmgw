@@ -12,6 +12,8 @@ mod dev_guard;
 mod gateway;
 #[cfg(target_os = "linux")]
 mod media;
+/// A device's `lmgw-pair:` link, handed to the desktop (client-apps §1.4).
+mod pairing;
 #[cfg(target_os = "linux")]
 mod reveal;
 mod updater;
@@ -108,9 +110,37 @@ fn show_main_window(app: &tauri::AppHandle) {
         tauri::webview::NewWindowResponse::Deny
     })
     // Every navigation, top level or iframe (the HTML preview), that is not
-    // the gateway's own origin is denied silently: nothing here ever opens a
-    // browser, so a frame cannot be used to launch one.
+    // the gateway's own origin is denied silently. The one thing a
+    // navigation may hand to the desktop is the pairing link the owner just
+    // minted, once (`pairing`); nothing here opens a browser, so a frame
+    // cannot be used to launch one.
     .on_navigation(move |url| {
+        // A device's pairing link from the Devices card (client-apps design
+        // §1.4): WebKitGTK launches no scheme handler itself, so the shell
+        // hands it to the desktop — only the exact link this process minted,
+        // once, and only to a client registered for the scheme (`pairing`)
+        // — and the webview stays put. The link carries a credential, so it
+        // is never logged.
+        if pairing::is_pairing_link(url) {
+            pairing::hand_off(url, &shared, |link| {
+                let link = link.to_string();
+                // Off the UI thread: asking the desktop for its handler runs
+                // a process.
+                std::thread::spawn(move || {
+                    if !pairing::handler_registered() {
+                        tracing::warn!(
+                            "no client is registered for lmgw-pair: links, so the pairing \
+                             link was not opened — use Copy and paste it into the client"
+                        );
+                        return;
+                    }
+                    if let Err(e) = xdg_open(&link) {
+                        tracing::warn!("xdg-open of a pairing link: {e}");
+                    }
+                });
+            });
+            return false;
+        }
         let Some(origin) = serving.origin() else {
             return false;
         };
@@ -403,6 +433,31 @@ fn notify_page(webview: &tauri::Webview, event: &str, key: &str, value: &str) {
     }
 }
 
+/// The tray's Quit item, said "Quitting…" while the quit runs.
+struct QuitItem(MenuItem<tauri::Wry>);
+
+/// What the tray's status line and tooltip say while the quit runs.
+const QUITTING: &str = "quitting: stopping the gateway, then the model containers…";
+
+/// The quit sequence started (review P-11): the window goes at once, the
+/// tray's tooltip and status line say it is quitting, and its Quit item
+/// reads "Quitting…", greyed out, so a Quit that takes its time (the
+/// server's bound, then the containers') is seen to be under way.
+pub(crate) fn quit_feedback(app: &tauri::AppHandle) {
+    tracing::info!("quit: started; the window is hidden and the tray says so");
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    let label = dev_guard::tray_label(cfg!(debug_assertions));
+    if let Some(tray) = app.tray_by_id("lmgw-tray") {
+        let _ = tray.set_tooltip(Some(format!("{label} — {QUITTING}")));
+    }
+    if let Some(item) = app.try_state::<QuitItem>() {
+        let _ = item.0.set_text("Quitting…");
+        let _ = item.0.set_enabled(false);
+    }
+}
+
 /// Push the GPU-hold state to every tray surface it drives: the checkbox,
 /// the icon (`tray.png` ↔ `tray-hold.png`) and the tooltip (§6). Shared by
 /// the menu handler — so a click flips the tray immediately — and the 5 s
@@ -588,6 +643,9 @@ fn main() {
             };
             app.manage(state.clone());
             app.manage(gateway);
+            // SIGTERM and Ctrl-C quit as Quit does, once the gateway is
+            // managed (`gateway::on_signals`).
+            gateway::on_signals(app.handle().clone());
 
             // --- tray menu (§12) ---
             let status_item = MenuItem::with_id(app, "status", head, false, None::<&str>)?;
@@ -635,6 +693,8 @@ fn main() {
                 None::<&str>,
             )?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            // Said "Quitting…" while the quit runs (`quit_feedback`).
+            app.manage(QuitItem(quit.clone()));
             let menu = Menu::with_items(
                 app,
                 &[
@@ -768,6 +828,11 @@ fn main() {
                     let stats = state_for_status.telemetry.stats();
                     let runtime = state_for_status.runtime().list();
                     let gateway: tauri::State<Gateway> = app_for_status.state();
+                    // A quit that runs keeps its line (`quit_feedback`).
+                    if gateway.quitting() {
+                        let _ = status_item.set_text(format!("{tray_label} · {QUITTING}"));
+                        continue;
+                    }
                     let _ = status_item.set_text(match gateway.status() {
                         Ok(addr) => format!(
                             "{tray_label} · {addr} · {} req/min · {} active",
@@ -820,26 +885,48 @@ fn main() {
         })
         .build(context)
         .expect("error while running lmgw")
-        // `build` + `run(callback)` instead of `run(context)` for exactly one
-        // reason: `RunEvent::Exit` is the only place the per-model container
-        // teardown can hang off (per-model-containers §3.4).
+        // `build` + `run(callback)` instead of `run(context)`: the exit
+        // events are the only place the quit sequence and the per-model
+        // container teardown can hang off (per-model-containers §3.4).
         //
-        // "Quit" calls `app.exit(0)`, which never touches `ServerHandle` — the
-        // Axum task is simply abandoned as the process dies — so the graceful
-        // shutdown Axum has cannot be where containers get stopped. Nor may it
-        // be: "Restart gateway" bounces that same task, and a gateway restart
-        // must not dump every warm model off the GPU. Quitting must; restarting
-        // must not; only this callback can tell the two apart.
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        // "Restart gateway" stops and starts the server without them, and a
+        // gateway restart must not dump every warm model off the GPU.
+        // Quitting must — after the server has stopped and its sessions and
+        // turns have ended; restarting must not; only this callback can tell
+        // the two apart.
+        .run(|app, event| match event {
+            // Every exit — Quit, an update's restart, a signal — runs the quit
+            // sequence first (`gateway::quit`, review F-1): the server stops
+            // and is waited for, then the containers stop; the exit is asked
+            // for again once that has run.
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                if gateway::exit_requested(app, code) {
+                    api.prevent_exit();
+                }
+            }
+            tauri::RunEvent::Exit => {
+                let gateway: tauri::State<Gateway> = app.state();
+                // An exit that went through while the quit runs (one whose
+                // `prevent_exit` Tauri ignored, review P-2): it waits for
+                // that quit, bounded, rather than stopping the containers a
+                // second time beside it. Blocking on purpose: this is the
+                // last thing the process does, and returning from it is what
+                // lets the exit proceed.
+                if gateway.quitting() {
+                    tauri::async_runtime::block_on(gateway.wait_quit(gateway::EXIT_WAITS_WITHIN));
+                }
+                if gateway.quit_done() || gateway.quitting() {
+                    return;
+                }
+                // An exit that did not ask first, or a quit that failed: the
+                // containers still stop. Bounded inside `shutdown` (its own
+                // timeout), so a wedged podman delays the quit by that much
+                // and no longer.
                 let state: tauri::State<SharedState> = app.state();
                 let state = (*state).clone();
-                // Blocking on purpose: this is the last thing the process does,
-                // and returning from it is what lets the exit proceed. Bounded
-                // inside `shutdown` (its own timeout), so a wedged podman
-                // delays the quit by that much and no longer.
                 tauri::async_runtime::block_on(lmgw_core::runtime::lifecycle::shutdown(&state));
             }
+            _ => {}
         });
 }
 

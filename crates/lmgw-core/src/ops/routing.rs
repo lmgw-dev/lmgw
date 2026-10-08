@@ -7,10 +7,11 @@ use crate::ir::Params;
 use crate::state::SharedState;
 use crate::store::{self, NewAlias, NewUpstream};
 
+use super::credential_move::{self, RowWriter};
 use super::*;
 
 /// Sparse patch for an upstream. `action` selects the verb; the remaining
-/// fields are the record, all optional (see the module note on sparseness).
+/// fields are the record, all optional (a field left out keeps its value).
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 // The advertised inputSchema is closed (`additionalProperties: false`), so an
 // argument we don't know is an error, not something to drop on the floor: a
@@ -32,7 +33,13 @@ pub struct UpstreamPatch {
     pub supports_responses: Option<bool>,
 }
 
-pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value, String> {
+/// `writer` is who asks: a self-admin tool's move of a keyed row to another
+/// address must restate the key ([`RowWriter`]).
+pub async fn upstream_set(
+    state: &SharedState,
+    p: UpstreamPatch,
+    writer: RowWriter,
+) -> Result<Value, String> {
     let id_of = |p: &UpstreamPatch| p.id.ok_or_else(|| format!("'{}' requires id", p.action));
 
     match p.action.as_str() {
@@ -99,11 +106,19 @@ pub async fn upstream_set(state: &SharedState, p: UpstreamPatch) -> Result<Value
             // partial update would wipe it (or persist the `<set>` placeholder).
             let new_key = opt(&p.api_key);
             let update_key = new_key.is_some();
+            // Whichever action this is, a move of the row's address checks
+            // the stored key against the one the call sends (V-1).
+            let base_url = opt(&p.base_url).unwrap_or_else(|| cur.base_url.clone());
+            if let Some(why) =
+                credential_move::upstream_refusal(writer, &cur, &base_url, new_key.as_deref())
+            {
+                return Err(why);
+            }
             let new = NewUpstream {
                 name: opt(&p.name).unwrap_or(cur.name),
                 protocol: settled.shape.protocol,
                 kind: settled.shape.kind,
-                base_url: opt(&p.base_url).unwrap_or(cur.base_url),
+                base_url,
                 api_key: new_key,
                 extra_headers: cur.extra_headers,
                 timeout_ms: p.timeout_ms.unwrap_or(cur.timeout_ms),
@@ -164,10 +179,9 @@ pub struct AliasPatch {
     pub upstream: Option<String>,
     pub upstream_model: Option<String>,
     pub enabled: Option<bool>,
-    /// Owner override of the derived `/v1/models` capability facts
-    /// (model-capabilities design §7): a JSON object, or a JSON string
-    /// containing one (MCP arguments are flat scalars) — see
-    /// [`parse_capabilities_override`]. `null`/empty clears.
+    /// Override of the derived `/v1/models` capability facts: a JSON object,
+    /// or a JSON string containing one (MCP arguments are flat scalars).
+    /// `null`/empty clears.
     pub capabilities_override: Option<Value>,
     /// Field names to reset to unset, comma- or space-separated. Only
     /// `capabilities_override` is clearable here today.

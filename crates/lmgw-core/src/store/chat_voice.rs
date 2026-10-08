@@ -471,13 +471,15 @@ fn keep_parsable<T: DeserializeOwned + Default>(map: Map<String, Value>) -> T {
 /// A stored seed that is not a `u32` (a hand-edited row) is no seed:
 /// [`ThreadVoice::from_stored`] drops it on read, so it is replaced here
 /// too. A `voice` that is not a JSON object becomes one. The thread's
-/// `updated_at` stays: the server drew this, the owner changed nothing.
+/// `updated_at` stays: the server drew this, the owner changed nothing. The
+/// change feed hears of it (`thread.updated`, the gateway's own).
 pub async fn draw_chat_thread_seed(
     pool: &sqlx::SqlitePool,
     thread_id: i64,
     drawn: u32,
 ) -> super::DbResult<Option<u32>> {
     // A `u32` seed is held; anything else is none (doc, `seed_held!`).
+    let mut tx = super::begin_write(pool).await?;
     let written: Option<i64> = sqlx::query_scalar(concat!(
         "UPDATE chat_threads SET voice = json_set(
            CASE WHEN NOT json_valid(voice) THEN '{}'
@@ -489,11 +491,17 @@ pub async fn draw_chat_thread_seed(
     ))
     .bind(thread_id)
     .bind(i64::from(drawn))
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if written.is_some() {
+        // The thread's `voice` as a client lists it changed: the gateway's
+        // own write (client-apps design §2.2).
+        super::feed::record_thread(&mut tx, super::feed::kind::THREAD_UPDATED, thread_id, None)
+            .await?;
+        tx.commit().await?;
         return Ok(Some(drawn));
     }
+    drop(tx);
     let held: Option<i64> = sqlx::query_scalar(concat!(
         "SELECT json_extract(voice, '$.seed') FROM chat_threads WHERE id = ?1 AND ",
         seed_held!()
@@ -582,11 +590,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let saved =
-            crate::store::update_chat_thread_settings(&pool, &t, crate::store::SeedWrite::Keep)
-                .await
-                .unwrap()
-                .unwrap();
+        let saved = crate::store::update_chat_thread_settings(
+            &pool,
+            &t,
+            crate::store::SeedWrite::Keep,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(saved.seed, None);
         // The settings save judges a stored seed as the draw does (WP11
         // server review n7): a `u32` is kept, an out-of-range integer is
@@ -601,9 +613,14 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            crate::store::update_chat_thread_settings(&pool, &t, crate::store::SeedWrite::Keep)
-                .await
-                .unwrap();
+            crate::store::update_chat_thread_settings(
+                &pool,
+                &t,
+                crate::store::SeedWrite::Keep,
+                None,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 stored(id).await.get("seed").cloned(),
                 kept,

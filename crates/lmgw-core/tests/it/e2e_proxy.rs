@@ -18,7 +18,7 @@ async fn setup(upstream_base: &str, protocol: Protocol) -> (SharedState, Gw) {
     setup_kind(upstream_base, protocol, UpstreamKind::Generic).await
 }
 
-async fn setup_kind(
+pub(crate) async fn setup_kind(
     upstream_base: &str,
     protocol: Protocol,
     kind: UpstreamKind,

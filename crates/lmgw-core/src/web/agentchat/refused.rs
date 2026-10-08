@@ -15,10 +15,11 @@ use crate::proxy;
 use crate::state::SharedState;
 
 /// The refusal `e` of the turn for `alias` on `route`, under the loop's
-/// `proto`, as its request row.
+/// `proto`, as its request row — charged to `key`, the turn's caller
+/// (`Turn::key`).
 pub(super) async fn record(
     state: &SharedState,
-    alias: &str,
+    (key, alias): (proxy::KeyRef, &str),
     proto: &str,
     route: &Route,
     fallback: Option<FallbackReason>,
@@ -29,7 +30,7 @@ pub(super) async fn record(
     state.telemetry.request_started();
     proxy::record_in_process(
         proxy::InProcessLog {
-            key: proxy::KeyRef::default(),
+            key,
             ingress_proto: proto,
             alias,
             route,
@@ -41,6 +42,7 @@ pub(super) async fn record(
             fallback,
             rung: None,
             degraded: None,
+            quantities: Default::default(),
         },
         e.http_status().as_u16(),
         None,

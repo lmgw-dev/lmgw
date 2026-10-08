@@ -83,6 +83,39 @@ pub struct ChatThread {
     pub updated_at: String,
 }
 
+impl ChatThread {
+    /// Whether this thread drives the self-admin plane (client-apps design
+    /// L3, review W3-1): an Admin Chat thread, or one with the self-admin
+    /// toolset attached ([`Self::reach_level`] above `0`).
+    pub fn drives_self_admin(&self) -> bool {
+        self.reach_level() > 0
+    }
+
+    /// How far into the self-admin plane it reaches (`self_admin_thread!`
+    /// says the same in SQL): `2` Admin Chat, which no device sees; `1` the
+    /// self-admin toolset attached, which only a device that may use lmgw's
+    /// admin tools sees; `0` anything else. A reader sees it when
+    /// [`AdminThreads::sees`] says so.
+    pub fn reach_level(&self) -> u8 {
+        if self.kind == "admin" {
+            2
+        } else if carries_self_admin(&self.mcp_tools) {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Whether `tools` attach the self-admin toolset. Spaces around the label
+/// are trimmed and nothing else, exactly as SQL's `trim()` in
+/// `self_admin_thread!` trims (review W4-17): the two are one predicate.
+pub fn carries_self_admin(tools: &[ThreadMcp]) -> bool {
+    tools
+        .iter()
+        .any(|m| m.server_label.trim_matches(' ') == crate::mcp::exec::SELF_ADMIN_LABEL)
+}
+
 /// One stored turn in a [`ChatThread`].
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ChatMessageRow {
@@ -184,27 +217,35 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
     }
 }
 
+/// A new thread with no prompt, recorded in the feed as the gateway's own
+/// (`by` none): the seed of tests and in-process callers.
 pub async fn create_chat_thread(pool: &SqlitePool, model_alias: &str, kind: &str) -> DbResult<i64> {
-    create_chat_thread_with_prompt(pool, model_alias, kind, "").await
+    create_chat_thread_with_prompt(pool, model_alias, kind, "", None).await
 }
 
 /// [`create_chat_thread`] starting from `system_prompt` — the Chat page's
-/// new threads take the configured default this way, as their own copy.
+/// new threads take the configured default this way, as their own copy —
+/// recorded in the feed (`thread.created`) as `by`'s.
 pub async fn create_chat_thread_with_prompt(
     pool: &SqlitePool,
     model_alias: &str,
     kind: &str,
     system_prompt: &str,
+    by: feed::By<'_>,
 ) -> DbResult<i64> {
+    let mut tx = super::begin_write(pool).await?;
     let res = sqlx::query(
         "INSERT INTO chat_threads (model_alias, kind, system_prompt) VALUES (?1, ?2, ?3)",
     )
     .bind(model_alias)
     .bind(kind)
     .bind(system_prompt)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(res.last_insert_rowid())
+    let id = res.last_insert_rowid();
+    feed::record_thread(&mut tx, feed::kind::THREAD_CREATED, id, by).await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// Create a thread that belongs to a catalog agent (§2.5), seeded in one
@@ -224,6 +265,7 @@ pub async fn create_agent_chat_thread(
     mcp_tools: &[ThreadMcp],
 ) -> DbResult<i64> {
     let mcp = serde_json::to_string(mcp_tools).unwrap_or_else(|_| "[]".to_string());
+    let mut tx = super::begin_write(pool).await?;
     let res = sqlx::query(
         "INSERT INTO chat_threads
            (model_alias, system_prompt, temperature, kind, mcp_tools, agent_id)
@@ -234,9 +276,19 @@ pub async fn create_agent_chat_thread(
     .bind(temperature)
     .bind(mcp)
     .bind(agent_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(res.last_insert_rowid())
+    let id = res.last_insert_rowid();
+    // Opened from the catalog, which only the owner reaches.
+    feed::record_thread(
+        &mut tx,
+        feed::kind::THREAD_CREATED,
+        id,
+        Some(feed::BY_OWNER),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// Which threads [`list_chat_threads`] returns.
@@ -255,39 +307,140 @@ pub enum ThreadListMode {
     All,
 }
 
+/// How far a reader reaches into the threads and folders that drive the
+/// self-admin plane (client-apps design L3, review W3-1; the per-device
+/// switch, 2026-10-07): the owner sees all of them; a device that may use
+/// lmgw's admin tools sees the ones with the self-admin toolset, never Admin
+/// Chat nor a folder a device deleted; any other device none of them — for
+/// it they do not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminThreads {
+    /// The owner.
+    Shown,
+    /// A device allowed lmgw's admin tools (`ApiKey::self_admin`).
+    ToolsShown,
+    /// Any other device.
+    Hidden,
+}
+
+impl AdminThreads {
+    /// The first level the reader does not see (`self_admin_thread!`,
+    /// `self_admin_folder!`): what a query's `… < ?n` binds.
+    pub fn reach(self) -> i64 {
+        match self {
+            Self::Shown => 3,
+            Self::ToolsShown => 2,
+            Self::Hidden => 1,
+        }
+    }
+
+    /// Whether the reader sees a thread or folder of `level`.
+    pub fn sees(self, level: impl Into<i64>) -> bool {
+        level.into() < self.reach()
+    }
+
+    /// Whether the reader is a device (anything but the owner).
+    pub fn is_device(self) -> bool {
+        self != Self::Shown
+    }
+
+    /// A device's reach with its admin-tools switch `on` or off.
+    pub fn of_device(on: bool) -> Self {
+        if on {
+            Self::ToolsShown
+        } else {
+            Self::Hidden
+        }
+    }
+
+    /// The one of the two that sees less.
+    pub fn narrower(self, other: Self) -> Self {
+        if other.reach() < self.reach() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 /// The sidebar list (chat-archive-pin-attachments design §1): active threads
 /// pinned-first then most-recently-active, archived threads newest-archived-
 /// first, or both together. Three orderings behind one enum rather than three
 /// functions, because every caller already knows which list it wants and a
-/// `WHERE`/`ORDER BY` clause is the whole difference.
+/// `WHERE`/`ORDER BY` clause is the whole difference. Every kind is listed;
+/// [`list_chat_threads_as`] leaves Admin Chat out for a device.
 pub async fn list_chat_threads(
     pool: &SqlitePool,
     mode: ThreadListMode,
 ) -> DbResult<Vec<ChatThread>> {
+    list_chat_threads_as(pool, mode, AdminThreads::Shown).await
+}
+
+/// [`list_chat_threads`], as far as `admin` reaches.
+pub async fn list_chat_threads_as(
+    pool: &SqlitePool,
+    mode: ThreadListMode,
+    admin: AdminThreads,
+) -> DbResult<Vec<ChatThread>> {
     let sql = match mode {
-        ThreadListMode::Active => {
-            "SELECT * FROM chat_threads WHERE archived_at IS NULL \
-             ORDER BY pinned DESC, updated_at DESC, id DESC"
-        }
-        ThreadListMode::Archived => {
-            "SELECT * FROM chat_threads WHERE archived_at IS NOT NULL \
-             ORDER BY archived_at DESC, id DESC"
-        }
-        ThreadListMode::All => {
-            "SELECT * FROM chat_threads ORDER BY pinned DESC, updated_at DESC, id DESC"
-        }
+        ThreadListMode::Active => concat!(
+            "SELECT * FROM chat_threads WHERE archived_at IS NULL AND ",
+            self_admin_thread!(""),
+            " < ?1 ORDER BY pinned DESC, updated_at DESC, id DESC"
+        ),
+        ThreadListMode::Archived => concat!(
+            "SELECT * FROM chat_threads WHERE archived_at IS NOT NULL AND ",
+            self_admin_thread!(""),
+            " < ?1 ORDER BY archived_at DESC, id DESC"
+        ),
+        ThreadListMode::All => concat!(
+            "SELECT * FROM chat_threads WHERE ",
+            self_admin_thread!(""),
+            " < ?1 ORDER BY pinned DESC, updated_at DESC, id DESC"
+        ),
     };
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
+    let rows = sqlx::query(sql).bind(admin.reach()).fetch_all(pool).await?;
+    Ok(rows.iter().map(chat_thread_from_row).collect())
+}
+
+/// The stored threads among `ids` as far as `admin` reaches, active and
+/// archived alike, in the active list's order (pinned first, then
+/// `updated_at DESC, id DESC`): the Chat page re-reads only the rows a
+/// change named (`GET /chat/api/threads/rows`). An id that is not there, or
+/// out of reach, is left out; repeats are read once. One query however many
+/// ids, bound as a JSON array.
+pub async fn list_chat_threads_by_ids(
+    pool: &SqlitePool,
+    ids: &[i64],
+    admin: AdminThreads,
+) -> DbResult<Vec<ChatThread>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
+    let rows = sqlx::query(concat!(
+        "SELECT * FROM chat_threads WHERE id IN (SELECT value FROM json_each(?1)) AND ",
+        self_admin_thread!(""),
+        " < ?2 ORDER BY pinned DESC, updated_at DESC, id DESC"
+    ))
+    .bind(ids)
+    .bind(admin.reach())
+    .fetch_all(pool)
+    .await?;
     Ok(rows.iter().map(chat_thread_from_row).collect())
 }
 
 /// How many threads are archived, so the sidebar's toggle can label itself
 /// ("Archived (n)") without a second round trip through the full list.
-pub async fn count_archived_chat_threads(pool: &SqlitePool) -> DbResult<i64> {
-    let n: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM chat_threads WHERE archived_at IS NOT NULL")
-            .fetch_one(pool)
-            .await?;
+pub async fn count_archived_chat_threads(pool: &SqlitePool, admin: AdminThreads) -> DbResult<i64> {
+    let n: i64 = sqlx::query_scalar(concat!(
+        "SELECT COUNT(*) FROM chat_threads WHERE archived_at IS NOT NULL AND ",
+        self_admin_thread!(""),
+        " < ?1"
+    ))
+    .bind(admin.reach())
+    .fetch_one(pool)
+    .await?;
     Ok(n)
 }
 
@@ -299,23 +452,42 @@ pub async fn get_chat_thread(pool: &SqlitePool, id: i64) -> DbResult<Option<Chat
     Ok(row.as_ref().map(chat_thread_from_row))
 }
 
-pub async fn delete_chat_thread(pool: &SqlitePool, id: i64) -> DbResult<()> {
-    sqlx::query("DELETE FROM chat_threads WHERE id = ?1")
-        .bind(id)
-        .execute(pool)
-        .await?;
+/// Delete a thread with everything in it, recorded in the feed
+/// (`thread.deleted`) as `by`'s. A thread that is not there records nothing.
+/// The current thread of an ongoing folder leaves it first (`folder.current`,
+/// reason `gone`, client-apps design §3.3).
+pub async fn delete_chat_thread(pool: &SqlitePool, id: i64, by: feed::By<'_>) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
+    super::chat_ongoing::clear_current(&mut tx, id, None, by).await?;
+    let gone: Vec<feed::Gone> = sqlx::query(
+        "DELETE FROM chat_threads WHERE id = ?1 RETURNING id, kind, folder_id, mcp_tools",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?
+    .iter()
+    .map(feed::Gone::of)
+    .collect();
+    feed::record_threads_deleted(&mut tx, &gone, by).await?;
+    tx.commit().await?;
     Ok(())
 }
 
 /// Set a thread's pinned flag (design §1). Pinning an archived thread also
-/// [`restore`](restore_chat_thread)s it — done here, in the same statement's
-/// spirit, so the API handler never forgets the half that makes "pin" also
-/// mean "bring back".
-pub async fn set_chat_thread_pinned(pool: &SqlitePool, id: i64, pinned: bool) -> DbResult<()> {
+/// [`restore`](restore_chat_thread)s it — done here, in the same
+/// transaction, so the API handler never forgets the half that makes "pin"
+/// also mean "bring back".
+pub async fn set_chat_thread_pinned(
+    pool: &SqlitePool,
+    id: i64,
+    pinned: bool,
+    by: feed::By<'_>,
+) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
     sqlx::query("UPDATE chat_threads SET pinned=?2 WHERE id=?1")
         .bind(id)
         .bind(pinned as i64)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     if pinned {
         sqlx::query(
@@ -323,15 +495,19 @@ pub async fn set_chat_thread_pinned(pool: &SqlitePool, id: i64, pinned: bool) ->
              WHERE id=?1 AND archived_at IS NOT NULL",
         )
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+    feed::record_thread(&mut tx, feed::kind::THREAD_UPDATED, id, by).await?;
+    tx.commit().await?;
     Ok(())
 }
 
 /// Archive one thread by hand — the sweep's own bulk update lives in
 /// [`sweep_chat_threads`]; this is the single-row explicit action behind
-/// `POST /chat/api/threads/{id}/archive`.
+/// `POST /chat/api/threads/{id}/archive`. An ongoing folder's current thread
+/// archived by hand is its current thread no more (`folder.current`, reason
+/// `gone`, client-apps design §3.3).
 ///
 /// Also unpins (review finding 6): pinned and archived used to be able to
 /// coexist through this path (the sweep itself already excludes `pinned=1`
@@ -339,11 +515,15 @@ pub async fn set_chat_thread_pinned(pool: &SqlitePool, id: i64, pinned: bool) ->
 /// purges — and, worse, one whose *later* unpin would purge it immediately
 /// against a stale `archived_at`. Archiving is a stronger statement than
 /// pinning here: it wins.
-pub async fn archive_chat_thread(pool: &SqlitePool, id: i64) -> DbResult<()> {
+pub async fn archive_chat_thread(pool: &SqlitePool, id: i64, by: feed::By<'_>) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
     sqlx::query("UPDATE chat_threads SET archived_at=datetime('now'), pinned=0 WHERE id=?1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    feed::record_thread(&mut tx, feed::kind::THREAD_UPDATED, id, by).await?;
+    super::chat_ongoing::clear_current(&mut tx, id, None, by).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -352,11 +532,14 @@ pub async fn archive_chat_thread(pool: &SqlitePool, id: i64) -> DbResult<()> {
 /// re-archive it at once, since the idle clock never moved. The target of
 /// three triggers: an explicit restore, pinning an archived thread
 /// ([`set_chat_thread_pinned`]), and sending into one (`web::chat::send`).
-pub async fn restore_chat_thread(pool: &SqlitePool, id: i64) -> DbResult<()> {
+pub async fn restore_chat_thread(pool: &SqlitePool, id: i64, by: feed::By<'_>) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
     sqlx::query("UPDATE chat_threads SET archived_at=NULL, updated_at=datetime('now') WHERE id=?1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    feed::record_thread(&mut tx, feed::kind::THREAD_UPDATED, id, by).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -379,41 +562,80 @@ pub fn chat_thread_purge_at(archived_at: &str, purge_days: i64) -> Option<String
 }
 
 /// The hourly janitor's chat sweep (design §1): archive threads idle past
-/// `archive_days`, then delete threads archived past `purge_days`. Pinned
-/// threads are exempt from both — the `WHERE` clauses say so directly rather
-/// than pre-filtering in Rust, so the two counts this returns are exactly
-/// what changed. Either half is `0` to disable that step; `(0, 0)` when both
-/// disabled without a query.
+/// their archive days, then delete threads archived past their purge days.
+/// A thread in a folder with its own retention (client-apps design §11 Q2)
+/// takes the folder's days, every other thread `archive_days` and
+/// `purge_days`; `0` disables that step, for the folder or globally. Pinned
+/// threads are exempt from both, and so is every ongoing folder's current
+/// thread (client-apps design §3.5) — the `WHERE` clauses say so directly
+/// rather than pre-filtering in Rust, so the two counts this returns are
+/// exactly what changed.
+///
+/// Each half records what it changed in the feed, in its own transaction
+/// (client-apps design §2.2): `thread.updated` for every thread it archived,
+/// `thread.deleted` for every thread it purged, as the gateway's own work.
 pub async fn sweep_chat_threads(
     pool: &SqlitePool,
     archive_days: i64,
     purge_days: i64,
 ) -> DbResult<(u64, u64)> {
-    let archived = if archive_days > 0 {
-        sqlx::query(
-            "UPDATE chat_threads SET archived_at=datetime('now')
-             WHERE pinned=0 AND archived_at IS NULL
-               AND updated_at < datetime('now', ?1)",
-        )
-        .bind(format!("-{archive_days} days"))
-        .execute(pool)
-        .await?
-        .rows_affected()
-    } else {
-        0
+    let (archived, purged) = sweep_chat_threads_ids(pool, archive_days, purge_days).await?;
+    Ok((archived, purged.len() as u64))
+}
+
+/// [`sweep_chat_threads`], with the ids of the threads it purged: what the
+/// upkeep ends the live turns and bound sessions of (`LiveTurns::purged`).
+pub async fn sweep_chat_threads_ids(
+    pool: &SqlitePool,
+    archive_days: i64,
+    purge_days: i64,
+) -> DbResult<(u64, Vec<i64>)> {
+    // A day count past what `datetime()` can subtract makes it NULL, so the
+    // comparison never matches: "never" is the honest reading of it.
+    let archived = {
+        let mut tx = super::begin_write(pool).await?;
+        let ids: Vec<i64> = sqlx::query_scalar(concat!(
+            "UPDATE chat_threads AS t SET archived_at=datetime('now')
+             WHERE t.pinned=0 AND t.archived_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM chat_folders c WHERE c.current_thread_id = t.id)
+               AND ",
+            folder_days!("archive_days"),
+            " > 0
+               AND t.updated_at < datetime('now', '-' || ",
+            folder_days!("archive_days"),
+            " || ' days')
+             RETURNING id"
+        ))
+        .bind(archive_days.max(0))
+        .fetch_all(&mut *tx)
+        .await?;
+        feed::record_threads_updated(&mut tx, &ids, None).await?;
+        tx.commit().await?;
+        ids.len() as u64
     };
-    let purged = if purge_days > 0 {
-        sqlx::query(
-            "DELETE FROM chat_threads
-             WHERE pinned=0 AND archived_at IS NOT NULL
-               AND archived_at < datetime('now', ?1)",
-        )
-        .bind(format!("-{purge_days} days"))
-        .execute(pool)
+    let purged = {
+        let mut tx = super::begin_write(pool).await?;
+        let gone: Vec<feed::Gone> = sqlx::query(concat!(
+            "DELETE FROM chat_threads AS t
+             WHERE t.pinned=0 AND t.archived_at IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM chat_folders c WHERE c.current_thread_id = t.id)
+               AND ",
+            folder_days!("purge_days"),
+            " > 0
+               AND t.archived_at < datetime('now', '-' || ",
+            folder_days!("purge_days"),
+            " || ' days')
+             RETURNING id, kind, folder_id, mcp_tools"
+        ))
+        .bind(purge_days.max(0))
+        .fetch_all(&mut *tx)
         .await?
-        .rows_affected()
-    } else {
-        0
+        .iter()
+        .map(feed::Gone::of)
+        .collect();
+        feed::record_threads_deleted(&mut tx, &gone, None).await?;
+        tx.commit().await?;
+        gone.iter().map(|g| g.id).collect::<Vec<i64>>()
     };
     Ok((archived, purged))
 }
@@ -429,7 +651,58 @@ pub async fn update_chat_thread_settings(
     pool: &SqlitePool,
     t: &ChatThread,
     seed: SeedWrite,
+    by: feed::By<'_>,
 ) -> DbResult<Option<ThreadVoice>> {
+    Ok(write_settings_of(pool, t, seed, by, AdminThreads::Shown)
+        .await?
+        .map(|w| w.voice))
+}
+
+/// [`update_chat_thread_settings`] with what the write saw: the voice as
+/// stored and the thread's level before and after (review W4-3). `None`
+/// when there is no such row, or when the writer (`admin`, a device) does
+/// not see the thread's level.
+pub async fn write_settings_of(
+    pool: &SqlitePool,
+    t: &ChatThread,
+    seed: SeedWrite,
+    by: feed::By<'_>,
+    admin: AdminThreads,
+) -> DbResult<Option<SettingsWritten>> {
+    let mut tx = super::begin_write(pool).await?;
+    let written = write_chat_thread_settings(&mut tx, t, seed, by, admin).await?;
+    tx.commit().await?;
+    Ok(written)
+}
+
+/// What [`write_chat_thread_settings`] wrote: the voice as stored, and the
+/// thread's level (`self_admin_thread!`) before and after the write — as the
+/// write's own transaction saw it, so a caller decides a flip from the
+/// store's state, not from what it read before (review W4-3).
+#[derive(Debug, Clone)]
+pub struct SettingsWritten {
+    pub thread_id: i64,
+    pub voice: ThreadVoice,
+    pub level_before: u8,
+    pub level_after: u8,
+}
+
+/// [`update_chat_thread_settings`]'s write and its record, on the caller's
+/// transaction: a folder patch writes its current thread's settings with it
+/// (client-apps design L9).
+///
+/// **The backstop of L3** (review W5-2). The write is a whole row, read by
+/// the caller earlier; a writer that does not see the thread's level as
+/// this transaction finds it (`admin`: a device) writes nothing, and gets
+/// `None`. A device's stale copy can then never undo the owner's attach of
+/// the toolset, whatever the route read before.
+pub(super) async fn write_chat_thread_settings(
+    conn: &mut sqlx::SqliteConnection,
+    t: &ChatThread,
+    seed: SeedWrite,
+    by: feed::By<'_>,
+    admin: AdminThreads,
+) -> DbResult<Option<SettingsWritten>> {
     let mcp = serde_json::to_string(&t.mcp_tools).unwrap_or_else(|_| "[]".to_string());
     let mut voice = t.voice.clone();
     if seed == SeedWrite::Keep {
@@ -440,6 +713,10 @@ pub async fn update_chat_thread_settings(
     // run only on valid JSON — a malformed stored `voice` makes them raise,
     // which `AND` does not prevent and a `CASE` does.
     // The stored seed is kept when the draw would keep it (`seed_held!`).
+    let was = feed::self_admin_now(&mut *conn, t.id).await?;
+    if was.is_some_and(|level| !admin.sees(level)) {
+        return Ok(None);
+    }
     let stored: Option<String> = sqlx::query_scalar(concat!(
         "UPDATE chat_threads SET title=?2, model_alias=?3, system_prompt=?4, temperature=?5,
          max_tokens=?6, mcp_tools=?7, reasoning_enabled=?8, reasoning_effort=?9,
@@ -478,18 +755,38 @@ pub async fn update_chat_thread_settings(
     .bind(t.kb_budget_tokens)
     .bind(voice.to_stored())
     .bind(seed == SeedWrite::Keep)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
-    Ok(stored.as_deref().map(ThreadVoice::from_stored))
+    feed::record_thread_since(&mut *conn, feed::kind::THREAD_UPDATED, t.id, by, was).await?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let now = feed::self_admin_now(&mut *conn, t.id).await?;
+    let level = |l: Option<i64>| u8::try_from(l.unwrap_or(0)).unwrap_or(2);
+    Ok(Some(SettingsWritten {
+        thread_id: t.id,
+        voice: ThreadVoice::from_stored(&stored),
+        level_before: level(was),
+        level_after: level(now),
+    }))
 }
 
-/// Set just the title (used to auto-name a thread from its first user message).
-pub async fn set_chat_thread_title(pool: &SqlitePool, id: i64, title: &str) -> DbResult<()> {
+/// Set just the title (used to auto-name a thread from its first user
+/// message), recorded in the feed as `by`'s.
+pub async fn set_chat_thread_title(
+    pool: &SqlitePool,
+    id: i64,
+    title: &str,
+    by: feed::By<'_>,
+) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
     sqlx::query("UPDATE chat_threads SET title=?2 WHERE id=?1")
         .bind(id)
         .bind(title)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    feed::record_thread(&mut tx, feed::kind::THREAD_UPDATED, id, by).await?;
+    tx.commit().await?;
     Ok(())
 }
 

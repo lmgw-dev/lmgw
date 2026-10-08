@@ -268,6 +268,25 @@ pub(crate) fn money(micro: i64, currency: &str) -> String {
     }
 }
 
+/// [`money`] for one request's amount and its parts, which are often below
+/// a cent: a transcription at 0.006 a minute costs 0.00274, and a rounded
+/// "0.00" would read as free — nor would parts rounded to cents add up to
+/// the total beside them. It keeps the digits the amount has
+/// (`fmt::price`), never fewer than two decimals; from a thousand up it is
+/// [`money`].
+pub(crate) fn money_fine(micro: i64, currency: &str) -> String {
+    let v = micro.abs() as f64 / 1e6;
+    if v >= 1000.0 {
+        return money(micro, currency);
+    }
+    let mut s = crate::fmt::price(v);
+    if s.split_once('.').map_or(0, |(_, d)| d.len()) < 2 {
+        s = format!("{v:.2}");
+    }
+    let sign = if micro < 0 { "-" } else { "" };
+    format!("{sign}{}{s}", cur_sym(currency))
+}
+
 /// The §2.3 obligation in one string: what the money figure beside it does
 /// **not** cover. Returns `None` when nothing is unpriced.
 pub(super) fn unpriced_note(reqs: i64, toks: i64) -> Option<String> {
@@ -342,6 +361,12 @@ pub(super) fn cell_add(dst: &mut UsageCell, s: &UsageCell) {
     dst.cache_n += s.cache_n;
     dst.draft_n += s.draft_n;
     dst.draft_accepted += s.draft_accepted;
+    dst.audio_in_ms += s.audio_in_ms;
+    dst.chars_in += s.chars_in;
+    dst.images_out += s.images_out;
+    dst.cost_unknown_audio_in_ms += s.cost_unknown_audio_in_ms;
+    dst.cost_unknown_chars_in += s.cost_unknown_chars_in;
+    dst.cost_unknown_images_out += s.cost_unknown_images_out;
 }
 
 /// `cells` flattened into `[bucket][series]`, with every bucket in the window

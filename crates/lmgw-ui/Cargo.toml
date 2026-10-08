@@ -7,6 +7,9 @@ description = "Leptos (CSR/WASM) dashboard for lmgw, built with Trunk, served em
 
 [dependencies]
 lmgw-api-types = { path = "../lmgw-api-types" }
+# The voice panel's realtime protocol, voice state and truncate bookkeeping:
+# the rules every client of the gateway runs (client-apps design §4.1).
+lmgw-client = { path = "../lmgw-client" }
 leptos = { version = "0.8", features = ["csr"] }
 leptos_router = "0.8"
 console_error_panic_hook = "0.1"

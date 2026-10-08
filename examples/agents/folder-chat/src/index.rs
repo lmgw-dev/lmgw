@@ -295,6 +295,9 @@ async fn retire_prerelease_readings(pool: &SqlitePool) -> Result<(), IndexError>
     if present.is_none() {
         return Ok(());
     }
+    // Deferred, and its first statement writes: it takes the write lock there,
+    // so it cannot fail as a read that turned into a write (clippy.toml).
+    #[allow(clippy::disallowed_methods)]
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT OR IGNORE INTO folder_chat_reading
@@ -747,6 +750,9 @@ impl IndexDir {
         if ids.is_empty() {
             return Ok(0);
         }
+        // Deferred, and its first statement writes: it takes the write lock there,
+        // so it cannot fail as a read that turned into a write (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
         let mut tx = self.pool.begin().await?;
         let mut n = 0;
         for id in ids {
@@ -766,6 +772,9 @@ impl IndexDir {
         if rows.is_empty() {
             return Ok(());
         }
+        // Deferred, and its first statement writes: it takes the write lock there,
+        // so it cannot fail as a read that turned into a write (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
         let mut tx = self.pool.begin().await?;
         for (id, (a, b)) in rows {
             sqlx::query(
@@ -980,6 +989,9 @@ impl IndexDir {
         vision: &DocVision,
         pages: &[PageKey],
     ) -> Result<(), IndexError> {
+        // Deferred, and its first statement writes: it takes the write lock there,
+        // so it cannot fail as a read that turned into a write (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO folder_chat_doc_vision (document_id, content_hash, settings, pending)
@@ -1132,6 +1144,9 @@ impl IndexDir {
     /// takes it through and reads those pages again. One transaction.
     /// Returns `(failures deleted, documents marked)`.
     pub async fn retry_failed_readings(&self) -> Result<(u64, u64), IndexError> {
+        // Deferred, and its first statement writes: it takes the write lock there,
+        // so it cannot fail as a read that turned into a write (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
         let mut tx = self.pool.begin().await?;
         let marked = sqlx::query(
             "UPDATE folder_chat_doc_vision SET pending = 1 WHERE document_id IN (
@@ -1172,6 +1187,9 @@ impl IndexDir {
         )
         .fetch_all(&self.pool)
         .await?;
+        // Deferred, and its first statement writes: it takes the write lock there,
+        // so it cannot fail as a read that turned into a write (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
         let mut tx = self.pool.begin().await?;
         let mut n = 0;
         for h in hashes.iter().filter(|h| !keep.contains(*h)) {

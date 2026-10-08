@@ -323,6 +323,11 @@ impl JobCtx {
 pub trait JobExecutor: Send + Sync + 'static {
     fn kind(&self) -> JobKind;
 
+    /// Job `id` is about to go live — before anything outside can see it,
+    /// and before [`Self::run`] starts. What the kind needs in place by the
+    /// time a request can name the job goes here. Nothing, by default.
+    fn going_live(&self, _state: &SharedState, _id: i64) {}
+
     /// `input` is the payload passed to [`spawn`], the executor's own type.
     /// Returning `Err` marks the job failed with that message.
     async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String>;
@@ -529,6 +534,7 @@ pub async fn spawn(
         .ok_or_else(|| format!("job {id} vanished between insert and start"))?;
 
     let cancel = Arc::new(AtomicBool::new(false));
+    exec.going_live(state, id);
     {
         let mut live = state.jobs.live.lock().unwrap();
         live.insert(

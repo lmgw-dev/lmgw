@@ -105,17 +105,26 @@ macro_rules! hits {
     };
 }
 
-/// Archive state (`?2`: `0`, `1` or `all`) and folder (`?3`, NULL = any).
+/// Archive state (`?2`: `0`, `1` or `all`), folder (`?3`, NULL = any) and,
+/// at the parameter given, the reader's reach into the threads that drive
+/// the self-admin plane (`AdminThreads::reach`; a device's search,
+/// client-apps design L3, review W3-1).
 macro_rules! filter {
-    () => {
-        "(?2 = 'all' OR (?2 = '1') = (t.archived_at IS NOT NULL)) \
-         AND (?3 IS NULL OR t.folder_id = ?3)"
+    ($admin:literal) => {
+        concat!(
+            "(?2 = 'all' OR (?2 = '1') = (t.archived_at IS NOT NULL)) \
+             AND (?3 IS NULL OR t.folder_id = ?3) AND ",
+            self_admin_thread!("t."),
+            " < ",
+            $admin
+        )
     };
 }
 
 /// Search threads by title, message text and sent attachment names, best
 /// bm25 rank first. `folder` narrows to one folder. Threads of every kind
-/// the Chat list shows are searched (the list applies no kind filter).
+/// the Chat list shows are searched — for a device, every kind but Admin
+/// Chat (`admin`, client-apps design L3), as its list shows.
 ///
 /// One statement answers the page (review R1 finding 6 — one query per
 /// thread repeated the full MATCH fifty times, since `thread_id` is
@@ -140,6 +149,7 @@ pub async fn search_chat(
     archived: SearchArchived,
     folder: Option<i64>,
     offset: i64,
+    admin: super::AdminThreads,
 ) -> DbResult<SearchPage> {
     let empty = SearchPage {
         total_threads: 0,
@@ -163,7 +173,7 @@ pub async fn search_chat(
                     t.updated_at, COUNT(*) AS n, MIN(h.rank) AS best, \
                     COUNT(*) OVER () AS total \
              FROM h JOIN chat_threads t ON t.id = h.thread_id WHERE ",
-        filter!(),
+        filter!("?9"),
         "    GROUP BY t.id ORDER BY best, t.updated_at DESC, t.id DESC LIMIT ?4 OFFSET ?5 \
          ), top AS MATERIALIZED ( \
              SELECT rid, thread_id, kind, ref_id, rank FROM ( \
@@ -192,6 +202,7 @@ pub async fn search_chat(
     .bind(SNIPPET_OPEN.to_string())
     .bind(SNIPPET_CLOSE.to_string())
     .bind(SEARCH_HITS_PER_THREAD)
+    .bind(admin.reach())
     .fetch_all(pool)
     .await?;
 
@@ -236,11 +247,12 @@ pub async fn search_chat(
                 hits!(),
                 ") SELECT COUNT(DISTINCT t.id) FROM h JOIN chat_threads t ON t.id = h.thread_id \
                    WHERE ",
-                filter!()
+                filter!("?4")
             ))
             .bind(&expr)
             .bind(arch)
             .bind(folder)
+            .bind(admin.reach())
             .fetch_one(pool)
             .await?
         }

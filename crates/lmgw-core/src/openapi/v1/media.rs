@@ -1,5 +1,5 @@
-//! `/tokenize`, `/v1/audio/*`, `/v1/images/*` and `/v1/tasks/*` (api-docs
-//! design §4.8, §5.3): llama.cpp's own tokenizer route, and the audio.cpp /
+//! `/tokenize`, `/v1/audio/*`, `/v1/images/*` and `/v1/tasks/*`: llama.cpp's
+//! own tokenizer route, and the audio.cpp /
 //! stable-diffusion.cpp byte-level passthroughs `proxy::audio` and
 //! `proxy::image` forward with only alias resolution and model rewrite —
 //! there is no IR translation for any of these, so the request shapes here
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use super::super::schemas;
 
 // ---------------------------------------------------------------------------
-// POST /tokenize (§5.3)
+// POST /tokenize
 // ---------------------------------------------------------------------------
 
 pub(crate) fn tokenize_request(g: &mut SchemaGenerator) -> Schema {
@@ -36,7 +36,7 @@ pub(crate) fn tokenize_request(g: &mut SchemaGenerator) -> Schema {
             "description": "Every key but model is forwarded to the backend's own /tokenize \
                 verbatim. Refused with 501 not_supported_error on any backend but a real \
                 llama-server — an id from a tokenizer the backend does not run would be a \
-                hidden approximation (§10 choice 6)."
+                hidden approximation."
         }),
     )
 }
@@ -88,29 +88,34 @@ pub(crate) fn speech_request(g: &mut SchemaGenerator) -> Schema {
             "required": ["model", "input"],
             "properties": {
                 "model": {"type": "string"},
-                "input": {"type": "string"},
+                "input": {"type": "string", "description": "The text. A local model whose \
+                    engine refuses a character its package lacks (Supertonic) is sent an \
+                    equivalent it has in its place, or nothing; the x-lmgw-speech response \
+                    header names each one. An input left with nothing to say (a lone emoji) is \
+                    400 empty_input, refused before any model is started."},
                 "voice": {"type": "string", "description": "A row's own voice preset id, \
                     when it defines any (GET /v1/audio/voices). A voice-library clip with no \
                     transcript, for a model that cannot clone one without, is 400 \
                     voice_needs_transcript before anything starts (lmgw.needs_transcript in \
-                    the voice list); send reference_text, or transcribe the clip in the Audio \
-                    lab. A local model whose audio.cpp image lacks eSpeak NG is 400 \
+                    the voice list); send reference_text, or transcribe the clip in the \
+                    dashboard's Audio lab. A local model whose audio.cpp image lacks eSpeak NG is 400 \
                     audio_image_lacks_espeak."},
                 "response_format": {"type": "string"},
                 "speed": {"type": "number"},
                 "instructions": {"type": "string", "description": "A speaking style, or the \
                     description a voice-design model builds its voice from (required there: \
                     400 instructions_required without one, unless the row has a default). \
-                    Dropped for a model that reads none — capabilities.speech.instructions \
-                    says which, x-lmgw-speech says when."},
+                    Dropped for a model that reads none: capabilities.speech.instructions \
+                    says which, and the x-lmgw-speech response header says when."},
                 "language": {"type": "string", "description": "An ISO 639-1 code or BCP-47 \
                     tag; a local model gets it in its own vocabulary."},
                 "stream_format": {"type": "string", "enum": ["sse", "audio"],
-                    "description": "Stream PCM16 (response_format pcm): speech.audio.delta events, or raw \
-                    chunked PCM. A local model streams only when its row runs in streaming \
-                    mode — an offline row is 400 streaming_unsupported before anything starts \
-                    (capabilities.speech.streaming says which); x-lmgw-sample-rate states the \
-                    PCM's rate."}
+                    "description": "Streams PCM16 (with response_format pcm) as speech.audio.delta \
+                    events (sse) or as raw chunked PCM (audio). A local model streams only \
+                    when its row runs in streaming mode; an offline row is 400 \
+                    streaming_unsupported before anything starts \
+                    (capabilities.speech.streaming says which). The x-lmgw-sample-rate \
+                    response header states the PCM's rate."}
             },
             "additionalProperties": true,
             "description": "OpenAI's TTS shape plus audio.cpp's own request options, \
@@ -140,7 +145,9 @@ pub(crate) fn transcriptions_request(g: &mut SchemaGenerator) -> Schema {
                 "temperature": {"type": "number"}
             },
             "description": "multipart/form-data (also accepted as application/json with the \
-                same fields, file base64-less — the multipart form is what real clients \
+                same fields but no upload: instead of file, audio names a clip by its path \
+                on the model server's own filesystem, e.g. /models/clip.wav, and the body \
+                is relayed with model rewritten; the multipart form is what real clients \
                 send)."
         }),
     )
@@ -192,8 +199,8 @@ pub(crate) fn alignments_request(g: &mut SchemaGenerator) -> Schema {
                 "text": {"type": "string"},
                 "language": {"type": "string"}
             },
-            "description": "multipart/form-data only — lmgw's own route (task: \"align\" \
-                rows), not an OpenAI shape."
+            "description": "multipart/form-data only — lmgw's own route (for models whose row has task \"align\"), \
+                not an OpenAI shape."
         }),
     )
 }
@@ -249,7 +256,7 @@ pub(crate) fn voices_response(g: &mut SchemaGenerator) -> Schema {
                             "description": "The model cannot clone a library clip without its \
                                 transcript: speech with an entry whose `transcript` is false \
                                 is refused (400 voice_needs_transcript) until it has one \
-                                (Audio lab → Transcribe)."}
+                                (the dashboard's Audio lab, Transcribe)."}
                     }
                 }
             },
@@ -276,8 +283,8 @@ pub(crate) fn image_generations_request(g: &mut SchemaGenerator) -> Schema {
                 "model": {"type": "string"},
                 "prompt": {"type": "string", "description": "May carry a trailing \
                     <sd_cpp_extra_args>{…}</sd_cpp_extra_args> block of raw sd.cpp CLI \
-                    arguments — the api-types image_lab.rs builder is the reference for its \
-                    contents."},
+                    arguments; the dashboard's Image lab builds this block and is the \
+                    reference for its contents."},
                 "n": {"type": "integer"},
                 "size": {"type": "string"},
                 "output_format": {"type": "string"},
@@ -324,7 +331,7 @@ pub(crate) fn image_edits_request(g: &mut SchemaGenerator) -> Schema {
                 "image": {
                     "type": "array",
                     "items": {"type": "string", "format": "binary"},
-                    "description": "One or more image files — proxy/image.rs relays every \
+                    "description": "One or more image files. lmgw relays every \
                         multipart field named image verbatim, with no cardinality check of \
                         its own."
                 },
@@ -334,7 +341,7 @@ pub(crate) fn image_edits_request(g: &mut SchemaGenerator) -> Schema {
                 "n": {"type": "integer"},
                 "size": {"type": "string"}
             },
-            "description": "Refused unless the resolved row's edit pipeline flag is set."
+            "description": "Refused unless the resolved model's row has its edit pipeline enabled."
         }),
     )
 }
@@ -355,8 +362,8 @@ pub(crate) fn task_request(g: &mut SchemaGenerator) -> Schema {
                 "request": {
                     "type": "object",
                     "additionalProperties": true,
-                    "description": "Relayed to audio.cpp's generic task endpoint untouched — \
-                        its shape is the task's own, not modeled here."
+                    "description": "Relayed to audio.cpp's generic task endpoint untouched; \
+                        its shape is the task's own and is not modeled here."
                 }
             }
         }),

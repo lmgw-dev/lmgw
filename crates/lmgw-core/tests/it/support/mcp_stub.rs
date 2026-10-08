@@ -31,6 +31,8 @@ pub struct McpStub {
     /// Every `tools/call`: the tool's name and its arguments, in arrival
     /// order.
     pub calls: Arc<Mutex<Vec<(String, Value)>>>,
+    /// Every session a client closed (an HTTP `DELETE`).
+    closed: Arc<AtomicUsize>,
     /// Lets a held `tools/list` answer (`held`).
     release: watch::Sender<bool>,
 }
@@ -38,6 +40,11 @@ pub struct McpStub {
 impl McpStub {
     pub fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
+    }
+
+    /// The sessions a client closed so far.
+    pub fn closed(&self) -> usize {
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// The `tools/call`s so far.
@@ -183,7 +190,13 @@ pub async fn answering(tools: Value, held: bool, answer: Answer) -> McpStub {
                 .into_response()
         }
     };
-    let app = axum::Router::new().route("/mcp", axum::routing::post(handler));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let closes = closed.clone();
+    let close = move || {
+        closes.fetch_add(1, Ordering::SeqCst);
+        async { StatusCode::OK }
+    };
+    let app = axum::Router::new().route("/mcp", axum::routing::post(handler).delete(close));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -191,6 +204,7 @@ pub async fn answering(tools: Value, held: bool, answer: Answer) -> McpStub {
         url: format!("http://{addr}/mcp"),
         hits,
         calls,
+        closed,
         release,
     }
 }

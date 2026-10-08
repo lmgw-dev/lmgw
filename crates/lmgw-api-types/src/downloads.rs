@@ -22,9 +22,9 @@ pub struct RepoFile {
     /// Filename heuristic, in the vocabulary of the target that was listed:
     /// `weights | mmproj | drafter | other` for chat/aux/audio, and
     /// `diffusion | checkpoint | vae | text_encoder | lora | upscaler | other`
-    /// for `image` (image-generation design §7.1). A string, not an enum, on
+    /// for `image`. A string, not an enum, on
     /// both sides of the wire — the image roles are guesses the editor lets
-    /// the owner override, and a new one must not break an old client.
+    /// the user override, and a new one must not break an old client.
     pub role: String,
     pub quant: Option<String>,
     /// >1 = split GGUF; selecting it downloads all parts.
@@ -92,7 +92,7 @@ pub struct DownloadRow {
     /// what "Cancel" acts on. `None` means nothing is running for this row.
     pub job_id: Option<i64>,
     /// The revision the download asks for: `main`, or the commit an audio
-    /// catalog spec pins. `None` on a row from before it was recorded (a
+    /// catalog entry pins. `None` on a row from before it was recorded (a
     /// `main` download).
     pub requested_revision: Option<String>,
     /// The commit the file on disk came from (the hub's `X-Repo-Commit`).

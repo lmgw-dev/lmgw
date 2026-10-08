@@ -19,7 +19,7 @@ pub struct ImageRecipes {
     /// nothing can be downloaded or found.
     pub models_dir: String,
     /// True when `models_dir` is empty — the one refusal the UI can show
-    /// before the owner clicks anything.
+    /// before the user clicks anything.
     pub models_dir_missing: bool,
     /// A Hugging Face token is configured, so a gated component is reachable.
     pub hf_token_set: bool,
@@ -110,8 +110,8 @@ pub struct ImageRecipeAlternative {
 /// `POST /api/op/image_recipe_add` — components queued, plus the row the
 /// editor is about to be filled with.
 ///
-/// It does **not** create the row (§7.2, "hands a prefilled row to the
-/// editor"): the files are not on disk yet, and `image_model_set` refuses a
+/// It does **not** create the row (it hands a prefilled row to the
+/// editor): the files are not on disk yet, and `image_model_set` refuses a
 /// row whose `files` do not resolve — correctly, because that check is what
 /// keeps a broken row out of the table. So the caller downloads, then posts
 /// `row` at `image_model_set action=create`.
@@ -162,7 +162,7 @@ pub struct AudioCatalogInstall {
     pub family: String,
     pub package: String,
     pub repo: String,
-    /// The revision the files are fetched at: the commit the spec pins
+    /// The revision the files are fetched at: the commit the catalog pins
     /// (under `audio.catalog_revision = pinned`), else `main`.
     pub revision: String,
     pub files_queued: u32,

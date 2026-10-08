@@ -20,7 +20,12 @@
 //! the history it changed (review R1 finding 1). A reply itself is saved with
 //! [`ChatRepo::save_reply`] / [`ChatRepo::save_continue`], under the lock the
 //! turn's ticket holds.
+//!
+//! Every message write of a stored thread that went through marks the thread
+//! ([`marked`]): the dashboard's `chat` frame names it, so a Chat page open
+//! on it reads its messages again (`chat_feed::dashboard`).
 
+use super::chat_caller::Caller;
 use super::chat_live::{HistoryWrite, SaveGuard};
 use super::chat_temp::TakeForKeep;
 use crate::error::GatewayError;
@@ -28,7 +33,7 @@ use crate::state::AppState;
 use crate::store::{
     self, ChatAttachmentFull, ChatAttachmentMeta, ChatContext, ChatMessageRow, ChatMessageUpdate,
     ChatReply, ChatThread, ContinueSave, DbResult, DeleteAttachmentOutcome, MessageVoice,
-    NewAttachment, SeedWrite, SendMessageOutcome, SetModeOutcome, ThreadVoice,
+    NewAttachment, SeedWrite, SendMessageOutcome, SetModeOutcome,
 };
 
 /// What [`ChatRepo::keep`] did.
@@ -64,6 +69,17 @@ fn gone() -> GatewayError {
     GatewayError::NotFound("this temporary chat was discarded or kept meanwhile".into())
 }
 
+/// A message write of stored thread `thread_id`, passed through: once it
+/// went through, the thread is marked for the dashboard's `chat` frame
+/// (`chat_feed::Feed::messages_changed`). A write that matched nothing marks
+/// it too; the page that reads it again finds it as it was.
+fn marked<T>(s: &AppState, thread_id: i64, written: DbResult<T>) -> DbResult<T> {
+    if written.is_ok() {
+        s.chat_feed.messages_changed(thread_id);
+    }
+    written
+}
+
 impl ChatRepo {
     /// The backing of a thread, message or attachment id: negative ids are
     /// temporary.
@@ -88,13 +104,21 @@ impl ChatRepo {
         model_alias: &str,
         kind: &str,
         system_prompt: &str,
+        by: &Caller,
     ) -> DbResult<ChatThread> {
         match self {
             Self::Temp => Ok(s.chat_temp.create(model_alias, kind, system_prompt)),
             Self::Db => {
-                let id =
-                    store::create_chat_thread_with_prompt(&s.db, model_alias, kind, system_prompt)
-                        .await?;
+                let by = by.named();
+                let id = store::create_chat_thread_with_prompt(
+                    &s.db,
+                    model_alias,
+                    kind,
+                    system_prompt,
+                    Some(&by),
+                )
+                .await?;
+                s.chat_feed.wake();
                 store::get_chat_thread(&s.db, id).await?.ok_or_else(|| {
                     GatewayError::Internal(
                         "the thread vanished immediately after being created".into(),
@@ -111,42 +135,154 @@ impl ChatRepo {
         }
     }
 
+    /// Thread `id` as `caller` may reach it (client-apps design L3): `None`
+    /// for a thread a device does not see (Admin Chat; the self-admin
+    /// toolset unless it may use lmgw's admin tools), exactly as for one
+    /// that is not there. Every route that reaches a thread by its id, a message
+    /// id or an attachment id resolves it here.
+    ///
+    /// A thread in a folder `caller` cannot see (review W4-7) comes without
+    /// its folder: for a device the folder does not exist, so the thread is
+    /// in none.
+    pub(super) async fn thread_as(
+        self,
+        s: &AppState,
+        caller: &Caller,
+        id: i64,
+    ) -> DbResult<Option<ChatThread>> {
+        let snap = s.snapshot();
+        let Some(mut t) = self.thread(s, id).await?.filter(|t| caller.sees(&snap, t)) else {
+            return Ok(None);
+        };
+        if let (true, Some(folder)) = (caller.is_device(), t.folder_id) {
+            let hidden = store::get_chat_folder(&s.db, folder)
+                .await?
+                .is_some_and(|f| !caller.sees_folder(&snap, &f));
+            if hidden {
+                t.folder_id = None;
+            }
+        }
+        Ok(Some(t))
+    }
+
+    /// For a device, the threads of `threads` in a folder it cannot see lose
+    /// their folder (review W4-7), as [`Self::thread_as`] does.
+    pub(super) async fn hide_folders(
+        s: &AppState,
+        caller: &Caller,
+        threads: &mut [ChatThread],
+    ) -> DbResult<()> {
+        if !caller.is_device() {
+            return Ok(());
+        }
+        let hidden = store::self_admin_folder_ids(&s.db, caller.reach(&s.snapshot())).await?;
+        for t in threads.iter_mut() {
+            if t.folder_id.is_some_and(|f| hidden.contains(&f)) {
+                t.folder_id = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether attachment `id` belongs to a thread `caller` may reach (L3) —
+    /// `false` also when there is no such attachment. A temporary thread is
+    /// resolved like a stored one (review W4-2): the owner can attach the
+    /// self-admin toolset to it, and its attachments are then as out of a
+    /// device's reach as the thread.
+    pub(super) async fn attachment_reachable(
+        self,
+        s: &AppState,
+        caller: &Caller,
+        id: i64,
+    ) -> DbResult<bool> {
+        if !caller.is_device() {
+            return Ok(true);
+        }
+        let thread_id = match self {
+            Self::Temp => s.chat_temp.attachment_thread(id),
+            Self::Db => store::chat_attachment_thread_id(&s.db, id).await?,
+        };
+        let Some(thread_id) = thread_id else {
+            return Ok(false);
+        };
+        Ok(Self::of(thread_id)
+            .thread_as(s, caller, thread_id)
+            .await?
+            .is_some())
+    }
+
     /// Every temporary thread, most recently active first — the thread
     /// list's `temporary` array.
     pub(super) fn temporary_threads(s: &AppState) -> Vec<ChatThread> {
         s.chat_temp.list()
     }
 
-    /// The stored threads, in `mode`'s order.
+    /// The stored threads `caller` may see (L3), in `mode`'s order.
     pub(super) async fn stored_threads(
         s: &AppState,
+        caller: &Caller,
         mode: store::ThreadListMode,
     ) -> DbResult<Vec<ChatThread>> {
-        store::list_chat_threads(&s.db, mode).await
+        let reach = caller.reach(&s.snapshot());
+        let mut threads = store::list_chat_threads_as(&s.db, mode, reach).await?;
+        Self::hide_folders(s, caller, &mut threads).await?;
+        Ok(threads)
     }
 
-    /// How many stored threads are archived.
-    pub(super) async fn archived_count(s: &AppState) -> DbResult<i64> {
-        store::count_archived_chat_threads(&s.db).await
+    /// The stored threads among `ids` that `caller` may see (L3), active and
+    /// archived alike, in the active list's order.
+    pub(super) async fn stored_rows(
+        s: &AppState,
+        caller: &Caller,
+        ids: &[i64],
+    ) -> DbResult<Vec<ChatThread>> {
+        let reach = caller.reach(&s.snapshot());
+        let mut threads = store::list_chat_threads_by_ids(&s.db, ids, reach).await?;
+        Self::hide_folders(s, caller, &mut threads).await?;
+        Ok(threads)
+    }
+
+    /// How many of the stored threads `caller` may see are archived.
+    pub(super) async fn archived_count(s: &AppState, caller: &Caller) -> DbResult<i64> {
+        store::count_archived_chat_threads(&s.db, caller.reach(&s.snapshot())).await
     }
 
     /// Pin or unpin (pinning an archived thread restores it). Stored threads
     /// only: a temporary one has nothing to pin until it is kept.
-    pub(super) async fn set_pinned(self, s: &AppState, id: i64, pinned: bool) -> DbResult<()> {
+    pub(super) async fn set_pinned(
+        self,
+        s: &AppState,
+        id: i64,
+        pinned: bool,
+        by: &Caller,
+    ) -> DbResult<()> {
         match self {
             Self::Temp => Err(stored_only("pinned")),
-            Self::Db => store::set_chat_thread_pinned(&s.db, id, pinned).await,
+            Self::Db => {
+                store::set_chat_thread_pinned(&s.db, id, pinned, Some(&by.named())).await?;
+                s.chat_feed.wake();
+                Ok(())
+            }
         }
     }
 
     /// Archive by hand, or restore. Stored threads only: a temporary one is
     /// discarded, never archived.
-    pub(super) async fn set_archived(self, s: &AppState, id: i64, archived: bool) -> DbResult<()> {
+    pub(super) async fn set_archived(
+        self,
+        s: &AppState,
+        id: i64,
+        archived: bool,
+        by: &Caller,
+    ) -> DbResult<()> {
+        let by = by.named();
         match self {
-            Self::Temp => Err(stored_only("archived")),
-            Self::Db if archived => store::archive_chat_thread(&s.db, id).await,
-            Self::Db => store::restore_chat_thread(&s.db, id).await,
+            Self::Temp => return Err(stored_only("archived")),
+            Self::Db if archived => store::archive_chat_thread(&s.db, id, Some(&by)).await?,
+            Self::Db => store::restore_chat_thread(&s.db, id, Some(&by)).await?,
         }
+        s.chat_feed.wake();
+        Ok(())
     }
 
     /// **Keep** a temporary thread: write it to the DB whole — settings,
@@ -156,11 +292,14 @@ impl ChatRepo {
     /// request be dropped halfway), so a second Keep running alongside is
     /// refused rather than storing it twice (review R1 finding 8). A reply
     /// still being written into it is cancelled.
-    pub(super) async fn keep(s: &AppState, id: i64) -> DbResult<KeepOutcome> {
+    pub(super) async fn keep(s: &AppState, id: i64, by: &Caller) -> DbResult<KeepOutcome> {
         if s.chat_live.voice_bound(id) {
             return Ok(KeepOutcome::VoiceActive);
         }
-        let _write = s.chat_live.discard(id).await;
+        let mut _write = s.chat_live.discard(id).await;
+        // A reply still being written into it is cancelled up front: the
+        // thread leaves memory now.
+        s.chat_live.discarded(&mut _write);
         let t = match s.chat_temp.take_for_keep(id) {
             TakeForKeep::Taken(t) => t,
             TakeForKeep::Busy => return Ok(KeepOutcome::Busy),
@@ -182,8 +321,11 @@ impl ChatRepo {
         let t = taken.t.as_ref().expect("just put there");
         let attachments: Vec<store::KeptAttachment> =
             t.attachments.iter().map(|a| a.kept()).collect();
+        let by = by.named();
         let new_id =
-            store::insert_kept_chat_thread(&s.db, &t.thread, &t.messages, &attachments).await?;
+            store::insert_kept_chat_thread(&s.db, &t.thread, &t.messages, &attachments, Some(&by))
+                .await?;
+        s.chat_feed.wake();
         taken.t = None;
         s.chat_temp.keep_done(id);
         Ok(KeepOutcome::Kept(new_id))
@@ -195,57 +337,131 @@ impl ChatRepo {
     pub(super) async fn draw_seed(self, s: &AppState, id: i64, drawn: u32) -> DbResult<u32> {
         match self {
             Self::Temp => s.chat_temp.draw_seed(id, drawn).ok_or_else(gone),
-            Self::Db => store::draw_chat_thread_seed(&s.db, id, drawn)
-                .await?
-                .ok_or_else(|| GatewayError::NotFound("thread not found".into())),
+            Self::Db => {
+                let seed = store::draw_chat_thread_seed(&s.db, id, drawn).await?;
+                s.chat_feed.wake();
+                seed.ok_or_else(|| GatewayError::NotFound("thread not found".into()))
+            }
         }
     }
 
     /// Write the editable settings `t` holds to the thread `t.id`; `seed`
     /// says whether the stored seed stays (chat-voice §2.2). The voice as
-    /// stored.
+    /// stored, and whether the thread drove the self-admin plane before and
+    /// after, as the write saw it (review W4-3).
     pub(super) async fn update_settings(
         self,
         s: &AppState,
         t: &ChatThread,
         seed: SeedWrite,
-    ) -> DbResult<ThreadVoice> {
+        by: &Caller,
+    ) -> DbResult<store::SettingsWritten> {
+        let reach = by.reach(&s.snapshot());
         match self {
-            Self::Temp => s.chat_temp.update_settings(t, seed).ok_or_else(gone),
-            Self::Db => store::update_chat_thread_settings(&s.db, t, seed)
-                .await?
-                .ok_or_else(|| GatewayError::NotFound("thread not found".into())),
+            Self::Temp => s.chat_temp.update_settings(t, seed, reach).ok_or_else(gone),
+            Self::Db => {
+                let written =
+                    store::write_settings_of(&s.db, t, seed, Some(&by.named()), reach).await?;
+                s.chat_feed.wake();
+                written.ok_or_else(|| GatewayError::NotFound("thread not found".into()))
+            }
         }
     }
 
-    pub(super) async fn set_title(self, s: &AppState, id: i64, title: &str) -> DbResult<()> {
+    /// Whether `caller` may still write into thread `thread_id`, read under
+    /// the thread's lock (review W4-3): a device's message never lands in a
+    /// thread that became Admin Chat for it since the route resolved it.
+    /// `NotFound` when it may not, as for a thread that is gone.
+    async fn still_reachable(self, s: &AppState, caller: &Caller, thread_id: i64) -> DbResult<()> {
+        if caller.is_device() && self.thread_as(s, caller, thread_id).await?.is_none() {
+            return Err(GatewayError::NotFound("thread not found".into()));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn set_title(
+        self,
+        s: &AppState,
+        id: i64,
+        title: &str,
+        by: &Caller,
+    ) -> DbResult<()> {
         match self {
             Self::Temp => {
                 s.chat_temp.set_title(id, title);
                 Ok(())
             }
-            Self::Db => store::set_chat_thread_title(&s.db, id, title).await,
+            Self::Db => {
+                store::set_chat_thread_title(&s.db, id, title, Some(&by.named())).await?;
+                s.chat_feed.wake();
+                Ok(())
+            }
         }
     }
 
     /// Delete a thread with everything in it; a temporary one is discarded.
     /// A reply still being written into it is cancelled.
-    pub(super) async fn delete_thread(self, s: &AppState, id: i64) -> DbResult<()> {
-        let _write = s.chat_live.discard(id).await;
-        match self {
-            Self::Temp => {
-                s.chat_temp.delete(id);
-                Ok(())
+    pub(super) async fn delete_thread(
+        self,
+        s: &crate::state::SharedState,
+        id: i64,
+        by: &Caller,
+    ) -> DbResult<()> {
+        let held = s.chat_live.hold(id).await;
+        self.delete_thread_held(s, id, by, held).await
+    }
+
+    /// [`Self::delete_thread`] under the thread's lock the caller holds
+    /// already ([`super::chat_live::LiveTurns::hold`]), from its re-check of
+    /// the thread's reach (review W6-6). Before the delete only the thread's
+    /// live events leave every device's reach; once it committed, still
+    /// under the lock, its turn is cancelled and a session a device bound
+    /// to it closes, as one whose thread left its reach
+    /// (`LiveTurns::discarded`). From the first step to the last on a task
+    /// of its own, with the lock (`chat_live::to_its_end`): a client that
+    /// hangs up meanwhile leaves no thread hidden from devices after a
+    /// delete that failed, nor one deleted with its device's session still
+    /// open.
+    pub(super) async fn delete_thread_held(
+        self,
+        s: &crate::state::SharedState,
+        id: i64,
+        by: &Caller,
+        held: super::chat_live::HistoryWrite,
+    ) -> DbResult<()> {
+        let (s, by) = (s.clone(), by.named());
+        super::chat_live::to_its_end(async move {
+            let mut held = held;
+            s.chat_live.discard_held(&mut held);
+            match self {
+                Self::Temp => {
+                    s.chat_temp.delete(id);
+                }
+                Self::Db => {
+                    if let Err(e) = store::delete_chat_thread(&s.db, id, Some(&by)).await {
+                        s.chat_live.delete_failed(&mut held);
+                        return Err(e);
+                    }
+                    s.chat_feed.threads_deleted(&[id]);
+                    s.chat_feed.wake();
+                }
             }
-            Self::Db => store::delete_chat_thread(&s.db, id).await,
-        }
+            s.chat_live.discarded(&mut held);
+            drop(held);
+            Ok(())
+        })
+        .await?
     }
 
     /// A turn into an archived thread restores it (chat-archive design §1).
     /// A temporary thread is never archived.
-    pub(super) async fn wake(self, s: &AppState, t: &ChatThread) -> DbResult<()> {
+    pub(super) async fn wake(self, s: &AppState, t: &ChatThread, by: &Caller) -> DbResult<()> {
         match self {
-            Self::Db if t.archived_at.is_some() => store::restore_chat_thread(&s.db, t.id).await,
+            Self::Db if t.archived_at.is_some() => {
+                store::restore_chat_thread(&s.db, t.id, Some(&by.named())).await?;
+                s.chat_feed.wake();
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -292,6 +508,8 @@ impl ChatRepo {
     /// A user turn with its drafts bound to it, all or nothing, naming the
     /// knowledge bases picked for it alone (`kb_refs`) and, for a spoken
     /// turn, how it was spoken (`voice`, chat-voice design §3).
+    // The message's own parts, and who writes it (review W4-3).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn append_user_message(
         self,
         s: &AppState,
@@ -300,14 +518,18 @@ impl ChatRepo {
         attachment_ids: &[i64],
         kb_refs: &[i64],
         voice: Option<&MessageVoice>,
+        caller: &Caller,
     ) -> DbResult<SendMessageOutcome> {
         let _write = s.chat_live.write(thread_id).await;
+        self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => s
                 .chat_temp
                 .append_user_message(thread_id, content, attachment_ids, kb_refs, voice)
                 .ok_or_else(gone),
-            Self::Db => {
+            Self::Db => marked(
+                s,
+                thread_id,
                 store::append_user_message_with_voice(
                     &s.db,
                     thread_id,
@@ -316,8 +538,8 @@ impl ChatRepo {
                     kb_refs,
                     voice,
                 )
-                .await
-            }
+                .await,
+            ),
         }
     }
 
@@ -332,13 +554,17 @@ impl ChatRepo {
         thread_id: i64,
         content: &str,
         voice: &MessageVoice,
+        caller: &Caller,
     ) -> DbResult<SendMessageOutcome> {
+        self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => s
                 .chat_temp
                 .append_user_message(thread_id, content, &[], &[], Some(voice))
                 .ok_or_else(gone),
-            Self::Db => {
+            Self::Db => marked(
+                s,
+                thread_id,
                 store::append_user_message_with_voice(
                     &s.db,
                     thread_id,
@@ -347,42 +573,59 @@ impl ChatRepo {
                     &[],
                     Some(voice),
                 )
-                .await
-            }
+                .await,
+            ),
         }
     }
 
     /// Save a turn's reply as a new assistant row; its id. Only with the
     /// turn's [`SaveGuard`] — the proof its history has not moved since it
-    /// started ([`super::chat_live::Ticket::save_lock`]).
+    /// started ([`super::chat_live::Ticket::save_lock`]) — and, for a
+    /// device's turn, while the thread is still in its reach (review W5-18):
+    /// the guard holds the thread's lock, which the attach of the
+    /// self-admin toolset takes too, so the check and the write are one.
     pub(super) async fn save_reply(
         self,
         s: &AppState,
         _proof: &SaveGuard,
+        caller: &Caller,
         thread_id: i64,
         r: &ChatReply,
     ) -> DbResult<i64> {
+        self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => s.chat_temp.append_reply(thread_id, r).ok_or_else(gone),
-            Self::Db => store::append_chat_reply(&s.db, thread_id, r).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::append_chat_reply(&s.db, thread_id, r).await,
+            ),
         }
     }
 
     /// Save a continue onto reply `id` — only while its text is still
-    /// `prefix` (re-read inside the write), and only with the turn's
-    /// [`SaveGuard`].
+    /// `prefix` (re-read inside the write), only with the turn's
+    /// [`SaveGuard`], and for a device only while the thread is in its reach
+    /// ([`Self::save_reply`]).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn save_continue(
         self,
         s: &AppState,
         _proof: &SaveGuard,
+        caller: &Caller,
         thread_id: i64,
         id: i64,
         prefix: &str,
         r: &ChatReply,
     ) -> DbResult<ContinueSave> {
+        self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => Ok(s.chat_temp.continue_reply(thread_id, id, prefix, r)),
-            Self::Db => store::continue_chat_reply(&s.db, thread_id, id, prefix, r).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::continue_chat_reply(&s.db, thread_id, id, prefix, r).await,
+            ),
         }
     }
 
@@ -397,7 +640,11 @@ impl ChatRepo {
         let _write = s.chat_live.write(thread_id).await;
         match self {
             Self::Temp => Ok(s.chat_temp.update_message(thread_id, id, m)),
-            Self::Db => store::update_chat_message(&s.db, thread_id, id, m).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::update_chat_message(&s.db, thread_id, id, m).await,
+            ),
         }
     }
 
@@ -412,15 +659,19 @@ impl ChatRepo {
         id: i64,
         content: &str,
         kb_refs: &[i64],
+        caller: &Caller,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
+        self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => Ok(s
                 .chat_temp
                 .rewrite_user_message(thread_id, id, content, kb_refs)),
-            Self::Db => {
-                store::rewrite_chat_user_message(&s.db, thread_id, id, content, kb_refs).await
-            }
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::rewrite_chat_user_message(&s.db, thread_id, id, content, kb_refs).await,
+            ),
         }
     }
 
@@ -439,9 +690,11 @@ impl ChatRepo {
             Self::Temp => Ok(s
                 .chat_temp
                 .set_message_knowledge(thread_id, id, kb_refs, context)),
-            Self::Db => {
-                store::set_chat_message_knowledge(&s.db, thread_id, id, kb_refs, context).await
-            }
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::set_chat_message_knowledge(&s.db, thread_id, id, kb_refs, context).await,
+            ),
         }
     }
 
@@ -456,7 +709,11 @@ impl ChatRepo {
         let _write = s.chat_live.write(thread_id).await;
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
-            Self::Db => store::delete_chat_message(&s.db, thread_id, id).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::delete_chat_message(&s.db, thread_id, id).await,
+            ),
         }
     }
 
@@ -472,7 +729,11 @@ impl ChatRepo {
     ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s.chat_temp.set_message_voice(thread_id, id, voice)),
-            Self::Db => store::set_chat_message_voice(&s.db, thread_id, id, voice).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::set_chat_message_voice(&s.db, thread_id, id, voice).await,
+            ),
         }
     }
 
@@ -489,7 +750,11 @@ impl ChatRepo {
     ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s.chat_temp.cut_reply(thread_id, id, content, voice)),
-            Self::Db => store::cut_chat_reply(&s.db, thread_id, id, content, voice).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::cut_chat_reply(&s.db, thread_id, id, content, voice).await,
+            ),
         }
     }
 
@@ -504,7 +769,11 @@ impl ChatRepo {
     ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
-            Self::Db => store::delete_chat_message(&s.db, thread_id, id).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::delete_chat_message(&s.db, thread_id, id).await,
+            ),
         }
     }
 
@@ -520,7 +789,11 @@ impl ChatRepo {
         let _write = s.chat_live.write(thread_id).await;
         match self {
             Self::Temp => Ok(s.chat_temp.truncate(thread_id, id, inclusive)),
-            Self::Db => store::truncate_chat_messages(&s.db, thread_id, id, inclusive).await,
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::truncate_chat_messages(&s.db, thread_id, id, inclusive).await,
+            ),
         }
     }
 
@@ -676,6 +949,9 @@ impl ChatRepo {
 }
 
 #[cfg(test)]
+mod marks_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -690,8 +966,12 @@ mod tests {
             .unwrap();
         let repo = ChatRepo::of(tid);
         let thread = repo.thread(&state, tid).await.unwrap().unwrap();
-        repo.delete_thread(&state, tid).await.unwrap();
-        let written = repo.update_settings(&state, &thread, SeedWrite::Keep).await;
+        let owner = Caller::default();
+        repo.delete_thread(&state, tid, &owner).await.unwrap();
+        let written = repo
+            .update_settings(&state, &thread, SeedWrite::Keep, &owner)
+            .await
+            .map(|w| w.voice);
         assert!(
             matches!(written, Err(GatewayError::NotFound(_))),
             "{written:?}"
@@ -699,8 +979,9 @@ mod tests {
 
         let gone = ChatThread { id: -7, ..thread };
         let written = ChatRepo::of(gone.id)
-            .update_settings(&state, &gone, SeedWrite::Keep)
-            .await;
+            .update_settings(&state, &gone, SeedWrite::Keep, &owner)
+            .await
+            .map(|w| w.voice);
         assert!(
             matches!(written, Err(GatewayError::NotFound(_))),
             "{written:?}"

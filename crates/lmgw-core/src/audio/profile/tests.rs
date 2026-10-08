@@ -46,16 +46,30 @@ fn supertonic_voices_come_from_the_embedded_voice_styles() {
         "sources": [{"files": {
             "voice_style_M1": "model:voice_styles/M1.json",
             "voice_style_F1": "model:voice_styles/F1.json",
-            "config": "model:config.json"
+            "config": "model:config.json",
+            "unicode_indexer": "model:config/unicode_indexer.json"
         }}]
     });
     let g = write(
         d.path(),
         "supertonic-3-q8_0.gguf",
-        &synth::audiocpp("supertonic", &spec.to_string(), &[("README.md", b"x")]),
+        &synth::audiocpp(
+            "supertonic",
+            &spec.to_string(),
+            &[
+                ("README.md", b"x"),
+                (
+                    "config/unicode_indexer.json",
+                    include_bytes!(
+                        "../../../tests/fixtures/audio/supertonic3_unicode_indexer_trimmed.json"
+                    ),
+                ),
+            ],
+        ),
     );
     let p = compute(&row("supertonic", "s"), None, Some(&g));
     assert_eq!(p.native_voices, ["F1", "M1"]);
+    assert_eq!(p.char_vocab.as_ref().map(|v| v.len()), Some(661));
     assert_eq!(p.voice_field, VoiceField::Voice);
     assert!(p.streaming, "the embedded spec is the fallback spec");
     // Its engine validates a request against exactly these codes
@@ -288,6 +302,69 @@ async fn the_cache_computes_once_per_change_of_its_inputs() {
     assert_eq!(c.native_voices, ["aiden", "ryan", "serena"]);
 }
 
+/// A package file read from beside the GGUF is an input too (review
+/// TC-7): Supertonic's vocabulary added there, then edited, computes the
+/// profile again.
+#[tokio::test]
+async fn a_file_beside_the_gguf_is_an_input_of_the_cache() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("s");
+    std::fs::create_dir_all(&root).unwrap();
+    let spec = json!({"family": "supertonic", "sources": [{"files": {
+        "unicode_indexer": "model:config/unicode_indexer.json"
+    }}]});
+    write(
+        &root,
+        "supertonic-3-q8_0.gguf",
+        &synth::audiocpp("supertonic", &spec.to_string(), &[]),
+    );
+    let cache = Arc::new(ProfileCache::default());
+    let dir = d.path().display().to_string();
+    let r = row("supertonic", "s");
+    assert!(profile_of(&cache, &dir, &r, None)
+        .await
+        .char_vocab
+        .is_none());
+    profile_of(&cache, &dir, &r, None).await;
+    assert_eq!(cache.computed(), 1);
+
+    std::fs::create_dir(root.join("config")).unwrap();
+    let file = root.join("config/unicode_indexer.json");
+    std::fs::write(&file, b"{\"65\": 1}").unwrap();
+    let p = profile_of(&cache, &dir, &r, None).await;
+    assert_eq!(cache.computed(), 2);
+    assert_eq!(p.char_vocab.as_ref().unwrap().len(), 1);
+    profile_of(&cache, &dir, &r, None).await;
+    assert_eq!(cache.computed(), 2);
+
+    std::fs::write(&file, b"{\"65\": 1, \"66\": 2}").unwrap();
+    let p = profile_of(&cache, &dir, &r, None).await;
+    assert_eq!(cache.computed(), 3);
+    assert_eq!(p.char_vocab.as_ref().unwrap().len(), 2);
+}
+
+/// A package file's stamp is taken when the file is noted, before it is
+/// read (review TC-17): an edit after that shows, and a stamp taken later,
+/// with the compute, would hide it.
+#[test]
+fn a_beside_file_is_stamped_when_noted_not_when_checked() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("config.json");
+    std::fs::write(&file, b"{}").unwrap();
+    let mut p = SpeechProfile::default();
+    p.note_beside(file.clone());
+    assert!(p.beside_unchanged());
+    std::fs::write(&file, b"{\"a\": 1}").unwrap();
+    assert!(!p.beside_unchanged(), "the edit after the stamp shows");
+    // Looked for and absent: the file added later shows too.
+    let absent = d.path().join("later.json");
+    let mut p = SpeechProfile::default();
+    p.note_beside(absent.clone());
+    assert!(p.beside_unchanged());
+    std::fs::write(&absent, b"{}").unwrap();
+    assert!(!p.beside_unchanged());
+}
+
 /// The owner's real packages, when `LMGW_TEST_AUDIO_MODELS_DIR` points at an
 /// audio models dir holding them (skipped otherwise): the extractors read
 /// what the synthetic packages above claim they read.
@@ -309,6 +386,14 @@ fn real_packages() {
             ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"]
         );
         assert!(p.problems.is_empty(), "{:?}", p.problems);
+        // The characters its engine says (`audio::charset`): not the German
+        // opening quote that failed a voice turn, the ASCII one it becomes.
+        let v = p
+            .char_vocab
+            .as_ref()
+            .expect("the package's unicode_indexer");
+        assert_eq!(v.file, "config/unicode_indexer.json");
+        assert!(!v.says('\u{201E}') && v.says('"'));
     }
     if let Some(p) = read(
         "Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf",

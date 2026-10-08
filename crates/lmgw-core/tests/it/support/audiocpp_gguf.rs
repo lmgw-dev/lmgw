@@ -33,14 +33,23 @@ pub fn magpie(root: &Path) {
     .write_to(&root.join("magpie-tts-multilingual-357m-q8_0.gguf"));
 }
 
-/// Supertonic 3: one `voice_style_<name>` source file per built-in voice.
+/// The real Supertonic 3 `config/unicode_indexer.json` below U+3000
+/// ([`supertonic`]'s, and the container stand-in's,
+/// `support::audiocpp_options`).
+pub const SUPERTONIC_INDEXER: &str =
+    include_str!("../../fixtures/audio/supertonic3_unicode_indexer_trimmed.json");
+
+/// Supertonic 3: one `voice_style_<name>` source file per built-in voice,
+/// and the `unicode_indexer` its engine looks every character up in (the
+/// real one, trimmed: [`SUPERTONIC_INDEXER`]).
 pub fn supertonic(root: &Path) {
     let spec = json!({
         "family": "supertonic", "tasks": ["tts"], "modes": ["offline", "streaming"],
         "languages": ["en", "de"],
         "sources": [{"files": {
             "voice_style_F1": "model:voice_styles/F1.json",
-            "voice_style_M1": "model:voice_styles/M1.json"
+            "voice_style_M1": "model:voice_styles/M1.json",
+            "unicode_indexer": "model:config/unicode_indexer.json"
         }}]
     });
     synth::audiocpp(
@@ -49,6 +58,7 @@ pub fn supertonic(root: &Path) {
         &[
             ("voice_styles/F1.json", b"{}"),
             ("voice_styles/M1.json", b"{}"),
+            ("config/unicode_indexer.json", SUPERTONIC_INDEXER.as_bytes()),
         ],
     )
     .write_to(&root.join("supertonic-3-q8_0.gguf"));

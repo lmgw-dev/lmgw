@@ -321,6 +321,7 @@ async fn search(State(st): State<SharedState>, Json(req): Json<SearchRequest>) -
                 &retrieve::Options {
                     budget_tokens: budget,
                     params,
+                    caller: None,
                 },
             )
             .await;

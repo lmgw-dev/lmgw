@@ -23,11 +23,13 @@ async fn a_key_deleted_while_its_call_ran_gets_no_token_window() {
         completion_tokens: Some(5),
         ..Default::default()
     };
-    let call = |key: KeyRef| price_call(&state, "chatty", None, None, &key, "openai", &usage);
+    let none = crate::pricing::Quantities::default();
+    let call = |key: KeyRef| price_call(&state, "chatty", None, &key, "openai", &usage, &none);
 
     call(KeyRef {
         name: Some("live".into()),
         id: Some(live),
+        ..Default::default()
     });
     assert!(
         state.policy.tracks(live),
@@ -39,6 +41,7 @@ async fn a_key_deleted_while_its_call_ran_gets_no_token_window() {
     let priced = call(KeyRef {
         name: Some("gone".into()),
         id: Some(gone),
+        ..Default::default()
     });
     assert_eq!(priced.key_id, Some(gone), "the row keeps the id");
     assert_eq!(priced.client_key.as_deref(), Some("gone"));
@@ -70,6 +73,7 @@ async fn a_row_dropped_mid_write_still_lands_and_closes_the_gauge() {
             fallback: None,
             rung: None,
             degraded: None,
+            quantities: Default::default(),
         },
         200,
         None,
@@ -98,4 +102,69 @@ async fn a_row_dropped_mid_write_still_lands_and_closes_the_gauge() {
         .unwrap();
     assert_eq!(rows.len(), 1, "and the row landed");
     assert_eq!(rows[0].requested_alias, "dropped");
+}
+
+/// The per-call check reads the key again, by id and by credential
+/// (client-apps design §1.6, review W2-2): a key disabled, rotated or
+/// deleted since the request was resolved fails its next call — the
+/// backstop behind every revocation watch.
+#[tokio::test]
+async fn a_call_after_a_disable_a_rotate_or_a_delete_is_refused() {
+    use crate::ingress::ClientProto;
+    use crate::principal::Principal;
+    use crate::telemetry::RequestClass;
+
+    let state = AppState::init_for_tests().await.unwrap();
+    let hash = |k: &str| crate::config::hash_api_key(k);
+    sqlx::query("INSERT INTO api_keys (name, key_hash, enabled) VALUES ('phone', ?1, 1)")
+        .bind(hash("lmgw-old"))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let snap = state.snapshot();
+    let key = snap.api_keys.iter().find(|k| k.name == "phone").unwrap();
+    let ctx = super::RequestCtx {
+        principal: Principal::from_key(key),
+        client_key: Some("phone".into()),
+        ..Default::default()
+    };
+    let call = || {
+        super::policy_checked_call(
+            &state,
+            ClientProto::Chat,
+            &ctx,
+            "chatty",
+            RequestClass::Chat,
+        )
+    };
+    assert!(call().await.is_ok(), "the key it was resolved with");
+
+    // Rotated: the same row, another credential.
+    sqlx::query("UPDATE api_keys SET key_hash = ?1 WHERE name = 'phone'")
+        .bind(hash("lmgw-new"))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    state.reload_snapshot().await.unwrap();
+    let e = call().await.unwrap_err();
+    assert_eq!(e.http_status().as_u16(), 401, "{e}");
+    assert!(e.to_string().contains("rotated"), "{e}");
+
+    // Back to its own credential, then disabled: refused too.
+    sqlx::query("UPDATE api_keys SET key_hash = ?1, enabled = 0 WHERE name = 'phone'")
+        .bind(hash("lmgw-old"))
+        .execute(&state.db)
+        .await
+        .unwrap();
+    state.reload_snapshot().await.unwrap();
+    assert!(call().await.is_err());
+
+    // Deleted: refused.
+    sqlx::query("DELETE FROM api_keys WHERE name = 'phone'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    state.reload_snapshot().await.unwrap();
+    assert!(call().await.is_err());
 }

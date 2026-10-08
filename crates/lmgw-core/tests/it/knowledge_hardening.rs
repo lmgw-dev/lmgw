@@ -387,6 +387,7 @@ async fn a_failing_reranker_does_not_cost_the_vector_stage() {
     let opts = Options {
         budget_tokens: None,
         params: Some(rerank_params(&state)),
+        caller: None,
     };
     let ok = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     assert!(ok.traces[0].rerank_model.is_some(), "{:?}", ok.notes);
@@ -493,6 +494,7 @@ async fn rerank_pairs_over_the_reranker_limit_are_not_sent() {
     let opts = Options {
         budget_tokens: None,
         params: Some(rerank_params(&state)),
+        caller: None,
     };
     let r = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     assert!(!r.excerpts.is_empty(), "{:?}", r.notes);

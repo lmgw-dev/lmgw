@@ -5,23 +5,23 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-/// Per-model override of the GPU-hold fallback lookup (`2026-09-04-gpu-hold-
-/// design.md` §2/§3.2): whether a held request against this row falls back to
-/// the global chat alias, refuses outright, or names its own alias.
-///
-/// Two columns rather than a `""` sentinel on `hold_fallback` alone: every
-/// patch struct in this crate already treats an empty string as "not
-/// supplied" (`ops::opt`), so a single `Option<String>` could not distinguish
-/// "inherit" from "explicitly none" from "not touched by this patch" at the
-/// same time. `Default` is `Inherit` so a row that has never touched this
-/// keeps behaving exactly as the global setting says.
+/// Per-model override of the GPU hold's fallback lookup: whether a held
+/// request against this row falls back to the global chat alias, refuses
+/// outright, or names its own alias.
+// Two columns rather than a `""` sentinel on `hold_fallback` alone: every
+// patch struct in this crate already treats an empty string as "not
+// supplied" (`ops::opt`), so a single `Option<String>` could not distinguish
+// "inherit" from "explicitly none" from "not touched by this patch" at the
+// same time. `Default` is `Inherit` so a row that has never touched this
+// keeps behaving exactly as the global setting says.
+// Design: 2026-09-04-gpu-hold-design.md §2/§3.2.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum HoldFallbackMode {
     /// Chat: fall through to `settings.hold.fallback_alias`. Aux/audio: no
-    /// fallback — they never inherit the global (§2: a different embedding
+    /// fallback — they never inherit the global (a different embedding
     /// model silently corrupts a vector index).
     #[default]
     Inherit,

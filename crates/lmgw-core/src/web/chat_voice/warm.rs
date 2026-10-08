@@ -18,7 +18,11 @@
 //! Refused before anything is warmed: `404` for a thread that is not there,
 //! `400 bad_request` for an empty or unknown stage list, `422
 //! asr_not_configured` / `tts_not_configured` for a stage the thread has no
-//! alias for at any level (the message names Settings → Chat → Voice).
+//! alias for at any level (the message names Settings → Chat → Voice), and
+//! for a device, the key's own refusal — its scope, its budget — for a
+//! stage whose alias it may not use (client-apps design §1.3, review W2-3):
+//! a warm is no model call, but it loads, and may evict for, the model one
+//! would use, so nothing starts and nothing is evicted for such a stage.
 
 use std::convert::Infallible;
 
@@ -38,6 +42,7 @@ use crate::state::SharedState;
 use crate::store::ChatThread;
 
 use super::super::chat::err_json;
+use super::super::chat_caller::Caller;
 use super::super::chat_extract::{ChatJson, ChatPath};
 use super::super::chat_repo::ChatRepo;
 use super::resolve::{resolve, VoiceConfig};
@@ -53,10 +58,12 @@ pub(crate) struct WarmBody {
 /// `POST /chat/api/threads/{id}/voice/warm` (module doc).
 pub(crate) async fn warm(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatJson(body): ChatJson<WarmBody>,
 ) -> Response {
-    let Some(thread) = ChatRepo::of(id).thread(&state, id).await.ok().flatten() else {
+    let repo = ChatRepo::of(id);
+    let Some(thread) = repo.thread_as(&state, &caller, id).await.ok().flatten() else {
         return err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
     };
     let snap = state.snapshot();
@@ -64,13 +71,25 @@ pub(crate) async fn warm(
         Ok(m) => m,
         Err(refused) => return refused,
     };
+    if let Caller::Device(ctx) = &caller {
+        let key = ctx.current_key_name(&snap);
+        for alias in models.iter().map(Warm::alias) {
+            let checked =
+                crate::policy::check_alias(&state.policy, &state.db, &snap, key.as_deref(), alias)
+                    .await;
+            if let Err(e) = checked {
+                return err_json(e.http_status(), e.code(), e.to_string());
+            }
+        }
+    }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let report = Reporter::to(tx);
     let label = format!("chat thread {id}");
     // Its own task: the stream going away must not cancel a start in flight
     // (module doc) — the warm sees it through the reporter instead.
+    let st = state.clone();
     tokio::spawn(async move {
-        warm_group(&state, &label, WarmMode::Admit, &models, &report).await;
+        warm_group(&st, &label, WarmMode::Admit, &models, &report).await;
     });
     let frames = UnboundedReceiverStream::new(rx).map(|s| {
         let data = serde_json::to_string(&s).unwrap_or_default();
@@ -79,7 +98,7 @@ pub(crate) async fn warm(
     let done = futures::stream::once(async {
         Ok::<_, Infallible>(Event::default().event("done").data("{}"))
     });
-    Sse::new(frames.chain(done))
+    Sse::new(caller.sse(&state, frames.chain(done)))
         .keep_alive(KeepAlive::default())
         .into_response()
 }

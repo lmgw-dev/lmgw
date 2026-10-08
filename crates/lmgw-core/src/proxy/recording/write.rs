@@ -15,7 +15,11 @@ use crate::telemetry::{RequestSummary, TelemetryBus};
 /// Insert `row`, then close the gauge with it and put it on the live feed.
 pub(super) async fn write_row(state: &SharedState, row: NewRequestLog, status: u16) {
     let st = state.clone();
+    // A stopping server waits for the row whatever happens to the handler
+    // (review F-2): a quit does not lose it.
+    let writing = state.stops.writing();
     let task = tokio::spawn(async move {
+        let _writing = writing;
         let log_id = store::insert_request_log(&st.db, &row)
             .await
             .unwrap_or_else(|e| {
@@ -30,7 +34,14 @@ pub(super) async fn write_row(state: &SharedState, row: NewRequestLog, status: u
 }
 
 fn finished(telemetry: &TelemetryBus, log_id: i64, row: NewRequestLog, status: u16) {
-    telemetry.request_finished(RequestSummary {
+    telemetry.request_finished(summary(log_id, row, status));
+}
+
+/// The live `request` frame for a row just written as `log_id`, so a row
+/// that lands while Traffic is open reads like a reloaded one. One builder
+/// for the three model-traffic writers.
+pub(in crate::proxy) fn summary(log_id: i64, row: NewRequestLog, status: u16) -> RequestSummary {
+    RequestSummary {
         log_id,
         ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         client_key: row.client_key,
@@ -55,5 +66,8 @@ fn finished(telemetry: &TelemetryBus, log_id: i64, row: NewRequestLog, status: u
         fallback_reason: row.fallback_reason,
         rung: row.rung,
         degraded: row.degraded,
-    });
+        audio_in_ms: row.audio_in_ms,
+        chars_in: row.chars_in,
+        images_out: row.images_out,
+    }
 }

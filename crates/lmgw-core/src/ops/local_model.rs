@@ -16,17 +16,16 @@ use super::*;
 
 /// Sparse patch for a local (llama.cpp) model.
 ///
-/// Unlike the other patches here this one is *complete*: every
-/// [`crate::config::LlamaParams`] field is reachable. The earlier narrow
-/// version could not express a multimodal or speculative model at all, which
-/// pushed callers into the freeform `extra_args` escape hatch and into
-/// knowing llama-server's path conventions. An `update` preserves every field
-/// not named.
+/// Unlike the other model patches this one is *complete*: every llama.cpp
+/// parameter of the row is reachable, including multimodal and speculative
+/// setups, without the freeform `extra_args` escape hatch or knowledge of
+/// llama-server's path conventions. An `update` preserves every field not
+/// named.
 ///
-/// Because `None` means "leave as is", there is no value a caller can send to
-/// *unset* a field — hence [`LocalModelPatch::clear`], a list of field names
-/// to reset. That keeps every argument a flat scalar (see the schema note in
-/// [`crate::mcp::selfadmin`]) while still allowing "remove the drafter".
+/// Because an omitted field means "leave as is", there is no value a caller can
+/// send to *unset* a field — hence `clear`, a list of field names to reset.
+/// That keeps every argument a flat scalar while still allowing "remove the
+/// drafter".
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 // The advertised inputSchema is closed (`additionalProperties: false`), so an
 // argument we don't know is an error, not something to drop on the floor: a
@@ -51,14 +50,13 @@ pub struct LocalModelPatch {
     pub batch_size: Option<i64>,
     pub ubatch_size: Option<i64>,
     pub parallel: Option<i64>,
-    /// `kv_unified` tri-state (unified-KV design §3.1): `true` renders
+    /// `kv_unified` tri-state: `true` renders
     /// `--kv-unified`, `false` renders `--no-kv-unified`, absent leaves
     /// llama-server's own default alone.
     pub kv_unified: Option<bool>,
     /// `--kv-unified-per-slot`: per-request cap on a unified row's context,
     /// and (only when `ctx_size` is unset) how the shared pool is sized.
-    /// Refused at save time on a split row (§3.1 — see
-    /// [`validate_kv_unified`]).
+    /// Refused at save time on a split row.
     pub kv_unified_per_slot: Option<i64>,
     pub flash_attn: Option<String>,
     pub cache_type_k: Option<String>,
@@ -76,9 +74,8 @@ pub struct LocalModelPatch {
     pub reasoning_preserve: Option<bool>,
     pub reasoning_effort: Option<String>,
     /// `--chat-template-kwargs` as the JSON object string llama-server takes.
-    /// A flat scalar rather than a nested object because the whole schema is
-    /// (see the note in [`crate::mcp::selfadmin`]); it is parsed and validated
-    /// on the way in, so a malformed one fails here and not at model load.
+    /// A flat scalar rather than a nested object because the whole schema is;
+    /// it is parsed and validated on the way in, so a malformed one fails here and not at model load.
     pub chat_template_kwargs: Option<String>,
 
     // -- sampling --
@@ -133,17 +130,14 @@ pub struct LocalModelPatch {
     /// be local).
     pub hold_fallback: Option<String>,
 
-    /// Owner override of the derived `/v1/models` capability facts
-    /// (model-capabilities design §7): a JSON object, or a JSON string
-    /// containing one (MCP arguments are flat scalars) — see
-    /// [`parse_capabilities_override`]. `null`/empty clears (or name it in
-    /// `clear`).
+    /// Override of the derived `/v1/models` capability facts: a JSON object,
+    /// or a JSON string containing one (MCP arguments are flat scalars).
+    /// `null`/empty clears (or name it in `clear`).
     pub capabilities_override: Option<Value>,
 
-    /// Ladder rungs above the base (ladder design §4.1, §6): the row's own
-    /// `gguf_path` + `ctx_size` stay rung 1. Empty (or `clear: "ladder"`)
-    /// means "not a ladder". Validated at save time by
-    /// [`validate_ladder`] (§4.3).
+    /// Ladder rungs above the base: the row's own `gguf_path` + `ctx_size`
+    /// stay rung 1. Empty (or `clear: "ladder"`) means "not a ladder".
+    /// Validated at save time.
     pub ladder: Option<Vec<crate::ladder::Rung>>,
 
     /// Field names to reset to unset, comma- or space-separated.

@@ -10,6 +10,12 @@
 //!
 //! Export of a folder is added by a later package: its menu item goes in
 //! [`FolderHeader`]'s menu, beside Delete.
+//!
+//! A folder may be one ongoing conversation (client-apps §3.6, [`ongoing`]):
+//! its current thread is marked in the list ([`is_current`]), and its menu's
+//! "New conversation" asks the server for a new current thread.
+
+mod ongoing;
 
 use std::collections::HashSet;
 
@@ -17,12 +23,15 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::chat::{matches_query_in, ChatThread, ListItem, SettingsDraft};
+use super::chat::{matches_query_in, ChatThread, ListItem, Opener, SettingsDraft};
 use super::chat_settings::{draft_patch, DraftErrors, SettingsFields};
+use super::chat_sync::own_folder_delete;
 use crate::scope::Scope;
 use crate::widgets::{
     use_toasts, ConfirmButton, MenuItem, Modal, ModalFooter, ModelPicker, RowMenu, Toasts,
 };
+use lmgw_api_types::chat_folders::FolderOngoing;
+use ongoing::{ApplyToCurrent, OngoingDraft, OngoingFields};
 
 /// One folder as the thread list carries it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -37,6 +46,33 @@ pub(super) struct FolderInfo {
     pub defaults: Value,
     pub threads_active: i64,
     pub threads_archived: i64,
+    /// One ongoing conversation: its idle minutes and current thread.
+    pub ongoing: Option<FolderOngoing>,
+    /// The folder's own retention; `None` is the global setting.
+    pub archive_days: Option<i64>,
+    pub purge_days: Option<i64>,
+    /// A device deleted it while it held chats that device could not see:
+    /// it stays for them, hidden from every device (review F-7).
+    pub devices_hidden: bool,
+}
+
+impl FolderInfo {
+    fn current_thread(&self) -> Option<i64> {
+        self.ongoing.as_ref().and_then(|o| o.current_thread_id)
+    }
+}
+
+/// Whether thread `id` is the current thread of an ongoing folder.
+pub(super) fn is_current(folders: &[FolderInfo], id: i64) -> bool {
+    folders.iter().any(|f| f.current_thread() == Some(id))
+}
+
+/// The ongoing folder whose current thread `id` is, by name.
+pub(super) fn current_of(folders: &[FolderInfo], id: i64) -> Option<String> {
+    folders
+        .iter()
+        .find(|f| f.current_thread() == Some(id))
+        .map(|f| f.name.clone())
 }
 
 /// A folder's header line in the list.
@@ -51,8 +87,13 @@ pub(super) struct FolderRow {
 impl FolderRow {
     pub(super) fn key(&self) -> String {
         format!(
-            "f:{}:{}:{}:{}",
-            self.info.id, self.info.name, self.shown, self.collapsed
+            "f:{}:{}:{}:{}:{}:{}",
+            self.info.id,
+            self.info.name,
+            self.shown,
+            self.collapsed,
+            self.info.ongoing.is_some(),
+            self.info.devices_hidden
         )
     }
 }
@@ -160,11 +201,85 @@ pub(super) fn defaults_body(patch: Value, model: &str) -> Value {
     d
 }
 
+/// The defaults fields `now` changes from `seeded` (both built by
+/// [`defaults_body`]), as a patch's `defaults_patch` names them (review
+/// W6-10): a field that differs, with its new value; `voice` field by field,
+/// a field it no longer sets as `null`. A save sends only these, so it never
+/// writes back — nor applies to an ongoing folder's current thread — what
+/// another client changed while the form was open.
+pub(super) fn defaults_changes(seeded: &Value, now: &Value) -> serde_json::Map<String, Value> {
+    let empty = serde_json::Map::new();
+    let was = seeded.as_object().unwrap_or(&empty);
+    let mut out = serde_json::Map::new();
+    for (k, v) in now.as_object().unwrap_or(&empty) {
+        let before = was.get(k).unwrap_or(&Value::Null);
+        if before == v {
+            continue;
+        }
+        if let (Some(vb), Some(vn), "voice") = (before.as_object(), v.as_object(), k.as_str()) {
+            let mut voice = serde_json::Map::new();
+            for (f, x) in vn {
+                if vb.get(f) != Some(x) {
+                    voice.insert(f.clone(), x.clone());
+                }
+            }
+            for f in vb.keys().filter(|f| !vn.contains_key(*f)) {
+                voice.insert(f.clone(), Value::Null);
+            }
+            out.insert(k.clone(), Value::Object(voice));
+            continue;
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
+/// Whether `defaults` (a defaults body) attach the self-admin toolset.
+fn attaches_self_admin(defaults: &Value) -> bool {
+    defaults["mcp_tools"].as_array().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|m| m["server_label"].as_str().map(str::trim) == Some(SELF_ADMIN_LABEL))
+    })
+}
+
+/// The self-admin toolset's label (as the thread drawer names it).
+const SELF_ADMIN_LABEL: &str = "lmgw";
+
 fn collapsed_set(stored: &str) -> HashSet<i64> {
     stored
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect()
+}
+
+/// What an ongoing folder's "New conversation" says when the server kept
+/// the current thread, which had no message yet.
+pub(super) const CONTINUING: &str = "the current conversation has no message yet: continuing it";
+
+/// An ongoing folder's "New conversation", as the server answers it: the
+/// thread to open, and whether it rolled over (a new current thread) or
+/// kept the current one, which had no message yet.
+pub(super) async fn start_conversation(folder: i64) -> Result<(i64, bool), crate::api::Error> {
+    let v = crate::api::post::<Value, _>(
+        format!("/chat/api/folders/{folder}/current"),
+        &json!({ "new": true }),
+    )
+    .await?;
+    let id = v["thread"]["id"].as_i64().ok_or_else(|| {
+        crate::api::Error::Transport("the folder's current thread came back without an id".into())
+    })?;
+    Ok((id, v["rolled_over"] != json!(false)))
+}
+
+/// "New chat here": a chat in `folder`, on `alias` unless the folder's
+/// defaults name a model (the server applies them).
+pub(super) async fn start_chat_in(
+    folder: i64,
+    alias: &str,
+) -> Result<ChatThread, crate::api::Error> {
+    let body = json!({ "model_alias": alias, "kind": "chat", "folder_id": folder });
+    crate::api::post::<ChatThread, _>("/chat/api/threads", &body).await
 }
 
 /// Everything the folder UI shares with the page.
@@ -187,11 +302,17 @@ pub(super) struct FolderEnv {
     toasts: Toasts,
     model_sel: RwSignal<String>,
     current: RwSignal<Option<ChatThread>>,
-    open: Callback<i64>,
+    /// The page's opens: a New chat of the folder's opens what it made as
+    /// the page's own does, leaving a rescued draft's new chat as it starts
+    /// (`chat_sync::gone`).
+    opener: Opener,
     refresh: Callback<()>,
     /// Delete a thread as the page does (falls through to another one when
     /// it was open).
     delete_thread: Callback<i64>,
+    /// A delete of this thread is the page's own, under way: the follower
+    /// leaves it to the page (`chat_sync`).
+    deleting: StoredValue<Option<i64>>,
 }
 
 impl FolderEnv {
@@ -201,9 +322,10 @@ impl FolderEnv {
         scope: Scope,
         model_sel: RwSignal<String>,
         current: RwSignal<Option<ChatThread>>,
-        open: Callback<i64>,
+        opener: Opener,
         refresh: Callback<()>,
         delete_thread: Callback<i64>,
+        deleting: StoredValue<Option<i64>>,
     ) -> Self {
         Self {
             folders,
@@ -220,15 +342,21 @@ impl FolderEnv {
             toasts: use_toasts(),
             model_sel,
             current,
-            open,
+            opener,
             refresh,
             delete_thread,
+            deleting,
         }
     }
 
     /// The collapsed folders (tracked).
     pub(super) fn collapsed(&self) -> HashSet<i64> {
         collapsed_set(&self.collapsed_text.get())
+    }
+
+    /// Folder `id` open in the list, so a thread just made in it shows.
+    pub(super) fn expand(&self, id: i64) {
+        self.set_collapsed(id, false);
     }
 
     fn set_collapsed(&self, id: i64, collapsed: bool) {
@@ -247,6 +375,15 @@ impl FolderEnv {
     fn toggle(&self, id: i64) {
         let now = collapsed_set(&self.collapsed_text.get_untracked()).contains(&id);
         self.set_collapsed(id, !now);
+    }
+
+    /// Open folder `id`'s settings form, its folder expanded in the list:
+    /// the menu's "Folder settings", and the deep link
+    /// `/chat?folder=<id>&settings=1`.
+    pub(super) fn open_settings(&self, id: i64) {
+        self.set_collapsed(id, false);
+        self.settings_of.set(Some(id));
+        self.settings_open.set(true);
     }
 
     pub(super) fn folder(&self, id: i64) -> Option<FolderInfo> {
@@ -274,22 +411,50 @@ impl FolderEnv {
         });
     }
 
+    /// An ongoing folder's "New conversation": the server starts a new
+    /// current thread (or answers the current one while it is still empty),
+    /// opened at once.
+    fn new_conversation(&self, folder: i64) {
+        let env = *self;
+        let since = self.opener.starting();
+        self.scope.spawn(async move {
+            match start_conversation(folder).await {
+                Ok((id, rolled_over)) => {
+                    env.expand(folder);
+                    env.refresh.run(());
+                    // Opened unless the owner did something meanwhile
+                    // (review CF-4).
+                    if env.opener.follow(since, id) && !rolled_over {
+                        env.toasts.ok(CONTINUING);
+                    }
+                }
+                Err(e) => {
+                    let back = env.opener.failed(since);
+                    env.toasts
+                        .err(format!("starting a new conversation failed: {e}{back}"));
+                }
+            }
+        });
+    }
+
     /// A new chat that starts from the folder's defaults (the server applies
     /// them), opened at once.
     fn new_chat_in(&self, folder: i64) {
         let env = *self;
+        let since = self.opener.starting();
         let alias = self.model_sel.get_untracked();
         self.scope.spawn(async move {
-            let body = json!({ "model_alias": alias, "kind": "chat", "folder_id": folder });
-            match crate::api::post::<ChatThread, _>("/chat/api/threads", &body).await {
+            match start_chat_in(folder, &alias).await {
                 Ok(t) => {
-                    env.set_collapsed(folder, false);
+                    env.expand(folder);
                     env.refresh.run(());
-                    env.open.run(t.id);
+                    env.opener.follow(since, t.id);
                 }
-                Err(e) => env
-                    .toasts
-                    .err(format!("starting a chat in the folder failed: {e}")),
+                Err(e) => {
+                    let back = env.opener.failed(since);
+                    env.toasts
+                        .err(format!("starting a chat in the folder failed: {e}{back}"));
+                }
             }
         });
     }
@@ -347,6 +512,16 @@ impl FolderEnv {
             .current
             .with_untracked(|c| c.as_ref().is_some_and(|t| t.folder_id == Some(id)));
         let open_id = self.current.with_untracked(|c| c.as_ref().map(|t| t.id));
+        // The open thread goes with the folder: the page's own delete, so
+        // marked before the POST goes out. A read of it that answers 404
+        // before the POST does is not taken for a delete elsewhere (review
+        // CL-16).
+        let own = self
+            .current
+            .with_untracked(|c| own_folder_delete(c.as_ref(), id, delete_threads));
+        if own.is_some() {
+            self.deleting.set_value(own);
+        }
         self.scope.spawn(async move {
             let body = json!({ "threads": if delete_threads { "delete" } else { "keep" } });
             match crate::api::post::<Value, _>(format!("/chat/api/folders/{id}/delete"), &body)
@@ -354,11 +529,13 @@ impl FolderEnv {
             {
                 Ok(_) => {
                     env.toasts.ok("folder deleted");
-                    // The open chat went with it: the page's own delete falls
-                    // through to another one (the server already lost it).
-                    match open_id {
-                        Some(t) if delete_threads && open_here => env.delete_thread.run(t),
-                        Some(t) if open_here => {
+                    // The open chat went with it, the page's own delete as
+                    // marked above: it falls through to another one (the
+                    // server already lost it). One the folder kept stays
+                    // open, out of any folder.
+                    match (own, open_id) {
+                        (Some(t), _) => env.delete_thread.run(t),
+                        (None, Some(t)) if open_here => {
                             env.current.try_update(|c| {
                                 if let Some(c) = c.as_mut().filter(|c| c.id == t) {
                                     c.folder_id = None;
@@ -369,7 +546,12 @@ impl FolderEnv {
                         _ => env.refresh.run(()),
                     }
                 }
-                Err(e) => env.toasts.err(format!("deleting the folder failed: {e}")),
+                Err(e) => {
+                    if own.is_some() {
+                        env.deleting.try_set_value(None);
+                    }
+                    env.toasts.err(format!("deleting the folder failed: {e}"));
+                }
             }
         });
     }
@@ -389,15 +571,24 @@ pub(super) fn FolderHeader(row: FolderRow, env: FolderEnv) -> impl IntoView {
     let collapsed = row.collapsed;
     let over = RwSignal::new(false);
     let renaming = Memo::new(move |_| env.renaming.get() == Some(id));
+    let ongoing = row.info.ongoing.is_some();
+    let devices_hidden = row.info.devices_hidden;
     let menu = Signal::derive(move || {
         let mut items = vec![
-            MenuItem::new("New chat here", move || env.new_chat_in(id)),
+            if ongoing {
+                MenuItem::new("New conversation", move || env.new_conversation(id))
+            } else {
+                MenuItem::new("New chat here", move || env.new_chat_in(id))
+            },
             MenuItem::new("Rename", move || env.renaming.set(Some(id))),
-            MenuItem::new("Folder settings", move || {
-                env.settings_of.set(Some(id));
-                env.settings_open.set(true);
-            }),
+            MenuItem::new("Folder settings", move || env.open_settings(id)),
         ];
+        if devices_hidden {
+            items.push(
+                MenuItem::new("Show to devices again…", move || env.open_settings(id))
+                    .title("in the folder settings, which say what devices will then see"),
+            );
+        }
         items.extend(super::chat_export::folder_items(id));
         items.push(MenuItem::new("Delete…", move || {
             env.delete_of.set(Some(id));
@@ -498,6 +689,17 @@ pub(super) fn FolderHeader(row: FolderRow, env: FolderEnv) -> impl IntoView {
                 }
             </Show>
             <span class="count">{row.shown}</span>
+            {devices_hidden
+                .then(|| {
+                    view! {
+                        <span
+                            class="folder-hidden"
+                            title="hidden from devices (a device deleted it): it stays here for the chats that device could not see; Folder settings shows it to devices again"
+                        >
+                            "hidden from devices"
+                        </span>
+                    }
+                })}
             <span class="thread-row-menu" on:click=|ev| ev.stop_propagation()>
                 <RowMenu items=menu title="Folder actions"/>
             </span>
@@ -580,9 +782,29 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
     let model = RwSignal::new(seeded.model_alias.clone());
     let draft = SettingsDraft::new();
     draft.seed(&seeded);
+    // The defaults as the form opened with them, through the same
+    // pipeline a save runs: what a save compares against (review W6-10).
+    let seeded_body = StoredValue::new(
+        draft_patch(&draft)
+            .map(|p| defaults_body(p, &seeded.model_alias))
+            .unwrap_or(Value::Null),
+    );
+    let seeded_name = StoredValue::new(folder.name.clone());
     let errors = DraftErrors::of(draft);
+    let ongoing = OngoingDraft::of(&folder);
+    let has_current = folder.current_thread().is_some();
     let busy = RwSignal::new(false);
     let toasts = env.toasts;
+    // Review W6-11: the self-admin toolset gained in a folder's defaults
+    // takes the folder out of a paired device's reach — any folder, not
+    // only an ongoing one (review F-17) — said before Save, as the thread
+    // drawer says it.
+    let gains_self_admin = move || {
+        draft
+            .picked
+            .with(|p| p.iter().any(|m| m.server_label.trim() == SELF_ADMIN_LABEL))
+            && !seeded_body.with_value(attaches_self_admin)
+    };
     let save = move |_| {
         let patch = match draft_patch(&draft) {
             Ok(p) => p,
@@ -592,16 +814,38 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
         if n.is_empty() {
             return toasts.err("a folder needs a name");
         }
-        let body = json!({
-            "name": n,
-            "defaults": defaults_body(patch, &model.get_untracked()),
-        });
+        if ongoing.on.get_untracked() && model.get_untracked().trim().is_empty() {
+            return toasts.err("an ongoing conversation needs a model: pick one");
+        }
+        // Only what the form changed (reviews W5-17, W6-10).
+        let mut body = json!({});
+        if !seeded_name.with_value(|was| *was == n) {
+            body["name"] = json!(n);
+        }
+        let now = defaults_body(patch, &model.get_untracked());
+        let changes = seeded_body.with_value(|was| defaults_changes(was, &now));
+        if !changes.is_empty() {
+            body["defaults_patch"] = Value::Object(changes);
+        }
+        match ongoing.body() {
+            Ok(m) => body.as_object_mut().expect("an object").extend(m),
+            Err(e) => return toasts.err(e),
+        }
         busy.set(true);
         env.scope.spawn(async move {
             match crate::api::post::<Value, _>(format!("/chat/api/folders/{id}"), &body).await {
-                Ok(_) => {
+                Ok(v) => {
                     env.settings_open.set(false);
-                    toasts.ok("folder settings saved");
+                    match v["applied"]["fields"].as_array() {
+                        Some(f) => toasts.ok(format!(
+                            "folder settings saved, and applied to the current thread ({})",
+                            f.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                        None => toasts.ok("folder settings saved"),
+                    }
                     env.refresh.run(());
                 }
                 Err(e) => toasts.err(format!("saving the folder failed: {e}")),
@@ -609,8 +853,56 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
             busy.try_set(false);
         });
     };
+    // Review F-7: a folder a device's delete hid from devices, and the way
+    // back, saying what devices will then see.
+    let hidden_notice = folder.devices_hidden.then(|| {
+        let total = folder.threads_active + folder.threads_archived;
+        let fname = folder.name.clone();
+        let show = move |()| {
+            busy.set(true);
+            env.scope.spawn(async move {
+                let body = json!({ "devices_hidden": false });
+                match crate::api::post::<Value, _>(format!("/chat/api/folders/{id}"), &body).await {
+                    Ok(_) => {
+                        env.settings_open.set(false);
+                        toasts.ok("the folder is shown to devices again");
+                        env.refresh.run(());
+                    }
+                    Err(e) => toasts.err(format!("showing the folder to devices failed: {e}")),
+                }
+                busy.try_set(false);
+            });
+        };
+        view! {
+            <div class="notice warn folder-devices-hidden">
+                <p>
+                    <b>"Hidden from devices (a device deleted it)."</b>
+                    " A device deleted this folder while it held chats that device could not see, \
+                     so it stays here for them. Paired devices do not see the folder. A device \
+                     allowed lmgw's admin tools still sees the chats in it that use those tools, \
+                     in no folder; Admin Chat stays hidden from every device."
+                </p>
+                <p>
+                    {format!(
+                        "Shown to devices again, '{fname}' comes back to every paired device as a \
+                         new folder, with the chats in it each device may see ({total} in all \
+                         here): never Admin Chat, and the chats with the self-admin tools only \
+                         for a device allowed lmgw's admin tools.",
+                    )}
+                </p>
+                <ConfirmButton
+                    label="Show to devices again"
+                    confirm="Show it to devices?"
+                    class="btn"
+                    disabled=Signal::derive(move || busy.get())
+                    on_confirm=Callback::new(show)
+                />
+            </div>
+        }
+    });
     view! {
         <div class="chat-settings density-dense folder-settings">
+            {hidden_notice}
             <div class="field">
                 <label>"Name"</label>
                 <input
@@ -619,11 +911,26 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
                     on:input=move |ev| name.set(event_target_value(&ev))
                 />
             </div>
+            <OngoingFields draft=ongoing/>
             <p class="dim">
-                "New chats in this folder start with these settings. Chats already in it keep theirs."
+                {move || {
+                    if ongoing.on.get() {
+                        "New chats in this folder start with these settings. The current thread takes what you change here unless you untick it below; the folder's other chats keep theirs."
+                    } else {
+                        "New chats in this folder start with these settings. Chats already in it keep theirs."
+                    }
+                }}
             </p>
             <div class="field">
-                <label>"Model"</label>
+                <label>
+                    {move || {
+                        if ongoing.on.get() {
+                            "Model — required for an ongoing conversation"
+                        } else {
+                            "Model"
+                        }
+                    }}
+                </label>
                 <ModelPicker
                     value=model
                     tasks=&["chat"]
@@ -637,8 +944,22 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
                 model=model
                 prompt_label="System prompt — blank keeps the default prompt"
             />
+            <Show when=gains_self_admin>
+                <div class="notice warn">
+                    "With the self-admin tools in its defaults, paired devices can no longer \
+                     reach this folder: it leaves their lists, and new chats here start with \
+                     the self-admin tools. "
+                    <Show when=move || ongoing.on.get()>
+                        "A client asking for this conversation's current thread is told there \
+                         is no such folder, and with the change applied to the current thread, \
+                         that thread leaves their reach too. "
+                    </Show>
+                    "A device allowed lmgw's admin tools (Usage → Keys → Devices) keeps it."
+                </div>
+            </Show>
         </div>
         <ModalFooter>
+            <ApplyToCurrent draft=ongoing has_current=has_current/>
             <button class="btn ghost" on:click=move |_| env.settings_open.set(false)>
                 "Cancel"
             </button>
@@ -759,6 +1080,47 @@ fn MovePicker(env: FolderEnv, thread: i64) -> impl IntoView {
 mod tests {
     use super::super::chat::group_threads;
     use super::*;
+
+    /// Review W6-10: a save sends the defaults fields it changed, and the
+    /// voice field by field — what it does not touch, another client may
+    /// have changed meanwhile.
+    #[test]
+    fn a_save_names_only_the_defaults_it_changed() {
+        let seeded = json!({
+            "model_alias": "gemma", "system_prompt": null, "temperature": 0.3,
+            "mcp_tools": null,
+            "voice": {"tts_alias": "supertonic", "voice": "F2", "language": "de"}
+        });
+        let mut now = seeded.clone();
+        assert!(
+            defaults_changes(&seeded, &now).is_empty(),
+            "nothing changed"
+        );
+        now["temperature"] = json!(0.5);
+        now["mcp_tools"] = json!([{"server_label": "lmgw", "allowed_tools": null}]);
+        now["voice"] = json!({"tts_alias": "supertonic", "voice": "M1"});
+        let changes = defaults_changes(&seeded, &now);
+        assert_eq!(
+            Value::Object(changes),
+            json!({
+                "temperature": 0.5,
+                "mcp_tools": [{"server_label": "lmgw", "allowed_tools": null}],
+                "voice": {"voice": "M1", "language": null}
+            })
+        );
+        assert!(attaches_self_admin(&now) && !attaches_self_admin(&seeded));
+        // A voice set from none, or cleared whole.
+        let none = json!({"voice": null});
+        let some = json!({"voice": {"voice": "F2"}});
+        assert_eq!(
+            Value::Object(defaults_changes(&none, &some)),
+            json!({"voice": {"voice": "F2"}})
+        );
+        assert_eq!(
+            Value::Object(defaults_changes(&some, &none)),
+            json!({"voice": null})
+        );
+    }
 
     /// `thread_items` with the clock left out: a row is the thread alone, and
     /// a date heading is the day it was last active.
@@ -971,5 +1333,21 @@ mod tests {
         assert_eq!(body["mcp_tools"], Value::Null);
         assert_eq!(body["model_alias"], Value::Null);
         assert_eq!(body["top_k"], 5);
+    }
+
+    #[test]
+    fn the_folder_json_reads_ongoing_and_marks_its_current_thread() {
+        let f: FolderInfo = serde_json::from_value(json!({
+            "id": 3, "name": "Assistant", "sort": 1, "defaults": {"model_alias": "m"},
+            "threads_active": 2, "threads_archived": 0,
+            "ongoing": {"idle_minutes": 30, "current_thread_id": 12},
+            "archive_days": null, "purge_days": 365,
+        }))
+        .unwrap();
+        assert_eq!(f.ongoing.as_ref().map(|o| o.idle_minutes), Some(30));
+        assert_eq!((f.archive_days, f.purge_days), (None, Some(365)));
+        let folders = [folder(1, "Plain"), f];
+        assert!(is_current(&folders, 12));
+        assert!(!is_current(&folders, 11));
     }
 }

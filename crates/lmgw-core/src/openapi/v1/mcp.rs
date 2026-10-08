@@ -1,5 +1,5 @@
-//! `/mcp` and `/mcp/admin` (api-docs design §4.8 tail, §1 non-goal "no
-//! per-method expansion of MCP's JSON-RPC"): the Streamable HTTP transport
+//! `/mcp` and `/mcp/admin` (no per-method expansion of MCP's JSON-RPC
+//! is documented): the Streamable HTTP transport
 //! `mcp/ingress.rs` hand-rolls — single request/response per `POST`, no
 //! batching, session lifecycle via `Mcp-Session-Id`, `GET` for the
 //! server→client notification stream, `DELETE` to end a session.
@@ -17,8 +17,7 @@ use serde_json::{json, Value};
 use super::super::schemas;
 
 /// Registers and refs `JsonRpcRequest` — what [`super::super::build`]'s
-/// `Req::JsonRpc` arm resolves to (fixed alongside `error_ref`'s same bug,
-/// see its doc comment): `{jsonrpc, id?, method, params?}`. `id` is absent on
+/// `Req::JsonRpc` arm resolves to (see `error_ref`'s doc comment): `{jsonrpc, id?, method, params?}`. `id` is absent on
 /// a notification (`notifications/*`); JSON-RPC leaves its type to the
 /// caller, so it is left unconstrained here too.
 pub(crate) fn jsonrpc_request(g: &mut SchemaGenerator) -> Schema {
@@ -43,7 +42,7 @@ pub(crate) fn jsonrpc_request(g: &mut SchemaGenerator) -> Schema {
 /// The success envelope: `{jsonrpc, id, result}`. `result`'s shape is the
 /// method's own — `tools/list` answers `{tools: [...]}`, `tools/call`
 /// answers a `CallToolResult` (`content`, `isError`) — left untyped rather
-/// than modeled per method (§1 non-goal).
+/// than modeled per method.
 pub(crate) fn jsonrpc_response(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
         g,
@@ -94,7 +93,7 @@ pub(crate) fn admin_call_example() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/mcp/servers[/{label}] (realtime-server-tools design §1.4)
+// GET /v1/mcp/servers[/{label}]
 // ---------------------------------------------------------------------------
 
 /// The properties every `mcp.server` object has (`mcp/discovery.rs`).
@@ -105,8 +104,8 @@ fn server_properties() -> Value {
             {\"type\": \"mcp\", \"server_label\"} tool on /v1/realtime or /v1/responses: a \
             built-in toolset's label, a registered server's tool prefix, else its name."},
         "kind": {"type": "string", "enum": ["builtin", "server", "agent"],
-            "description": "builtin: lmgw's own toolsets (lmgw — owner credentials only — \
-                docs, kb); server: a registered MCP server; agent: a service agent's tools."},
+            "description": "builtin: lmgw's own toolsets (lmgw, for owner credentials only; \
+                docs; kb); server: a registered MCP server; agent: a service agent's tools."},
         "name": {"type": "string", "description": "A server's configured name; a toolset's \
             label."},
         "description": {"type": "string", "description": "A toolset's purpose; \"\" for a \

@@ -17,6 +17,7 @@
 use std::rc::Rc;
 
 use leptos::prelude::*;
+use lmgw_client::realtime::ChatReply;
 use serde_json::Value;
 
 use super::super::super::chat::{in_owner, new_msg, scroll_down, Msg};
@@ -172,7 +173,8 @@ pub(super) fn frame(l: &Rc<Live>, rid: &str, event: &str, data: Value) {
     }
 }
 
-pub(super) fn reply(l: &Rc<Live>, message_id: i64, body: &Value) {
+pub(super) fn reply(l: &Rc<Live>, r: &ChatReply) {
+    let message_id = r.message_id;
     if !here(l) {
         return;
     }
@@ -188,14 +190,14 @@ pub(super) fn reply(l: &Rc<Live>, message_id: i64, body: &Value) {
         return;
     };
     m.streaming.set(false);
-    if body["removed"].as_bool() == Some(true) {
+    if r.removed {
         // Heard by nobody, and no tool ran: the reply is gone from the
         // thread, and from the page.
         msgs.update(|v| v.retain(|x| x.key != m.key));
         return;
     }
-    let mut voice = MsgVoice::of_value(&body["voice"]);
-    if let Some(why) = body["skipped"].as_str() {
+    let mut voice = MsgVoice::of_value(&r.voice);
+    if let Some(why) = r.skipped.as_deref() {
         let mut v = voice
             .or_else(|| m.voice.get_untracked())
             .unwrap_or_else(MsgVoice::provisional_reply);
@@ -203,12 +205,12 @@ pub(super) fn reply(l: &Rc<Live>, message_id: i64, body: &Value) {
         m.voice.set(Some(v));
         return;
     }
-    if let Some(content) = body["content"].as_str() {
-        m.content.set(content.to_string());
+    if let Some(content) = &r.content {
+        m.content.set(content.clone());
     }
     if let Some(v) = voice.as_mut() {
         if v.unheard.is_none() {
-            v.unheard = body["unheard"].as_str().map(str::to_string);
+            v.unheard = r.unheard.clone();
         }
     }
     if voice.is_some() {

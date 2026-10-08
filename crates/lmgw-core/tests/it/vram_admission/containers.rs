@@ -387,11 +387,22 @@ fn context_rules(
         }));
     }
     if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
-        let frames = format!(
-            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        let mut frames = format!(
+            "data: {}\n\ndata: {}\n\n",
             json!({"choices": [{"index": 0, "delta": {"content": text}}]}),
             json!({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}),
         );
+        // llama-server's usage chunk, `choices: []` after the finish, comes
+        // only when the request asks for it — as the gateway always does.
+        if body.pointer("/stream_options/include_usage") == Some(&json!(true)) {
+            let usage = json!({"prompt_tokens": prompt, "completion_tokens": 1,
+                               "total_tokens": prompt + 1});
+            frames.push_str(&format!(
+                "data: {}\n\n",
+                json!({"choices": [], "usage": usage})
+            ));
+        }
+        frames.push_str("data: [DONE]\n\n");
         return ResponseTemplate::new(200)
             .insert_header("content-type", "text/event-stream")
             .set_body_raw(frames.into_bytes(), "text/event-stream");

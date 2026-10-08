@@ -41,16 +41,20 @@ use std::rc::{Rc, Weak};
 
 use futures::FutureExt;
 use leptos::prelude::*;
+use lmgw_client::realtime::{
+    self as protocol, ClientEvent, ErrorFacts, ServerEvent, SessionFacts, TurnDetection, Updates,
+};
+use lmgw_client::requests::realtime_page_url;
+use lmgw_client::truncate::{Incoming, PlaybackCursor, Replies};
 use serde_json::Value;
 
 use super::super::super::chat::Msg;
 use super::super::audio::capture::{self, Capture, CaptureEvent};
-use super::super::audio::pcm::{b64_pcm, ms_of, RATE};
+use super::super::audio::pcm::RATE;
 use super::super::audio::player::{self, Awake, Player};
 use super::super::spoken::VoiceTiming;
 use super::super::state::{Note, NoteKind, TURN_KEY};
-use super::machine::{cancel_after_truncate, Captions, Machine};
-use super::protocol::{self, ErrorFacts, Server, Updates};
+use super::machine::{Captions, Machine};
 use super::socket::{self, SockEvent, Socket};
 use super::{Mic, Phase, Realtime, Served};
 
@@ -59,22 +63,6 @@ mod errors;
 /// How long the first player may take before the session gives up on it
 /// (the player's own start wait is 5 s, its first route 6 s).
 const PLAYER_WAIT_MS: u64 = 15_000;
-
-/// One response's audio.
-#[derive(Debug, Default)]
-struct Reply {
-    /// The player's item, from the first audio delta.
-    item: Option<u32>,
-    /// The assistant item the audio belongs to (truncate's `item_id`).
-    item_id: Option<String>,
-    /// Ended (its audio's `done`, or the response's).
-    ended: bool,
-    /// Its `response.output_audio.done` came: the gateway's item is
-    /// complete, so a truncate no longer stops the response.
-    audio_done: bool,
-    /// Cut: later audio of it is dropped.
-    cut: bool,
-}
 
 /// Why a reply's audio is cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +87,11 @@ pub(crate) struct Live {
     awake: RefCell<Option<Awake>>,
     machine: RefCell<Machine>,
     captions: RefCell<Captions>,
-    replies: RefCell<HashMap<String, Reply>>,
+    /// Each response's audio: its assistant item, ended, cut
+    /// (`lmgw_client::truncate`).
+    replies: RefCell<Replies>,
+    /// The player's item of each response, from its first audio delta.
+    items: RefCell<HashMap<String, u32>>,
     /// The reply bubble of each response (`bubbles.rs`).
     pub(super) bubbles: RefCell<HashMap<String, Msg>>,
     opened: Cell<bool>,
@@ -135,7 +127,8 @@ impl Live {
             awake: RefCell::new(None),
             machine: RefCell::new(Machine::default()),
             captions: RefCell::new(Captions::default()),
-            replies: RefCell::new(HashMap::new()),
+            replies: RefCell::new(Replies::default()),
+            items: RefCell::new(HashMap::new()),
             bubbles: RefCell::new(HashMap::new()),
             opened: Cell::new(false),
             created: Cell::new(false),
@@ -192,7 +185,7 @@ impl Live {
             return;
         }
         let loc = window().location();
-        let url = protocol::socket_url(
+        let url = realtime_page_url(
             &loc.protocol().unwrap_or_default(),
             &loc.host().unwrap_or_default(),
             self.tid,
@@ -223,13 +216,20 @@ impl Live {
         self.socket.borrow().as_ref().is_some_and(|s| s.send(text))
     }
 
+    fn send_event(&self, ev: ClientEvent) -> bool {
+        self.send(&ev.to_json())
+    }
+
     /// What the client owns of the session (§8.1, §12.1): the turn
     /// detection it runs with and half duplex for echo mode `none`.
     fn send_session_update(&self) {
-        let sent = self.send(&protocol::session_update(
-            protocol::turn_detection(self.rt.ptt.get_untracked(), &self.resolved),
-            self.rt.dev.echo.get_untracked().half_duplex(),
-        ));
+        let sent = self.send_event(ClientEvent::SessionUpdate {
+            turn_detection: TurnDetection::requested(
+                self.rt.ptt.get_untracked(),
+                Some(&self.resolved),
+            ),
+            half_duplex: self.rt.dev.echo.get_untracked().half_duplex(),
+        });
         if sent {
             self.updates.borrow_mut().sent();
         }
@@ -314,12 +314,8 @@ impl Live {
                 }
             }
         }
-        let items: Vec<u32> = self
-            .replies
-            .borrow_mut()
-            .drain()
-            .filter_map(|(_, r)| r.item)
-            .collect();
+        self.replies.borrow_mut().clear();
+        let items: Vec<u32> = self.items.borrow_mut().drain().map(|(_, i)| i).collect();
         if let Some(p) = self.player.borrow_mut().take() {
             for item in items {
                 let p2 = p.clone();
@@ -337,23 +333,11 @@ impl Live {
 
     // ------------------------------------------------------------- events
 
-    fn on_event(self: &Rc<Self>, ev: Server) {
+    fn on_event(self: &Rc<Self>, ev: ServerEvent) {
         match ev {
-            Server::Session(f) => {
-                if let Some(t) = &f.thread {
-                    self.rt.admin_tools.try_set(Some(t.admin_tools));
-                }
-                if f.echo {
-                    self.session_echo(f.turn_detection.is_none());
-                }
-                if let Some(ms) = f.prefix_padding_ms {
-                    self.preroll_ms.set(ms);
-                }
-                if !self.created.replace(true) {
-                    self.open_capture();
-                }
-            }
-            Server::SpeechStarted => {
+            ServerEvent::SessionCreated(f) => self.on_session(&f, false),
+            ServerEvent::SessionUpdated(f) => self.on_session(&f, true),
+            ServerEvent::SpeechStarted => {
                 self.captions.borrow_mut().user_started();
                 let playing = self.machine.borrow().playing().map(str::to_string);
                 if let Some(rid) = playing {
@@ -363,46 +347,48 @@ impl Live {
                 }
                 self.machine.borrow_mut().speech_started();
             }
-            Server::SpeechStopped => self.machine.borrow_mut().speech_stopped(),
-            Server::Committed => self.machine.borrow_mut().committed(),
+            ServerEvent::SpeechStopped => self.machine.borrow_mut().speech_stopped(),
+            ServerEvent::Committed => self.machine.borrow_mut().committed(),
             // Push-to-talk's own clear (Space down) is followed by its turn.
-            Server::Cleared if !self.rt.talking.get_untracked() => {
+            ServerEvent::Cleared if !self.rt.talking.get_untracked() => {
                 self.machine.borrow_mut().cleared()
             }
-            Server::Cleared => {}
-            Server::HeardDelta(d) => self.captions.borrow_mut().user_delta(&d),
-            Server::Heard(t) => {
+            ServerEvent::Cleared => {}
+            ServerEvent::TranscriptDelta(d) => self.captions.borrow_mut().user_delta(&d),
+            ServerEvent::Transcript(t) => {
                 self.captions.borrow_mut().user_final(&t);
                 let t = t.trim();
                 if !t.is_empty() {
                     self.rt.announce.try_set(format!("You said: {t}"));
                 }
             }
-            Server::HeardFailed { code, message } => self.heard_failed(code.as_deref(), &message),
-            Server::ResponseCreated(id) => {
+            ServerEvent::TranscriptFailed(e) => self.heard_failed(e.code.as_deref(), &e.message),
+            ServerEvent::ResponseCreated { response_id: id } => {
                 self.last_error.borrow_mut().take();
                 self.machine.borrow_mut().response_created(&id);
-                self.replies.borrow_mut().entry(id).or_default();
+                self.replies.borrow_mut().created(&id);
                 // The last turn's notes, and the chat stage's (a refusal, a
                 // `held`): this response says its own.
                 self.rt.status.clear(errors::TURN_NOTE);
                 self.rt.status.clear(TURN_KEY);
             }
-            Server::Audio {
+            ServerEvent::AudioDelta {
                 response_id,
                 item_id,
                 pcm,
-            } => self.audio(&response_id, item_id, &pcm),
-            Server::AudioDone { response_id } => {
-                if let Some(r) = self.replies.borrow_mut().get_mut(&response_id) {
-                    r.audio_done = true;
-                }
+            } => self.audio(&response_id, &item_id, &pcm),
+            ServerEvent::AudioDone { response_id } => {
+                self.replies.borrow_mut().audio_done(&response_id);
                 self.end_audio(&response_id)
             }
-            Server::Spoken { response_id, delta } => {
+            ServerEvent::SpokenDelta { response_id, delta } => {
                 self.captions.borrow_mut().spoken(&response_id, &delta)
             }
-            Server::ResponseDone { id, status, reason } => {
+            ServerEvent::ResponseDone {
+                response_id: id,
+                status,
+                reason,
+            } => {
                 self.machine.borrow_mut().response_done(&id);
                 // A cancelled response's audio gets no `done` of its own: what
                 // is in the player plays out, and then `speaking` ends.
@@ -434,26 +420,24 @@ impl Live {
                     }
                 }
             }
-            Server::Error(e) => self.on_error(e),
-            Server::ChatFrame {
+            ServerEvent::Error(e) => self.on_error(e),
+            ServerEvent::ChatFrame {
                 response_id,
                 event,
                 data,
             } => super::bubbles::frame(self, &response_id, &event, data),
-            Server::ChatUser {
+            ServerEvent::ChatUser {
                 message_id,
                 content,
                 voice,
                 response_id,
             } => super::bubbles::user(self, message_id, content, &voice, response_id.as_deref()),
-            Server::ChatInput { input, why, .. } => {
+            ServerEvent::ChatInput { input, why, .. } => {
                 self.rt.said_input.try_set(Some((input, why)));
             }
-            Server::ChatReply { message_id, body } => {
-                super::bubbles::reply(self, message_id, &body)
-            }
-            Server::ModelState(v) => self.model_state(&v),
-            Server::Timing(v) => {
+            ServerEvent::ChatReply(reply) => super::bubbles::reply(self, &reply),
+            ServerEvent::ModelState(m) => self.model_state(&m),
+            ServerEvent::Timing(v) => {
                 if let Ok(t) = serde_json::from_value::<VoiceTiming>(v) {
                     self.rt.served.try_update(|s| {
                         let ans = |m: &Option<super::super::spoken::Served>| {
@@ -469,7 +453,7 @@ impl Live {
                     self.rt.timing.try_set(Some(t));
                 }
             }
-            Server::Thread(t) => {
+            ServerEvent::Thread(t) => {
                 self.rt.admin_tools.try_set(Some(t.admin_tools));
                 let title = t.title.clone();
                 let tid = self.tid;
@@ -484,20 +468,38 @@ impl Live {
                     self.rt.parts.refresh.run(());
                 }
             }
-            Server::Truncated(ms) => {
-                self.rt.probe.try_update(|c| c.truncated_ack_ms = Some(ms));
+            ServerEvent::Truncated { audio_end_ms, .. } => {
+                self.rt
+                    .probe
+                    .try_update(|c| c.truncated_ack_ms = Some(audio_end_ms));
             }
-            Server::Other(_) => {}
+            // Unknown, and whatever a newer crate types.
+            _ => {}
         }
         self.refresh();
     }
 
-    fn model_state(&self, v: &Value) {
-        self.rt.status.state_frame(v);
-        let stage = v["stage"].as_str().unwrap_or_default();
-        let state = v["state"].as_str().unwrap_or_default();
-        if state == "fallback" {
-            let by = v["answered_by"].as_str().map(str::to_string);
+    /// `session.created` (`echo: false`) or `session.updated`.
+    fn on_session(self: &Rc<Self>, f: &SessionFacts, echo: bool) {
+        if let Some(t) = &f.thread {
+            self.rt.admin_tools.try_set(Some(t.admin_tools));
+        }
+        if echo {
+            self.session_echo(f.turn_detection.is_none());
+        }
+        if let Some(ms) = f.prefix_padding_ms {
+            self.preroll_ms.set(ms);
+        }
+        if !self.created.replace(true) {
+            self.open_capture();
+        }
+    }
+
+    fn model_state(&self, m: &protocol::ModelState) {
+        self.rt.status.state(m);
+        let stage = m.stage.as_str();
+        if m.state == "fallback" {
+            let by = m.answered_by.clone();
             self.rt.served.try_update(|s| match stage {
                 "asr" => s.asr = by,
                 "chat" => s.chat = by,
@@ -563,18 +565,18 @@ impl Live {
 
     // --------------------------------------------------------- audio out
 
-    fn audio(self: &Rc<Self>, rid: &str, item_id: String, pcm: &[u8]) {
+    fn audio(self: &Rc<Self>, rid: &str, item_id: &str, pcm: &[u8]) {
         let Some(p) = self.player.borrow().clone() else {
             return;
         };
-        let mut replies = self.replies.borrow_mut();
-        let r = replies.entry(rid.to_string()).or_default();
-        if r.cut || r.ended {
-            return;
-        }
-        let item = match r.item {
-            Some(i) => i,
-            None => {
+        let incoming = self.replies.borrow_mut().audio(rid, item_id);
+        let item = match incoming {
+            Incoming::Drop => return,
+            Incoming::Continue => match self.items.borrow().get(rid) {
+                Some(i) => *i,
+                None => return,
+            },
+            Incoming::Start => {
                 let weak = Rc::downgrade(self);
                 let id = rid.to_string();
                 let i = p.begin_owned(Box::new(move || {
@@ -595,13 +597,11 @@ impl Live {
                         }
                     }),
                 );
-                r.item = Some(i);
-                r.item_id = Some(item_id);
+                self.items.borrow_mut().insert(rid.to_string(), i);
                 self.machine.borrow_mut().audio_started(rid);
                 i
             }
         };
-        drop(replies);
         p.push(item, pcm);
         self.rt.audio_bytes.try_update(|c| *c += pcm.len() as u64);
     }
@@ -611,18 +611,12 @@ impl Live {
         let Some(p) = self.player.borrow().clone() else {
             return;
         };
-        let item = {
-            let mut replies = self.replies.borrow_mut();
-            let Some(r) = replies.get_mut(rid) else {
-                return;
-            };
-            if r.ended || r.cut {
-                return;
-            }
-            r.ended = true;
-            r.item
+        if !self.replies.borrow_mut().end(rid) {
+            return;
+        }
+        let Some(item) = self.items.borrow().get(rid).copied() else {
+            return;
         };
-        let Some(item) = item else { return };
         let me = self.clone();
         let rid = rid.to_string();
         leptos::task::spawn_local(async move {
@@ -644,21 +638,18 @@ impl Live {
         if self.over.get() {
             return;
         }
-        let item = {
-            let mut replies = self.replies.borrow_mut();
-            let r = replies.entry(rid.to_string()).or_default();
-            if r.cut {
-                return;
-            }
-            r.cut = true;
-            r.item
-        };
+        if !self.replies.borrow_mut().cut(rid) {
+            return;
+        }
+        let item = self.items.borrow().get(rid).copied();
         // A barge-in's response the server cancels itself.
         let stop = why != Cut::BargeIn;
         let (Some(p), Some(item)) = (self.player.borrow().clone(), item) else {
             // Nothing of it was heard: nothing to truncate, only the cancel.
             if stop && self.machine.borrow().is_open(rid) {
-                self.send(&protocol::response_cancel(Some(rid)));
+                self.send_event(ClientEvent::ResponseCancel {
+                    response_id: Some(rid.to_string()),
+                });
             }
             return;
         };
@@ -708,20 +699,21 @@ impl Live {
     /// Truncate response `rid`'s item at `heard` samples (`played`, for the
     /// probes); whether it was sent.
     fn truncate(&self, rid: &str, heard: Option<u64>, played: Option<u64>) -> bool {
-        let item_id = self
-            .replies
-            .borrow()
-            .get(rid)
-            .and_then(|r| r.item_id.clone());
-        let (Some(item_id), Some(h)) = (item_id, heard) else {
+        let cursor = |samples| PlaybackCursor {
+            heard_samples: samples,
+            sample_rate: RATE,
+        };
+        let Some(ev) = self.replies.borrow().truncate(rid, heard.map(cursor)) else {
             return false;
         };
-        let ms = ms_of(h, RATE);
-        let sent = self.send(&protocol::truncate(&item_id, ms));
+        let ClientEvent::Truncate { audio_end_ms, .. } = ev else {
+            return false;
+        };
+        let sent = self.send_event(ev);
         if sent {
             self.rt.probe.try_update(|c| {
-                c.truncated_ms = Some(ms);
-                c.cut_played_ms = played.map(|p| ms_of(p, RATE));
+                c.truncated_ms = Some(audio_end_ms);
+                c.cut_played_ms = played.map(|p| cursor(p).audio_end_ms());
                 c.truncates += 1;
             });
         }
@@ -732,9 +724,15 @@ impl Live {
     /// response still open that the truncate did not stop — nothing of it
     /// was truncated, or its item was complete already.
     fn cancel_unless_truncated(&self, rid: &str, truncated: bool) {
-        let audio_done = self.replies.borrow().get(rid).is_some_and(|r| r.audio_done);
-        if cancel_after_truncate(self.machine.borrow().is_open(rid), truncated, audio_done) {
-            self.send(&protocol::response_cancel(Some(rid)));
+        let open = self.machine.borrow().is_open(rid);
+        if self
+            .replies
+            .borrow()
+            .cancel_after_truncate(rid, open, truncated)
+        {
+            self.send_event(ClientEvent::ResponseCancel {
+                response_id: Some(rid.to_string()),
+            });
         }
     }
 
@@ -752,7 +750,7 @@ impl Live {
                 .borrow()
                 .get(&rid)
                 .filter(|r| !r.cut)
-                .and_then(|r| r.item),
+                .and_then(|_| self.items.borrow().get(&rid).copied()),
         ) else {
             return;
         };
@@ -814,7 +812,7 @@ impl Live {
         let weak = Rc::downgrade(self);
         let on_chunk = Box::new(move |samples: Vec<i16>| {
             if let Some(me) = weak.upgrade() {
-                if !me.over.get() && me.send(&protocol::append(&b64_pcm(&samples))) {
+                if !me.over.get() && me.send_event(ClientEvent::append_pcm16(&samples)) {
                     me.rt.chunks.try_update(|c| *c += 1);
                 }
             }
@@ -895,7 +893,7 @@ impl Live {
             // Talking over the voice stops it first (§9.2).
             self.cut(&rid, Cut::Stop);
         }
-        self.send(&protocol::clear());
+        self.send_event(ClientEvent::Clear);
         if let Some(c) = self.capture.borrow().as_ref() {
             c.open_gate();
         }
@@ -926,7 +924,8 @@ impl Live {
             if me.over.get() {
                 return;
             }
-            let asked = me.send(&protocol::commit()) && me.send(&protocol::response_create());
+            let asked =
+                me.send_event(ClientEvent::Commit) && me.send_event(ClientEvent::ResponseCreate);
             if asked {
                 me.rt.probe.try_update(|c| c.commits += 1);
             }
@@ -957,7 +956,7 @@ impl Live {
                 let me = self.clone();
                 leptos::task::spawn_local(async move {
                     f.await;
-                    me.send(&protocol::clear());
+                    me.send_event(ClientEvent::Clear);
                 });
             } else {
                 c.open_gate();

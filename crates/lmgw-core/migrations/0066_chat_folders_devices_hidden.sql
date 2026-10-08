@@ -1,0 +1,14 @@
+-- A folder a device deleted while it still held threads out of the
+-- device's reach (client-apps design L3; review W6-1, decided by the owner
+-- 2026-10-07). The device's own threads go as it asked — moved out of the
+-- folder, or deleted — and the folder stays in place, holding the threads
+-- the device could not see, with its own retention unchanged: those are
+-- the owner's Admin Chat and self-admin threads, and moving them out would
+-- put them on the global retention, a device's lever on how long the
+-- owner's history is kept.
+--
+-- From then on the folder is out of every device's reach, as a folder whose
+-- defaults attach the self-admin toolset is (`self_admin_folder!`): to a
+-- device it is gone, as the delete it asked for said. The owner sees it with
+-- its threads.
+ALTER TABLE chat_folders ADD COLUMN devices_hidden INTEGER NOT NULL DEFAULT 0;

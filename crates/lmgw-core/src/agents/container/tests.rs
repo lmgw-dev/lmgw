@@ -21,6 +21,7 @@ fn agent(manifest_text: &str, config: &str) -> Agent {
         source: "authored".into(),
         provenance: String::new(),
         dev_url: None,
+        created_by_key: None,
         created_at: String::new(),
         updated_at: String::new(),
     })

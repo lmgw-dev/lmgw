@@ -6,7 +6,7 @@
 //! `docs/design/2026-09-17-model-capabilities-design.md` §4: a
 //! field the catalog does not publish is absent (`None`), never defaulted.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use crate::config::{upstream_scope_key, PriceScope, Protocol, Upstream, UpstreamKind};
+use crate::config::{upstream_scope_key, PriceRow, PriceScope, PriceUnit, Protocol, Upstream};
 use crate::pricing::{per_token_to_per_mtok, PriceSource, Prices};
 use crate::state::SharedState;
 use crate::store;
@@ -42,7 +42,8 @@ pub struct ModelInfo {
     pub id: String,
     /// Max context window in tokens, when the upstream advertises it.
     pub context_length: Option<u64>,
-    /// Per-token price, when the upstream advertises it (Kilo/OpenRouter shape).
+    /// The catalog's prices, when the upstream advertises a prompt and a
+    /// completion price (Kilo/OpenRouter shape).
     pub pricing: Option<Pricing>,
     /// Unix seconds. OpenAI-protocol `created`; Anthropic `created_at`
     /// (RFC3339) parsed to unix seconds; Gemini never publishes one.
@@ -93,15 +94,48 @@ pub struct CatalogStructured {
     pub json_object: Option<bool>,
 }
 
-/// Per-token price in USD, as advertised by an upstream catalog.
+/// Prices in USD, as advertised by an upstream catalog's pricing object
+/// (the OpenRouter shape, which Kilo follows).
 /// Kept as the upstream's verbatim decimal strings (e.g. `"0.000003"`) so we
 /// neither lose precision nor reformat what the provider published.
-#[derive(Debug, Clone)]
+///
+/// Field meanings, from OpenRouter's models API: the Pricing Object at
+/// <https://openrouter.ai/docs/guides/overview/models> ("All pricing values are
+/// in USD per token/request/unit. A value of "0" indicates the feature is
+/// free.") and the `PublicPricing` schema at
+/// <https://openrouter.ai/docs/api/api-reference/models/get-models>. What the
+/// price sync makes of each is billable-units design §6.
+#[derive(Debug, Clone, Default)]
 pub struct Pricing {
     /// USD per input (prompt) token.
     pub prompt: String,
     /// USD per output (completion) token.
     pub completion: String,
+    /// USD per cached input token read (`input_cache_read`), when published.
+    /// A replacement rate for those tokens, not a surcharge.
+    pub cache_read: Option<String>,
+    /// USD per cached input token written (`input_cache_write`), when published.
+    pub cache_write: Option<String>,
+    /// USD per API request (`request`: "Fixed cost per API request"), when
+    /// published. Synced as a `per_request` row, but only beside a usable
+    /// token row (§6).
+    pub request: Option<String>,
+    /// USD per **input** image (`image`: "Cost per image input"), when
+    /// published. Not synced in v1 (§6, Q5): `per_image` counts *generated*
+    /// images, and the docs do not say whether this adds to the image's prompt
+    /// tokens or replaces them.
+    pub image: Option<String>,
+    /// USD per web search (`web_search`: "Cost per web search operation"),
+    /// when published. Not synced in v1: `per_web_search` is reserved, and no
+    /// route can carry a hosted search (§4.6).
+    pub web_search: Option<String>,
+    /// Every other field of the pricing object the catalog published with a
+    /// value other than zero, by name, sorted: `internal_reasoning`,
+    /// `image_output`, `audio`, `input_cache_write_1h`, `discount`,
+    /// `overrides`, and whatever a provider adds next. lmgw prices none of
+    /// them; they are named so a sync can count them (`not_synced`) instead of
+    /// dropping them unseen.
+    pub other: Vec<String>,
 }
 
 /// A cached catalog fetch — the models, or why there are none. Failures are
@@ -202,7 +236,7 @@ pub async fn upstream_models(state: &SharedState, u: &Upstream) -> Result<Vec<Mo
 }
 
 // ---------------------------------------------------------------------------
-// Price sync (usage-analytics design §2.2)
+// Price sync (usage-analytics design §2.2; billable-units design §6)
 // ---------------------------------------------------------------------------
 //
 // Catalog rows have always been parsed (`pricing` on `ModelInfo`, above) and
@@ -215,13 +249,28 @@ pub async fn upstream_models(state: &SharedState, u: &Upstream) -> Result<Vec<Mo
 pub struct PriceUpdate {
     pub scope_kind: PriceScope,
     pub scope_key: String,
+    /// `per_mtok`, with its rates in `prices`, or `per_request`, with its
+    /// rate in `price` (billable-units §6).
+    pub unit: PriceUnit,
+    /// The token rates of a `per_mtok` row. On any other unit only the
+    /// `source` is set and every rate stays `None`: the table's CHECK keeps
+    /// the two shapes apart.
     pub prices: Prices,
+    /// The rate of a non-token row, per its unit's scale; `None` on a
+    /// `per_mtok` row.
+    pub price: Option<f64>,
+    /// Write only over an existing catalog row of this scope and unit, never
+    /// create one. That is a fee the catalog now states as `"0"` (§6): a new
+    /// zero row would change nothing, and an old non-zero one left in place
+    /// would keep charging a fee the provider dropped.
+    pub update_only: bool,
 }
 
 /// The pure conversion behind [`sync_prices`]: one upstream's catalog listing,
-/// turned into the per-Mtok price rows it implies. No IO, so the rule this
-/// stands on — a model with no usable price upserts nothing, never a zero
-/// (§2.3) — is testable without a DB or an upstream fetch.
+/// turned into the price rows it implies. No IO, so the rules this stands on —
+/// a model with no usable price upserts nothing, never a zero (§2.3); a fee
+/// goes on file only beside a usable token row (billable-units §6) — are
+/// testable without a DB or an upstream fetch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceUpdates {
     pub rows: Vec<PriceUpdate>,
@@ -229,6 +278,94 @@ pub struct PriceUpdates {
     /// numbers that failed to parse). These upsert nothing — the count is how
     /// the caller reports that instead of staying silent about it.
     pub unpriced_models: usize,
+    /// Per pricing field, the models priced here that publish it and had it
+    /// go into no row ([`UpstreamPriceSync::not_synced`]).
+    pub not_synced: BTreeMap<String, usize>,
+    /// The scopes of every model priced here whose pricing object has no
+    /// `request` field at all. A catalog `per_request` row on file for one of
+    /// them is a fee the catalog no longer states, and goes
+    /// ([`to_remove`](Self::to_remove)).
+    pub no_fee: Vec<(PriceScope, String)>,
+}
+
+impl PriceUpdates {
+    /// The catalog `per_request` rows on file that the catalog no longer
+    /// backs: their model's token row is synced, and it publishes no
+    /// `request` at all. Catalog rows mirror the catalog, so a fee the
+    /// provider dropped must not keep charging; a later sync recreates the
+    /// row if the fee comes back. A manual row is the owner's and never one
+    /// of these.
+    ///
+    /// `per_request` only. A stale catalog `per_mtok` row (a model that left
+    /// the catalog, or stopped publishing a usable price) stays on file as it
+    /// always has; that is older behaviour, unchanged here.
+    pub fn to_remove<'a>(&'a self, on_file: &'a [PriceRow]) -> impl Iterator<Item = &'a PriceRow> {
+        on_file.iter().filter(move |p| {
+            p.source == PriceSource::Catalog
+                && p.unit == PriceUnit::PerRequest
+                && self
+                    .no_fee
+                    .iter()
+                    .any(|(kind, key)| p.scope_kind == *kind && p.scope_key == *key)
+        })
+    }
+
+    /// The rows to write, given the rows on file: all of them, except an
+    /// [`update_only`](PriceUpdate::update_only) row with no catalog row of
+    /// its scope and unit to update.
+    ///
+    /// The match is exact, as the upsert's conflict key
+    /// `(scope_kind, scope_key, source, unit)` is: a row this skips is one
+    /// the upsert would have created rather than updated.
+    pub fn to_write<'a>(
+        &'a self,
+        on_file: &'a [PriceRow],
+    ) -> impl Iterator<Item = &'a PriceUpdate> + 'a {
+        self.rows.iter().filter(move |u| {
+            !u.update_only
+                || on_file.iter().any(|p| {
+                    p.source == PriceSource::Catalog
+                        && p.unit == u.unit
+                        && p.scope_kind == u.scope_kind
+                        && p.scope_key == u.scope_key
+                })
+        })
+    }
+}
+
+/// A catalog value as a price: a finite, non-negative number, or `None`.
+///
+/// `f64::from_str` accepts "inf" and "NaN". An infinite price times a token
+/// count saturates to `i64::MAX` in `cost_micro`, and from there into the
+/// rollup's running sum and the budget gate — one malformed catalog entry
+/// would refuse every request on the gateway for the rest of the period.
+/// A price that is not a finite, non-negative number is not a price.
+fn sane(v: &str) -> Option<f64> {
+    v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+/// Whether a published value says something costs money, or might: anything
+/// but an empty string and a zero. A field published as `"0"` is free
+/// ("A value of "0" indicates the feature is free",
+/// <https://openrouter.ai/docs/guides/overview/models>), so leaving it out of
+/// every row loses nothing and is not worth reporting. A value that is not a
+/// price at all (`"-1"`, garbage) does count: what it would have charged is
+/// unknown.
+fn charges(v: &str) -> bool {
+    !v.is_empty() && v.parse::<f64>() != Ok(0.0)
+}
+
+/// [`charges`] for a raw pricing-object value of any JSON type: a non-zero
+/// number or string, a non-empty `overrides` array or object, `true`.
+fn value_charges(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => charges(s),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
 }
 
 /// Convert a catalog's per-token pricing into a per-Mtok sheet, or `None` when
@@ -236,30 +373,48 @@ pub struct PriceUpdates {
 /// treated exactly like one that publishes none — §2.3 does not carve out an
 /// exception for "the provider's own data looked wrong".
 fn catalog_prices(p: &Pricing) -> Option<Prices> {
-    // `f64::from_str` accepts "inf" and "NaN". An infinite price times a token
-    // count saturates to `i64::MAX` in `cost_micro`, and from there into the
-    // rollup's running sum and the budget gate — one malformed catalog entry
-    // would refuse every request on the gateway for the rest of the period.
-    // A price that is not a finite, non-negative number is not a price.
-    let sane = |v: &str| v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0);
     let prompt = sane(&p.prompt)?;
     let completion = sane(&p.completion)?;
+    // Cache rates are replacement rates for the cached subset of `prompt`
+    // (OpenRouter models API, Pricing Object: "input_cache_read: Cost per
+    // cached input token read", per token like `prompt`). Absent or
+    // unparseable is `None`, which bills at the input rate.
+    //
+    // A "0" here with a non-zero prompt price is also `None`. OpenRouter's
+    // docs say "A value of "0" indicates the feature is free", but that is a
+    // blanket sentence for the whole pricing object, not a statement about
+    // cache fields, and a placeholder zero would make cached tokens free:
+    // wrong downward, the worst failure here. Falling back to the input
+    // rate errs upward and is visible.
+    // (https://openrouter.ai/docs/guides/overview/models)
+    // A zero on a model whose prompt is zero too stays a real zero.
+    let cache = |v: &Option<String>| {
+        let n = sane(v.as_deref()?)?;
+        (n > 0.0 || prompt == 0.0).then(|| per_token_to_per_mtok(n))
+    };
     Some(Prices {
         price_in: Some(per_token_to_per_mtok(prompt)),
         price_out: Some(per_token_to_per_mtok(completion)),
-        price_cache_read: None,
-        price_cache_write: None,
+        price_cache_read: cache(&p.cache_read),
+        price_cache_write: cache(&p.cache_write),
         source: PriceSource::Catalog,
     })
 }
 
-/// Turn one upstream's catalog listing into the price rows it implies.
+/// Turn one upstream's catalog listing into the price rows it implies
+/// (billable-units design §6):
+///
+/// | Field | Row |
+/// |---|---|
+/// | `prompt`, `completion`, `input_cache_read`, `input_cache_write` | `per_mtok` (`catalog_prices`) |
+/// | `request` | `per_request`, beside a usable token row only; `"0"` updates an existing catalog row and creates none; absent removes it |
+/// | `image`, `web_search`, anything else | none; counted in `not_synced` unless published as zero |
 ///
 /// `aliases` is every enabled alias pointing at this upstream, as
 /// `(upstream_model_id, alias_name)` pairs. A model with one or more matching
 /// aliases is scoped to each alias by name; a model with none is scoped to
 /// [`upstream_scope_key`] instead, which is what an `expose_all` passthrough
-/// request resolves to.
+/// request resolves to. Every row of one model has the same scopes.
 pub fn price_updates_for_upstream(
     upstream_id: i64,
     models: &[ModelInfo],
@@ -267,7 +422,11 @@ pub fn price_updates_for_upstream(
 ) -> PriceUpdates {
     let mut out = PriceUpdates::default();
     for m in models {
-        let Some(prices) = m.pricing.as_ref().and_then(catalog_prices) else {
+        let Some((pricing, prices)) = m
+            .pricing
+            .as_ref()
+            .and_then(|p| Some((p, catalog_prices(p)?)))
+        else {
             out.unpriced_models += 1;
             continue;
         };
@@ -276,51 +435,143 @@ pub fn price_updates_for_upstream(
             .filter(|(model_id, _)| *model_id == m.id)
             .map(|(_, alias)| *alias)
             .collect();
-        if matching.is_empty() {
-            out.rows.push(PriceUpdate {
-                scope_kind: PriceScope::UpstreamModel,
-                scope_key: upstream_scope_key(upstream_id, &m.id),
-                prices,
-            });
+        let scopes: Vec<(PriceScope, String)> = if matching.is_empty() {
+            vec![(
+                PriceScope::UpstreamModel,
+                upstream_scope_key(upstream_id, &m.id),
+            )]
         } else {
-            for alias in matching {
+            matching
+                .into_iter()
+                .map(|alias| (PriceScope::Alias, alias.to_string()))
+                .collect()
+        };
+        let mut push = |unit, prices, price, update_only| {
+            for (scope_kind, scope_key) in &scopes {
                 out.rows.push(PriceUpdate {
-                    scope_kind: PriceScope::Alias,
-                    scope_key: alias.to_string(),
+                    scope_kind: *scope_kind,
+                    scope_key: scope_key.clone(),
+                    unit,
                     prices,
+                    price,
+                    update_only,
                 });
             }
+        };
+        push(PriceUnit::PerMtok, prices, None, false);
+
+        // The fee rides on the token row, never alone: a model whose token
+        // price did not parse is unpriced and on the worklist, and a fee
+        // written without it would price that model at the fee alone — a
+        // silent number, wrong downward. A request-only sheet (a per-clip
+        // music model) is legitimate, but only as a manual row.
+        let mut skipped = Vec::new();
+        match pricing.request.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => match sane(v) {
+                Some(fee) => push(
+                    PriceUnit::PerRequest,
+                    Prices {
+                        source: PriceSource::Catalog,
+                        ..Default::default()
+                    },
+                    Some(fee),
+                    fee == 0.0,
+                ),
+                None => skipped.push("request"),
+            },
+            // Published in a shape no price comes in: named in `other`, and
+            // counted below. Not "absent", so a fee on file stays.
+            None if pricing.other.iter().any(|f| f == "request") => {}
+            // No fee published at all: a catalog fee on file is stale.
+            None => out.no_fee.extend(scopes.iter().cloned()),
+        }
+        // A cache rate that is published but did not become one: falling back
+        // to the input rate errs upward, but it is still a published number
+        // lmgw did not apply. A "0" on a paid model is not advertised
+        // (`catalog_prices`) and is not counted.
+        for (name, published, synced) in [
+            (
+                "input_cache_read",
+                &pricing.cache_read,
+                prices.price_cache_read,
+            ),
+            (
+                "input_cache_write",
+                &pricing.cache_write,
+                prices.price_cache_write,
+            ),
+        ] {
+            if published.as_deref().is_some_and(charges) && synced.is_none() {
+                skipped.push(name);
+            }
+        }
+        // Not synced in v1 (§6, Q5): `image` is per *input* image and so not
+        // `per_image`, and `per_web_search` is reserved.
+        for (name, published) in [
+            ("image", &pricing.image),
+            ("web_search", &pricing.web_search),
+        ] {
+            if published.as_deref().is_some_and(charges) {
+                skipped.push(name);
+            }
+        }
+        skipped.extend(pricing.other.iter().map(String::as_str));
+        for name in skipped {
+            *out.not_synced.entry(name.to_string()).or_default() += 1;
         }
     }
     out
 }
 
-/// What [`sync_prices`] did to one upstream.
+/// What a price sync did to one upstream.
 #[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct UpstreamPriceSync {
     pub upstream_id: i64,
     pub upstream: String,
+    /// Rows created or updated: one `per_mtok` row per priced model and
+    /// scope, and a `per_request` row beside it where the catalog states a
+    /// fee.
     pub rows_written: usize,
+    /// Catalog `per_request` rows deleted because their model, priced here,
+    /// no longer publishes a `request` fee at all.
+    pub rows_removed: usize,
     pub unpriced_models: usize,
+    /// Per field of the catalog's pricing object, how many models had their
+    /// token prices synced here and publish that field with a value other
+    /// than zero that went into no row. Left out on purpose: `image` (a
+    /// price per *input* image, not a generated one),
+    /// `web_search` (no route carries a hosted search), and the fields lmgw
+    /// does not model, such as `internal_reasoning`, `image_output`,
+    /// `overrides` or `discount`. Also a `request` fee or cache rate that is
+    /// not a price (`"-1"`, unparseable). A model counted in
+    /// `unpriced_models` had nothing synced and is not counted here again.
+    /// Empty when nothing published was left out.
+    // Billable-units design §6.
+    pub not_synced: BTreeMap<String, usize>,
     /// The catalog fetch failed; nothing was synced for this upstream. Not
     /// fatal to the run as a whole — one unreachable provider should not stop
     /// every other upstream's prices from refreshing.
     pub error: Option<String>,
 }
 
-/// Summary of one [`sync_prices`] run.
+/// Summary of one price sync run.
 #[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
 pub struct PriceSyncSummary {
     pub rows_written: usize,
+    /// The upstreams' `rows_removed`, summed.
+    pub rows_removed: usize,
     pub unpriced_models: usize,
+    /// The upstreams' `not_synced`, summed per field.
+    pub not_synced: BTreeMap<String, usize>,
     pub upstreams: Vec<UpstreamPriceSync>,
 }
 
 /// Sync catalog-advertised prices into the `prices` table for every enabled
 /// upstream, then refresh the snapshot so the new numbers price the very next
-/// request rather than waiting for a restart.
+/// request rather than waiting for a restart. Which catalog fields become
+/// which rows is [`price_updates_for_upstream`].
 ///
-/// Local containers (`llama_server`, `audio_cpp`) are skipped: a local route
+/// Local containers (`llama_server`, `audio_cpp`, `sd_cpp`) are skipped: a local route
 /// is always `free_local` regardless of any price row — `Snapshot::prices_for`
 /// decides that from the upstream kind before it ever looks at the prices
 /// table — so there is nothing for a price row to do there.
@@ -328,7 +579,8 @@ pub struct PriceSyncSummary {
 /// Manual rows are never touched by this: `store::upsert_price` is keyed on
 /// `(scope_kind, scope_key, source, unit)` and every row written here carries
 /// `source = catalog`, so a catalog refresh can only ever create or update
-/// another catalog row, never a `manual` one.
+/// another catalog row, never a `manual` one. The one delete, of a fee the
+/// catalog stopped publishing, picks catalog rows only.
 pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String> {
     let snap = state.snapshot();
     let mut upstreams: Vec<&Upstream> = snap.upstreams.values().filter(|u| u.enabled).collect();
@@ -336,7 +588,7 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
 
     let mut summary = PriceSyncSummary::default();
     for u in upstreams {
-        if matches!(u.kind, UpstreamKind::LlamaServer | UpstreamKind::AudioCpp) {
+        if snap.is_local_upstream(u.id) {
             continue;
         }
         let mut row = UpstreamPriceSync {
@@ -353,25 +605,37 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
                     .map(|a| (a.upstream_model_id.as_str(), a.alias.as_str()))
                     .collect();
                 let updates = price_updates_for_upstream(u.id, &models, &aliases);
-                for pu in &updates.rows {
+                for pu in updates.to_write(&snap.prices) {
                     store::upsert_price(
                         &state.db,
                         pu.scope_kind,
                         &pu.scope_key,
-                        "per_mtok",
+                        pu.unit,
                         &pu.prices,
+                        pu.price,
                         None,
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                    row.rows_written += 1;
                 }
-                row.rows_written = updates.rows.len();
+                for stale in updates.to_remove(&snap.prices) {
+                    store::delete_price(&state.db, stale.id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    row.rows_removed += 1;
+                }
                 row.unpriced_models = updates.unpriced_models;
+                row.not_synced = updates.not_synced;
             }
             Err(e) => row.error = Some(e),
         }
         summary.rows_written += row.rows_written;
+        summary.rows_removed += row.rows_removed;
         summary.unpriced_models += row.unpriced_models;
+        for (field, models) in &row.not_synced {
+            *summary.not_synced.entry(field.clone()).or_default() += models;
+        }
         summary.upstreams.push(row);
     }
 
@@ -557,15 +821,50 @@ fn parse_context_length_anthropic(m: &Value) -> Option<u64> {
         .or_else(|| m["context_window"].as_u64())
 }
 
-/// Extract per-token pricing from an OpenAI-shaped model object.
-/// Mirrors the Kilo/OpenRouter shape: `pricing: { prompt, completion }`, USD
-/// per token. Both fields must be present (number or numeric string) or we
-/// report no pricing rather than a half-known price.
+/// The pricing-object fields [`Pricing`] reads by name. Everything else lands
+/// in [`Pricing::other`].
+const PRICING_FIELDS: [&str; 7] = [
+    "prompt",
+    "completion",
+    "input_cache_read",
+    "input_cache_write",
+    "request",
+    "image",
+    "web_search",
+];
+
+/// Extract pricing from an OpenAI-shaped model object.
+/// Mirrors the Kilo/OpenRouter shape: `pricing: { prompt, completion, … }`,
+/// USD per token (per request, per image, per search for the fields named so;
+/// see [`Pricing`]). `prompt` and `completion` must both be present (number
+/// or numeric string) or we report no pricing rather than a half-known price.
 fn parse_pricing_openai(m: &Value) -> Option<Pricing> {
     let p = &m["pricing"];
+    let prompt = price_field(&p["prompt"])?;
+    let completion = price_field(&p["completion"])?;
+    // A named field of a type no price comes in (an object where a string
+    // belongs) goes to `other` with the unknown ones, so it is counted rather
+    // than read as "not published".
+    let mut other: Vec<String> = p
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, v)| {
+            value_charges(v) && (!PRICING_FIELDS.contains(&k.as_str()) || price_field(v).is_none())
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    other.sort_unstable();
     Some(Pricing {
-        prompt: price_field(&p["prompt"])?,
-        completion: price_field(&p["completion"])?,
+        prompt,
+        completion,
+        // Optional: a model that publishes no cache price keeps `None`.
+        cache_read: price_field(&p["input_cache_read"]),
+        cache_write: price_field(&p["input_cache_write"]),
+        request: price_field(&p["request"]),
+        image: price_field(&p["image"]),
+        web_search: price_field(&p["web_search"]),
+        other,
     })
 }
 
@@ -832,6 +1131,7 @@ mod price_sync_tests {
         Pricing {
             prompt: "0.000003".to_string(),
             completion: "0.000012".to_string(),
+            ..Default::default()
         }
     }
 
@@ -881,6 +1181,7 @@ mod price_sync_tests {
             Some(Pricing {
                 prompt: "not-a-number".to_string(),
                 completion: "0.00001".to_string(),
+                ..Default::default()
             }),
         )];
         let updates = price_updates_for_upstream(1, &models, &[]);
@@ -940,6 +1241,7 @@ mod price_sync_tests {
             Some(Pricing {
                 prompt: "0".to_string(),
                 completion: "0".to_string(),
+                ..Default::default()
             }),
         )];
         let updates = price_updates_for_upstream(9, &models, &[]);
@@ -947,5 +1249,65 @@ mod price_sync_tests {
         assert_eq!(updates.rows.len(), 1);
         assert_eq!(updates.rows[0].prices.price_in, Some(0.0));
         assert_eq!(updates.rows[0].prices.source, PriceSource::Catalog);
+    }
+
+    fn with_cache(prompt: &str, read: Option<&str>, write: Option<&str>) -> Pricing {
+        Pricing {
+            prompt: prompt.to_string(),
+            completion: "0.000025".to_string(),
+            cache_read: read.map(String::from),
+            cache_write: write.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    fn prices_of(p: Pricing) -> Prices {
+        let updates = price_updates_for_upstream(1, &[model("m", Some(p))], &[]);
+        updates.rows.into_iter().next().expect("priced").prices
+    }
+
+    #[test]
+    fn cache_prices_convert_per_token_to_per_mtok() {
+        let p = prices_of(with_cache(
+            "0.000005",
+            Some("0.0000005"),
+            Some("0.00000625"),
+        ));
+        assert_eq!(p.price_cache_read, Some(0.5));
+        assert_eq!(p.price_cache_write, Some(6.25));
+    }
+
+    #[test]
+    fn absent_or_unparseable_cache_prices_stay_none() {
+        let p = prices_of(with_cache("0.000005", None, Some("garbage")));
+        assert_eq!(p.price_cache_read, None);
+        assert_eq!(p.price_cache_write, None);
+        // A bad cache field never unprices the model itself.
+        assert_eq!(p.price_in, Some(5.0));
+    }
+
+    #[test]
+    fn a_zero_cache_price_on_a_paid_model_is_not_advertised() {
+        let p = prices_of(with_cache("0.000005", Some("0"), Some("0")));
+        assert_eq!(p.price_cache_read, None, "falls back to the input rate");
+        assert_eq!(p.price_cache_write, None);
+    }
+
+    #[test]
+    fn a_zero_cache_price_on_a_free_model_stays_zero() {
+        let p = prices_of(with_cache("0", Some("0"), None));
+        assert_eq!(p.price_cache_read, Some(0.0));
+        assert_eq!(p.price_cache_write, None);
+    }
+
+    #[test]
+    fn the_kilo_fixture_parses_its_cache_prices() {
+        let raw = include_str!("../tests/fixtures/catalogs/kilo_anthropic_variants.json");
+        let entry: Value = serde_json::from_str(raw).expect("fixture is JSON");
+        let info = parse_openai_entry(&entry).expect("parses");
+        let p = prices_of(info.pricing.expect("pricing"));
+        assert_eq!(p.price_in, Some(5.0));
+        assert_eq!(p.price_cache_read, Some(0.5));
+        assert_eq!(p.price_cache_write, Some(6.25));
     }
 }

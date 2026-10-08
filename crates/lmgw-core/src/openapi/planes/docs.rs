@@ -229,7 +229,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         // -- Export / import ---------------------------------------------------------
         DocRoute {
             description: "The corpus store as a plain SQLite file — one corpus with \
-                ?corpus_id=, or the whole file. rsync it and you are done.",
+                ?corpus_id=, or the whole file. The file can be copied to another machine as is.",
             query: Some(|g| g.root_schema_for::<ExportQuery>()),
             response: Resp::Binary(&["application/vnd.sqlite3"]),
             ..base("GET", "/api/docs/export", "Export corpora as a SQLite file")

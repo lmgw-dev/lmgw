@@ -23,12 +23,12 @@ pub(super) fn tools() -> Vec<Builtin> {
                  it is moving to a higher one, a climbing state naming the target and the \
                  reason ('prompt 41,210 + 8,192 > 30,000'). A runtime entry a background \
                  candidate alias started carries owner: 'background' until an ordinary request \
-                 claims it, and draining_for_owner while an owner admission is waiting on it \
-                 (candidate-aliases design §4.4-§4.5); both are absent on every other entry. \
+                 claims it, and draining_for_owner while an ordinary request's admission is waiting on it; both \
+                 are absent on every other entry. \
                  When any candidate alias is configured, a candidate_aliases array lists each \
                  one's name, mode (background/owner), primary, alternates, enabled facets, \
                  problems and deferrals_24h — how many times it answered gpu_deferred (a \
-                 background request declined rather than disturb the owner) in the last 24 \
+                 background request declined rather than disturb ordinary traffic) in the last 24 \
                  hours; absent entirely on an install with none configured. Start here when \
                  asked how the gateway is doing — including 'why is my request slow', 'what is \
                  on the GPU' and 'is my background job actually running or stuck deferring'.",
@@ -43,13 +43,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                  to find the exact alias to send to /v1/chat/completions or /v1/messages. \
                  Entries carry the same capabilities/max_output_tokens/notes object that GET \
                  /v1/models publishes; absent fields are unknown. kind='alias' (and 'all') \
-                 also lists candidate aliases (candidate-aliases design) — 'kind': \
+                 also lists candidate aliases — 'kind': \
                  'candidate_alias' distinguishes them from a plain alias — each with its \
                  candidates list (primary first), background flag, enabled facets, which \
                  candidates are routable right now, any problems (a candidate or the fallback \
                  that stopped supporting an enabled facet, say), and deferrals_24h — how many \
                  times a background alias answered gpu_deferred (declined rather than disturb \
-                 the owner) in the last 24 hours. Answering this makes the same cached catalog \
+                 ordinary traffic) in the last 24 hours. Answering this makes the same cached catalog \
                  HTTP calls to expose-all upstreams that /v1/models makes (warm calls are free; \
                  a cold one fetches each reachable upstream's catalog once).",
             props: vec![
@@ -425,10 +425,11 @@ pub(super) fn tools() -> Vec<Builtin> {
             name: "lmgw__usage",
             writes: false,
             description:
-                "What was spent, on what: cost and token totals over a date range, with a \
+                "What was spent, on what: cost, token and measured-quantity totals (input \
+                 audio, input characters, generated images) over a date range, with a \
                  ranked breakdown, from the same hourly rollups a usage dashboard reads — so \
                  this and any chart never disagree. Every total states its unpriced \
-                 remainder beside it (design rule: a request with no price on file is never \
+                 remainder beside it (a request with no price on file is never \
                  folded in as a silent zero, which would read as authoritative and be wrong \
                  downward) — see lmgw__prices for which aliases that currently affects and \
                  why. Dates are UTC; there is no browser here to read a timezone from.",
@@ -476,8 +477,11 @@ pub(super) fn tools() -> Vec<Builtin> {
             name: "lmgw__prices",
             writes: false,
             description:
-                "Every price sheet on file — catalog-synced and manual — per 1M tokens, plus \
-                 `unpriced_models`: every model that currently resolves to no price at all, \
+                "Every price sheet on file — catalog-synced and manual — each in one billable \
+                 unit (`unit`): per_mtok rows carry four token rates per 1M tokens, every \
+                 other unit one `price` per its scale (per minute of input audio, per 1M \
+                 input characters, per generated image, per answered request). Plus \
+                 `unpriced_models`: every model for which no unit resolves a price at all, \
                  with the requests each has already spent unpriced. That list covers the \
                  configured aliases *and* the passthrough models an expose_all upstream \
                  serves, counted from the usage rollup — on a gateway with no configured \

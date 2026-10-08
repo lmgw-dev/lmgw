@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A speech model its language does not reach as set — the ASR the spoken
-/// language, the TTS the reply language (chat-voice design §2.1): a thread's `voice_resolved.language_notes`,
+/// language, the TTS the reply language: a thread's `voice_resolved.language_notes`,
 /// and Settings' `chat_voice_language_notes` for the Chat's own models.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -19,6 +19,41 @@ pub struct LanguageNote {
     /// The whole sentence the page shows: the model, then what it does
     /// ("text-to-speech model 'audio/…' takes no language: …").
     pub message: String,
+}
+
+// The chat-voice design record, §4.3. The gateway writes these frames
+// from its own struct (`realtime::warm::outcome::ModelState`, whose enums
+// are its own); a test there reads every frame it writes into this type,
+// field for field (review W6-9).
+/// A voice stage's model state: a chat stream's `state` frame and a bound
+/// realtime session's `lmgw.model.state` event.
+/// Read leniently: a field a client does not know of is ignored, a missing
+/// one is empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModelState {
+    /// `asr`, `chat` or `tts`.
+    pub stage: String,
+    pub alias: String,
+    /// `loading`, `ready`, `held`, `fallback`, `skipped` or `failed`.
+    pub state: String,
+    /// How long the load took, for `ready`.
+    pub ms: Option<u64>,
+    /// `held`: `gpu_hold` or `benchmark`.
+    pub cause: Option<String>,
+    /// `fallback`: the alias that answers in its place.
+    pub answered_by: Option<String>,
+    /// `skipped`: `full`, `does_not_fit` or `cannot_speak`.
+    pub reason: Option<String>,
+    /// The sentence a client shows.
+    pub message: Option<String>,
+    /// `skipped` with `does_not_fit`: what the stage's group needs on the
+    /// card, in bytes.
+    pub needed_bytes: Option<u64>,
+    /// `skipped` with `does_not_fit`: what the group could have together,
+    /// in bytes.
+    pub capacity_bytes: Option<u64>,
 }
 
 /// How realtime mode detects the end of a turn — the names
@@ -86,7 +121,8 @@ pub fn language_hint(typed: &str) -> Option<String> {
 pub const FOLLOW_USER: &str = "auto";
 
 /// What a typed thread `voice.language` or `voice.reply_language` means:
-/// `Some("")` to inherit, `Some("auto")` ([`FOLLOW_USER`]), `Some(code)` folded to lowercase, `None` when it is
+/// `Some("")` to inherit, `Some("auto")` ([`FOLLOW_USER`]), `Some(code)` folded to lowercase,
+/// `None` when it is
 /// neither two letters nor `auto`.
 pub fn thread_language(typed: &str) -> Option<String> {
     let l = typed.trim().to_ascii_lowercase();

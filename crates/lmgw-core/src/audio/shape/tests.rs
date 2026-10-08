@@ -289,3 +289,87 @@ fn an_instruct_over_the_rows_instruction_goes_under_both_keys() {
         [ShapeChange::InstructionsOverRow { key: "instruction" }]
     );
 }
+
+/// A Supertonic row with the characters of the trimmed real indexer
+/// (`audio::charset`'s fixture).
+fn supertonic() -> SpeechProfile {
+    let fact = crate::audio::families::char_vocabulary("supertonic").unwrap();
+    let raw =
+        include_str!("../../../tests/fixtures/audio/supertonic3_unicode_indexer_trimmed.json");
+    let vocab = crate::audio::charset::CharVocab::from_indexer(
+        "config/unicode_indexer.json",
+        raw.as_bytes(),
+        &fact,
+    )
+    .unwrap();
+    SpeechProfile {
+        family: "supertonic".into(),
+        char_vocab: Some(std::sync::Arc::new(vocab)),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn characters_the_engine_lacks_are_replaced_or_dropped_after_the_tags_and_said_so() {
+    let (b, r) = shape(
+        &supertonic(),
+        &plain(),
+        json!({"input": "„Gern“ [laughs] – bis bald… 😊", "voice": "F1"}),
+    );
+    assert_eq!(b["input"], "\"Gern“ – bis bald… ");
+    assert_eq!(
+        r.changes,
+        [
+            ShapeChange::Tags {
+                mapped: 0,
+                stripped: 1
+            },
+            ShapeChange::Chars {
+                replaced: vec![0x201E],
+                dropped: vec![0x1F60A]
+            }
+        ]
+    );
+    assert_eq!(
+        r.header_value().unwrap().to_str().unwrap(),
+        "tags=stripped:1; chars=replaced:U+201E,dropped:U+1F60A"
+    );
+    // Only what the engine cannot say is a change.
+    let (b, r) = shape(
+        &supertonic(),
+        &plain(),
+        json!({"input": "Schöne Grüße — bis gleich…"}),
+    );
+    assert_eq!(b["input"], "Schöne Grüße — bis gleich…");
+    assert!(r.is_empty());
+    // A row whose package has no vocabulary, and any other route: as sent.
+    let input = json!({"input": "„Gern“ 😊"});
+    assert_eq!(shape(&magpie(), &plain(), input.clone()).0, input);
+    let mut obj = input.as_object().unwrap().clone();
+    assert!(shape_remote(&Expressive::remote(), &mut obj).is_empty());
+    assert_eq!(Value::Object(obj), input);
+}
+
+#[test]
+fn the_header_lists_each_list_it_has() {
+    let r = ShapeReport {
+        changes: vec![ShapeChange::Chars {
+            replaced: vec![0x201E, 0x2028],
+            dropped: vec![],
+        }],
+    };
+    assert_eq!(
+        r.header_value().unwrap().to_str().unwrap(),
+        "chars=replaced:U+201E/U+2028"
+    );
+    let r = ShapeReport {
+        changes: vec![ShapeChange::Chars {
+            replaced: vec![],
+            dropped: vec![0x1F44D, 0x7],
+        }],
+    };
+    assert_eq!(
+        r.header_value().unwrap().to_str().unwrap(),
+        "chars=dropped:U+1F44D/U+0007"
+    );
+}

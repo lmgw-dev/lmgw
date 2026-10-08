@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::SelfAdmin;
+
 /// A string that must not turn up in a log line or a panic message.
 ///
 /// `ApiKey` derives `Debug`, and an `ApiKey` ends up inside a `Snapshot` that
@@ -69,6 +71,137 @@ pub struct ApiKey {
     pub policy: KeyPolicy,
     #[serde(default)]
     pub note: String,
+    /// The label a **device** may host MCP tools under (client-apps design
+    /// §1.5); `None` on every other kind, which the table's CHECK states.
+    #[serde(default)]
+    pub hosts_label: Option<String>,
+    /// A **device**'s level of lmgw's admin tools (client-apps design L3/L5,
+    /// 2026-10-07; a level since the pre-merge review's P-3): above `off` it
+    /// sees and uses the Chat threads and folders that carry the self-admin
+    /// toolset and its tool scope takes in the `lmgw` label; at `full` (after
+    /// the cap) it may attach the toolset too. What the tools may do is this
+    /// level capped by the gateway's own ([`DeviceAdmin::capped`]). Off by default; the owner's to set; `off` on
+    /// every other kind, which the table's CHECK states.
+    #[serde(default)]
+    pub self_admin: DeviceAdmin,
+}
+
+/// A device's level of lmgw's admin tools (`ApiKey::self_admin`): stored as
+/// `0`, `1` and `2` (migration 0068), said as `off`, `read_only` and `full`.
+/// Its own type, not [`SelfAdmin`], whose default is the gateway's
+/// `read_only`: a device's is `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAdmin {
+    /// No admin tools, and none of the threads and folders with the toolset.
+    #[default]
+    Off,
+    /// The read tools: lmgw's configuration and state.
+    ReadOnly,
+    /// The read and the write tools — among them the ones that register
+    /// programs this machine runs as the lmgw user.
+    Full,
+}
+
+impl DeviceAdmin {
+    /// The level a stored column holds; anything but `1` and `2` is `off`
+    /// (the table's triggers allow nothing else).
+    pub fn from_column(v: i64) -> Self {
+        match v {
+            1 => Self::ReadOnly,
+            2 => Self::Full,
+            _ => Self::Off,
+        }
+    }
+
+    /// The column's value.
+    pub fn column(self) -> i64 {
+        match self {
+            Self::Off => 0,
+            Self::ReadOnly => 1,
+            Self::Full => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ReadOnly => "read_only",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "off" => Some(Self::Off),
+            "read_only" => Some(Self::ReadOnly),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    /// Above `off`: the device reaches the toolset's threads and folders and
+    /// the `lmgw` label.
+    pub fn is_on(self) -> bool {
+        self != Self::Off
+    }
+
+    /// The same level as the gateway's own vocabulary.
+    pub fn as_self_admin(self) -> SelfAdmin {
+        match self {
+            Self::Off => SelfAdmin::Off,
+            Self::ReadOnly => SelfAdmin::ReadOnly,
+            Self::Full => SelfAdmin::Full,
+        }
+    }
+
+    /// What the device's admin tools may do: this level capped by the
+    /// gateway's `global` one — a device at `full` under a global
+    /// `read_only` reads only.
+    pub fn capped(self, global: SelfAdmin) -> SelfAdmin {
+        self.as_self_admin().min(global)
+    }
+
+    /// A level the wire carried (`key_create`, `key_set`); `None` for one
+    /// this build does not know. A known word with spaces around it reads
+    /// as the word, as it always did.
+    pub fn from_wire(level: &lmgw_api_types::AdminLevel) -> Option<Self> {
+        Self::parse(level.as_str())
+    }
+}
+
+impl From<DeviceAdmin> for lmgw_api_types::AdminLevel {
+    fn from(level: DeviceAdmin) -> Self {
+        match level {
+            DeviceAdmin::Off => Self::Off,
+            DeviceAdmin::ReadOnly => Self::ReadOnly,
+            DeviceAdmin::Full => Self::Full,
+        }
+    }
+}
+
+impl ApiKey {
+    /// How a refusal names the key: "device 'phone'" for a device (its name
+    /// without `device:`, as every device message names it), "key 'laptop'"
+    /// for every other kind — the `/v1` refusals' words, the Chat's, a
+    /// realtime upgrade's and a mid-turn one's alike (review W2-18).
+    pub fn described(&self) -> String {
+        match self.kind {
+            ApiKeyKind::Device => {
+                format!("device '{}'", crate::devices::short_name(&self.name))
+            }
+            _ => format!("key '{}'", self.name),
+        }
+    }
+
+    /// Which credential the row holds now: the head of its hash, which a
+    /// Rotate changes (client-apps design §1.6, review W2-2). A principal
+    /// carries the one it was resolved with, so a request that outlives a
+    /// Rotate — a turn, a stream, a session — is told apart from one made
+    /// with the new key. Not a secret: a hash of a 256-bit key, cut short.
+    pub fn fingerprint(&self) -> String {
+        self.key_hash.chars().take(16).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -86,6 +219,10 @@ pub enum ApiKeyKind {
     /// `/mcp/admin` accepts. Holds every capability, and is the only kind the
     /// `lmgw_session` cookie is honoured for.
     Owner,
+    /// One paired client app (client-apps design §1.1): `device:<name>`,
+    /// hash-only like a client key, holding `Chat` on top of a client key's
+    /// `Inference` and never anything of the admin plane.
+    Device,
 }
 
 impl ApiKeyKind {
@@ -95,6 +232,7 @@ impl ApiKeyKind {
             Self::Internal => "internal",
             Self::Agent => "agent",
             Self::Owner => "owner",
+            Self::Device => "device",
         }
     }
     pub fn parse(s: &str) -> Self {
@@ -102,6 +240,7 @@ impl ApiKeyKind {
             "internal" => Self::Internal,
             "agent" => Self::Agent,
             "owner" => Self::Owner,
+            "device" => Self::Device,
             _ => Self::Key,
         }
     }

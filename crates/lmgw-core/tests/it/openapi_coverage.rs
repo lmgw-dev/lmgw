@@ -567,7 +567,9 @@ fn every_typed_extractor_is_referenced_by_the_doc() {
     // drift this guard should flag. The Chat's handlers live in `chat.rs`, its
     // `chat_*.rs` siblings (chat-complete design, ground rules: new logic in
     // new sibling modules) and the child modules named in `CHAT_DIRS`
-    // (chat-voice's `chat_voice/`), so every one of those counts. The
+    // (chat-voice's `chat_voice/`, the settings patch in `chat/`, the
+    // ongoing folders' `current` in `chat_folders/`), so every one of those
+    // counts. The
     // directories are named, not matched: a future non-Chat module under a
     // `chat_*` directory is scanned like any other.
     // The Knowledge page's backend (`api_knowledge.rs`, chat-complete §9.5)
@@ -576,7 +578,7 @@ fn every_typed_extractor_is_referenced_by_the_doc() {
         .iter()
         .map(|f| src.join("web").join(f))
         .collect();
-    const CHAT_DIRS: &[&str] = &["chat_voice"];
+    const CHAT_DIRS: &[&str] = &["chat_voice", "chat", "chat_folders"];
     let web = src.join("web");
     let is_chat = |f: &PathBuf| {
         let Ok(rel) = f.strip_prefix(&web) else {
@@ -692,4 +694,44 @@ fn every_example_validates_against_its_schema() {
         }
     }
     assert!(checked > 5, "only checked {checked} examples");
+}
+
+/// Review W6-8: a `thread.*` / `folder.*` event's `oneOf` matches exactly one
+/// branch — a row the row, a tombstone the tombstone — so a strict
+/// validator, and a generated client that resolves `oneOf` by "exactly one
+/// match", reads every event.
+#[test]
+fn a_feed_event_s_one_of_matches_exactly_one_branch() {
+    let doc = admin_doc();
+    let components = doc["components"].clone();
+    let events = &doc["paths"]["/chat/api/feed"]["get"]["responses"]["200"][ext::SSE_EVENTS];
+    let cases = [
+        (
+            "thread.updated",
+            serde_json::json!({"id": 9, "title": "Plan", "by": "device 'phone'"}),
+        ),
+        (
+            "thread.created",
+            serde_json::json!({"thread_id": 9, "deleted": true, "by": null}),
+        ),
+        (
+            "folder.updated",
+            serde_json::json!({"id": 3, "name": "Desk", "by": null}),
+        ),
+        (
+            "folder.created",
+            serde_json::json!({"folder_id": 3, "deleted": true, "by": "the dashboard"}),
+        ),
+    ];
+    for (event, instance) in cases {
+        let schema = &events[event];
+        assert!(schema.get("oneOf").is_some(), "{event}: {schema}");
+        let root = validator_root(schema, &components);
+        let result = jsonschema::validate(&root, &instance);
+        assert!(
+            result.is_ok(),
+            "{event}: {instance} does not validate: {:#?}",
+            result.err()
+        );
+    }
 }

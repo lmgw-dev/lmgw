@@ -10,14 +10,18 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message;
 
+use lmgw_core::config::{PriceScope, PriceUnit};
+use lmgw_core::pricing::{PriceSource, Prices};
 use lmgw_core::realtime::audio::pcm::fade_edges;
+use lmgw_core::state::SharedState;
+use lmgw_core::store;
 
 use crate::support::realtime_fakes::{
     captured_client_frames, events_until, next_event, send, types, user_text, Step, Turn, Ws,
 };
 use crate::support::realtime_tts::{
-    audio_of, speech, speech_22k, speech_gateway, spoken_session, tts_rows, wav, Tts, TTS_ALIAS,
-    TTS_MODEL,
+    add_cloud_tts_alias, audio_of, speech, speech_22k, speech_gateway, spoken_session, tts_fake,
+    tts_rows, wav, Tts, TtsFake, TTS_ALIAS, TTS_MODEL,
 };
 
 /// A long lead: nothing waits, for the tests that check what, not when.
@@ -154,8 +158,150 @@ async fn an_audio_response_is_the_golden_sequence() {
             json!({"model": TTS_MODEL, "input": text, "voice": "alba", "response_format": "wav"})
         );
     }
-    // One TTS row for the response, not one per clause.
+    // One TTS row for the response, not one per clause — carrying the
+    // characters the clauses were sent, on a local row too, at a real 0.
     assert_eq!(tts_rows(&state).await, [(200, None)]);
+    assert_eq!(chars_sent(&tts, 2), 30);
+    let row = tts_row(&state, TTS_ALIAS).await;
+    assert_eq!(
+        row,
+        (Some(30), Some(0), Some("free_local".into())),
+        "(chars_in, cost_micro, price_source)"
+    );
+}
+
+// --- Billable units (billable-units design §4.3, §4.5) ------------------------
+
+/// The characters of the first `n` clauses `tts` was sent, as sent.
+fn chars_sent(tts: &TtsFake, n: usize) -> i64 {
+    (0..n)
+        .map(|i| tts.seen.body(i)["input"].as_str().unwrap().chars().count() as i64)
+        .sum()
+}
+
+/// The one TTS row of `alias`, once written: `(chars_in, cost_micro,
+/// price_source)`.
+async fn tts_row(state: &SharedState, alias: &str) -> (Option<i64>, Option<i64>, Option<String>) {
+    for _ in 0..200 {
+        let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+            "SELECT chars_in, cost_micro, price_source FROM request_logs WHERE class = 'audio' \
+             AND requested_alias = ?1 ORDER BY id",
+        )
+        .bind(alias)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        if !rows.is_empty() {
+            assert_eq!(rows.len(), 1, "one row per response: {rows:?}");
+            return rows.into_iter().next().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no TTS row for {alias}");
+}
+
+/// A cloud TTS alias `cloud-tts` priced at 15 per 1M characters and 0.001
+/// per request, as `tts-1` would be with a request fee.
+async fn priced_cloud_tts(state: &SharedState) -> TtsFake {
+    let cloud = tts_fake(&[]).await;
+    add_cloud_tts_alias(state, &cloud, "cloud-tts").await;
+    for (unit, rate) in [(PriceUnit::PerMchar, 15.0), (PriceUnit::PerRequest, 0.001)] {
+        let sheet = Prices {
+            source: PriceSource::Manual,
+            ..Default::default()
+        };
+        store::upsert_price(
+            &state.db,
+            PriceScope::Alias,
+            "cloud-tts",
+            unit,
+            &sheet,
+            Some(rate),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    state.reload_snapshot().await.unwrap();
+    cloud
+}
+
+async fn cloud_session(addr: &str) -> Ws {
+    let lmgw = json!({"lmgw": {"output_lead_ms": NO_WAIT, "tts_model": "cloud-tts"}});
+    spoken_session(addr, &[], NO_WAIT, lmgw).await.0
+}
+
+/// A binary WAV per clause carries no usage, and the row is still priced:
+/// the characters as sent, 15 per 1M, plus one fee per answered clause.
+#[tokio::test]
+async fn a_spoken_answer_pays_for_its_characters_and_its_clauses() {
+    let (state, addr, chat, _local) = speech_gateway(false, None, |_| {}).await;
+    let cloud = priced_cloud_tts(&state).await;
+    chat.push(Turn::text(&["Hello there. ", "How are ", "you today?"]));
+    let mut ws = cloud_session(&addr).await;
+    let events = turn(&mut ws, "hi").await;
+    assert_eq!(events.last().unwrap()["response"]["status"], "completed");
+
+    assert_eq!(cloud.seen.count(), 2);
+    let chars = chars_sent(&cloud, 2);
+    assert_eq!(chars, 30);
+    let (chars_in, cost, source) = tts_row(&state, "cloud-tts").await;
+    assert_eq!(chars_in, Some(chars));
+    assert_eq!(cost, Some(chars * 15 + 2 * 1_000));
+    assert_eq!(source.as_deref(), Some("manual"));
+}
+
+/// A clause the upstream refused was not billed, and leaves what was
+/// answered known: the first clause's characters and one fee.
+#[tokio::test]
+async fn a_refused_clause_leaves_the_answered_ones_priced() {
+    let (state, addr, chat, _local) = speech_gateway(false, None, |_| {}).await;
+    let cloud = priced_cloud_tts(&state).await;
+    cloud.push(Tts::Wav(wav(&speech(300), 24_000)));
+    cloud.push(Tts::Status(
+        500,
+        json!({"error": {"message": "engine fell over"}}),
+    ));
+    chat.push(Turn::text(&["First. ", "Second."]));
+    let mut ws = cloud_session(&addr).await;
+    let events = turn(&mut ws, "hi").await;
+    assert_eq!(events.last().unwrap()["response"]["status"], "failed");
+
+    let first = chars_sent(&cloud, 1);
+    let (chars_in, cost, _) = tts_row(&state, "cloud-tts").await;
+    assert_eq!(chars_in, Some(first));
+    assert_eq!(cost, Some(first * 15 + 1_000));
+}
+
+/// A cancel while a clause is with the upstream leaves it unknown whether
+/// the provider took it: the row's characters and requests are unknown,
+/// and the row unpriced — never the answered clauses alone.
+#[tokio::test]
+async fn a_cancel_with_a_clause_in_flight_leaves_the_row_unpriced() {
+    let (state, addr, chat, _local) = speech_gateway(false, None, |_| {}).await;
+    let cloud = priced_cloud_tts(&state).await;
+    let held = Arc::new(Notify::new());
+    cloud.push(Tts::Wav(wav(&speech(300), 24_000)));
+    cloud.push(Tts::Held(held.clone(), wav(&speech(300), 24_000)));
+    chat.push(Turn::text(&["First.\n", "Second.\n", "Third."]));
+    let mut ws = cloud_session(&addr).await;
+    send(&mut ws, user_text("hi")).await;
+    events_until(&mut ws, "conversation.item.done").await;
+    send(&mut ws, json!({"type": "response.create"})).await;
+    events_until(&mut ws, "response.output_audio.delta").await;
+    for _ in 0..100 {
+        if cloud.seen.count() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    send(&mut ws, json!({"type": "response.cancel"})).await;
+    events_until(&mut ws, "response.done").await;
+
+    let (chars_in, cost, _) = tts_row(&state, "cloud-tts").await;
+    assert_eq!(chars_in, None, "the second clause was in flight");
+    assert_eq!(cost, None, "unknown is NULL, never the answered part");
+    held.notify_one();
 }
 
 #[test]
@@ -470,6 +616,10 @@ async fn a_cancel_mid_synthesis_writes_the_one_row_and_stops_the_rest() {
     .await
     .unwrap();
     assert_eq!(kind.as_deref(), Some("canceled"));
+    // The second clause was with the engine: whether it took it is unknown,
+    // so the row's characters are too — not the first clause's alone.
+    let (chars_in, _, _) = tts_row(&state, TTS_ALIAS).await;
+    assert_eq!(chars_in, None);
     held.notify_one();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(tts.seen.count(), 2, "the third clause was never asked for");

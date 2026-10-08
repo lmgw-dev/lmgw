@@ -29,7 +29,7 @@ use quickdoc_core::store::Corpus;
 
 use crate::config::{AuxKind, Snapshot};
 use crate::error::GatewayError;
-use crate::proxy;
+use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
 use crate::telemetry;
 
@@ -38,6 +38,9 @@ pub struct InProcessEmbedder {
     /// The client-facing name that routes to [`identity`](Self::identity).
     alias: String,
     identity: EmbedIdentity,
+    /// Whose request the vectors are for ([`Self::charged_to`]); `None`: the
+    /// gateway's own work, charged to its internal identity.
+    caller: Option<RequestCtx>,
 }
 
 impl std::fmt::Debug for InProcessEmbedder {
@@ -61,6 +64,7 @@ impl InProcessEmbedder {
             alias,
             vec!["quickdoc probe".into()],
             telemetry::EMBED_PROTO,
+            proxy::KeyRef::default(),
         )
         .await
         .map_err(|(_, _, e)| e)?;
@@ -79,6 +83,7 @@ impl InProcessEmbedder {
             state,
             alias: alias.to_string(),
             identity: EmbedIdentity::new(route.upstream.name, route.upstream_model, dims),
+            caller: None,
         })
     }
 
@@ -131,7 +136,17 @@ impl InProcessEmbedder {
             state,
             alias,
             identity: pinned.clone(),
+            caller: None,
         })
+    }
+
+    /// Embed for `caller`'s request (client-apps design L4): each call is
+    /// checked against its key first
+    /// ([`policy_checked_call`](crate::proxy::policy_checked_call)) and its
+    /// row is the key's. `None` keeps the gateway's own charging.
+    pub fn charged_to(mut self, caller: Option<RequestCtx>) -> Self {
+        self.caller = caller;
+        self
     }
 
     pub fn alias(&self) -> &str {
@@ -162,11 +177,15 @@ impl Embedder for InProcessEmbedder {
         // and again below on what the call returned.
         refuse_if_held(&self.state, &self.alias, CORPUS_PIN)
             .map_err(|e| QuickdocError::Embedder(e.to_string()))?;
+        let key = charge(&self.state, self.caller.as_ref(), &self.alias)
+            .await
+            .map_err(|e| QuickdocError::Embedder(e.to_string()))?;
         let (_, headers, resp) = proxy::embed_once(
             &self.state,
             &self.alias,
             texts.to_vec(),
             telemetry::EMBED_PROTO,
+            key,
         )
         .await
         .map_err(|(_, _, e)| QuickdocError::Embedder(format!("{}: {e}", self.alias)))?;
@@ -191,6 +210,29 @@ impl Embedder for InProcessEmbedder {
         }
         Ok(resp.embeddings)
     }
+}
+
+/// One encoder call made for `caller`'s request (client-apps design L4): its
+/// key's check — scope, budget, expiry, the per-minute windows, a refusal's
+/// row written — and the key its row is charged to. Nothing to check for the
+/// gateway's own work (`None`), whose row is its internal identity's.
+pub(crate) async fn charge(
+    state: &SharedState,
+    caller: Option<&RequestCtx>,
+    alias: &str,
+) -> Result<proxy::KeyRef, GatewayError> {
+    let Some(ctx) = caller else {
+        return Ok(proxy::KeyRef::default());
+    };
+    proxy::policy_checked_call(
+        state,
+        crate::ingress::ClientProto::Chat,
+        ctx,
+        alias,
+        telemetry::RequestClass::Aux,
+    )
+    .await?;
+    Ok(ctx.key_ref())
 }
 
 /// Resolve `alias` and refuse it if it lands on a reranker.

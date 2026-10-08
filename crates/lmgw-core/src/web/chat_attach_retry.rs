@@ -18,6 +18,7 @@ use crate::store::{ChatAttachmentMeta, ChatThread};
 use super::chat::err_json;
 use super::chat_attach_gate::{native_audio, Caps};
 use super::chat_attach_ingest::apply_transcript;
+use super::chat_caller::Caller;
 use super::chat_extract::ChatPath;
 use super::chat_repo::ChatRepo;
 
@@ -35,10 +36,13 @@ pub(super) enum Retried {
 }
 
 /// Transcribe draft `id` with its thread's speech-to-text alias (chat-voice
-/// design §2.1) and store the result. `thread`: the draft's thread when the
-/// caller holds it already (the send); read here otherwise.
+/// design §2.1) and store the result, as `caller` (client-apps design L4).
+/// `thread`: the draft's thread when the caller holds it already (the
+/// send); read here otherwise — `NotFound` for a thread `caller` may not
+/// reach (L3).
 pub(super) async fn retry_transcript(
     state: &SharedState,
+    caller: &Caller,
     id: i64,
     thread: Option<&ChatThread>,
 ) -> Result<Retried, String> {
@@ -62,7 +66,7 @@ pub(super) async fn retry_transcript(
         Some(t) => t,
         None => {
             read = match ChatRepo::of(att.thread_id)
-                .thread(state, att.thread_id)
+                .thread_as(state, caller, att.thread_id)
                 .await
             {
                 Ok(Some(t)) => t,
@@ -75,16 +79,13 @@ pub(super) async fn retry_transcript(
     let Some(stt) = super::chat_voice::asr_alias(&state.snapshot(), thread) else {
         return Ok(Retried::NoStt);
     };
-    let text = match crate::proxy::transcribe_for(
-        state,
-        super::chat_voice::speech_proto(thread),
-        &stt,
+    let proto = super::chat_voice::speech_proto(thread);
+    let upload = (
         Bytes::from(att.data.clone()),
-        &att.name,
-        &att.mime,
-    )
-    .await
-    {
+        att.name.as_str(),
+        att.mime.as_str(),
+    );
+    let text = match caller.transcribe(state, proto, &stt, upload).await {
         Ok(t) => t,
         Err(e) => return Ok(Retried::Failed(e.to_string())),
     };
@@ -108,6 +109,7 @@ pub(super) async fn retry_transcript(
 /// follows names it.
 pub(super) async fn retry_failed(
     state: &SharedState,
+    caller: &Caller,
     thread: &ChatThread,
     atts: &mut [ChatAttachmentMeta],
     caps: Caps,
@@ -121,7 +123,7 @@ pub(super) async fn retry_failed(
         if !failed {
             continue;
         }
-        match retry_transcript(state, a.id, Some(thread)).await {
+        match retry_transcript(state, caller, a.id, Some(thread)).await {
             Ok(Retried::Done(meta)) => {
                 a.extracted_tokens = crate::store::attachment_tokens(&meta);
                 a.meta = meta;
@@ -137,10 +139,17 @@ pub(super) async fn retry_failed(
 /// again (after a failure at upload). `409 attachment_sent` for a sent one,
 /// `422 not_audio`, `422 stt_not_set`, or `422 transcription_failed` with the
 /// speech-to-text call's own message; `200 {ok, id, meta}` otherwise.
-pub async fn transcribe(State(state): State<SharedState>, ChatPath(id): ChatPath<i64>) -> Response {
+pub async fn transcribe(
+    State(state): State<SharedState>,
+    caller: Caller,
+    ChatPath(id): ChatPath<i64>,
+) -> Response {
+    if let Some(refused) = super::chat::unreachable_attachment(&state, &caller, id).await {
+        return refused;
+    }
     let unprocessable =
         |code: &'static str, msg: String| err_json(StatusCode::UNPROCESSABLE_ENTITY, code, msg);
-    match retry_transcript(&state, id, None).await {
+    match retry_transcript(&state, &caller, id, None).await {
         Ok(Retried::Done(meta)) => Json(json!({ "ok": true, "id": id, "meta": meta })).into_response(),
         Ok(Retried::NotFound) => err_json(StatusCode::NOT_FOUND, "not_found", "attachment not found"),
         Ok(Retried::Sent) => err_json(

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// `GET /api/tools` — every tool this gateway can serve northbound, from the
-/// built-in toolsets and from the registered servers alike, with the owner's
+/// built-in toolsets and from the registered servers alike, with the
 /// per-tool switch and the reason a tool is not currently offered.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,7 +48,7 @@ pub struct ToolEntryView {
     pub plane: String,
     pub description: Option<String>,
     pub upstream_name: Option<String>,
-    /// The owner's switch (`POST /api/op/tool_set`).
+    /// The per-tool switch (`POST /api/op/tool_set`).
     pub enabled: bool,
     /// Offered right now: `enabled` **and** its source's condition holds.
     pub available: bool,

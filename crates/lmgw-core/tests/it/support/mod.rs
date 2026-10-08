@@ -13,3 +13,4 @@ pub mod realtime_fakes;
 pub mod realtime_mcp;
 pub mod realtime_mic;
 pub mod realtime_tts;
+pub mod rust_source;

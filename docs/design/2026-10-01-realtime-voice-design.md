@@ -900,7 +900,8 @@ the fallback's (AC2).
 shape on the final route → send. An lmgw audio row is shaped in full; any
 other route (a fallback included) gets the expressive half only — its
 instructions and inline tags (AC2). `input` is touched only for its inline
-tags.
+tags, and on an lmgw row for the characters its engine cannot say
+(**Characters**, below).
 - A native voice named in any case is sent in the package's spelling;
   for a family that reads `options.voice_id` (Magpie) it moves there and
   `voice` is dropped. A preset's, or with no `voice` the row's default
@@ -915,7 +916,8 @@ tags.
   else as it came.
 - `x-lmgw-speech` says what changed: `voice=options.voice_id`,
   `voice=preset->options.voice_id`, `voice=<spelling>`,
-  `language=de->german`. Absent when nothing did.
+  `language=de->german`, `chars=replaced:U+201E` (2026-10-08). Absent when
+  nothing did.
 
 **Instructions** (AC2, gap 9a). audio.cpp hands a request's `instructions`
 to the engine as `options.instruction`. The profile says what the row does
@@ -953,6 +955,65 @@ the owner's live probe, `audio_probes_live`); every other family, and a
 remote route without an override saying otherwise, has them stripped and
 the text rejoined. A tag is never read out. An input of nothing but tags is
 400 `empty_input`.
+
+**Characters** (2026-10-08, `audio/charset.rs`). Supertonic NFKD-normalises
+its text and looks every codepoint up in its package's `unicode_indexer`;
+one without an entry fails the whole request with a 500. A German reply's
+`„` (U+201E) ended a Kai voice turn that way ("Supertonic unicode indexer
+has no entry for codepoint 8222"): the indexer of Supertonic 3 has 8321
+entries and none for `„`, `“`, `–` or `…`, and the engine itself rewrites
+only some of them (`“`, `–`, `@`, `_` and others in `preprocess`). No other
+audio.cpp family fails on an unknown character (main at 75d0294: Magpie's
+character tokenizers, F5-TTS, ZipVoice and Piper skip one, VoxCPM2 falls
+back to bytes), so `audio::families::char_vocabulary` lists Supertonic
+alone, with the source key its vocabulary file goes by, the characters its
+engine rewrites before the lookup and into what, the text it adds itself
+(the stop, the `<de>…</de>` wrapper, `for example, ` for `e.g.,`), and the
+codepoints its NFKD table decomposes. That table is generated into audio.cpp
+at Unicode 15.1 (`scripts/audiocpp-nfkd-keys.py` copies its keys);
+`unicode-normalization` decomposes at 17.0 (pinned in a test), and 57
+codepoints Unicode 16 and 17 added, an outlined `A` among them, the engine
+looks up as they are. lmgw asks the engine's table which codepoints it
+decomposes and the crate only what into.
+
+The profile reads the file the package's embedded spec names for that key
+(`model:config/unicode_indexer.json`) from the GGUF's embedded files, else
+from beside the GGUF (a change to that file computes the profile again). A
+row without a package GGUF, or a package without the file, is a profile
+problem, logged, and its input goes as it came; so is a rewrite whose output
+the vocabulary lacks (that character is then fitted, not left to the
+engine), and text the engine adds that it lacks. On a row with the
+vocabulary, shaping keeps every character the engine says (one it rewrites
+itself, or one whose NFKD decomposition it has: `ä`, `…`, a no-break space)
+and fits the rest after the tags: a typographic double quote becomes `"`
+(else `'`), a single one `'`, a dash or minus `-`, `…` `...`, any other
+space a space, `ẞ` `ß` (else `SS`); then the NFKD decomposition without its
+combining marks when the engine has the base letters (the outlined `A`
+becomes `A`); else the character is dropped (an emoji: nothing past U+FFFF
+is in the indexer).
+
+An input with nothing but whitespace left once fitted is `empty_input`,
+like one of nothing but tags: the engine refuses an empty text ("Supertonic
+requires --text input") and says a blip for a blank one. `POST
+/v1/audio/speech` answers 400 naming the characters, before admission on the
+resolved row's shaping and again on the answering route's; a realtime answer
+or a Chat read-aloud skips the clause (no audio, its text kept in the
+transcript) and goes on. `x-lmgw-speech` says
+`chars=replaced:U+201E,dropped:U+1F60A` (codepoints, each once,
+`/`-separated, at most 64 per list and then `+<n> more`, so a long text in a
+script the vocabulary lacks cannot make the header too large for a proxy);
+the full list is in the log: one line per speech or task request that is
+refused for its characters or sent (none when admission fails first), one
+per realtime answer or Chat read-aloud when it ends. On a row with a
+vocabulary a text the engine's own rewrites leave blank (`♥`, `#`), shaped
+or not, counts as nothing left; an empty or blank `input` is `empty_input`
+before a container starts on every TTS row. The Audio lab shows the header under
+its result. `chars_in` counts the text as sent. `/v1/tasks/run` and
+`/v1/tasks/stream` fit a task's `text` (`request.text`) the same way, the
+characters only. Any other route, a fallback included, is sent the client's
+characters. The live probe `audio_probes_live::supertonic_chars` sends every
+rewritten, decomposed and replacement character to a real container: the
+tripwire to run after an audio.cpp update.
 
 **Preflight** (`audio/preflight.rs`, AC2): before admission, on the
 resolved route — nothing is started for a request the engine would refuse:
@@ -2893,13 +2954,22 @@ None are invented, and the ones that exist are visible:
 
   A wait for response headers that timed out is none of these: that prompt
   went out to a container that is still there, so a stop then bills it.
-- **No new columns in v1.** `request_logs` has no field for characters or
-  audio seconds, so those go into the response's TTS log line only
-  ("realtime {session}: TTS '{alias}': … characters sent, … s of audio"),
-  the characters as sent — after the cue and shaping took theirs. Audio rows carry no
-  tokens today, and cloud audio is unpriced, so audio budgets bite only
-  through per-call counts. That limitation is stated here rather than
-  hidden.
+- ~~**No new columns in v1.**~~ Superseded for characters and ASR duration
+  by the billable-units design
+  ([2026-10-07](2026-10-07-billable-units-design.md) §4.2–§4.5, migration
+  0070). A TTS row carries `chars_in`, the characters its answered clauses
+  were sent — after the cue and shaping took theirs — and counts those
+  clauses as its upstream requests, so a `per_mchar` or `per_request` price
+  prices it, binary WAV and all. Both are unknown (NULL) when a stop or a
+  failed send left a clause with the upstream unanswered. An ASR row
+  carries `audio_in_ms`, the length of the 16 kHz WAV lmgw built, or the
+  seconds a duration-billed provider reports, which win. A cloud ASR row
+  still records the tokens its provider reports (OpenAI's transcription
+  `usage`). What stays: a TTS row from a token-billed model has no tokens
+  in a binary answer, so it is unpriced under a token price; and the audio
+  seconds a response got back are output, which no unit prices, so they
+  stay on the response's TTS log line ("realtime {session}: TTS '{alias}':
+  … characters sent, … s of audio").
 - **`response.done.usage`.** It reports the chat model's `input_tokens` and
   `output_tokens` as text tokens. The audio token details are 0, because a
   cascade has no audio tokens.
@@ -3309,8 +3379,9 @@ follow it; WP6 and WP7 are independent. Work happens on branch
   Still later there: approvals, a gateway-sent answer after tools, a
   server-side default toolset.
 - **Spoken filler** while a client tool runs.
-- **Usage columns** for characters and audio seconds, and **a session
-  parent row** in `request_logs`.
+- ~~**Usage columns** for characters and audio seconds~~ (input audio and
+  characters built 2026-10-07 by the billable-units design, §11 above), and
+  **a session parent row** in `request_logs`.
 - **A realtime block** in `lmgw__status`, and **a live-mic test page** in the
   dashboard (the Tauri webview's media-permission path needs checking
   first).

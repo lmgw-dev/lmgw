@@ -706,6 +706,7 @@ async fn search_returns_citations_with_file_and_page_within_the_budget() {
         &Options {
             budget_tokens: Some(3),
             params: None,
+            caller: None,
         },
     )
     .await;
@@ -718,6 +719,7 @@ async fn search_returns_citations_with_file_and_page_within_the_budget() {
         &Options {
             budget_tokens: Some(60),
             params: None,
+            caller: None,
         },
     )
     .await;
@@ -1034,7 +1036,7 @@ async fn a_southbound_server_cannot_take_the_kb_prefix() {
         "url": "https://mcp.example.com/mcp", "tool_prefix": "kb",
     }))
     .unwrap();
-    let err = lmgw_core::ops::mcp_server_set(&state, patch)
+    let err = lmgw_core::ops::mcp_server_set(&state, patch, lmgw_core::ops::RowWriter::Dashboard)
         .await
         .unwrap_err();
     assert!(err.contains("reserved"), "{err}");

@@ -740,7 +740,7 @@ async fn a_key_renamed_mid_session_is_charged_by_its_identity() {
 }
 
 #[tokio::test]
-async fn a_key_disabled_or_deleted_mid_session_is_refused_at_its_next_call() {
+async fn a_key_disabled_mid_session_ends_it_with_the_reason() {
     let fake = chat_fake().await;
     let (state, addr) = gateway(&fake, true, Some(KeyPolicy::default()), |_| {}).await;
     let bearer = format!("Bearer {KEY}");
@@ -761,38 +761,33 @@ async fn a_key_disabled_or_deleted_mid_session_is_refused_at_its_next_call() {
     let events = turn(&mut ws, "hi", json!({"type": "response.create"})).await;
     assert_eq!(events.last().unwrap()["response"]["status"], "completed");
 
-    // Disabled while the session is open: the socket stays, the call does not.
+    // Disabled while the session is open — by any path, here the table
+    // itself: the published snapshot re-arms every revocation watch, and the
+    // session ends now, saying why (client-apps design §1.6, changed
+    // 2026-10-06: Disable means disable, for every key). Before, the socket
+    // stayed and only its next call was refused; that per-call check stays
+    // the backstop (`proxy::policy_checked_call`'s own tests).
     sqlx::query("UPDATE api_keys SET enabled = 0 WHERE name = 'voice'")
         .execute(&state.db)
         .await
         .unwrap();
     state.reload_snapshot().await.unwrap();
-    let events = turn(
-        &mut ws,
-        "again",
-        json!({"type": "response.create", "event_id": "d1"}),
-    )
-    .await;
-    assert_eq!(
-        types(&events),
-        ["response.created", "error", "response.done"]
-    );
-    assert_eq!(code(&events[1]), "auth", "{events:?}");
-    assert_eq!(events[1]["error"]["event_id"], "d1");
-    assert_eq!(events[2]["response"]["status"], "failed");
-
-    // Deleted is the same answer.
-    sqlx::query("DELETE FROM api_keys WHERE name = 'voice'")
-        .execute(&state.db)
-        .await
-        .unwrap();
-    state.reload_snapshot().await.unwrap();
-    let events = turn(&mut ws, "once more", json!({"type": "response.create"})).await;
-    assert_eq!(code(&events[1]), "auth", "{events:?}");
+    let close = loop {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+            Ok(Some(Ok(Message::Close(c)))) => break c,
+            Ok(Some(Ok(_))) => continue,
+            other => panic!("expected the close, got {other:?}"),
+        }
+    };
+    let close = close.expect("a close frame with a reason");
+    assert_eq!(u16::from(close.code), 4003);
+    assert_eq!(close.reason.as_str(), "revoked: key 'voice' was disabled");
     assert_eq!(
         fake.seen.chat_count(),
         1,
-        "no refused call reached the model"
+        "no call after the disable reached the model"
     );
 }
 

@@ -24,6 +24,14 @@ impl fmt::Display for Error {
     }
 }
 
+impl Error {
+    /// The server answered `not_found`: what was asked for is not there
+    /// (deleted, or never was). Any other failure is not that.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Error::Api(e) if e.code == "not_found")
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 async fn decode<T: DeserializeOwned>(resp: gloo_net::http::Response) -> Result<T> {

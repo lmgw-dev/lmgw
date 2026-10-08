@@ -91,14 +91,19 @@ impl VoiceStatus {
 
     /// A `state` frame of a warm, a turn or a read-aloud.
     pub(crate) fn state_frame(&self, data: &serde_json::Value) {
-        let Ok(s) = serde_json::from_value::<ModelState>(data.clone()) else {
-            return;
-        };
+        if let Ok(s) = serde_json::from_value::<ModelState>(data.clone()) {
+            self.state(&s);
+        }
+    }
+
+    /// A stage's model state, typed: a bound session's
+    /// `lmgw.model.state`.
+    pub(crate) fn state(&self, s: &ModelState) {
         let cpu = self
             .current
             .try_with_untracked(|c| cpu_stages(c.as_ref().and_then(|t| t.voice_resolved.as_ref())))
             .unwrap_or_default();
-        match note_of(&s, &cpu) {
+        match note_of(s, &cpu) {
             Some(n) => self.set(n),
             None => self.clear(&s.stage),
         }

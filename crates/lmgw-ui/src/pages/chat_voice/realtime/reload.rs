@@ -28,8 +28,9 @@
 //! voice session entered since.
 //!
 //! **In place** (review m2): the stored rows are matched to the page's
-//! messages by their ids ([`plan`]). A matched message takes the row's text,
-//! voice, reasoning, tokens and model where they differ; a bubble the store
+//! messages by their ids ([`plan`]). A matched message takes the row's
+//! fields where they differ (`chat_rows::patch`: its text, voice,
+//! reasoning, tokens, model, knowledge and tool record); a bubble the store
 //! lacks (a refused turn's, one the journal removed) goes; rows past the
 //! last one shown are added. Only a list whose order differs is loaded
 //! afresh. So a read that changes nothing re-mounts nothing — an open
@@ -42,7 +43,8 @@ use std::time::Duration;
 use leptos::prelude::*;
 use serde_json::Value;
 
-use super::super::super::chat::{Msg, MsgRow, ThreadDetail};
+use super::super::super::chat::{MsgRow, ThreadDetail};
+use super::super::super::chat_rows::{appended, patch};
 use super::super::audio::player::sleep;
 use super::super::state::{Note, NoteKind};
 use super::Realtime;
@@ -285,30 +287,13 @@ fn apply(rt: Realtime, rows: Vec<MsgRow>) {
     };
     msgs.with_untracked(|v| {
         for &(pi, ri) in &pairs {
-            patch(&v[pi], &rows[ri]);
+            patch(&v[pi], &rows, ri, rt.parts.make);
         }
     });
     if drop.is_empty() && append.is_empty() {
         return;
     }
-    let mut added = rt
-        .parts
-        .make
-        .run(append.iter().map(|&ri| rows[ri].clone()).collect());
-    // What a user turn retrieved belongs to the answer after it, which the
-    // page made without the turn when the turn was shown already.
-    for (m, &ri) in added.iter_mut().zip(&append) {
-        if m.role == "assistant" && m.context.with_untracked(Option::is_none) {
-            if let Some(c) = rows[..ri]
-                .iter()
-                .rev()
-                .find(|r| r.role == "user")
-                .and_then(|r| r.context.clone())
-            {
-                m.context.set(Some(c));
-            }
-        }
-    }
+    let added = appended(rt.parts.make, &rows, &append);
     msgs.update(|v| {
         let mut i = 0usize;
         v.retain(|_| {
@@ -318,33 +303,6 @@ fn apply(rt: Realtime, rows: Vec<MsgRow>) {
         });
         v.extend(added);
     });
-}
-
-/// Message `m` takes stored row `r`'s fields where they differ.
-fn patch(m: &Msg, r: &MsgRow) {
-    if m.content.with_untracked(|c| *c != r.content) {
-        m.content.set(r.content.clone());
-    }
-    if m.reasoning.with_untracked(|c| *c != r.reasoning) {
-        m.reasoning.set(r.reasoning.clone());
-    }
-    if m.voice.with_untracked(|v| *v != r.voice) {
-        m.voice.set(r.voice.clone());
-    }
-    let tokens = r.prompt_tokens.zip(r.completion_tokens);
-    if tokens.is_some() && m.tokens.get_untracked() != tokens {
-        m.tokens.set(tokens);
-    }
-    if r.model.is_some() && m.model.with_untracked(|x| *x != r.model) {
-        m.model.set(r.model.clone());
-        m.answered_by.set(r.answered_by.clone());
-    }
-    if m.streaming.get_untracked() {
-        m.streaming.set(false);
-    }
-    if m.unsaved.get_untracked() {
-        m.unsaved.set(false);
-    }
 }
 
 #[cfg(test)]

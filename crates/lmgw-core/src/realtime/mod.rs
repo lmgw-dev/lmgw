@@ -90,10 +90,9 @@ pub use tts::is_tts_alias;
 pub const PATH: &str = "/v1/realtime";
 
 /// The handshake's query string. `call_id`, which the Python SDK sometimes
-/// appends, belongs to the sideband surface (§19) and is ignored.
-///
-/// `JsonSchema`-derived so the API docs describe the parameter from this
-/// type rather than restating it.
+/// appends, belongs to the sideband surface and is ignored.
+// `JsonSchema`-derived so the API docs describe the parameter from this
+// type rather than restating it. Sideband: realtime design §19.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct RealtimeQuery {
     /// The chat model: a `realtime.model_map` name, an OpenAI Realtime name
@@ -102,14 +101,37 @@ pub(crate) struct RealtimeQuery {
     /// `session.update` instead.
     #[serde(default)]
     model: Option<String>,
-    /// The dashboard's realtime mode: bind the session to this Chat thread
+    /// A voice mode bound to a Chat thread: bind the session to this thread
     /// (negative for a temporary one). The thread then owns the chat model,
     /// prompt, tools, speech models, voice and conversation, and the session
-    /// sends lmgw's `lmgw.*` extension events. Needs the admin capability
-    /// (the dashboard's cookie or an owner key), refused beside `model`, and
-    /// refused for an Admin Chat thread.
+    /// sends lmgw's `lmgw.*` extension events. Needs the chat capability
+    /// (the dashboard's cookie, an owner key or a paired device's key),
+    /// refused beside `model`, and refused for an Admin Chat thread (a
+    /// device is told there is no such thread). A device binds as its key:
+    /// the thread's aliases pass its scope and budget first.
     #[serde(default)]
     chat_thread: Option<i64>,
+    /// With `chat_thread`: whether this bind may take the thread from a
+    /// session already bound to it. Left out, it does — the other session
+    /// closes with 4000, naming who took it. `never`: it does not — while
+    /// another session is bound to the thread the upgrade is refused, 409
+    /// chat_thread_bound naming who holds it ("voice is in use on device
+    /// 'phone'"), and nothing is taken over. For a client's own automatic
+    /// rebinds (after a conversation moved to a new thread), so it never
+    /// takes the voice from another device that followed the same move; a
+    /// user's explicit choice to talk here binds without it.
+    #[serde(default)]
+    takeover: Option<Takeover>,
+}
+
+/// `?takeover=`: whether a bind may take its thread from another session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Takeover {
+    /// Take the thread over (what a bind without the parameter does).
+    Always,
+    /// Never: refuse while another session is bound to the thread.
+    Never,
 }
 
 /// `GET /v1/realtime` — the handshake.
@@ -157,8 +179,8 @@ pub(crate) async fn upgrade(
             return (e.http_status(), Json(e.to_openai_json())).into_response();
         }
     }
-    let (requested, chat_thread) = match query {
-        Ok(Query(q)) => (q.model, q.chat_thread),
+    let (requested, chat_thread, takeover) = match query {
+        Ok(Query(q)) => (q.model, q.chat_thread, q.takeover),
         Err(why) => {
             return handshake::http_error(
                 StatusCode::BAD_REQUEST,
@@ -172,11 +194,13 @@ pub(crate) async fn upgrade(
     // A session bound to a chat thread starts bound (chat-voice §8.1): its
     // models are the thread's, and realtime's own resolution is skipped.
     if let Some(id) = chat_thread {
-        let bind = match thread::handshake(&state, &ctx, id, requested.is_some()).await {
+        let takeover = takeover != Some(Takeover::Never);
+        let bind = match thread::handshake(&state, &ctx, id, requested.is_some(), takeover).await {
             Ok(b) => b,
             Err(refused) => return refused,
         };
         let init = session::SessionInit {
+            running: Some(state.stops.running_at(state.stops.at_or_now(ctx.served_at))),
             limits: Limits::from_settings(&state.snapshot().settings.realtime),
             state,
             ctx,
@@ -190,6 +214,16 @@ pub(crate) async fn upgrade(
         return open(ws, init);
     }
 
+    if takeover.is_some() {
+        return handshake::http_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_value",
+            "takeover applies to a session bound to a chat thread: give chat_thread with it, \
+             or leave it out"
+                .into(),
+        );
+    }
     let snap = state.snapshot();
     let chat = match resolve::resolve_chat(&snap, requested.as_deref()) {
         Ok(r) => r,
@@ -231,6 +265,8 @@ pub(crate) async fn upgrade(
     let slot = slot.and_then(|Extension(h)| h.take());
     let limits = Limits::from_settings(&snap.settings.realtime);
     let init = session::SessionInit {
+        // Before the 101 (`SessionInit::running`).
+        running: Some(state.stops.running_at(state.stops.at_or_now(ctx.served_at))),
         state: state.clone(),
         ctx,
         requested_model: requested,

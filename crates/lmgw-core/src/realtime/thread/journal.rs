@@ -85,18 +85,23 @@ impl Journal {
     /// to `events`. `label`: what its log lines start with.
     /// `fence`: the session this one took over, raised once its journal
     /// drained — nothing is written before it (module doc).
+    /// `caller`: who the session runs as, the author of the writes it makes
+    /// (an untitled thread named from a spoken turn, client-apps design
+    /// §2.2).
     pub(crate) fn spawn(
         state: SharedState,
         thread_id: i64,
         label: String,
         events: mpsc::UnboundedSender<ServerEvent>,
         fence: Option<StopSignal>,
+        caller: crate::web::chat_voice::bound::Caller,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let task = Task {
             state,
             thread_id,
             label,
+            caller,
             events,
             ops: VecDeque::new(),
             slots: HashMap::new(),
@@ -194,6 +199,8 @@ struct Task {
     state: SharedState,
     thread_id: i64,
     label: String,
+    /// Who the session runs as: the author of its writes.
+    caller: crate::web::chat_voice::bound::Caller,
     events: mpsc::UnboundedSender<ServerEvent>,
     ops: VecDeque<Op>,
     slots: HashMap<u64, Slot>,

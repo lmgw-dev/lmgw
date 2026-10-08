@@ -9,7 +9,7 @@
   "nav": "/chat"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "js": "localStorage.removeItem('lmgw.voice.viz'); 'default visualisations: ribbon in the chat panel, orb in the focus view'"
@@ -145,7 +145,7 @@
   "nav": "/settings/chat"
  },
  {
-  "js": "(()=>{document.documentElement.classList.add('tauri');const c=document.getElementById('win-controls');if(!c)return 'no controls';c.hidden=false;const m=document.getElementById('win-max');if(m){m.textContent='❏';m.title='Restore';}return 'window chrome on'})()"
+  "js": "(()=>{document.documentElement.classList.add('tauri');return 'app window class on'})()"
  },
  {
   "until": "!!document.querySelector('#f-chat-tts-alias')",

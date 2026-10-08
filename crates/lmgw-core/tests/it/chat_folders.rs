@@ -451,3 +451,40 @@ async fn unreadable_requests_are_flat_api_errors() {
         .unwrap();
     flat("bad offset")(r).await;
 }
+
+/// Review F-6: a folder delete reads before it writes (whether a device
+/// leaves the folder to threads it cannot see), so it takes the write lock
+/// from its first statement. Another connection that holds the write lock
+/// when the delete starts and commits while it waits: a deferred
+/// transaction would have read before that commit and fail its first write
+/// with `SQLITE_BUSY_SNAPSHOT`; this one waits for the lock, then reads.
+/// On a file database in WAL mode, as the gateway runs it.
+#[tokio::test]
+async fn a_folder_delete_beside_a_concurrent_commit_waits_and_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = store::open(&dir.path().join("lmgw.sqlite")).await.unwrap();
+    for admin in [store::AdminThreads::Hidden, store::AdminThreads::Shown] {
+        let f = store::create_chat_folder(&db, "f", &ThreadDefaults::default(), None)
+            .await
+            .unwrap();
+        let t = store::create_chat_thread(&db, "m", "chat").await.unwrap();
+        store::set_chat_thread_folder(&db, t, Some(f), None)
+            .await
+            .unwrap();
+        // Another connection's write in progress: a request row, a feed
+        // record, a turn's save.
+        let mut other = db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("INSERT INTO chat_threads (model_alias, kind) VALUES ('m', 'chat')")
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        let delete = tokio::spawn({
+            let db = db.clone();
+            async move { store::delete_chat_folder(&db, f, true, admin, Some("device 'phone'")).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        other.commit().await.unwrap();
+        let deleted = delete.await.unwrap();
+        assert!(deleted.is_ok(), "{admin:?}: {deleted:?}");
+    }
+}

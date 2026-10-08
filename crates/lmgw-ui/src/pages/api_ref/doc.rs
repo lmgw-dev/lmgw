@@ -112,6 +112,8 @@ pub struct Principals {
     pub owner: Vec<String>,
     pub agent: Vec<String>,
     pub key: Vec<String>,
+    /// A paired device (client-apps design §1.2).
+    pub device: Vec<String>,
     pub anonymous: Vec<String>,
     pub anonymous_auth_off: Vec<String>,
 }
@@ -336,6 +338,7 @@ fn parse_principals(v: &Value) -> Principals {
         owner: list("owner"),
         agent: list("agent"),
         key: list("key"),
+        device: list("device"),
         anonymous: list("anonymous"),
         anonymous_auth_off: list("anonymous_auth_off"),
     }

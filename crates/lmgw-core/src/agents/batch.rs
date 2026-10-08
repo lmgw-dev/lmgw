@@ -52,13 +52,12 @@ use crate::error::GatewayError;
 use crate::ingress::responses::{ApprovalRule, McpToolSpec};
 use crate::ir::{
     flatten_tool_result, ChatRequest, Completion, ContentPart, Message, Params, Role,
-    ToolResultBlock, Usage,
+    ToolResultBlock,
 };
 use crate::jobs::{self, JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::mcp::exec::{
     self as mcp_exec, DocsExecutor, McpExecutor, SelfAdminExecutor, SplitExecutor,
 };
-use crate::pricing::{self, TokenUsage};
 use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
 use crate::store;
@@ -183,6 +182,15 @@ pub struct Input {
     /// `agent_id` and `phase` out of this document and nothing else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective: Option<Map<String, Value>>,
+    /// The paired device whose `lmgw__agent_run` started this run, if one
+    /// did (client-apps design L5's note, 2026-10-07): the run's calls of
+    /// lmgw's admin tools are that device's, capped at what its admin tools
+    /// may do when each call is made (read as stored), and filed as its
+    /// rows. Nothing else of the run is the device's: its tools are the
+    /// agent's own, its manifest's labels, resolved and called as the
+    /// gateway's. `None` for the owner's runs and every row written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<i64>,
 }
 
 /// One row of the review table.
@@ -192,20 +200,21 @@ pub struct Input {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Row {
-    /// `item.id` rendered. Empty marks the row errored (§2.3) — there is no
+    /// `item.id` rendered. Empty marks the row errored — there is no
     /// stable identity to apply anything against.
+    // Design: agent-catalog §2.3.
     pub id: String,
     /// The **source** item, kept so a re-run can re-fetch and re-classify this
     /// row without re-listing the mailbox. Not shown anywhere.
     #[serde(skip_serializing_if = "Value::is_null")]
     pub item: Value,
     /// The manifest's `columns`, rendered. Order comes from the manifest, not
-    /// from this map — see [`review_columns`].
+    /// from this map.
     pub columns: Map<String, Value>,
     /// The structured answer. `null` for a list-only run, which makes no call.
     pub output: Value,
-    /// Exactly the `user` text the model received, for the details modal
-    /// (§6.2). Kept per row because "why did it say that" is the question the
+    /// Exactly the `user` text the model received, for the details modal.
+    /// Kept per row because "why did it say that" is the question the
     /// review table exists to answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
@@ -214,7 +223,7 @@ pub struct Row {
     pub raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The output equals the fallback, or the call failed (§2.4).
+    /// The output equals the fallback, or the call failed.
     pub attention: bool,
 }
 
@@ -340,6 +349,12 @@ impl JobExecutor for AgentRunExecutor {
         JobKind::AgentRun
     }
 
+    /// The run's meter opens before a request stamped `X-Lmgw-Run` can name
+    /// the run, which is once its job is live (§3.1).
+    fn going_live(&self, state: &SharedState, id: i64) {
+        state.agent_meters.open(id);
+    }
+
     async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
         let input: Input = serde_json::from_value(input)
             .map_err(|e| format!("agent_run input (phase: {}): {e}", Phase::names()))?;
@@ -377,8 +392,6 @@ struct Run<'a> {
     budget: Budget,
     alias: String,
     base: template::Ctx,
-    /// The route the model calls went to, for pricing the run at the end.
-    route: Option<Route>,
     /// A re-run's full table. Its stages only ever see the attention rows, and
     /// publishing *those* would make the Run tab flicker down to the four rows
     /// being redone; with this set, every partial frame is spliced back into
@@ -390,49 +403,6 @@ struct Run<'a> {
     /// that broke is the sentence the model was going to write about it.
     applied: Mutex<Option<Value>>,
     meter: Meter,
-}
-
-/// What a run spent. Summed as it goes and priced **once** at the end against
-/// the run's route: pricing is linear in tokens, so summing then pricing and
-/// pricing then summing are the same number, and this way one `Prices` lookup
-/// answers the whole run (§4.5).
-#[derive(Debug, Clone, Default, PartialEq)]
-struct Meter {
-    usage: Usage,
-    model_calls: u32,
-    tool_calls: u32,
-}
-
-impl Meter {
-    fn note_model_call(&mut self, usage: &Usage) {
-        self.usage.add(usage);
-        self.model_calls += 1;
-    }
-
-    /// The §4.5 block, priced with the same function every log row uses.
-    fn report(&self, state: &SharedState, alias: &str, route: Option<&Route>) -> Value {
-        let detail = TokenUsage {
-            prompt: self.usage.prompt_tokens,
-            completion: self.usage.completion_tokens,
-            cached_in: self.usage.cached_input_tokens,
-            cache_write: self.usage.cache_write_tokens,
-            reasoning: self.usage.reasoning_tokens,
-        };
-        let prices = route.and_then(|r| {
-            state
-                .snapshot()
-                .prices_for(alias, Some(r.upstream.id), Some(&r.upstream_model))
-        });
-        let cost = pricing::price_request(&detail, prices.as_ref());
-        json!({
-            "usage": self.usage,
-            // NULL, never 0, when nothing could be priced: "we do not know" and
-            // "it was free" are different answers (usage-analytics §2.2).
-            "cost_micro": cost.total_micro,
-            "model_calls": self.model_calls,
-            "tool_calls": self.tool_calls,
-        })
-    }
 }
 
 /// Drives one model turn for a run: [`proxy::stream_once`], logged as
@@ -605,7 +575,8 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
     // server, on `lmgw` or on `docs` (§4.3). Without this the built-in labels
     // would file their rows under Admin Chat and /v1/responses.
     let exec = SplitExecutor::new(
-        SelfAdminExecutor::new(state.clone(), RequestCtx::default()).with_proto(AGENT_TOOL_PROTO),
+        SelfAdminExecutor::new(state.clone(), run_caller(state, input.started_by))
+            .with_proto(AGENT_TOOL_PROTO),
         DocsExecutor::new(state.clone(), RequestCtx::default())
             .with_client(format!("agent {}", agent.manifest.id))
             .with_proto(AGENT_TOOL_PROTO),
@@ -613,7 +584,6 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
         McpExecutor::new(state.clone(), RequestCtx::default()).with_proto(AGENT_TOOL_PROTO),
     );
     let settings = state.snapshot().settings.clone();
-    let route = runner.as_ref().map(|r| r.route.clone());
     let mut run = Run {
         ctx,
         agent,
@@ -626,12 +596,48 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
         },
         alias,
         base,
-        route,
         overlay: Mutex::new(None),
         applied: Mutex::new(None),
         meter: Meter::default(),
     };
     run.dispatch(input).await
+}
+
+/// Whom a run's calls of lmgw's admin tools are made as: the paired device
+/// that started it (`Input::started_by`, client-apps design L5's note,
+/// 2026-10-07), so they are capped at what its admin tools may do as each
+/// call is made, read from the stored key row and settings — `off` once the
+/// device is gone, disabled or expired — and filed as its rows; the
+/// gateway's own context otherwise. A device that is gone is still named by
+/// its id, never left as the gateway. Only the self-admin half of the run's
+/// executor takes it: the MCP and docs halves are the agent's own tools
+/// (`resolve_tools`).
+fn run_caller(state: &SharedState, started_by: Option<i64>) -> RequestCtx {
+    let Some(id) = started_by else {
+        return RequestCtx::default();
+    };
+    let principal = state
+        .snapshot()
+        .api_keys
+        .iter()
+        .find(|k| k.id == id)
+        .map(crate::principal::Principal::from_key)
+        .unwrap_or(crate::principal::Principal::Key {
+            id,
+            name: format!("{}{id}", crate::devices::NAME_PREFIX),
+            kind: crate::config::ApiKeyKind::Device,
+            agent_id: None,
+            fingerprint: String::new(),
+        });
+    let client_key = match &principal {
+        crate::principal::Principal::Key { name, .. } => Some(name.clone()),
+        crate::principal::Principal::Anonymous => None,
+    };
+    RequestCtx {
+        principal,
+        client_key,
+        ..Default::default()
+    }
 }
 
 /// The agent's `tools[]` against the MCP plane, with `require_approval: Never`
@@ -656,8 +662,13 @@ async fn resolve_tools(
             require_approval: ApprovalRule::Never,
         })
         .collect();
-    // An in-process run: the labels are the manifest's, which the owner
-    // installed, so there is no caller's scope to narrow them by.
+    // An in-process run uses the agent's own tool scope, its manifest's
+    // labels, whoever started it: a run a device started resolves and calls
+    // them as the gateway does, and only its calls of lmgw's admin tools are
+    // capped at the device's level (`run_caller`). A device may write an
+    // agent only at `full`, where it can also widen its own scope (the
+    // pre-merge review's P-3), so the device's tool scope is not applied
+    // here (the branch review's verification, V-6).
     let resolved = mcp_exec::resolve(state, &specs, &crate::mcp::scope::ToolScope::gateway()).await;
     if let Some((label, why)) = resolved.failed.first() {
         return Err(format!("MCP server '{label}': {why}"));
@@ -725,14 +736,6 @@ impl StepFail {
     }
 }
 
-impl Meter {
-    fn absorb(&mut self, other: Meter) {
-        self.usage.add(&other.usage);
-        self.model_calls += other.model_calls;
-        self.tool_calls += other.tool_calls;
-    }
-}
-
 /// What a turn has done so far, folded **as the events arrive**.
 ///
 /// Folding afterwards out of a collected event list is the bug this replaces:
@@ -743,7 +746,6 @@ impl Meter {
 /// place (§4.1, §4.6).
 #[derive(Debug, Default)]
 struct Seen {
-    model_calls: u32,
     tool_calls: Vec<Value>,
     text: String,
 }
@@ -751,7 +753,6 @@ struct Seen {
 impl Seen {
     fn note(&mut self, ev: &LoopEvent) {
         match ev {
-            LoopEvent::TurnStarted { .. } => self.model_calls += 1,
             LoopEvent::Text(t) => self.text.push_str(t),
             LoopEvent::CallResult {
                 name,
@@ -772,16 +773,15 @@ impl Seen {
         }
     }
 
-    /// The step this turn amounts to, whatever ended it. `usage` comes from the
-    /// runner's own tally rather than from the loop's return value, for the
-    /// same reason the rest of this does.
-    fn step(&self, value: Value, usage: Usage) -> StepOut {
+    /// The step this turn amounts to, whatever ended it. The usage, the cost
+    /// and the model calls come from the runner's own tally rather than from
+    /// the loop's return value, for the same reason the rest of this does.
+    fn step(&self, value: Value, metered: &MeteredRunner) -> StepOut {
         StepOut {
             value,
             meter: Meter {
-                usage,
-                model_calls: self.model_calls,
                 tool_calls: self.tool_calls.len() as u32,
+                ..metered.tally()
             },
             tool_calls: self.tool_calls.clone(),
             text: self.text.clone(),
@@ -806,8 +806,14 @@ impl agent::EventSink for RunSink<'_> {
     }
 }
 
+mod meter;
+use meter::Meter;
+
 mod metered;
 use metered::MeteredRunner;
+
+#[cfg(test)]
+mod meter_tests;
 
 impl Run<'_> {
     /// The manifest's sampling knobs, minus `max_tokens`: the model's context
@@ -1072,7 +1078,7 @@ impl Run<'_> {
         .await;
         // Every exit below reads the same two accumulators, so none of them can
         // report a turn as having done less than it did.
-        let step = |value: Value| sink.seen.step(value, metered.usage());
+        let step = |value: Value| sink.seen.step(value, &metered);
         let result = match outcome {
             Ok(r) => r,
             Err(e) => return Err(StepFail::with(format!("{at}: {e}"), step(Value::Null))),
@@ -1180,9 +1186,11 @@ impl Run<'_> {
         // Same race as the turn itself. This is the call the runaway happened
         // on: a reasoning model with no tools left to call and a long answer to
         // think about, which used to be stoppable only by the per-turn deadline.
+        // Metered like the loop's turns: its row's cost, however it ended.
+        let finalize = MeteredRunner::new(runner);
         let finalized = self
             .cancel()
-            .guard(runner.run_turn(&ir, self.budget.wall_clock, &mut Discard))
+            .guard(finalize.run_turn(&ir, self.budget.wall_clock, &mut Discard))
             .await;
         let Some(completion) = finalized else {
             return Ok(StepOut {
@@ -1192,6 +1200,7 @@ impl Run<'_> {
                 text,
             });
         };
+        meter.absorb(finalize.tally());
         let fail = |why: String, meter: Meter, tool_calls: Vec<Value>, text: String| {
             StepFail::with(
                 why,
@@ -1214,7 +1223,6 @@ impl Run<'_> {
                 ))
             }
         };
-        meter.note_model_call(&completion.usage);
         let reply = completion_text(&completion);
         match first_json_object(&reply) {
             Some(v) => match matches_schema(&v, schema) {
@@ -1371,8 +1379,8 @@ impl Run<'_> {
             .enumerate()
             .map(|(i, (r, f))| (i, r, f))
             .collect();
-        let (rows, meter, canceled) = self.classify_stage(phase, &item, pairs).await?;
-        self.meter.absorb(meter);
+        let staged = self.classify_stage(phase, &item, pairs).await;
+        let (rows, canceled) = self.fold_stage(staged)?;
         if canceled {
             return Ok(JobOutcome::CanceledWith(
                 self.result(phase, &rows, None, true),
@@ -1483,15 +1491,36 @@ impl Run<'_> {
         (row, fetched, meter)
     }
 
+    /// A classify stage's outcome with its meter folded into the run's either
+    /// way: an aborted stage's calls were made and spent (§4.5), and the
+    /// failed run's result reads them from here ([`Run::failure_result`]).
+    fn fold_stage(
+        &mut self,
+        staged: Result<(Vec<Row>, Meter, bool), (String, Meter)>,
+    ) -> Result<(Vec<Row>, bool), String> {
+        match staged {
+            Ok((rows, meter, canceled)) => {
+                self.meter.absorb(meter);
+                Ok((rows, canceled))
+            }
+            Err((error, meter)) => {
+                self.meter.absorb(meter);
+                Err(error)
+            }
+        }
+    }
+
     /// One structured model call per item, bounded by `concurrency`, with
-    /// §2.4's early abort in the result loop.
+    /// §2.4's early abort in the result loop. An abort hands back what the
+    /// calls it made spent, as a `StepFail` does: they were made whether or
+    /// not the run goes on (§4.5).
     async fn classify_stage(
         &self,
         phase: Phase,
         item: &BatchItem,
         pairs: Vec<(usize, Row, Value)>,
-    ) -> Result<(Vec<Row>, Meter, bool), String> {
-        let conc = self.concurrency(item)?;
+    ) -> Result<(Vec<Row>, Meter, bool), (String, Meter)> {
+        let conc = self.concurrency(item).map_err(|e| (e, Meter::default()))?;
         // Every row as listed, so a run that aborts or is cancelled still
         // reports the rows it had rather than losing the ones it never reached.
         let mut rows: Vec<Row> = pairs.iter().map(|(_, r, _)| r.clone()).collect();
@@ -1558,7 +1587,7 @@ impl Run<'_> {
             }
         }
         if let Some(why) = fatal {
-            return Err(format!("model unavailable: {why}"));
+            return Err((format!("model unavailable: {why}"), meter));
         }
         Ok((rows, meter, canceled))
     }
@@ -1637,17 +1666,19 @@ impl Run<'_> {
         // between two rows is not where Cancel is pressed (§4.1). Abandoned
         // means the row stays exactly as it was listed — no error, no fallback,
         // no model call counted — and `classify_stage` stops on the next lap.
+        // Metered like a tool loop's turn: its row's cost, however it ended,
+        // and a model call once it was answered.
+        let metered = MeteredRunner::new(runner);
         let Some(answer) = self
             .cancel()
-            .guard(runner.run_turn(&ir, self.budget.wall_clock, &mut Discard))
+            .guard(metered.run_turn(&ir, self.budget.wall_clock, &mut Discard))
             .await
         else {
             return (row, None, meter);
         };
+        let meter = metered.tally();
         match answer {
             Ok(completion) => {
-                let mut meter = meter;
-                meter.note_model_call(&completion.usage);
                 let reply = completion_text(&completion);
                 let (value, is_fallback) = parse_reply(&reply, out, &self.base.config);
                 // The whole reply, not a cut of it: the details modal shows what
@@ -1723,8 +1754,8 @@ impl Run<'_> {
             .enumerate()
             .map(|(i, (r, f))| (i, r, f))
             .collect();
-        let (redone, meter, canceled) = self.classify_stage(Phase::Rerun, &item, pairs).await?;
-        self.meter.absorb(meter);
+        let staged = self.classify_stage(Phase::Rerun, &item, pairs).await;
+        let (redone, canceled) = self.fold_stage(staged)?;
         for (slot, row) in targets.iter().zip(redone) {
             rows[*slot] = row;
         }
@@ -1822,12 +1853,12 @@ impl Run<'_> {
 
     /// The job's `result` column (§3, §4.5).
     fn result(&self, phase: Phase, rows: &[Row], applied: Option<Value>, canceled: bool) -> Value {
-        let mut out = self
-            .meter
-            .report(&self.ctx.state, &self.alias, self.route.as_ref());
         // Anything that called in over HTTP stamped with `X-Lmgw-Run` belongs
-        // to this run too (container-runtime §3.1) — one number, not two halves.
-        self.ctx.state.agent_meters.fold_into(self.ctx.id, &mut out);
+        // to this run too (container-runtime §3.1) — one number, not two
+        // halves, folded by the meter's own rule.
+        let mut meter = self.meter.clone();
+        meter.absorb(Meter::from(&self.ctx.state.agent_meters.read(self.ctx.id)));
+        let mut out = meter.report();
         let m = out.as_object_mut().expect("report is an object");
         m.insert("phase".into(), json!(phase.as_str()));
         m.insert("agent_id".into(), json!(self.agent.row.id));
@@ -2309,8 +2340,10 @@ mod tests {
 
     use super::*;
     use crate::agent::ToolOutcome;
-    use crate::ir::{FinishReason, ToolDef};
+    use crate::ir::{FinishReason, ToolDef, Usage};
     use crate::state::AppState;
+
+    mod aborted_stage;
 
     // ---- fakes -----------------------------------------------------------
     //
@@ -2624,6 +2657,7 @@ mod tests {
                 source: store::AGENT_SOURCE_AUTHORED.into(),
                 provenance: String::new(),
                 dev_url: None,
+                created_by_key: None,
                 created_at: String::new(),
                 updated_at: String::new(),
             },
@@ -2689,7 +2723,6 @@ mod tests {
                 },
                 alias: "m1".into(),
                 base,
-                route: None,
                 overlay: Mutex::new(None),
                 applied: Mutex::new(None),
                 meter: Meter::default(),
@@ -3201,6 +3234,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap();
@@ -3255,6 +3289,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap_err();
@@ -3291,6 +3326,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap();
@@ -3327,6 +3363,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap();
@@ -3377,6 +3414,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap_err();
@@ -3407,6 +3445,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap_err();
@@ -3435,6 +3474,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .expect("a cancelled apply is not a failed apply");
@@ -3477,6 +3517,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             }),
         )
         .await
@@ -3529,6 +3570,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await;
 
@@ -3585,6 +3627,7 @@ mod tests {
                 ledger: false,
                 values: Map::new(),
                 effective: None,
+                started_by: None,
             })
             .await
             .unwrap_err();

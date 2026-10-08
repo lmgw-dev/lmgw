@@ -170,6 +170,37 @@ impl PolicyGate {
         self.admit_counting(key, now_utc, false)
     }
 
+    /// One concurrency slot and nothing else, for work whose model calls
+    /// are each checked and counted as they are made ([`Self::count_call`]):
+    /// a device's Chat turn (client-apps design §1.3, review W3-8). The
+    /// windows and the expiry are the calls' to check; the slot is what
+    /// bounds how many turns run at once. `None` without a limit.
+    pub fn take_slot(
+        self: &std::sync::Arc<Self>,
+        key: &ApiKey,
+    ) -> Result<Option<ConcurrencyGuard>, GatewayError> {
+        let limit = key.policy.concurrency_limit;
+        if limit <= 0 {
+            return Ok(None);
+        }
+        let now = Instant::now();
+        let mut m = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let st = m.entry(key.id).or_insert_with(|| KeyState::new(now));
+        if st.in_flight >= limit {
+            return Err(GatewayError::KeyRate {
+                key: key.described(),
+                limit_kind: "concurrent requests",
+                limit,
+                retry_after: 1,
+            });
+        }
+        st.in_flight += 1;
+        Ok(Some(ConcurrencyGuard {
+            gate: self.clone(),
+            key_id: key.id,
+        }))
+    }
+
     fn admit_counting(
         self: &std::sync::Arc<Self>,
         key: &ApiKey,
@@ -190,7 +221,7 @@ impl PolicyGate {
         per_minute(st, key, now)?;
         if p.concurrency_limit > 0 && st.in_flight >= p.concurrency_limit {
             return Err(GatewayError::KeyRate {
-                key: key.name.clone(),
+                key: key.described(),
                 limit_kind: "concurrent requests",
                 limit: p.concurrency_limit,
                 // Concurrency clears when something finishes, not on a clock;
@@ -339,15 +370,11 @@ fn usable(key: &ApiKey, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), Ga
             "missing or invalid gateway API key",
         ));
     }
-    if let Some(exp) = key.policy.expires_at.as_deref().filter(|e| !e.is_empty()) {
-        if expired(exp, now_utc) {
-            return Err(GatewayError::KeyExpired {
-                key: key.name.clone(),
-                expired_at: exp.to_string(),
-            });
-        }
-    }
-    Ok(())
+    // One reading of the expiry for `/v1` and `Chat` (review W2-22).
+    check_expiry(key, now_utc).map_err(|expired_at| GatewayError::KeyExpired {
+        key: key.described(),
+        expired_at,
+    })
 }
 
 /// The per-minute windows, checked before a request is counted into them.
@@ -355,7 +382,7 @@ fn per_minute(st: &KeyState, key: &ApiKey, now: Instant) -> Result<(), GatewayEr
     let p = &key.policy;
     if p.rpm_limit > 0 && st.requests >= p.rpm_limit {
         return Err(GatewayError::KeyRate {
-            key: key.name.clone(),
+            key: key.described(),
             limit_kind: "requests/minute",
             limit: p.rpm_limit,
             retry_after: st.retry_after(now),
@@ -363,7 +390,7 @@ fn per_minute(st: &KeyState, key: &ApiKey, now: Instant) -> Result<(), GatewayEr
     }
     if p.tpm_limit > 0 && st.tokens >= p.tpm_limit {
         return Err(GatewayError::KeyRate {
-            key: key.name.clone(),
+            key: key.described(),
             limit_kind: "tokens/minute",
             limit: p.tpm_limit,
             retry_after: st.retry_after(now),
@@ -428,7 +455,7 @@ pub fn check_scope(
         return Ok(());
     }
     Err(GatewayError::KeyScope {
-        key: key.name.clone(),
+        key: key.described(),
         alias: alias.to_string(),
         reason: match p.scope_mode {
             crate::config::ScopeMode::Allow => {
@@ -457,7 +484,7 @@ async fn check_identity(
             let spent = gate.spend_for(db, key.id, &period).await?;
             if spent >= p.budget_micro {
                 return Err(GatewayError::KeyBudget {
-                    scope: format!("key '{}'", key.name),
+                    scope: key.described(),
                     spent: money(spent, cur),
                     budget: money(p.budget_micro, cur),
                     period: p.budget_period.as_str(),
@@ -495,17 +522,37 @@ fn money(micro: i64, currency: &str) -> String {
 /// "expires 2026-12-31" means the key works on the 31st, not that it died at
 /// midnight as the 31st began.
 fn expired(when: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match expiry_deadline(when) {
+        Some(end) => end <= now,
+        // Unparseable: refusing on a typo would lock the owner out of their
+        // own gateway over a date field. Log-worthy, not refusal-worthy.
+        None => {
+            tracing::warn!("api key expiry '{when}' is not a date — ignoring");
+            false
+        }
+    }
+}
+
+/// The instant an `expires_at` value means, in [`expired`]'s reading (a
+/// bare date is the end of that day); `None` for a value that is not a date.
+/// What a device's revocation watch sleeps until (client-apps design L17).
+pub fn expiry_deadline(when: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(when) {
-        return ts.with_timezone(&chrono::Utc) <= now;
+        return Some(ts.with_timezone(&chrono::Utc));
     }
-    if let Ok(d) = chrono::NaiveDate::parse_from_str(when, "%Y-%m-%d") {
-        let end = d.and_hms_opt(23, 59, 59).unwrap_or_default().and_utc();
-        return end <= now;
+    chrono::NaiveDate::parse_from_str(when, "%Y-%m-%d")
+        .ok()
+        .map(|d| d.and_hms_opt(23, 59, 59).unwrap_or_default().and_utc())
+}
+
+/// The key's expiry alone, as `/v1`'s gate checks it (`usable`): what the
+/// gate runs on a `Chat` route, which takes no slot and counts no window
+/// (client-apps design §1.2, L17). `Err` carries the date it expired on.
+pub fn check_expiry(key: &ApiKey, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), String> {
+    match key.policy.expires_at.as_deref().filter(|e| !e.is_empty()) {
+        Some(exp) if expired(exp, now_utc) => Err(exp.to_string()),
+        _ => Ok(()),
     }
-    // Unparseable: refusing on a typo would lock the owner out of their own
-    // gateway over a date field. Log-worthy, not refusal-worthy.
-    tracing::warn!("api key expiry '{when}' is not a date — ignoring");
-    false
 }
 
 #[cfg(test)]

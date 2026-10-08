@@ -175,7 +175,7 @@ const BUILTINS: [(&str, &str); 3] = [
     (
         SELF_ADMIN_LABEL,
         "lmgw's own state and configuration: models, upstreams, MCP servers, settings and usage \
-         (self-admin, owner only)",
+         (self-admin: the owner, and devices the owner allowed lmgw's admin tools)",
     ),
     (
         DOCS_LABEL,
@@ -188,8 +188,10 @@ const BUILTINS: [(&str, &str); 3] = [
 ];
 
 /// Every label `scope` may name, connecting nothing: the built-in toolsets
-/// that would resolve for it — `lmgw` only for an owner credential and while
-/// the self-admin mode lists any tool — then the enabled registered servers
+/// that would resolve for it — `lmgw` only for a caller that may use the
+/// admin tools (an owner credential, or a device the owner allowed them) and
+/// while the self-admin mode lists any of them for it — then the enabled
+/// registered servers
 /// and service agents it may be told about as `agg` stands (`shown_to`),
 /// by label.
 pub fn labels(snap: &Snapshot, agg: &Aggregate, scope: &ToolScope) -> Vec<LabelEntry> {

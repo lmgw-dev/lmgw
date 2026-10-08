@@ -296,7 +296,7 @@ fn args(v: Value) -> Option<Map<String, Value>> {
 
 /// The text of a tool result, and whether it was an error.
 async fn call(state: &SharedState, name: &str, v: Value) -> (String, bool) {
-    let result = docs::call(state, name, args(v), None).await.unwrap();
+    let result = docs::call(state, name, args(v), None, None).await.unwrap();
     (
         result["content"][0]["text"].as_str().unwrap().to_string(),
         result["isError"].as_bool().unwrap_or(false),

@@ -35,7 +35,7 @@ async fn a_settings_write_keeps_a_seed_drawn_since_its_read_unless_it_names_one(
         .unwrap();
     // The handler's write, from its stale copy: the drawn seed stays.
     t.voice.tts_alias = Some("my-tts".into());
-    let stored = store::update_chat_thread_settings(&state.db, &t, SeedWrite::Keep)
+    let stored = store::update_chat_thread_settings(&state.db, &t, SeedWrite::Keep, None)
         .await
         .unwrap()
         .unwrap();
@@ -51,7 +51,7 @@ async fn a_settings_write_keeps_a_seed_drawn_since_its_read_unless_it_names_one(
 
     // A patch that named the seed writes what it named, `null` included.
     t.voice.seed = None;
-    let stored = store::update_chat_thread_settings(&state.db, &t, SeedWrite::AsGiven)
+    let stored = store::update_chat_thread_settings(&state.db, &t, SeedWrite::AsGiven, None)
         .await
         .unwrap()
         .unwrap();
@@ -59,7 +59,7 @@ async fn a_settings_write_keeps_a_seed_drawn_since_its_read_unless_it_names_one(
     // No such row: nothing written, and the caller is told.
     t.id = 9999;
     assert_eq!(
-        store::update_chat_thread_settings(&state.db, &t, SeedWrite::Keep)
+        store::update_chat_thread_settings(&state.db, &t, SeedWrite::Keep, None)
             .await
             .unwrap(),
         None

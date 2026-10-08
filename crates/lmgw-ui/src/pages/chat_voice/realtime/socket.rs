@@ -23,10 +23,7 @@ use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
-use super::protocol::ErrorFacts;
-
-/// The close code of a takeover (§8.1).
-pub(crate) const TAKEN_OVER: u16 = 4000;
+use lmgw_client::realtime::{ErrorFacts, CLOSE_TAKEN_OVER as TAKEN_OVER};
 
 /// What the socket says.
 pub(crate) enum SockEvent {
@@ -157,7 +154,13 @@ pub(crate) fn close_words(
     let reason = reason.trim();
     if code == TAKEN_OVER || error.and_then(|e| e.code.as_deref()) == Some("chat_thread_taken_over")
     {
-        return "voice mode moved to another window".into();
+        // The close names who took it over — "voice mode moved to device
+        // 'phone'", "… to the dashboard" (client-apps design §1.7).
+        return if code == TAKEN_OVER && reason.starts_with("voice mode moved") {
+            reason.to_string()
+        } else {
+            "voice mode moved to another window".into()
+        };
     }
     if !opened {
         return "the voice session could not be opened: the gateway refused it or could not be \
@@ -173,10 +176,27 @@ pub(crate) fn close_words(
     };
     match code {
         1000 => with("the gateway ended the voice session"),
-        1001 => with("the gateway is shutting down"),
+        // The reason says it whole ("lmgw is stopping or restarting").
+        1001 if !reason.is_empty() => reason.to_string(),
+        1001 => "the gateway is stopping or restarting".into(),
         1006 => "the connection to lmgw was lost (the network, or the gateway stopped)".into(),
         1009 => with("a message was larger than the gateway takes"),
         1011 => with("the gateway ended the session after an error"),
+        // A revocation's reason starts with the kind's token for clients
+        // that act on it; a person reads the sentence after it (review
+        // G-11): "owner key 'dashboard' was rotated".
+        lmgw_api_types::realtime::CLOSE_REVOKED => {
+            let (_, sentence) = lmgw_api_types::realtime::RevokeKind::split_close_reason(reason);
+            if sentence.is_empty() {
+                "this key was revoked".into()
+            } else {
+                format!("the voice session ended: {sentence}")
+            }
+        }
+        // The thread is out of this key's reach; the reason says it neutrally.
+        lmgw_api_types::realtime::CLOSE_OUT_OF_REACH if !reason.is_empty() => {
+            format!("the voice session ended: {reason}")
+        }
         _ => with(&format!("the voice session ended (code {code})")),
     }
 }
@@ -190,6 +210,11 @@ mod tests {
         assert_eq!(
             close_words(4000, "voice mode moved to another window", true, None),
             "voice mode moved to another window"
+        );
+        assert_eq!(
+            close_words(4000, "voice mode moved to device 'phone'", true, None),
+            "voice mode moved to device 'phone'",
+            "the close names who took it over (client-apps §1.7)"
         );
         let taken = ErrorFacts {
             code: Some("chat_thread_taken_over".into()),
@@ -210,6 +235,25 @@ mod tests {
         assert_eq!(
             close_words(4100, "", true, None),
             "the voice session ended (code 4100)"
+        );
+        // A revocation's token is a client's, not the reader's.
+        assert_eq!(
+            close_words(
+                4003,
+                "revoked: owner key 'dashboard' was rotated",
+                true,
+                None
+            ),
+            "the voice session ended: owner key 'dashboard' was rotated"
+        );
+        assert_eq!(
+            close_words(
+                4004,
+                "chat thread 7 is out of reach for this key",
+                true,
+                None
+            ),
+            "the voice session ended: chat thread 7 is out of reach for this key"
         );
     }
 }

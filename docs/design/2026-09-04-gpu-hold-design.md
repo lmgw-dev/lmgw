@@ -120,6 +120,14 @@ revert `hold.active` after the sweep already ran. `AppState` gains
 holds it across snapshot → mutate → save → reload. Pre-existing latent bug,
 fixed here because hold is the first setting a race would visibly break.
 
+*Changed 2026-10-08:* the mutex covers snapshot → mutate → save → publish, and
+the MCP reconcile runs once it is released, in every writer (`settings_set`,
+`settings_set_full`, `hold_set`, the boot sweep of old container names). The
+reconcile can start a stdio server, and its start can take as long as a cold
+image pull: under the mutex, a tray click on the hold waited for that, and so
+did the next settings save. The publish stays under it, since the next writer
+copies the published settings and would otherwise revert the save.
+
 `reload_snapshot` also calls `vram.forget_plans()` and `mcp.reconcile()` on
 every call. A toggle is rare; accepted, and the footprint cache refills on the
 first request after release.
@@ -286,7 +294,8 @@ after the request ends.
   sweep, because one unreachable tool server would otherwise delay handing the
   GPU back by its whole connect timeout. Same hazard §5 restructured `boot`
   for; hence `AppState::publish_snapshot`, the half of `reload_snapshot` that
-  only touches this process.
+  only touches this process. *Changed 2026-10-08:* the reconcile runs after the
+  settings mutex is released (§3.1's note of this date).
   Exposed as `POST /api/op/hold_set {"active": bool}` and MCP `lmgw__hold_set`
   (`writes: true`, so self-admin `read_only` refuses it like `lmgw__container`).
 - **`VramView`** gains `hold_active: bool`, `hold_fallback_alias:

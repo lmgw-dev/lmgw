@@ -473,6 +473,7 @@ async fn a_failing_reranker_does_not_embed_the_query_again() {
     let opts = Options {
         budget_tokens: None,
         params: Some(p),
+        caller: None,
     };
     w.rerank_fails.store(true, Ordering::Relaxed);
     let before = w.embedded("embed-tgt");
@@ -538,6 +539,7 @@ async fn a_held_local_reranker_is_refused_up_front() {
     let opts = Options {
         budget_tokens: None,
         params: Some(p),
+        caller: None,
     };
     let r = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     assert!(!r.excerpts.is_empty(), "{:?}", r.notes);
@@ -579,6 +581,7 @@ async fn unscored_candidates_are_flagged_not_given_invented_scores() {
     let opts = Options {
         budget_tokens: None,
         params: Some(p),
+        caller: None,
     };
     let r = retrieve::retrieve(&state, &[id], "refund May", &opts).await;
     let skipped: Vec<_> = r.excerpts.iter().filter(|e| e.rerank_skipped).collect();

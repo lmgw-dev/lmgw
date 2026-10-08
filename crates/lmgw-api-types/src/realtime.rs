@@ -10,6 +10,126 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// The close code of a bound realtime session that another client took over
+/// by binding its thread. The close's reason names who: "voice mode moved to
+/// device 'phone'".
+pub const CLOSE_TAKEN_OVER: u16 = 4000;
+
+/// The close code of a session whose key was revoked: disabled, rotated,
+/// deleted or expired. The reason starts with the [`RevokeKind`] token,
+/// then a colon and the sentence: "device_disabled: device 'desktop' was
+/// disabled". Reconnecting with the same key is refused.
+pub const CLOSE_REVOKED: u16 = 4003;
+
+/// The close code of a bound session whose thread left the key's reach:
+/// the thread now carries what this key may not see, or what the key may
+/// see narrowed. The key is still good; the thread is gone for it. The
+/// reason is neutral and says no more: "chat thread 7 is out of reach for
+/// this key". A client asks for its current thread again.
+pub const CLOSE_OUT_OF_REACH: u16 = 4004;
+
+/// What revoked a key, as a [`CLOSE_REVOKED`] close's reason starts with it
+/// and the change feed's `revoked` event carries it (`kind`):
+///
+/// - `device_disabled`: a paired device was disabled; it may be enabled
+///   again, so it keeps its pairing;
+/// - `key_expired`: a paired device's key passed its expiry;
+/// - `key_unknown`: a paired device's key was rotated or deleted: pair the
+///   device again;
+/// - `revoked`: any other kind of key, for any of these.
+///
+/// Forward compatible like every enum a client reads: a token a newer
+/// gateway sends reads as [`RevokeKind::Unknown`], as sent. One an older
+/// gateway does not send at all — a close reason without a token, a
+/// `revoked` event without `kind` — is an empty `Unknown`, the default, so
+/// a client never reads a device's rotation as another key's revocation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub enum RevokeKind {
+    DeviceDisabled,
+    KeyExpired,
+    KeyUnknown,
+    Revoked,
+    /// A token this build does not know (a newer gateway's), as sent; empty
+    /// where the gateway sent none.
+    #[serde(untagged)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    Unknown(String),
+}
+
+impl Default for RevokeKind {
+    /// None was sent: an empty [`RevokeKind::Unknown`].
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
+impl RevokeKind {
+    /// The wire token: `device_disabled`, `key_expired`, `key_unknown`,
+    /// `revoked`, or the unknown token as sent.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::DeviceDisabled => "device_disabled",
+            Self::KeyExpired => "key_expired",
+            Self::KeyUnknown => "key_unknown",
+            Self::Revoked => "revoked",
+            Self::Unknown(v) => v,
+        }
+    }
+
+    /// The token a [`CLOSE_REVOKED`] close's reason starts with: the text
+    /// before its first colon, or the whole reason, when that is a token
+    /// (`[a-z0-9_]+`); an empty [`RevokeKind::Unknown`] for a reason without
+    /// one.
+    pub fn of_close_reason(reason: &str) -> Self {
+        Self::split_close_reason(reason).0
+    }
+
+    /// A [`CLOSE_REVOKED`] close's reason as its kind and its sentence: the
+    /// sentence after the token and its colon (empty for a bare token), or
+    /// the whole reason when it carries no token — what a person reads.
+    pub fn split_close_reason(reason: &str) -> (Self, &str) {
+        let is_token = |t: &str| {
+            !t.is_empty()
+                && t.bytes()
+                    .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+        };
+        let (token, text) = match reason.split_once(':') {
+            Some((head, rest)) if is_token(head.trim()) => (Some(head.trim()), rest.trim_start()),
+            None if is_token(reason.trim()) => (Some(reason.trim()), ""),
+            _ => (None, reason),
+        };
+        let kind = match token {
+            Some("device_disabled") => Self::DeviceDisabled,
+            Some("key_expired") => Self::KeyExpired,
+            Some("key_unknown") => Self::KeyUnknown,
+            Some("revoked") => Self::Revoked,
+            Some(other) => Self::Unknown(other.to_string()),
+            None => Self::default(),
+        };
+        (kind, text)
+    }
+}
+
+impl std::fmt::Display for RevokeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The close code of every session when the gateway stops or restarts
+/// (RFC 6455's "going away"), with the reason [`SHUTTING_DOWN`]. A client
+/// reconnects once the gateway is back.
+pub const CLOSE_GOING_AWAY: u16 = 1001;
+
+/// The reason of the [`CLOSE_GOING_AWAY`] close, and the message of a Chat
+/// stream's last `error` frame (`gateway_stopping`) when the gateway stops
+/// or restarts: one sentence for both, since a client cannot tell them
+/// apart until it reconnects.
+pub const SHUTTING_DOWN: &str = "lmgw is stopping or restarting";
+
 /// The capability tasks whose models answer `POST /v1/audio/speech`, and so
 /// can speak a realtime session's answers (§5.3): text to speech, and voice
 /// design — the voice designed from a description, which a session sends as
@@ -141,7 +261,7 @@ pub fn speech_hint_text(
         .or_else(|| takes_cues(instructions, inline_tags, tags).then(cue_hint_text))
 }
 
-/// One eagerness's row of `realtime.semantic_vad` (§6.3).
+/// One eagerness's row of `realtime.semantic_vad`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -169,37 +289,37 @@ pub struct SemanticVadTable {
     pub low: SemanticVadRow,
 }
 
-/// Mirror of `config::RealtimeSettings`, with `default_instructions` spelled
+/// The realtime settings, with `default_instructions` spelled
 /// out the way the Chat's default system prompt is: the text in force, the
 /// built-in text beside it, and whether the setting is unset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeSettings {
-    /// The chat alias a session starts on (§5.1); empty = none.
+    /// The chat alias a session starts on; empty = none.
     pub default_model: String,
-    /// Client model names mapped to lmgw aliases (§5.1, §5.2).
+    /// Client model names mapped to lmgw aliases.
     pub model_map: BTreeMap<String, String>,
-    /// The speech-to-text alias turns are transcribed with (§5.2); empty =
+    /// The speech-to-text alias turns are transcribed with; empty =
     /// the Chat's transcription model.
     pub asr_alias: String,
-    /// The text-to-speech alias a session speaks with (§5.3); empty = none.
-    /// Its task is one of [`SPEECH_TASKS`].
+    /// The text-to-speech alias a session speaks with; empty = none.
+    /// Its task is `tts` or `vdes`.
     pub tts_alias: String,
     /// The voice a session speaks with when it names none or an OpenAI
     /// built-in voice; empty = the TTS row's default preset.
     pub default_voice: String,
-    /// Client voice names mapped to voices of the TTS model (§5.3).
+    /// Client voice names mapped to voices of the TTS model.
     pub voice_map: BTreeMap<String, String>,
     /// The speech instructions a session's TTS gets while the client sends
-    /// none (WP10): a speaking style, or a voice-design row's description;
+    /// none: a speaking style, or a voice-design row's description;
     /// empty = none.
     pub speech_instructions: String,
     /// An audio response's prompt says what square brackets do for the TTS:
-    /// the sounds it can make (WP10), or the delivery cues it takes (WP9b).
+    /// the sounds it can make, or the delivery cues it takes.
     pub tag_hint: bool,
     /// The instructions a session with audio output uses while the client
-    /// gives none: the owner's own, `""` for none, or the built-in text
+    /// gives none: the configured text, `""` for none, or the built-in text
     /// while the setting is unset.
     pub default_instructions: String,
     /// The built-in voice-assistant prompt — what saving
@@ -212,7 +332,7 @@ pub struct RealtimeSettings {
     pub threshold: f64,
     pub prefix_padding_ms: u32,
     pub silence_duration_ms: u32,
-    /// `smart_turn` | `server_vad` (the escape hatch, §6.3).
+    /// `smart_turn` | `server_vad` (the escape hatch).
     pub semantic_vad_engine: String,
     pub semantic_vad: SemanticVadTable,
     pub semantic_floor_window_ms: u32,
@@ -221,7 +341,7 @@ pub struct RealtimeSettings {
     pub barge_in_guard_ms: u32,
     pub half_duplex: bool,
     pub echo_tail_ms: u32,
-    /// `words` | `duration` (§6.4).
+    /// `words` | `duration`.
     pub barge_in_check: String,
     pub backchannel_words: Vec<String>,
     /// Unicode script names; empty = every script.
@@ -327,6 +447,47 @@ pub struct RealtimeBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review G-8, G-10: a token is `[a-z0-9_]+`, bare or before a colon;
+    /// a reason without one, and a `revoked` event without `kind`, read as
+    /// an empty `Unknown` — never as another key's `revoked`.
+    #[test]
+    fn a_revocation_kind_reads_from_what_was_sent() {
+        let split = RevokeKind::split_close_reason;
+        assert_eq!(
+            split("key_unknown: device 'desk' was rotated — pair it again"),
+            (
+                RevokeKind::KeyUnknown,
+                "device 'desk' was rotated — pair it again"
+            )
+        );
+        assert_eq!(split("key_unknown"), (RevokeKind::KeyUnknown, ""));
+        assert_eq!(
+            split("key_v2: moved"),
+            (RevokeKind::Unknown("key_v2".into()), "moved")
+        );
+        assert_eq!(
+            split("device 'desk' was disabled"),
+            (
+                RevokeKind::Unknown(String::new()),
+                "device 'desk' was disabled"
+            )
+        );
+        assert_eq!(RevokeKind::default(), RevokeKind::Unknown(String::new()));
+        let older: crate::chat_feed::Revoked = serde_json::from_str(
+            r#"{"reason": "rotated", "message": "device 'desk' was rotated"}"#,
+        )
+        .unwrap();
+        assert_eq!(older.kind, RevokeKind::Unknown(String::new()));
+        let newer: crate::chat_feed::Revoked =
+            serde_json::from_str(r#"{"reason": "rotated", "message": "…", "kind": "key_unknown"}"#)
+                .unwrap();
+        assert_eq!(newer.kind, RevokeKind::KeyUnknown);
+        assert_eq!(
+            serde_json::to_value(&newer).unwrap()["kind"],
+            serde_json::json!("key_unknown")
+        );
+    }
 
     #[test]
     fn a_tag_is_a_lowercase_word_of_two_to_thirty_one_bytes() {

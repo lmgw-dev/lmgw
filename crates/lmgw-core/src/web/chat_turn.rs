@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use super::agentchat::{self, ToolPlan, ADMIN_KIND};
 use super::chat::{err_json, run_send};
 use super::chat_attach_gate::Caps;
+use super::chat_caller::Caller;
 use super::chat_live::Ticket;
 use super::chat_repo::ChatRepo;
 use super::chat_voice::ReadAloud;
@@ -49,8 +50,10 @@ pub use spoken::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnForT
 #[cfg(test)]
 mod seam_tests;
 
-/// Where a turn's frames go: its caller's channel ([`out`]).
-pub(crate) type Events = mpsc::Sender<TurnFrame>;
+/// Where a turn's frames go: its caller's channel ([`out`]), read along by
+/// the change feed ([`events`]).
+mod events;
+pub(crate) use events::Events;
 
 /// What a turn answers.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +99,16 @@ pub(super) struct Turn {
     /// a capability — attachments as notes or transcripts, a heard turn as
     /// its transcript — for its request rows (`request_logs.degraded`).
     degraded: Option<String>,
+    /// Who the turn runs as ([`TurnOpts::caller`]): every model call it
+    /// makes is checked against and charged to a device's key, and its
+    /// tools resolve under that key's scope (client-apps design L4).
+    caller: Caller,
+    /// The turn in the change feed (client-apps design §2.2): live from its
+    /// start, `turn.done` with what it saved when the worker drops it.
+    feed: crate::web::chat_feed::TurnWatch,
+    /// A device's concurrency slot ([`TurnOpts::slot`]), released when the
+    /// turn ends.
+    _slot: Option<crate::policy::ConcurrencyGuard>,
 }
 
 /// Why a turn gave up before its end.
@@ -169,6 +182,17 @@ impl Turn {
     /// The alias this turn asked for — the `done` event's `model`.
     pub(super) fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Who the turn runs as (client-apps design L4).
+    pub(super) fn caller(&self) -> &Caller {
+        &self.caller
+    }
+
+    /// Whom its rows are charged to: the caller's key, or nobody for the
+    /// owner (`internal:chat`).
+    pub(super) fn key(&self) -> crate::proxy::KeyRef {
+        self.caller.key()
     }
 
     /// This turn's hold on its thread.
@@ -291,6 +315,12 @@ impl Turn {
     /// - a stopped or failed fresh reply that produced nothing;
     /// - the write failed (the thread is gone, or the DB refused), logged.
     pub(super) async fn persist(&self, state: &AppState, r: Reply<'_>) -> Persisted {
+        let p = self.persist_reply(state, r).await;
+        self.feed.persisted(p.id);
+        p
+    }
+
+    async fn persist_reply(&self, state: &AppState, r: Reply<'_>) -> Persisted {
         let nothing = r.text.is_empty() && r.reasoning.is_empty() && r.ir_messages.is_none();
         if nothing && (r.stopped || r.failed || self.is_continue()) {
             // Nothing came: a stopped or failed reply is not an empty
@@ -339,7 +369,7 @@ impl Turn {
         let res = match &self.persist {
             Persist::Insert => {
                 self.repo
-                    .save_reply(state, &proof, self.thread_id, &reply)
+                    .save_reply(state, &proof, &self.caller, self.thread_id, &reply)
                     .await
             }
             Persist::Append {
@@ -350,7 +380,15 @@ impl Turn {
                 reply.content = format!("{content}{}", r.text);
                 reply.reasoning = format!("{reasoning}{}", r.reasoning);
                 self.repo
-                    .save_continue(state, &proof, self.thread_id, *message_id, content, &reply)
+                    .save_continue(
+                        state,
+                        &proof,
+                        &self.caller,
+                        self.thread_id,
+                        *message_id,
+                        content,
+                        &reply,
+                    )
                     .await
                     .map(|saved| match saved {
                         ContinueSave::Saved => *message_id,
@@ -415,9 +453,10 @@ pub(super) fn answered_by(snap: &Snapshot, headers: &crate::gate::GateHeaders) -
 /// [`out::sse`]): `turn` / `retrieval` / `delta` / `reasoning` / `tool` /
 /// `usage` / `stats` / `stop` / `error` / `done`. With `speak`, the reply is
 /// also read aloud as it streams, its speech frames interleaved (the speech
-/// tee, chat-voice design §6.4).
+/// tee, chat-voice design §6.4). The turn runs as `caller` ([`Turn::caller`]).
 pub(super) async fn start_turn(
     state: &SharedState,
+    caller: &Caller,
     repo: ChatRepo,
     thread: &ChatThread,
     mode: TurnMode,
@@ -440,17 +479,39 @@ pub(super) async fn start_turn(
         }
         None => (None, None),
     };
+    // A device's turn takes one of its key's concurrent-request slots for
+    // its length (review W3-8); a refusal is the key's own, before anything
+    // starts.
+    let slot = match caller
+        .turn_slot(
+            state,
+            crate::ingress::ClientProto::Chat,
+            &thread.model_alias,
+        )
+        .await
+    {
+        Ok(slot) => slot,
+        Err(e) => return err_json(e.http_status(), e.code(), e.to_string()),
+    };
     let opts = TurnOpts {
         language,
         heard,
+        caller: caller.clone(),
+        slot,
         ..TurnOpts::default()
     };
     match start_turn_into(state, repo, thread, mode, caps, tx, opts).await {
         Ok(()) => match speak {
-            Some(read) => {
-                super::chat_voice::speaking_turn(state, repo, thread, rx, (started, planned), read)
-            }
-            None => out::sse(rx),
+            Some(read) => super::chat_voice::speaking_turn(
+                state,
+                caller,
+                repo,
+                thread,
+                rx,
+                (started, planned),
+                read,
+            ),
+            None => out::sse(state, caller, rx),
         },
         Err(refused) => refused,
     }
@@ -474,7 +535,7 @@ pub(crate) async fn start_turn_into(
     thread: &ChatThread,
     mode: TurnMode,
     caps: Caps,
-    out: Events,
+    out: mpsc::Sender<TurnFrame>,
     opts: TurnOpts,
 ) -> Result<(), Response> {
     let continue_gone = || {
@@ -507,8 +568,32 @@ pub(crate) async fn start_turn_into(
     }
     // The thread's one live turn from here: the previous one is cancelled,
     // and anything that rewrites the history after this point keeps this
-    // turn's reply from being saved onto it. The history is read after.
-    let ticket = state.chat_live.begin(thread.id).await;
+    // turn's reply from being saved onto it. The history is read after. A
+    // device's turn is cancelled when the thread leaves its reach (P-8).
+    let device = opts
+        .caller
+        .is_device()
+        .then(|| opts.caller.key_id())
+        .flatten();
+    let out_of_reach = || err_json(StatusCode::NOT_FOUND, "not_found", "thread not found");
+    // The reach was checked when the thread was read. Asked again before
+    // the turn takes the thread, so a device whose level dropped since never
+    // cancels the turn running there, the owner's perhaps (the branch
+    // review's verification, V-10) ...
+    if device.is_some() && !opts.caller.sees(&state.snapshot(), thread) {
+        return Err(out_of_reach());
+    }
+    let ticket = state
+        .chat_live
+        .begin_as(thread.id, device, thread.reach_level())
+        .await;
+    // ... and after: a level that moved between that check and this
+    // registration found no turn to cancel, so it is asked again now that
+    // one would be found (review G-6).
+    if device.is_some() && !opts.caller.sees(&state.snapshot(), thread) {
+        drop(ticket);
+        return Err(out_of_reach());
+    }
     let TurnOpts {
         stop,
         voice,
@@ -518,12 +603,14 @@ pub(crate) async fn start_turn_into(
         spoken,
         user_row,
         degraded,
+        caller,
+        slot,
     } = opts;
     if let Some(began) = began {
         let _ = began.send(ticket.generation());
     }
     // Turning an archived thread over restores it (chat-archive design §1).
-    let _ = repo.wake(state, thread).await;
+    let _ = repo.wake(state, thread, &caller).await;
     let mut history = repo.messages(state, thread.id).await.unwrap_or_default();
 
     let (user_message_id, persist) = match mode {
@@ -578,7 +665,15 @@ pub(crate) async fn start_turn_into(
         mcp: thread.mcp_tools.clone(),
         kb: kb.tools,
     };
-    let tx = out;
+    // Live in the change feed from here (client-apps design §2.2): who
+    // started it, and whether it is a bound session's voice turn.
+    let feed = state.chat_live.feed().turn_started(
+        thread.id,
+        thread.reach_level(),
+        caller.named(),
+        voice.is_some(),
+    );
+    let tx = Events::new(out, feed.observer());
     if let Some(id) = user_message_id {
         let data = json!({ "user_message_id": id }).to_string();
         // Room was checked before `begin`; a closed channel is a reader
@@ -609,10 +704,21 @@ pub(crate) async fn start_turn_into(
         user_row,
         blind: Default::default(),
         degraded,
+        caller,
+        feed,
+        _slot: slot,
     };
     let state = state.clone();
     let thread = thread.clone();
+    // Held until the turn has saved what it had and written its row: a
+    // stopping server waits for it (review F-2), counted with the server
+    // its request came in on. Taken before the spawn, so a stop that comes
+    // before the task first runs still counts it.
+    let running = state
+        .stops
+        .running_at(state.stops.at_or_now(turn.caller.served_at()));
     tokio::spawn(async move {
+        let _running = running;
         // The waits before the request goes out give way the moment the turn
         // is stopped or replaced (review R1 finding 1): nothing is saved and
         // nothing more is started for a reply nobody will read.
@@ -622,8 +728,8 @@ pub(crate) async fn start_turn_into(
                     &tx,
                     chat_knowledge::run_auto(
                         &state,
-                        repo,
-                        thread.id,
+                        turn.caller(),
+                        (repo, thread.id),
                         &mut history,
                         auto,
                         turn.ticket(),
@@ -643,7 +749,8 @@ pub(crate) async fn start_turn_into(
             for (mid, atts) in &attachments {
                 let mut parts = Vec::with_capacity(atts.len());
                 for att in atts {
-                    parts.push(chat_attach::render(&state, att, caps, &thread).await);
+                    parts
+                        .push(chat_attach::render(&state, turn.caller(), att, caps, &thread).await);
                 }
                 rendered.insert(*mid, parts);
             }
@@ -841,11 +948,7 @@ fn effective_alias(state: &SharedState, alias: &str) -> String {
 
 /// Whether the thread's last reply can be continued, and why not — the
 /// thread JSON's `continue: {ok, reason}`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub(super) struct ContinueState {
-    pub ok: bool,
-    pub reason: Option<String>,
-}
+pub(super) use lmgw_api_types::chat::ContinueState;
 
 /// [`ContinueState`] for `thread` whose newest message is `last`: that is a
 /// reply, it carries no tool record, and the thread's model resolves

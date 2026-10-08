@@ -528,19 +528,25 @@ pub struct Usage {
     /// `cached_input_tokens` would be a subset of one provider's number and an
     /// addition to another's.
     pub prompt_tokens: Option<u64>,
+    /// **Total** output tokens for the turn, reasoning included. OpenAI's
+    /// `completion_tokens` and Anthropic's `output_tokens` already mean that;
+    /// Gemini reports its thoughts beside `candidatesTokenCount`, not inside
+    /// it, so the Gemini adapter adds the two.
     pub completion_tokens: Option<u64>,
     /// Subset of `prompt_tokens` served from the provider's prompt cache and
     /// billed at the (cheaper) cache-read rate. `None` = not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
     /// Subset of `prompt_tokens` written *into* the prompt cache, billed at the
-    /// (dearer) cache-write rate. Anthropic is the only dialect that reports
-    /// it; OpenAI's caching is implicit and free to write.
+    /// (dearer) cache-write rate in place of the input rate. Anthropic reports
+    /// it as `cache_creation_input_tokens`, OpenAI as
+    /// `prompt_tokens_details.cache_write_tokens` (billed at 1.25x input since
+    /// GPT-5.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
     /// Reasoning tokens, when the provider breaks them out. **Informational
-    /// only**: every provider already counts them inside `completion_tokens`,
-    /// so pricing them again would double-charge a thinking model.
+    /// only**: they are a subset of `completion_tokens`, so pricing them again
+    /// would double-charge a thinking model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
 }

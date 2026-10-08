@@ -244,7 +244,12 @@ impl Core {
             _ => None,
         };
         let b = self.bound.as_ref()?;
-        tokio::spawn(turn::run(turn::Job {
+        // Held until the turn has saved and written its row (review F-2).
+        let running = self
+            .state
+            .stops
+            .running_at(self.state.stops.at_or_now(self.ctx.served_at));
+        let job = turn::Job {
             state: self.state.clone(),
             ctx: self.ctx.clone(),
             gen,
@@ -258,7 +263,11 @@ impl Core {
             hint,
             audio,
             degraded,
-        }));
+        };
+        tokio::spawn(async move {
+            let _running = running;
+            turn::run(job).await
+        });
         Some(stop)
     }
 

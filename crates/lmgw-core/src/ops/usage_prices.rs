@@ -1,13 +1,17 @@
-//! Prices & usage (usage-analytics design §2.2, §2.3, §5)
+//! Prices & usage (usage-analytics design §2.2, §2.3, §5; billable-units
+//! design §8)
 
 use serde_json::{json, Value};
 
 use crate::catalog;
 use crate::config::PriceScope;
-use crate::pricing::{micro_to_units, PriceSource, Prices};
+use crate::pricing::micro_to_units;
 use crate::state::SharedState;
 use crate::store::{self, GroupBy, UsageFilter};
 use crate::telemetry::RequestClass;
+
+mod units;
+pub use units::PriceRates;
 
 /// Sync catalog-advertised prices into the `prices` table and report what
 /// happened, per upstream: rows written, models that advertised no usable
@@ -28,11 +32,16 @@ pub async fn prices_sync(state: &SharedState) -> Result<Value, String> {
 /// the only models there are — so a worklist built from aliases alone came
 /// back empty in exactly the case it exists for.
 ///
-/// Resolution goes through [`Snapshot::prices_for`](crate::config::Snapshot::prices_for), the same path a real
-/// request takes. A local model therefore never appears (it resolves
+/// Resolution goes through [`Snapshot::sheet_for`](crate::config::Snapshot::sheet_for), the same path a real
+/// request takes, over **every unit** (billable-units §8.2): a model is listed
+/// when no unit resolves a usable row, so a scope priced per minute of audio
+/// or per request alone is priced. A local model never appears (it resolves
 /// `free_local` — free, not unpriced), and a logged name that no longer routes
 /// anywhere — an MCP tool call, a model since deleted — is skipped rather than
-/// offered as something to price.
+/// offered as something to price. A scope whose rows its route never measures
+/// (a token row on a binary-speech alias) is priced here and still writes
+/// unpriced rows: that is a fact about its traffic, and it shows in the
+/// remainder of `lmgw__usage` and the Usage page, not on this list.
 pub async fn unpriced_models(state: &SharedState) -> Result<Vec<(String, i64)>, String> {
     let snap = state.snapshot();
     let used = store::used_model_names(&state.db)
@@ -53,9 +62,9 @@ pub async fn unpriced_models(state: &SharedState) -> Result<Vec<(String, i64)>, 
         let Ok(route) = snap.resolve(&name) else {
             continue;
         };
-        if snap
-            .prices_for(&name, Some(route.upstream.id), Some(&route.upstream_model))
-            .is_none()
+        if !snap
+            .sheet_for(&name, Some(route.upstream.id), Some(&route.upstream_model))
+            .is_priced()
         {
             out.push((name, requests));
         }
@@ -75,6 +84,7 @@ fn price_row_view(r: &crate::config::PriceRow) -> Value {
         "price_out": r.price_out,
         "price_cache_read": r.price_cache_read,
         "price_cache_write": r.price_cache_write,
+        "price": r.price,
         "source": r.source.as_str(),
         "note": r.note,
         "updated_at": r.updated_at,
@@ -102,30 +112,39 @@ pub async fn prices(state: &SharedState) -> Result<Value, String> {
         "currency": snap.settings.currency,
         "sheets": sheets,
         "unpriced_models": unpriced,
-        "hint": "A manual row always wins over a catalog row for the same scope. \
-                 lmgw__prices_sync refreshes the catalog rows; lmgw__price_set writes a \
-                 manual one (needed for upstreams like Gemini that publish no pricing at \
-                 all). unpriced_models covers configured aliases *and* the passthrough \
-                 models an expose_all upstream serves, counted from the usage rollup, and \
-                 resolves through the same order a real request uses \
-                 (Snapshot::prices_for) — so a local model never appears here: it is \
-                 free_local, not unpriced.",
+        "hint": format!(
+            "Each sheet prices one scope in one unit, and a scope may hold a row per unit \
+             (tokens plus a per-request fee, say); a request costs the sum of every unit \
+             priced for it, and is unpriced when any of those units' quantities is \
+             unknown. Units: {}. A manual row always wins over a catalog row for the same \
+             scope and unit. lmgw__prices_sync refreshes the catalog rows; lmgw__price_set \
+             writes a manual one (needed for upstreams like Gemini that publish no pricing \
+             at all). unpriced_models covers configured aliases *and* the passthrough \
+             models an expose_all upstream serves, counted from the usage rollup, and lists \
+             a model only when no unit resolves a price for it, through the same order a \
+             real request uses — so a local model never appears here: it is free_local, \
+             not unpriced.",
+            units::unit_table()
+        ),
     }))
 }
 
 /// Manual price upsert (usage-analytics design §2.2) — always wins over a
-/// catalog row for the same scope, because `store::upsert_price` keys the
-/// unique index on `(scope_kind, scope_key, source, unit)` and this always
-/// writes `source = manual`.
-#[allow(clippy::too_many_arguments)]
+/// catalog row for the same scope and unit, because `store::upsert_price`
+/// keys the unique index on `(scope_kind, scope_key, source, unit)` and this
+/// always writes `source = manual`.
+///
+/// `unit` is the row's billable unit (billable-units design §8.2), omitted
+/// for tokens: a `per_mtok` row takes the four token rates, per 1M tokens,
+/// any other unit takes `price`, per its scale. The two shapes are checked
+/// here, once for the tool and the dashboard alike. An existing row's unit is
+/// part of its key, so a call in another unit writes a second row beside it.
 pub async fn price_set(
     state: &SharedState,
     scope_kind: &str,
     scope_key: Option<&str>,
-    price_in: Option<f64>,
-    price_out: Option<f64>,
-    price_cache_read: Option<f64>,
-    price_cache_write: Option<f64>,
+    unit: Option<&str>,
+    rates: PriceRates,
     note: Option<&str>,
 ) -> Result<Value, String> {
     let scope = match scope_kind.trim() {
@@ -145,18 +164,10 @@ pub async fn price_set(
              '<upstream_id>:<upstream_model_id>' for scope_kind=upstream_model"
                 .to_string()
         })?;
-    let p = Prices {
-        price_in,
-        price_out,
-        price_cache_read,
-        price_cache_write,
-        source: PriceSource::Manual,
-    };
-    if !p.is_usable() {
-        return Err("at least one of price_in or price_out is required".to_string());
-    }
+    let unit = units::parse_unit(unit)?;
+    let (p, price) = units::manual_row(unit, rates)?;
     let note = note.map(str::trim).filter(|n| !n.is_empty());
-    store::upsert_price(&state.db, scope, scope_key, "per_mtok", &p, note)
+    store::upsert_price(&state.db, scope, scope_key, unit, &p, price, note)
         .await
         .map_err(|e| e.to_string())?;
     state.reload_snapshot().await.map_err(|e| e.to_string())?;
@@ -164,6 +175,7 @@ pub async fn price_set(
         "ok": true,
         "scope_kind": scope.as_str(),
         "scope_key": scope_key,
+        "unit": unit.as_str(),
         "source": "manual",
     }))
 }
@@ -180,20 +192,19 @@ pub async fn price_delete(state: &SharedState, id: i64) -> Result<Value, String>
 /// Format a cost total together with its unpriced remainder — the §2.3 UI
 /// obligation applied to every total this module returns, not only the ones
 /// a chart draws: "€12.84" alone would silently drop however much of the
-/// window has no price on file.
-fn money_with_unpriced(
-    cost_micro: i64,
-    unpriced_requests: i64,
-    unpriced_tokens: i64,
-    currency: &str,
-) -> String {
-    let base = format!("{:.2} {currency}", micro_to_units(cost_micro));
-    if unpriced_requests == 0 {
+/// window has no price on file. The remainder names its tokens and every
+/// quantity it holds (billable-units §8.3): "3 unpriced requests (0 tokens,
+/// 4.5 min audio)".
+fn money_with_unpriced(c: &store::UsageCell, currency: &str) -> String {
+    let base = format!("{:.2} {currency}", micro_to_units(c.cost_micro));
+    let n = c.cost_unknown_requests;
+    if n == 0 {
         return base;
     }
     format!(
-        "{base} · {unpriced_requests} unpriced request{} ({unpriced_tokens} tokens)",
-        if unpriced_requests == 1 { "" } else { "s" }
+        "{base} · {n} unpriced request{} ({})",
+        if n == 1 { "" } else { "s" },
+        units::remainder_holds(c)
     )
 }
 
@@ -212,10 +223,16 @@ fn usage_cell_view(c: &store::UsageCell, currency: &str) -> Value {
         "tokens_cached": c.tokens_cached,
         "tokens_cache_write": c.tokens_cache_write,
         "tokens_reasoning": c.tokens_reasoning,
-        "cost": money_with_unpriced(c.cost_micro, c.cost_unknown_requests, c.cost_unknown_tokens, currency),
+        "audio_in_ms": c.audio_in_ms,
+        "chars_in": c.chars_in,
+        "images_out": c.images_out,
+        "cost": money_with_unpriced(c, currency),
         "cost_micro": c.cost_micro,
         "unpriced_requests": c.cost_unknown_requests,
         "unpriced_tokens": c.cost_unknown_tokens,
+        "unpriced_audio_in_ms": c.cost_unknown_audio_in_ms,
+        "unpriced_chars_in": c.cost_unknown_chars_in,
+        "unpriced_images_out": c.cost_unknown_images_out,
         "errors": c.errors,
         "refusals": c.refusals,
         "avg_ttfb_ms": avg_ttfb_ms,
@@ -260,6 +277,12 @@ fn fold_other(mut rows: Vec<store::UsageCell>, limit: usize) -> Vec<store::Usage
         other.cache_n += r.cache_n;
         other.draft_n += r.draft_n;
         other.draft_accepted += r.draft_accepted;
+        other.audio_in_ms += r.audio_in_ms;
+        other.chars_in += r.chars_in;
+        other.images_out += r.images_out;
+        other.cost_unknown_audio_in_ms += r.cost_unknown_audio_in_ms;
+        other.cost_unknown_chars_in += r.cost_unknown_chars_in;
+        other.cost_unknown_images_out += r.cost_unknown_images_out;
     }
     rows.push(other);
     rows
@@ -377,17 +400,27 @@ pub async fn usage(
         fold_other(rows, limit)
     };
 
+    let units_since = store::units_since(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(json!({
         "from": from_key,
         "to": to_key,
         "timezone": "UTC",
         "currency": currency,
+        "units_since": units_since,
         "totals": usage_cell_view(&totals, &currency),
         "group_by": group_by.unwrap_or("alias"),
         "breakdown": breakdown.iter().map(|c| usage_cell_view(c, &currency)).collect::<Vec<_>>(),
-        "hint": "cost states its unpriced remainder inline — a total with unpriced requests \
-                 folded in understates what was actually spent, not the whole story. Sync \
-                 catalog prices with lmgw__prices_sync, or check lmgw__prices for aliases \
-                 with no price on file at all.",
+        "hint": "cost is money in every billable unit (tokens, audio minutes, characters, \
+                 images, request fees) and states its unpriced remainder inline, with the \
+                 tokens and quantities that remainder holds — a total with unpriced requests \
+                 folded in understates what was actually spent, not the whole story. \
+                 audio_in_ms, chars_in and images_out are measured quantities (input audio, \
+                 input characters, generated images), recorded since units_since; before it \
+                 they read 0 because nothing was recorded. Sync catalog prices with \
+                 lmgw__prices_sync, or check lmgw__prices for models with no price on file \
+                 at all.",
     }))
 }

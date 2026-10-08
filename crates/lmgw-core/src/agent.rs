@@ -421,12 +421,19 @@ pub trait DeltaSink: Send {
     /// flush inside an open code block would make the rest of it speakable.
     fn flush(&mut self) {}
 
-    /// What the call's request row records it cost, said once the row is
+    /// What the call's request row records it used, said once the row is
     /// written — on every path a streamed in-process call writes one,
     /// stopped and failed calls included (`proxy::stream_once_on`). A meter
     /// tallies it (`agents::batch`'s, WP11 server review n4). Nothing, by
     /// default.
     fn billed(&mut self, _usage: &crate::ir::Usage) {}
+
+    /// What the same row adds to a total, said right after [`Self::billed`]:
+    /// its cost, priced on the route that answered — a re-routed call's own,
+    /// not the caller's (billable-units design §7) — or, unpriced, a gap
+    /// where it did work ([`crate::store::NewRequestLog::row_cost`]). A run's
+    /// meter sums it ([`crate::pricing::CostTotal`]). Nothing, by default.
+    fn billed_cost(&mut self, _row: crate::pricing::RowCost) {}
 }
 
 impl<F: FnMut(&StreamDelta) + Send> DeltaSink for F {

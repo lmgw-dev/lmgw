@@ -106,6 +106,207 @@ resolved:
 *Why:* those threads drive the self-admin plane a device never holds, and their history is where
 provider keys get pasted.
 
+*Changed during the build (review W3-1), 2026-10-07, decided by the owner:* **a thread with the
+self-admin toolset (`lmgw`) among its tools is Admin Chat for L3**, and so is a folder whose
+defaults attach it (every new thread in it would). The owner's turns in such a thread run the
+self-admin tools; a device that could rewrite its prompt or history would steer them. For a device
+they do not exist: every route by id answers 404, the collections leave them out, the bind refuses
+them, and a folder route on such a folder is a 404. L5 already refuses a device writing `lmgw`.
+**Attaching the toolset takes the thread out of a device's reach at once:** a session a device
+bound to it closes with 4003 (`revoked: chat thread N is out of reach for this key`; 4004 with
+the neutral reason since §1.6's close-code note, 2026-10-07), its
+live events stop reaching devices, and a device's feed receives the thread's removal
+(`thread.deleted`), or the folder's (`folder.deleted`). Taking the toolset off brings it back as
+`thread.created` / `folder.created`. The rule is one predicate: `ChatThread::drives_self_admin`
+in Rust, `self_admin_thread!` in the store's SQL, and the same pair for folders.
+
+*Decided, 2026-10-07 (review W4-18):* the close is neutral, like every other L3 refusal. It
+said that the self-admin toolset was attached, and so did the `error` event before it; both now
+say only that the thread is out of reach for this key (`chat_thread_not_found`, then the 4003 —
+4004 since §1.6's close-code note).
+
+*Changed during the build (review W6-1), 2026-10-07, decided by the owner:* **a device's folder
+delete leaves the folder to the threads it cannot see.** Moving the Admin Chat and self-admin
+threads out of the folder (the bullet above) put them on the global retention, so a device
+undid the owner's longer folder retention for them: W5-1's lever the other way round. Now a
+device's delete takes only its own threads as it asked (`keep` moves them out, `delete`
+deletes them); when the folder holds others it stays in place holding them, its retention
+unchanged, and from then on is out of every device's reach, as a folder whose defaults attach
+the toolset is (`chat_folders.devices_hidden`, migration 0066, in `self_admin_folder!` and
+`ChatFolder::hidden_from_devices`). The device's answer is `{ok: true}` like any delete's (no
+`left`, no message), and its feed reads a delete in a delete's order: its threads, then
+`folder.deleted`; a current thread its threads took with them ends without a word to devices.
+No answer a device gets says that other threads were there. The owner sees the folder with
+them, and reads `folder.updated`. *Built as a mark, not as "a folder holding only hidden
+threads is hidden" in general:* that rule would hide a device's empty folder the moment the
+owner made an Admin Chat thread in it, and turn an attach to a folder's only thread into the
+folder's removal — both telling a device what L3 hides.
+
+*Changed during the build (the final review's F-7), 2026-10-07, decided by the owner:* **the
+owner sees the mark and can take it back.** The owner's folder list carries `devices_hidden`;
+the dashboard shows such a folder as "hidden from devices (a device deleted it)" in the list and
+in its settings, which offer "Show to devices again", confirmed with what devices will then see.
+The folder patch takes `devices_hidden: false` from the owner only (a device is refused as for
+retention, `403 forbidden`; it cannot reach a hidden folder anyway; `true` is no request, a
+device's delete is what sets it). The clear is recorded as the folder's level change and then
+each thread in it (`store::show_chat_folder_to_devices`), so a device's feed receives the folder
+as `folder.created` and its threads in it as `thread.updated`; the threads it may not see stay
+out of its reach by their own level.
+
+*Changed during the build, 2026-10-07, decided by the owner:* **a per-device switch, "may use
+lmgw's admin tools"** (`api_keys.self_admin`, migration 0067), so the owner can administer lmgw by
+voice through a desktop client. Off by default; set on the pairing form and on the Devices card
+(turning it on is confirmed with "this device can then read and change lmgw's configuration
+through the admin tools, within the self-admin level set in Settings"), owner-only through
+`key_create` / `key_set` (refused for any other key kind). L3 is a level now
+(`self_admin_thread!`, `self_admin_folder!`, `ChatThread::reach_level`,
+`ChatFolder::reach_level`): `2` an Admin Chat thread or a folder a device deleted, `1` the
+self-admin toolset attached (to a thread, or to a folder's defaults), `0` anything else. A reader
+reaches `3` (the owner), `2` (a device with the switch) or `1` (any other device) and sees what is
+below its reach (`store::AdminThreads`): with the switch a device sees and uses the threads and
+folders that carry the toolset, in text chat and in bound realtime sessions alike; Admin Chat and
+a folder a device deleted stay hidden from every device. Every place L3 is enforced reads the
+level: by-id resolution, lists and counts, search, exports, the bind, `current` and its
+rollovers (a current thread that took the toolset rolls over for a device without the switch
+only), the folder delete's mark (an allowed device's delete takes the toolset's threads as it
+asked and leaves the folder only to Admin Chat), and the feed's records and live events. The feed
+records a level in `chat_feed.admin` (0067 rewrote every earlier non-zero value to `2`: no device
+could have the switch then, and one given it later hears the toolset's threads as created). The
+switch is read from the snapshot per request; a feed reads it from the key's row when it opens.
+**Turning it off acts as attaching the toolset does:** the device's realtime sessions bound to
+such a thread close with the neutral 4003 (4004 since §1.6's close-code note;
+`LiveTurns::reach_changed`), and its feed hears the
+threads go (`thread.deleted`), its plain threads in such a folder move to none
+(`thread.updated`), and the folders go (`folder.deleted`) — a delete's order — then a fresh
+`state`. Turning it on brings them as `folder.created`, `thread.created`, `thread.updated`. The
+key write records a `device.reach` record in its own transaction; only that device's stream
+renders it, in commit order, so a device that was away hears it when it catches up (its stream
+starts at the reach before the first such record after its cursor). `hello.self_admin` says the
+switch as it is. Tool calls and request rows are the device's as for every turn of it
+(`admin-tool` rows included).
+
+*Corrected (the pre-merge review's P-1, P-4, P-5 and P-9), 2026-10-07, decided by the owner:*
+**a catch-up does not replay a switch.** Starting at the reach before the first switch record
+after the cursor, as said above, rendered the toolset's threads and folders as they are now to a
+device whose switch was off now, and an "on" met in the catch-up sent them in full before an
+"off" took them back. Now the switch is read in the transaction that reads the feed's head
+(`store::feed::bounds_and_switch`), so no switch falls between the two reads (P-5), and `hello`
+and the live state are at that reach. The catch-up — the records up to that head — renders each
+record with the narrower of the reach the device had when it was written and the reach it has
+now, and a `device.reach` record of its own met there is one `resync` carrying its cursor, not a
+replayed transition: the client reloads what it shows, at the reach it has now. A device never
+receives what it may not see now, nor what was written while it could not see it. A record read
+after the head plays the transition as above. Live frames waiting for the table are checked again
+as they go out: an event about a thread the reach no longer covers, and a `state` computed for an
+earlier reach, are dropped (P-4). `state` carries `self_admin` as `hello` does, so a connected
+client learns of a change (P-9).
+
+*Changed (the pre-merge review's P-8), 2026-10-07, decided by the owner:* **turning it off,
+Disable and expiry stop in-flight work.** A device's text turn on a thread that leaves its reach
+— its switch off, or the toolset attached — is cancelled as a delete cancels it
+(`LiveTurns::reach_changed`, `self_admin_changed`): its stream says `superseded` and nothing of it
+is saved. `devices::self_admin` reads `off` for a disabled or expired key. A device's `lmgw__*`
+call is checked against its key row as well as the snapshot (`store::device_admin_now`,
+`ScopedExecutor`), so a key write that committed is in force before the snapshot is reloaded. A
+realtime session of a device whose switch moved lists its `lmgw` label again
+(`devices::ReachMoves`): its model is offered what the device may use now. An `lmgw__*` call
+already running finishes; the next one is refused. `/mcp` serves no admin tool, so nothing there
+moves.
+
+*Changed (the pre-merge review's P-7 and P-18), 2026-10-07:* **the hidden-folder rule takes in
+the threads that stay.** A device's delete of a folder that keeps threads out of its reach
+records each thread that stays before the folder's removal, so a device that sees some of them —
+one allowed lmgw's admin tools, beside a deleter that is not — reads them in no folder, as the
+by-id reads already said. Showing the folder to devices again is written in the folder patch's
+own transaction (`ChatFolderPatch::show_to_devices`), never a second write after it.
+
+*Changed (the pre-merge review's P-3), 2026-10-07, decided by the owner:* **the switch is a level
+per device: off, read only or full** (`api_keys.self_admin` 0, 1, 2, `config::DeviceAdmin`,
+migration 0068; a row that had the switch on reads as read only, the safer level, and nothing had
+shipped). What a device's admin tools may do is its level capped by the gateway's self-admin
+level (`DeviceAdmin::capped`): a device at full under a gateway at read only reads only. Its
+reach into the toolset's threads and folders is the same at read only and at full; off takes it
+away. The administration by voice the switch was built for — a desktop client — asks at read
+only and changes things at full.
+- **Programs on this machine need full.** Every tool that has lmgw run a program as the lmgw user
+  is a write tool, so only a device whose capped level is full reaches one:
+  `lmgw__mcp_server_set` (a stdio server's command, arguments, environment and directory; a
+  container server's image and extra run arguments); `lmgw__agent_set`, `lmgw__agent_install`
+  and `lmgw__agent_run` (an agent's container and its manifest's mounts); `lmgw__build_set`,
+  `lmgw__build_run` and `lmgw__build_check_merge` (a git source's build code, a pull request's
+  included); `lmgw__local_model_set`, `lmgw__aux_model_set`, `lmgw__image_model_set` and
+  `lmgw__audio_model_set` (a row's image and flags decide what its container runs), with
+  `lmgw__container`, `lmgw__local_model_test` and `lmgw__bench_start`, which start such
+  containers, and `lmgw__container_image_pull`, which fetches their images. Below full they are
+  neither offered nor run: `selfadmin::call_capped` refuses them, naming the device's level when
+  it is the lower one, and the per-call row check refuses a level lowered before its snapshot.
+- **The pairing form and the Devices card** choose the level: off by default, read only the first
+  choice above it. Read only is confirmed with "this device can then read lmgw's configuration
+  and state", full with "this device can then change lmgw's configuration and register programs
+  that run on this machine as the lmgw user". The card shows the level beside the name.
+- **On the wire** the level is said by name: `hello.self_admin`, `state.self_admin`,
+  `KeyRow.self_admin`, and `key_create`/`key_set`'s `self_admin` (`off`, `read_only`, `full`;
+  any other kind of key is refused anything but `off`). A bound session's `admin_tools` is true
+  only for a binder at full.
+- **Everything around a switch applies to a level change.** It is a `device.reach` record
+  (`self_admin`, `self_admin_was`) in the key write's transaction. A move above off or back
+  plays as the switch did — live, the threads and folders come or go; in a catch-up, a `resync`
+  — and every move sends a fresh `state` with the level. A lowered level refuses a running turn's
+  next write call, and the device's realtime sessions list `lmgw` again at the new level.
+
+*Changed after the merge, 2026-10-07:* **the gateway's level moving plays as a device's own
+level moving**, for each device whose capped level moved with it. Before, a change of the
+self-admin level in Settings narrowed a device's calls (the mode gate reads the snapshot) but
+left its realtime sessions offering what they listed and its feed saying the old level.
+- **What the wire says, and what a device sees, is the capped level** (*decided by the owner
+  the same day*). `hello.self_admin` and `state.self_admin` say what the device's
+  admin tools may do now — its own level capped by the gateway's — and L3's reach follows the
+  same value (`devices::may_do`, `devices::reach`, `store::feed::Levels`): at a capped `off` a
+  device sees none of the toolset's threads and folders and may not attach `lmgw`
+  (`scope::self_admin_of`), whatever its own level, so L3, `hello` and `state` agree.
+  `KeyRow.self_admin` and the key ops stay the device's own level, the one the owner sets.
+- **The move is a feed record, wherever it was saved.** `store::save_settings` records a
+  `gateway.reach` record (`self_admin`, `self_admin_was`) in the save's own transaction whenever
+  the stored level moves — a first save too, measured from the default `read_only` in force
+  before it (review G-5). The gateway's
+  level is read with the feed's head (`feed::bounds_and_switch`), and every device's stream reads
+  the record in commit order as a move of its own capped level: to or from `off` it plays as the
+  per-device switch — live, the threads and folders come or go in a delete's or a create's order;
+  in a catch-up, one `resync` (the catch-up starts at the levels before the first record of each
+  kind after the cursor, `first_gateway_reach_after`) — and a fresh `state` follows where the
+  capped level moved at all. A device whose capped level did not move hears nothing, and the
+  owner's stream renders nothing of it. The published snapshot whose level moved
+  (`AppState::store_carrying_lease`) wakes the feed, closes a device's bound sessions on a thread
+  it no longer reaches with the neutral 4004 (§1.6's close-code note) and cancels its turns there
+  (`LiveTurns::reach_changed`), and raises `devices::ReachMoves`, so its realtime sessions list
+  `lmgw` again.
+- **The same in-flight rules.** A bound session's turns resolve the toolset per turn, so the
+  next one is offered the narrower set. A device's `lmgw__*` call is checked against the stored
+  self-admin level as well as its key row (`store::gateway_self_admin_now`, in
+  `ScopedExecutor`): a lowered level refuses a running turn's next write call from its commit,
+  before the snapshot is reloaded or when the reload failed. A call already running finishes.
+  *Added by the branch review's G-6:* a device's attach of `lmgw` and its change of a toolset
+  thread (L5's G-2 note) read the stored levels too; a device's text turn whose thread left its
+  reach between the read and its registration is refused at registration (`chat_turn`); and a
+  settings save whose reload fails twice lays the saved settings over the published snapshot
+  (`AppState::settings_saved`), so a moved level still closes, cancels and re-lists, and the
+  answer says the save beside the reload's error instead of failing a committed save.
+  *Changed by the branch review's verification, 2026-10-07:* `selfadmin::call_capped` itself
+  reads a device caller's own level and the gateway's from the store, so the rule holds for
+  every call a device makes, an agent run it started included, which no `ScopedExecutor`
+  wraps (V-7). The turn's reach is asked before it takes the thread as well as after, so a
+  device whose level just dropped never cancels the turn running there (V-10). The fallback
+  lays the settings over the snapshot it replaces, inside the swap, so a publish that lands
+  meanwhile is kept (V-9).
+- **`admin_tools` follows the binder's level** (review G-14): a bound session's
+  `session.lmgw.resolved.chat_thread.admin_tools` is re-read before each response, and `true`
+  only while the gateway's level is `full` and the binder's own is too (`bound::thread_ref`, one
+  rule at the bind and at every re-read); a move shows in `lmgw.chat.thread` at the next
+  response.
+- **A catch-up across both kinds of record** plays each move of the reach the device had as one
+  `resync`, as two switches of its own do (P-1): away across its own `off → read_only` and then
+  the gateway's `read_only → off` is two, though the reach it ends at is the one it left with.
+
 **L4. A turn a device starts runs as that device**, not as the gateway:
 - every model call goes through `policy_checked_call` against the device key: disabled or deleted
   key, scope, budget, expiry, rpm and tpm;
@@ -120,18 +321,157 @@ The owner's own turns are unchanged (`internal:chat`, `ToolScope::gateway()`).
 - The check requires `admits` for every tool the label exposes now: a connected server's live
   list, a built-in's namespace, a device-hosted label by L16's rule.
 - A server without a tool prefix that is not connected cannot be checked, and is refused with
-  that reason. `lmgw` is never allowed.
+  that reason. `lmgw` is never allowed. (*Changed 2026-10-07:* except to a device the owner
+  allowed lmgw's admin tools, below.)
 - **What this does not bound, stated plainly:** a device may write a thread's system prompt and
   any label within its own reach. The owner's later turns in that thread read them and run with
   the gateway's scope. A device's scope bounds the device's own turns, not the content the owner
   later reads.
+
+*Changed during the build, 2026-10-07, decided by the owner:* **a device allowed lmgw's admin
+tools** (`self_admin`, L3's note) may attach `lmgw`: its tool scope takes in the label
+(`ToolScope::of_request`), so its turns, its bound sessions' turns, an unbound realtime session
+and `/v1/responses` resolve the toolset for it, and `/v1/mcp/servers` lists it. The self-admin
+level in Settings still bounds what the tools may do (read only or full); `/mcp` still serves
+none of them. Any other device is refused as before, the refusal saying it is not allowed lmgw's
+admin tools. *Narrowed by the branch review's verification (V-4), decided 2026-10-07:* attaching
+the label to a thread or a folder's defaults needs the device's admin tools at `full` (its own
+level capped by the gateway's, as stored); below that it uses the toolset threads and folders
+the owner made (G-2's note below).
+
+*Changed (the pre-merge review's P-6), 2026-10-07, decided by the owner:* **the device's own
+patterns narrow the label.** Taking in the whole label beside the device's list (9dce3d7) let a
+switched device's `deny: lmgw__settings_set` or `allow: docs__*, lmgw__status` silently stop
+applying. The switch grants the label, and the device's tool scope narrows it where it names the
+namespace — an allow pattern that begins with `lmgw__`, or a deny pattern that can match such a
+name (`ToolScope::admits`); a list that says nothing about it leaves the label whole. An attach
+whose patterns leave none of the tools (judged against the whole catalog, since the self-admin
+level may be raised later) is refused with `tool_label_out_of_scope`, so a thread never loses
+every tool at turn time without a word. No other label is opened by this: `lmgw__` is the
+reserved namespace no registered server, bare tool or device-hosted label may hold.
+
+*Changed during the build, 2026-10-06:*
+- **Only what the device writes is checked.** An entry the thread or folder already carries,
+  unchanged, passes: a client that sends the whole list back is not refused for what the thread
+  already carries. A scope with no list of its own (`all`) admits every tool but `lmgw`'s, so nothing
+  else is listed or refused for it. An unknown label is refused without naming any other.
+- **Knowledge bases** (review W2-4, decided by the owner). A device reaches the owner's bases as
+  the `kb` toolset its tool scope bounds, never around it. A base it names needs `kb__search`
+  within its scope: a thread's `kb_ids`, a folder's default `kb_ids`, a message's `kb_refs`
+  (send, edit). Otherwise `403 tool_label_out_of_scope`, naming the base. *Corrected 2026-10-07
+  (review W3-5):* the refusal names the tool and never the base, and it comes before the check
+  that the bases exist, so a device out of the knowledge tools cannot list the bases by probing
+  ids: a known id and an unknown one answer alike. At turn time, a
+  device's auto-mode retrieval without `kb__search` is skipped, with the reason as a note in the
+  `retrieval` event, and nothing is stored; the owner's own later turn still searches. Tool mode's
+  `kb` label resolves under the device's scope like any label.
+
+*Changed during the build (review W3-4), 2026-10-07:* **aliases are bounded like labels.** The
+model and the voice's speech-to-text and text-to-speech aliases a device writes (a thread's
+settings, a new thread's model, a folder's defaults) must be within its key's alias scope, or the
+write is the key's own `403 key_scope` and nothing is written. The owner's later turns, dictation
+and read-aloud go to those aliases, and a device must not choose for them an alias it may not use
+itself. An alias the thread or folder already carries passes; a thread created in a folder whose
+defaults name a model takes that one. The check is scope only, not counted: a write is no call.
+
+*Changed during the build (review W5-1), 2026-10-07, decided by the owner:* **a folder's own
+retention is the owner's.** The sweep applies a folder's `archive_days` and `purge_days` to every
+thread in it, the Admin Chat and self-admin threads a device cannot see included, so a device
+that set them could have those threads deleted: L3's folder delete, delayed. A device that
+writes either (on create, or a patch that changes it) gets `403 forbidden` naming the fields;
+the value already stored is no write. `ongoing` stays a device's to write. The global retention
+settings say that a folder's own retention overrides them.
+
+*Changed after the merge, 2026-10-07; widened by the branch review's G-1, decided by the owner:*
+**the settings that decide who reaches lmgw are no tool's to change.** A device at `full` could
+call `lmgw__settings_set` with `auth_enabled: false` and drop every key check, its own included;
+the first fix refused it to devices only, and the review showed an agent's run, or the owner's
+own steered turn, making the same call. Now no `lmgw__*` call changes them, whoever makes it — a
+device's turn, an agent run, Admin Chat, a model on `/mcp/admin`. A call that names one is
+refused with `<setting> cannot be changed through lmgw's admin tools … Change it on Settings in
+the dashboard`, as a tool error, and nothing of the call is written, an ordinary setting beside
+it included (`selfadmin::ACCESS_SETTINGS`, `guards::access_refusal`, in `call_capped` after the
+level gate). They change on Settings, with the owner's credential (`settings_set_full`, and
+`/api/op/settings_set` for `auth_enabled`, which the tool's schema no longer lists):
+- `auth_enabled` — whether `/v1` and `/mcp` ask for a key at all;
+- `self_admin` — the gateway's self-admin level, the cap on every device's own;
+- `bind_addr` — loopback or the network;
+- `agent_origin_suffix` — the names a service agent's UI answers under, lmgw's one origin
+  setting.
+
+Read off Settings → Network & access ("where the gateway listens and who may call it"), whose
+other rows are `max_body_mb` (a size, not access) and the API keys (no setting; no tool writes
+them). CORS is fixed (permissive), so there is no CORS setting to list. The tool's description
+names the four.
+
+*The branch review's G-1, decided by the owner, 2026-10-07:* **a device's agents are its own.**
+An agent run a device starts (`lmgw__agent_run`) carries the device as its caller
+(`batch::Input::started_by`, `batch::run_caller`): its calls of the admin tools are capped at what
+the device's admin tools may do as each is made, read as stored (V-7), and are the device's rows.
+Only those calls are: the run's tools are the agent's own, its manifest's labels, resolved and
+called as the gateway's, not narrowed by the device's tool scope (*corrected by the branch
+review's verification V-6:* this note said a device could not do through an agent what it may
+not do itself, which overclaimed; a device writes and starts agents only at `full`, where P-3
+already lets it widen its own scope). A device's `lmgw__agent_set` and `lmgw__agent_install`
+record the agent as the device's (`agents.created_by_key`, migration 0069), and an existing agent
+it did not create is refused, `replace` or not (`import_inner_as`), so a device cannot turn the
+owner's agent into one that runs what it chose. *Added by the verification (V-5):* its
+`lmgw__agent_delete` deletes only an agent it created, checked in the delete itself, so a delete
+and a re-create under the same id cannot replace the owner's agent either; and the owner's write
+to an agent — a manifest replace from the dashboard or by the owner's own tool call, or the
+dashboard's config, enable, dev URL, pull or reset — adopts it (`created_by_key` back to `NULL`,
+`store::adopt_agent`), so the device may no longer replace or delete what the owner has since
+changed. Dashboard runs and the runs an agent opens itself (`started_by: None`) stay the
+gateway's.
+
+*The branch review's G-2, decided by the owner, 2026-10-07:* **a device below `full` reads a
+toolset thread and does not steer it.** The owner's turns in a thread with the self-admin
+toolset run the write tools at the gateway's level, so whoever writes the thread's prompt or
+history steers them. At what its admin tools may do being `read_only`, a device reads such a
+thread and runs turns in it (at its own level), but its write of the thread's settings (prompt,
+tools and the rest), a message edit, delete or regenerate there, and a change of a toolset
+folder's defaults are refused (`web::chat_steer`, reading the stored levels). At `full` it
+may. *Changed by the branch review's verification, 2026-10-07:* the refusal is `403
+chat_toolset_needs_full` (§1.8), its own code beside the other 403s, and says what the device
+may still do and where its level is set (V-12). A thread's settings or a folder's defaults sent
+back unchanged are no change and are not refused (V-12). The check sits in the settings write
+both routes share (`chat::apply_settings_patch`), so a change of an ongoing folder's defaults
+that would reach its current thread (L9) is refused when that thread carries the toolset, even
+in a folder that does not; `apply_to_current: false` changes the defaults alone (V-3). And a
+device below `full` does not attach the toolset at all (V-4, the attach note above), so it can
+no longer make one of the owner's plain threads, or its own, a toolset thread with a prompt it
+wrote. *Still open, and accepted:* a `read_only` device's own user messages in a toolset thread
+stay in its history, and an owner's later turn there reads them as earlier user turns. Devices
+are the owner's own paired devices, and nothing a device wrote steers the thread's settings. Two more cases remain, and each needs an action by the owner: a `read_only` device can still write the prompt of a plain thread, so if the owner later attaches `lmgw` to that thread, the owner's turns run with that prompt; and a prompt a device wrote while at `full` stays on the thread after the owner lowers the device's level or revokes it.
+
+*The branch review's G-3, decided by the owner, 2026-10-07:* **a stored credential follows its
+host.** A self-admin tool's call that moves an upstream's `base_url`, or an MCP server's `url`,
+to another address while the row holds a credential must restate it in the same call — an
+upstream's `api_key` (non-empty), an MCP server's `headers` as text (`""` sends none) — or it is
+refused and nothing changes: one call must not send the owner's provider key to a host it names.
+An upstream with extra headers, which no tool sets, moves on the dashboard only. The dashboard's
+own ops keep their behaviour. *Changed by the branch review's verification, 2026-10-07:* the
+check sits where the op applies the move, on the row it is about to write
+(`ops::credential_move`, `RowWriter::Tool`), so `enable` and `disable`, which apply `base_url`
+and `url` as `update` does, meet it, and so would any action added to that arm (V-1); a
+`headers: null` keeps the stored headers, so it restates nothing (V-2).
+
+*The branch review's G-4, 2026-10-07:* **what the guards do not bound at `full`.** The refusals
+above stop a direct change. A device at `full` still reaches the program tools (P-3): an MCP
+server's command, an agent's container, a build, a model row's flags each run as the lmgw user
+and can rewrite `lmgw.db`, these settings included, and the next reload applies it. What a device
+created outlives its revocation: its agents (with their own tokens), its MCP servers, its model
+rows, and a service agent's unauthenticated UI on lmgw's listener; Disable, Rotate and Delete of
+the device remove none of them. Only agents record their creator; the Devices card does not list
+what a device created — that needs a creator on every kind of row and is not built.
 
 **L6. The feed persists change records, not renderings.**
 - A record is `{seq, at, type, thread_id, folder_id, message_ids, by}`, written by one store
   helper inside the change's own transaction.
 - Delivery renders the current state at read time, or a tombstone for something gone.
 - Turn, voice and hold events are live-only. `hello` carries the live state.
-- The cursor is `"<epoch>:<seq>"` with an epoch per database. Catch-up streams in pages. A cursor
+- The cursor is `"<epoch>:<seq>"` with an epoch per database (*as built:* `"<epoch>:<seq>:<tag>"`,
+  the tag a random draw stored with the record; §2.3, reviews W5-4 and W6-3). Catch-up streams in pages. A cursor
   the feed cannot honour gets an explicit `resync`. Retention and keep-alive are settings.
 
 **L7. The feed carries no token deltas and no temporary threads.** Deltas belong to the send
@@ -356,6 +696,23 @@ spec pins the extension document above. G's first step re-reads it (§7.4).
 - **`principal_list`** (`mcp/scope.rs:245-278`) gives `Device` the client key's arm. The match is
   exhaustive, so the new kind cannot slip into "reaches nothing" unnoticed.
 
+*Changed during the build, 2026-10-06:*
+- **The migration is 0061**, a rebuild of `api_keys` like 0037's (a CHECK cannot be widened in
+  place). It adds `CHECK (hosts_label IS NULL OR kind = 'device')` and a unique index on
+  `hosts_label`, the backstop between two devices.
+- **`last_seen_at`** is stored as RFC 3339 UTC. It stays out of the snapshot, so a connection
+  opening or closing reloads nothing; the Keys list reads it from the table.
+- **The hosting label** is validated as §1.5 says: letters, digits, `_` and `-`, no `__`, not a
+  reserved namespace, and not a server's prefix or name. The other direction is checked as well:
+  `mcp_server_set` refuses a prefix or a name that is a device's label. The server row that a
+  grant creates (§5.2) is WP7's. Until then the grant is stored and shown, and serves nothing.
+- **The amber flag** marks a device whose alias scope is `all` and that has no budget. The tool
+  scope does not count: it bounds no spend.
+- *Corrected 2026-10-06 (review W2-8, W2-25):* "the other direction is checked as well" was not
+  true of a service agent, whose MCP row takes its id as the tool prefix: an agent whose id is a
+  device's hosting label is now refused when its tools would register. Migration 0062 makes the
+  unique index on `hosts_label` case-insensitive, as every check that writes one already was.
+
 ### 1.2 The capability
 
 `Cap::Chat` joins `principal.rs:45-52`. **Every arm of `holds` is written positively** (R16), so a
@@ -387,6 +744,19 @@ new capability is held by nobody until an arm names it:
   rate window: a feed or a host link holds no slot, and the model calls inside a turn are checked
   one by one (§1.3).
 
+*Changed during the build, 2026-10-06:*
+- **The four new rows arrive with their routes** (WP4, WP5, WP7, WP9). The route walk fails on a
+  row that no route answers. *`GET /chat/api/feed` arrived with WP4, 2026-10-07;
+  `POST /chat/api/folders/{id}/current` with WP5, the same day.*
+- **`/v1/realtime?chat_thread=` keeps its `Admin` check until WP3.** WP3 moves the bind to `Chat`
+  together with the policy check before the 101. *Done in WP3, 2026-10-06* (§1.3).
+- **The expiry check is `policy::check_expiry`**, the expiry half of `usable`. The refusal is
+  `Refusal::key_expired`, flat JSON like the rest of the Chat API: `key '<name>' expired on
+  <date>`, the same words `/v1` has always used. *Corrected 2026-10-07 (reviews W2-18, W3-13):* a
+  device is named `device '<name>'` (its name without `device:`) in every key refusal — the Chat
+  gate's, `/v1`'s, a realtime upgrade's, a call refused mid-turn — and in a tool scope's refusal
+  (`ApiKey::described`); every other key stays `key '<name>'`.
+
 ### 1.3 What a device's turn runs under (L3, L4, L5)
 
 **The caller reaches the turn.**
@@ -414,6 +784,15 @@ new capability is held by nobody until an arm names it:
   otherwise 403 `tool_label_out_of_scope`, naming the label and the tool that failed.
 
 **Admin Chat** (L3).
+- *Changed during the build (review of WP4), 2026-10-07:* a temporary thread's attachments
+  resolve their thread as a stored one's do (W4-2): the owner can attach the toolset to a
+  temporary thread too. And the flag is checked where it is acted on (W4-3): a device's user
+  message (send, edit, a dictated or spoken turn) is re-checked under the thread's lock, which
+  a settings write that may attach the toolset also holds; the bound session's journal checks
+  it before a spoken row; and a bind re-reads the thread once its binding is registered.
+  *Corrected 2026-10-07 (review W5-18):* a device turn already running when the toolset is
+  attached saves nothing either. Its save re-checks the device's reach under the thread's
+  lock, which the attach holds too, and the turn ends `not_saved`.
 - One check in `ChatRepo`'s thread resolution, used by every thread-, message- and
   attachment-addressed route: for a device principal, an admin thread is "not found".
 - The list, search (`store/chat_search.rs`), folder counts, feed and exports filter admin threads
@@ -431,6 +810,50 @@ new capability is held by nobody until an arm names it:
 
 **A resumed turn** (§6.3) runs as the principal stored with its pending calls (L13), not as the
 approver.
+
+*Changed during the build, 2026-10-06:*
+- **Every model call a device's request causes, not only its turns** (review W2-3). Dictation,
+  read-aloud of a stored reply, an attachment's transcript (at upload, on retry and in a turn)
+  each pass `policy_checked_call` against the device's key and are charged to it. `voice/warm`
+  makes no model call, but it loads and may evict for one: for a device, each stage's alias
+  passes the key's scope and budget first, and a refusal (`403 key_scope`, `key_budget`) warms
+  nothing. A read-aloud checks its TTS alias the same way before its background warm. Nothing a
+  device triggers runs as `internal:chat` with the gateway's reach.
+- **Who runs as whom.** The handlers take a `Caller` from the request's principal: an owner key
+  or the cookie is the owner, and every other key runs as itself (a device is the only other
+  one that holds `Chat`). The owner's turns keep `internal:chat`, no key check and
+  `ToolScope::gateway()`.
+- **Tools.** A device's tool loop also re-reads its scope at each call (`ScopedExecutor`), so a
+  key narrowed mid-turn stops reaching. Its tool rows, and the model calls a docs or knowledge
+  search makes, are the device's.
+- **A knowledge base's embedder and reranker** are checked per call, but a refusal degrades the
+  search instead of ending the turn: a retrieval never fails, and says what it could not do in
+  its notes (code over spec). In tool mode the refusal is the tool's error result.
+- **L3 in code.** `ChatRepo::thread_as` is the one resolution every thread-, message- and
+  attachment-addressed route uses; an attachment is reached through its thread's kind. A
+  device's delete of a thread it cannot reach is a 404, and so is Keep (`persist`) of a stored
+  one; the owner's delete stays idempotent. The walk test enumerates the routes from
+  `CAPABILITY_TABLE`.
+- **The bind's alias check is realtime §10.2's**, scope and budget with a refusal row each
+  (`policy_checked`), not `policy_checked_call`: the gate's `admit_session` has already checked
+  expiry, the rate windows and the session's concurrency slot, and counting the handshake as
+  three model calls would spend a device's rpm on a connection. The owner's bind keeps today's
+  behaviour: no alias check, and no row for a refusal.
+
+*Changed during the build (review of WP3), 2026-10-07:*
+- **Nothing is loaded before the key's check** (W3-2). A device's turn with tools passes its key's
+  scope and budget for the thread's model, not counted, before the tools are resolved and the GPU
+  admission runs; each model call of the loop is then counted as it is made. The plain turn's
+  counted check already came first.
+- **`concurrency_limit` bounds a device's turns** (W3-8). A Chat turn a device starts (send,
+  edit, regenerate, continue) holds one of its key's concurrent-request slots for its length; at
+  the limit the route answers the key's own `429 key_rate` before anything starts, with its row.
+  The slot checks no rate window: each model call of the turn is checked and counted as it is
+  made. A bound realtime session's turns run in the slot the session holds.
+- **A retrieval a device causes is the device's on every plane** (W3-3). The `kb` label attached
+  by hand searches as the device, like tool mode's; and a device's `docs__query` and `kb__search`
+  through `/mcp`, `/v1/responses` and a realtime session's tools are checked against its key and
+  charged to it. Every other key's retrieval there stays the gateway's own, as it always was.
 
 **Across devices** the last writer wins, as across windows today: a text send cancels the thread's
 running voice turn (`web/chat_live.rs:24-27`). Clients see it live (`turn.done {code:
@@ -470,6 +893,43 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
   - `key_set` takes `hosts_label` and the policy fields;
   - `key_reveal` refuses device rows (L1).
 
+*Changed during the build, 2026-10-06:*
+- **The ops' shapes.** `key_create {kind: "device"}` takes `name`, `hosts_label`, `url` and every
+  `key_set` policy field. It answers `{id, name, key, link, url, url_note}`; `url_note` is the
+  loopback note or `null`. `key_rotate` on a device takes `url` too. Rotate keeps the row: its
+  id, policy and history stay, and only the hash changes.
+- **The form is confirmed on a review step** (§11 Q1). "Pair a device" shows the scopes and the
+  budget prefilled. "Review…" then restates what the device will reach: aliases, tools, budget,
+  hosting label and address. The amber note appears there when the scope is `all` and there is
+  no budget. Only "Pair the device" mints the key.
+- **Where the card sits.** The card is a strip above the keys table, which stays the page's one
+  scroller. Past two fifths of the page the card scrolls its own rows. A device is listed only on
+  the card, so its actions are the ones that say what they end. The policy dialog edits a
+  device's scopes, budget, limits, expiry and hosting label. Disable stays on the card, behind
+  its confirmation.
+- **The link has Open and Copy**, and is shown only until the dialog closes.
+- **lmgw's own window opens the link** (found while building a desktop client). A WebKitGTK view
+  never launches a URL-scheme handler by itself, so a click on the link in lmgw's window did
+  nothing. The Tauri shell's navigation handler now passes an `lmgw-pair:` URL to `xdg-open` and
+  cancels the navigation in the webview. It does this only when the link's `key` is one of this
+  gateway's device keys: the Chat's HTML preview can navigate its own frame, and the handler
+  cannot tell a frame from the page. A forged link from a preview cannot launch a client at an
+  address of its choosing. The link is never logged.
+  - *Corrected 2026-10-06 (review W2-1):* that last claim was false. Every device holds a valid
+    device key, its own, and `Chat`, so it can put HTML in front of the owner whose preview
+    navigates to a link with its key and an address of its choosing. The shell now hands off
+    only the **exact** link `key_create` or `key_rotate` minted in this process
+    (`devices::MintedLinks`), **once**, and then forgets it; a revoke forgets it too. A link
+    replayed from a preview can then only be the owner's own fresh one, to the address the owner
+    chose. Every other `lmgw-pair:` navigation is cancelled and not handed off. The dialog's Open
+    works once; Copy stays. With no client registered for the scheme (`xdg-mime query default
+    x-scheme-handler/lmgw-pair`), nothing is opened, since a generic `xdg-open` may fall back to
+    a browser with the credential in the URL (review W2-17).
+  - A client must confirm before it replaces an existing pairing, showing the new `url`.
+  - *Decided, 2026-10-07 (review W3-15):* a minted link has no time limit. It is handed off
+    once, and forgotten when its key is rotated (the new link replaces it) or deleted, as on
+    every revocation; closing the dialog does not drop it.
+
 ### 1.5 The hosting grant [Desktop 2]
 
 - **`hosts_label`** is the label (tool prefix) the device may host tools under. It is validated like a
@@ -482,7 +942,8 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
 
 - **A disabled device** is a 401 `device_disabled`: "device '<name>' is disabled — enable it on
   Usage → Keys". It is a new arm of `principal.rs:354-369`. A rotated or deleted key matches no row,
-  so its bearer is `Anonymous`, and `Chat` routes answer 401 `session_required`.
+  so its bearer is `Anonymous`, and `Chat` routes answer 401 `session_required` (*changed
+  2026-10-07:* a device key with no row is 401 `device_key_unknown`, §1.8).
 - **Disable, Rotate, Delete and `expires_at` end every open connection** of the device at once:
   - the feed sends `event: revoked` with `{reason}`, naming which of the four happened, then
     closes;
@@ -494,6 +955,272 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
   closes. The card shows "online (feed, voice, tools)" while any is open. `last_used` stays the
   usage hour.
 
+*Changed during the build, 2026-10-06:*
+- **One signal, keyed by key id.** `devices::Revocations` holds a generation on a `watch` channel
+  and the last revocation of each key. Every connection watches it, and a lagging watcher cannot
+  miss a revocation.
+- **When the signal fires.** Disable (`key_set`), Rotate and Delete raise it after the snapshot
+  reload, so a client that reconnects at once meets the gate's refusal.
+- **A mark closes the race at the door.** A principal is resolved with the generation of that
+  moment (`RequestCtx::revocation_mark`), and its connection counts only revocations raised after
+  it. A Disable that lands between the gate and the 101 still ends the connection.
+- **Expiry has no central timer.** Each watch sleeps until its key's `expires_at` as the
+  snapshot says it now, and re-reads on every change; `key_set` re-arms the watches when
+  `expires_at` changes. Only a connection needs to know, so there is no timer task to keep
+  alive.
+- **Devices only.** The signal is raised for device rows only. A client key's realtime session
+  keeps today's behaviour: its next model call is refused.
+- **What ends today.** WP2 ends realtime sessions: the close is 4003 with the reason `revoked:
+  device '<name>' was disabled` (or `was rotated — pair it again`, `was deleted`, `expired`).
+  The feed (WP4) and the host link (WP7) watch the same signal through
+  `devices::connect(…, LinkKind::Feed | Tools)`. The same call counts them as online and stamps
+  `last_seen_at`.
+
+*Changed during the build (WP3), 2026-10-06:*
+- **Every key kind** (decided 2026-10-06: Disable means disable). Disable, Rotate and
+  Delete raise the signal for every key: a client key's realtime session closes with 4003
+  (`revoked: key 'laptop' was disabled`) like a device's, and so does an owner key's after a
+  Rotate. Only a device's connections count as online and stamp `last_seen_at`. This replaces
+  the "devices only" note above.
+- **Any path.** Every published snapshot re-arms every watch, which re-reads its key: a key
+  disabled, rotated or deleted by any path (an agent's page, a restore) ends its connections,
+  not only the ones whose op raised the signal by name.
+- **The credential, not only the row** (review W2-2). A principal carries the fingerprint of
+  the key it was resolved with (the head of its hash). `policy_checked_call` refuses a call
+  whose key was rotated since, and a watch that missed the signal sees the rotation in the
+  snapshot.
+- **Chat streams and `/mcp` watch the signal too** (review W2-2). A device's `send`,
+  `continue`, `regenerate`, `edit`, `speak` and `voice/warm` streams end with a last `error`
+  frame `{code: "revoked", message}`. The turn behind the stream hears its reader go and stops,
+  saving what it had. `/mcp`'s notification stream of any key ends without a frame (MCP has no
+  notification for it).
+- **The edges** (review W2-5 to W2-7). The mark is read before the snapshot the credential is
+  resolved against, and the `Chat` gate refuses `401 session_required` for a row gone or rotated
+  since the root resolved it. A Disable, Rotate or Delete raises the signal even when the
+  snapshot reload after it fails, and Rotate and create still hand back the minted key, with the
+  failure said beside it. *Corrected 2026-10-07 (review W3-7):* that alone left the published
+  snapshot admitting the revoked key to new requests until a reload worked, and an owner key's
+  Rotate raised nothing when its reload failed. Now a failed reload lays the write over the
+  published snapshot (the row disabled, gone, or holding the new hash), so the old credential is
+  refused at once, and an owner key's Rotate raises the signal and hands back the new value with
+  the failure said beside it, like a device's. A watch re-reads the wall clock at least every 30 s (a tokio sleep does
+  not advance across a suspend), so an expiry is honoured within that whatever the clock did.
+- **Owner keys in the Chat too** (review W3-6, 2026-10-07). An owner key's Chat streams are
+  watched like a device's: its Disable, Rotate or Delete ends its running turn, read-aloud or warm
+  with the `revoked` frame, and a tool loop stops with its reader. The dashboard's session is an
+  owner key, so its own Rotate ends the turn it has running. An in-process caller holds no key and
+  is not watched.
+- **Open links counted** (review of WP5, decision 5 on W4-25): no cap on feeds per key; the
+  Keys list's row carries `open_links` (`[{kind, count}]`) beside `online`, and the Devices
+  card prints a kind held more than once with its count ("online (feed ×3, voice)"), so a
+  client's reconnect pile-up is seen. *2026-10-07.*
+- **The plain reason** (the first client's pairing, 2026-10-07). `revoked`'s `message` and the
+  4003 close's reason are the reason alone — "device 'desktop' was disabled", "… was rotated —
+  pair it again", "chat thread 7 is out of reach for this key" — without the `revoked:` they
+  began with: the event's name and the code say it, and a client showing "revoked (…)" said it
+  twice.
+- **Closes a client can tell apart** (the desktop client, after the merge, 2026-10-07). A 4003
+  stood for a revocation and for a thread out of reach alike, so a client read the reason's words
+  and told a device to pair again when only its thread had gone. Now:
+  - **4004** (`CLOSE_OUT_OF_REACH`; `CloseKind::OutOfReach`) is the close of a bound session whose thread
+    left the key's reach — the toolset attached, the device's switched off, or the gateway's
+    level set to off (L3's notes), and a device's session whose thread was deleted (the note
+    below the table). The reason stays neutral, "chat thread 7 is out of reach for
+    this key"; the key is still good, and the client asks for its current thread again.
+  - **4003 is a revocation only**, and its reason starts with a stable token, a colon, then the
+    sentence (`devices::close_reason`, `RevokeReason::kind`): `device_disabled` (a paired
+    device disabled), `key_expired` (a paired device's key expired), `key_unknown` (a paired
+    device's key rotated or deleted, not told apart: pair again, as the next request's `401
+    device_key_unknown` says) and `revoked` for every other kind of key, whatever happened —
+    "device_disabled: device 'desktop' was disabled". The cut to 123 bytes keeps the token. This
+    takes back "the plain reason" above for the close; the feed's `message` stays plain.
+  - **The feed's `revoked` carries the same token** as `kind`, beside `reason` and `message`
+    (`RevokeKind`, with `Unknown` for a newer gateway's token; an older gateway's event without
+    one reads as an empty `Unknown`, as a close reason without a token does — review G-8; the
+    served schema states no default for it, since the empty `Unknown` is no value of its enum,
+    and its description says an event without it is of an unknown kind — the branch review's
+    verification V-8). A Chat stream's last `error {code: "revoked"}` frame carries the same
+    `kind` (review G-7).
+  - **`lmgw-client` reads it**: `realtime::close_kind(code, reason)` gives `CloseKind` —
+    `Revoked {kind}`, `OutOfReach`, `ShuttingDown` (1001), `TakenOver` (4000), `Other {code}`
+    for any code outside 4000–4999 but 1001, and `Unknown {code}` for an application code this
+    build does not know (*corrected by review G-10:* a token is `[a-z0-9_]+`, bare or before the
+    colon)
+    — and the crate re-exports the four codes. A 4003 without a token is an empty
+    `RevokeKind::Unknown`.
+
+  | Close | Token / reason | Meaning for the client |
+  |---|---|---|
+  | 1001 | "lmgw is stopping or restarting" | reconnect once it is back |
+  | 4000 | "voice mode moved to …" | another client took the thread |
+  | 4003 | `device_disabled: …` | wait: the device may be enabled again |
+  | 4003 | `key_expired: …` | wait: the expiry may be moved |
+  | 4003 | `key_unknown: …` | pair the device again |
+  | 4003 | `revoked: …` | any other key's revocation |
+  | 4004 | "chat thread N is out of reach for this key" | ask for the current thread again |
+
+  *Changed after the desktop client's live check, 2026-10-07 (the deleted thread decided by
+  the owner):*
+  - **The 4004 follows the write that moved the thread.** An attach of the toolset closed the
+    device's session before the attach was committed, and for a few milliseconds after the close
+    the client's next reads still found the old reach: `POST /chat/api/folders/{id}/current`
+    named the thread it had just lost, and a new bind to it was accepted and closed with a second
+    4004, or refused. Now the close is raised only once the write is committed, and for a level
+    once the snapshot that says it is published (`LiveTurns::self_admin_changed`,
+    `LiveTurns::reach_changed`, `LiveTurns::discarded`; `chat_live::voice`'s module doc).
+    Before its commit an attach only stops the thread's live events reaching the devices that
+    will not see it (`LiveTurns::self_admin_attaching`). A level's write commits its feed record
+    before it publishes the snapshot, so a device's stream that reads the record in between holds
+    it until the snapshot says its level — the writer wakes the feed after its publish — for up
+    to about two keep-alives (one from the record's first read, found at the tick after it),
+    after which the log says so and the record plays (`FeedStream::snapshot_behind`). So a client that reads on the 4004 or on the feed's
+    `thread.deleted` — `current`, the bind, the thread by id, its feed — finds the new reach:
+    `current` starts a new thread, and the bind to it stays open. The rollover takes the write
+    lock up front (`store::create_current_thread`): it meets the closing session's last writes,
+    and a deferred transaction was at times refused "database is locked" at once.
+  - **A deleted thread ends a device's session as one out of its reach.** The delete left the
+    session bound until it closed by itself, and its next spoken turn was told "chat thread N is
+    gone (deleted …)": a device told a deletion from a thread hidden from it, which review W4-18
+    ruled out. Now, once the delete is committed — the thread's own, its folder's with
+    `threads: "delete"`, or the sweep's purge — a device's session on it sends the same `error`
+    (`chat_thread_not_found`, "chat thread N is out of reach for this key, and this session
+    closes") and closes with the same 4004 and reason. The owner's session on a deleted thread
+    is left alone, as before. A folder a device's delete hides from devices (`devices_hidden`)
+    takes no thread out of their reach by itself: the threads that delete took close as deleted.
+  - **And so does everything else a device hears of it** (the same day, decided by the owner). Two more places told a deleted thread from a hidden one. A device's feed heard
+    `voice.ended {reason: "thread_gone"}` for a deleted thread, and nothing for a hidden one; now
+    a thread being deleted has its live turns and bound sessions reported to the owner alone from
+    the delete on, `turn.done` and `voice.ended` included, as an attach does for a hidden thread
+    (`LiveFeed::thread_going`, Admin Chat's level; a delete that fails takes it back), and every
+    device's stream sends a fresh `state` without them, so `hello` and `state` on a resume leave
+    them out too. A device hears `thread.deleted` and that `state`, for a delete as for a hide;
+    the owner's `voice.ended` still says `thread_gone`. And a spoken turn in flight before the
+    close was told "chat thread N is gone (deleted …)" for a deleted thread and
+    `chat_history_write_failed` for a hidden one; for a device both are now
+    `chat_thread_not_found` with the close's words, "chat thread N is out of reach for this key"
+    (`realtime::thread::not_there`: the journal's user entry and the bound turn). The owner's
+    turn still hears that the thread is gone.
+  - **The delete's own order** (the branch review, the same day). A delete did more than narrow
+    the live events before its commit: it cancelled a device's turn on the thread and moved its
+    history's generation, so a device in voice mode heard its response fail while the thread still
+    read as there. Now a delete does before its commit what an attach does — the thread's live
+    events leave every device's reach (`LiveTurns::discard`) — and the rest under the thread's
+    lock once it committed: the generation moves, the turn is cancelled, the session's
+    `voice.ended` says `thread_gone`, a device's session closes (`LiveTurns::discarded`). A delete
+    that fails only takes the narrowing back. A turn or a session registered from a read made
+    before the delete is reported to the owner alone too, and a session's end says `thread_gone`
+    (`going` beside `flipped` in the live feed, kept until an hourly prune finds it unused
+    twice); a bind of a thread deleted meanwhile is refused 404 for the owner too. A folder
+    delete ends the threads the delete took (`store::delete_chat_folder_ids`), not the ones it
+    read before taking their locks: one a move took out goes back, one a move brought in goes as
+    a purged one does. The sweep's purge cancels the purged threads' turns and closes a device's
+    sessions before the feed is woken (`store::sweep_chat_threads_ids`, `LiveTurns::purged`). A
+    device's feed opened between a level's commit and its publish reads its levels once the
+    snapshot says them too, for up to one keep-alive (`chat_feed::levels_as_published`). A
+    device's spoken turn dropped on a deleted or hidden thread is said in the log, which names
+    the cause.
+
+  *Changed after the branch review's re-verification, 2026-10-08:*
+  - **A level plays at the publish that says it.** The write of a device's level woke the feed,
+    closed the sessions out of reach and refreshed the devices' `state` only after its MCP
+    reconcile, which one unreachable autostart server holds for its connect timeout; a device's
+    stream holding the level's record, a feed opened in between, and the 4004 all waited for it.
+    Now the publish that moves a device's level, or the gateway's, does all of that
+    (`AppState::publish_over`), and the reconcile comes last (`ops::key_set`, as
+    `ops::hold_set` splits them). A reload that loaded before a write committed no longer
+    publishes over one that loaded after it (`SnapshotLoads`): an older snapshot never takes a
+    published level back.
+  - **A feed opened before the publish starts at once.** It waited for its levels with no status
+    and no byte, for up to one keep-alive (15 s by default); a client that waits less for
+    `hello` (the desktop client's `lmgw.timeout_s`, 10 s) gave up, and dropping the request
+    cancelled the warning meant to say why. Now the response starts with a keep-alive comment,
+    the log says the wait as it begins, and `hello` follows once the snapshot says the levels,
+    or after one keep-alive at the store's, as before (`chat_feed::opening`, in place of
+    `levels_as_published`). `hello` is still the first event (§2.1).
+  - **A delete or an attach runs to its end.** A client that hung up between the write's first
+    step and its commit left a thread hidden from devices after the commit rolled back, or a
+    deleted or attached thread with a device's session still bound. The write now runs on a
+    task of its own, with its locks, and the request waits for it (`chat_live::to_its_end`).
+    Two deletes of one thread, its own and its folder's, no longer undo each other's
+    narrowing: a failed one takes nothing back while the other is under way, or once it
+    committed.
+  - **The owner's bind of a thread it cannot read again** is a 500 `internal`, not the 404 of a
+    thread that is not there; a thread deleted meanwhile is still the 404.
+
+  *Changed after the last review's follow-ups, 2026-10-08:*
+  - **A malformed settings blob opens a device's feed at once.** The snapshot loader reads a
+    stored blob that does not parse as the defaults, and the feed read the gateway's level as
+    the one field in it: the two disagreed for good, and every device's feed waited a full
+    keep-alive before it opened. A blob that was not JSON failed the open. The feed now reads
+    the level through the snapshot's own parse (`store::settings_from_blob`).
+  - **A panic inside a delete or an attach takes its narrowing back.** The thread stayed out of
+    the devices' live view until the gateway restarted. The narrowing is a guard now, given
+    back unless the step after the commit ran (`chat_live::Going`, `chat::Attaching`).
+  - **The MCP reconcile after a level's publish runs to its end** when its request is dropped,
+    and a server's connect handshake is bounded by its `timeout_ms` (the MCP gateway design's
+    §9 note of this date).
+- **A stop ends every long-lived connection** (the first client's pairing, 2026-10-07; the
+  heading said "with a word", which the streams that end without a frame contradicted, final
+  review F-16). axum's graceful shutdown waits for open connections, and an open feed kept a
+  headless gateway's Ctrl-C waiting for as long as its client stayed; the process that then
+  exited reset a bound session mid-close (1006). Every long-lived stream now ends at its
+  server's stop (`server::Stops`, a generation, so a restart's next server's streams run on):
+  the feed, `/mcp`'s notification stream and `/api/events` end without a frame, a Chat stream
+  with a last `error {code: "gateway_stopping"}`, and a realtime session closes with 1001
+  (`lmgw-api-types::realtime::CLOSE_GOING_AWAY`, `SHUTTING_DOWN`; the reason reads "lmgw is
+  stopping or restarting" since F-16, one sentence for a quit and a restart, which a client
+  cannot tell apart until it reconnects). The server returns only once its sessions have
+  ended (their close sent, a bound thread's last turns written).
+
+  *Changed (the final review's F-1 to F-4), 2026-10-07:*
+  - **Every quit of the tray app stops the server first** (F-1). The tray's Quit, an update's
+    restart (`request_restart`) and SIGTERM/Ctrl-C all ask Tauri to exit, and the first exit
+    request runs one sequence (`src-tauri gateway::quit`): the server's stop (its streams end,
+    its sessions close with 1001), the wait until `serve` has returned, at most `QUIT_WITHIN`
+    (the server's own bound and 2 s) and said in the log when that runs out, and only then the
+    model containers' stop (`lifecycle::shutdown`); then the exit. Before, Quit force-stopped
+    the containers under the running sessions and turns, and the server was abandoned as the
+    process died. Tested against a real server (`gateway::tests`) and, live, in the debug shell
+    (`scripts/shell-check.py --only quit`: SIGTERM with the feed open; the feed ends whole, the
+    log's steps come in order, exit 0).
+  - **A stop waits for its turns** (F-2). A Chat turn, a realtime response's model call, a bound
+    voice turn and a request row's write each hold a `Running` (`Stops::running_at`,
+    `Stops::writing`): a cut turn's partial save and its row are written before the server
+    returns, and a headless Ctrl-C no longer loses them.
+  - **A request carries its server's generation from its arrival** (F-3, `ServedAt`, put on
+    every request by `serve_app`, `RequestCtx::served_at`): a feed still reading its catch-up,
+    or an upgrade still in its handshake, when the stop comes ends with the others; a session's
+    `Running` is taken in the handshake, before the 101.
+  - **One bound for the whole stop** (F-4, `STOP_WITHIN`, 10 s): the drain and the wait for
+    sessions and turns share it, and what was still in flight is named in the log
+    (`Stops::open_requests`, counted per request by `serve_app`). A response that ends neither
+    by itself nor at the stop — a `/v1` stream whose upstream stopped answering — no longer
+    holds it. The agent proxy's streamed bodies end at the stop too, and so does its WebSocket
+    tunnel (both its sockets are dropped: a byte pipe has no frame to say why); the exemption
+    this note named is gone. A second Ctrl-C or SIGTERM exits at once, said in the log, in the
+    headless binary and in the tray app.
+
+  *Corrected (the pre-merge review's P-2, P-11, P-13, P-14), 2026-10-07, decided by the owner:*
+  - **An update's restart runs the sequence before it restarts.** The F-1 note above is wrong
+    for it: Tauri ignores `prevent_exit` for a restart's exit code, so an exit request could
+    not hold a restart for the sequence, and the containers stopped beside a server still
+    stopping. The updater now runs the quit sequence itself (`gateway::quit_then` with
+    `AfterQuit::Restart`) and asks for the restart once it has run; the exit request then finds
+    the quit done. An exit that goes through while a quit runs waits for it in `RunEvent::Exit`
+    (`Gateway::wait_quit`, bounded by `EXIT_WAITS_WITHIN`, said in the log when it runs out),
+    never a second containers' stop beside it. Tested with the seam F-1's quit is tested with:
+    the server stops and is waited for, the containers stop, then the restart.
+  - **A quit is seen, and always ends.** The window hides, and the tray's tooltip, status line
+    and Quit item ("Quitting…", greyed out) say it while the sequence runs; a Quit asked for again
+    is logged. The exit or restart runs from a guard, so a panic inside the sequence still ends
+    the app, marked failed, and the exit stops the containers then.
+  - The quit's log says whether the gateway returned; a second signal exits with that signal's
+    status, 143 for SIGTERM and 130 for Ctrl-C.
+- **Pushed, not polled.** `/api/events` carries a `keys` frame (`{key_id, what}`: `link`,
+  `disabled`, `rotated`, `deleted`) when a device's connection opens or closes and when a key is
+  revoked. The Keys page refetches on it, and on requests landing (at most every 15 s); it
+  polls nothing.
+
 ### 1.7 Naming the binder
 
 - **`LiveTurns::bind_voice`** (`web/chat_live/voice.rs:53-76`) takes the binder's description and
@@ -503,20 +1230,59 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
   moved to device 'phone'", or "…to the dashboard" for an owner session.
 - **The feed's `voice.ended`** carries the same `by`.
 
+*Built in WP3, 2026-10-06:* the bind passes its caller's name to `bind_voice`, and the session it
+takes over says it in `chat_thread_taken_over` and in the 4000 close ("voice mode moved to device
+'phone'", "voice mode moved to the dashboard"). The dashboard's voice panel shows the close's
+reason.
+
+*Added (the first client's review), 2026-10-07:* **a bind that never takes over**,
+`/v1/realtime?chat_thread=<id>&takeover=never`. While another session is bound to the thread
+the upgrade is refused, 409 `chat_thread_bound` ("voice is in use on device 'phone'", the
+takeover's binder naming), and nothing is taken over; without the parameter a bind takes over
+as before. The check and the registration share the thread slot's lock
+(`LiveTurns::bind_voice_unless_bound`). A client uses it for its own automatic rebinds after a
+rollover, so it never takes the voice from a phone that followed the same rollover; a user's
+explicit press binds without it and wins. `lmgw-client`: `requests::realtime_unless_bound`.
+
+*Changed (the final review's F-5, F-15), 2026-10-07:* two holders are not "another session":
+one bound with the same key (the device's own session, after a dropped link the gateway has not
+seen yet), and one whose session is already ending (it left its loop: after its 1001, a
+revocation or a close, while it writes its last turns; `VoiceBinding::closing`). `takeover=never`
+takes such a binding over, its fence kept, so the new journal still writes after the old one
+drained; a client's automatic rebind is never refused in its own name. And a refusal re-reads
+the thread first: one that left the binder's reach meanwhile is the 404, never "in use".
+
 ### 1.8 Refusals
 
 | HTTP / close | `code` | When |
 |---|---|---|
 | 401 | `device_disabled` | the matched device row is disabled |
 | 401 | `key_expired` | a device key past `expires_at`, on any route |
-| 401 | `session_required` | a rotated or deleted device key (it matches no row) |
+| 401 | `device_key_unknown` | a rotated or deleted device key (it matches no row; *changed 2026-10-07*, was `session_required`) |
 | 403 | `forbidden` | a device on an `Admin` route, or creating an admin thread |
 | 403 | `tool_label_out_of_scope` | a device writes a label L5 refuses |
+| 403 | `chat_toolset_needs_full` | a device whose admin tools are below `full` (its own level capped by the gateway's) attaches the self-admin toolset, or changes the settings or messages of a thread that carries it or the defaults of a folder that does, an ongoing folder's change reaching such a current thread included (L5's notes; *the branch review's verification, 2026-10-07*). The same settings sent back are no change |
 | 403 | `host_not_granted` | `GET /mcp/host` without a hosting grant, or from a non-device principal |
 | 403 | `cross_origin_refused` | `GET /mcp/host` with an `Origin` header (§5.6) |
-| 404 | `not_found` / `chat_thread_not_found` | a device reaching an admin thread by any id (L3) |
+| 404 | `not_found` / `chat_thread_not_found` | a device reaching an admin thread by any id (L3); a thread or folder with the self-admin toolset for a device not allowed lmgw's admin tools (*2026-10-07*) |
 | 409 | `folder_no_model` | `current` on a folder whose defaults name no model (§3.3) |
-| close 4003 | `revoked` | §1.6 |
+| 409 | `not_ongoing` | `current` on a folder that is not an ongoing conversation (§3.2) |
+| close 4003 | `device_disabled` / `key_expired` / `key_unknown` / `revoked` (the reason's leading token) | a revocation (§1.6; the tokens since the desktop client's note, 2026-10-07) |
+| close 4004 | — (neutral reason, no token) | a bound thread left the key's reach (L3; was a 4003 until 2026-10-07) |
+
+*Changed during the build, 2026-10-06:* a device's Chat SSE stream ends with an `error` frame
+`{code: "revoked"}` (§1.6); `401 key_expired` and the 4003 close now apply to every key (§1.6). A
+device's bind, dictation and warm refuse an alias outside its key's scope or budget with the
+key's own `403 key_scope` / `key_budget`, as `/v1` does.
+
+*Changed during the build (the first client's pairing), 2026-10-07:* **a device key that matches
+no row is `401 device_key_unknown`**, "this device key is no longer valid (rotated or deleted) —
+pair the device again", on every route but a public one, `/v1` and the realtime handshake in
+their own shape. The key's prefix (`lmgw-device-`) says it was a device's even with no row
+behind it; `session_required` gave a device the dashboard's login hint. It does not say which of
+the two happened. The `Chat` gate gives the same refusal to a device whose row went or was
+rotated between the root's resolution and the gate (W2-5). The client crate reads it with
+`requests::key_refused` (`PairAgain`, beside `Disabled` and `Expired`).
 
 ### 1.9 Documents A updates
 
@@ -526,13 +1292,29 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
 - the labs' doc comment ("no key of their own", `web/mod.rs:147-149`);
 - principals §3.2's table, with a pointer to this record.
 
+*Changed during the build, 2026-10-06:* WP2 updated the documents that became true with it:
+- the labs' doc comment: the Chat routes are their own router, `Chat`; the labs stay `Admin`;
+- principals §3.1 and §3.2, with a pointer to this record;
+- the `/v1/realtime` `DocRoute`, for the 4003 close.
+
+The binding's documents describe the bind's capability and checks, which WP3 changes. They are
+updated with it:
+- the `DocRoute`'s "dashboard only";
+- the `bind.rs` table;
+- chat-voice §8.1;
+- chat-voice §8.8 and NIT 12.
+
+*Done in WP3, 2026-10-06:* all four, and `RealtimeQuery::chat_thread`'s own doc, which the
+`DocRoute` derives its parameter from.
+
 ## 2. The Chat change feed (B) [Desktop 1, Android]
 
 ### 2.1 Route
 
 `GET /chat/api/feed`, SSE, `Chat` capability.
 - **Resuming:** `?since=<cursor>`, or the standard `Last-Event-ID` header. A cursor is
-  `"<epoch>:<seq>"`. With neither, the feed starts at "now".
+  `"<epoch>:<seq>"` (*as built:* `"<epoch>:<seq>:<tag>"`, §2.3). With neither, the feed starts at
+  "now".
 - **A stored event** is an SSE record with `id: <cursor>`, `event: <type>`, `data: <json>`. Live-only
   events carry no `id`.
 - **The first record is `hello`:**
@@ -549,6 +1331,25 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
   state now.
 - **Keep-alive comments** every `chat_feed_keepalive_s` (a setting in Settings → Chat, default 15,
   named in `hello`), so a client derives its dead-link timeout from a stated value.
+
+*Changed during the build (WP4), 2026-10-07:*
+- **`Last-Event-ID` wins over `?since=`.** A browser's `EventSource` reconnects with the URL it
+  opened, so its `since` is the old cursor and the header the new one. A value that is no cursor
+  is a 400 `bad_request` naming the shape; a cursor the feed cannot honour is §2.4's `resync`.
+- **`hello` comes first, always**, then the `resync` a cursor may owe. `hello.cursor` is where the
+  stream continues: the cursor given, or the newest record when there was none or it got a
+  `resync`. *Changed 2026-10-08 (§1.6's close-code note):* a device's feed opened while its
+  admin-tools level is being published starts with a keep-alive comment, and `hello` follows
+  within one keep-alive. `hello` is still the first event.
+- **`hello` also carries `retention_days`** (`chat_feed_retention_days`), so a client knows how
+  long it may stay away. `principal` is `{kind: "owner" | "device", name}`: the dashboard and every
+  owner key are `{owner, dashboard}` (the key's name without `owner:`), a device is its name without
+  `device:`.
+- **The keep-alive interval is the stream's own**: a stream keeps the value it opened with and
+  announced, and a changed setting applies to feeds opened after it.
+- **Documented now.** The route has a `DocRoute` under a new "Chat" tag; its events are typed in
+  `lmgw-api-types::chat_feed`. The rest of the Chat API stays excluded until WP6. *WP6 documented
+  the desktop subset beside it (§4.3).*
 
 ### 2.2 Events
 
@@ -587,6 +1388,34 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
 
 `by` is the principal's description (§1.7).
 
+*Changed during the build (WP4), 2026-10-07:*
+- **Where `by` goes.** A stored event's data is the rendering with `by` beside its fields (`null`
+  for the gateway's own changes: the sweep, a voice seed drawn on first use). A thread or folder
+  gone by delivery renders as `{thread_id | folder_id, deleted: true, by}`; `thread.deleted` and
+  `folder.deleted` use the same shape, so they gain `deleted: true`.
+- **What writes `thread.*`, as built:** create (the Chat's, a folder's, a catalog agent's "Open in
+  Chat"), Keep, settings, the title (named from the first send, or from a spoken turn), pin, archive
+  and restore (a send into an archived thread included), move, delete, a folder's delete (its
+  threads deleted or taken out), an agent's delete (its threads unlinked), the voice seed drawn on
+  first use, and the sweep.
+- **A folder's counts** move with its threads, and no `folder.updated` is recorded for that: a
+  client follows `thread.*` (whose rendering carries `folder_id`). A `folder.*` event renders the
+  counts as they are at delivery, for the reader (L3).
+- **A thread's `updated_at`** also moves with every message, without a record: that is
+  `message.added` (WP10), which records in the same message writes.
+- **`turn.done`:** `message_id` is `null` when the turn saved nothing; `code` is the code of the
+  last `error` frame the turn sent that carried one (`superseded`, `gpu_hold`, `not_saved`, …), so
+  a tool label reported without a code does not count.
+- **`voice.ended`:** `by` names who bound the session that ended, as its `voice.bound` did.
+  `taken_over_by` names the binder that took it over, for `reason: "taken_over"` (§1.7's "the same
+  `by`"; one field per binder keeps both readable). `thread_gone` means the thread was deleted
+  while the session was bound: the session itself stays bound until it closes, as a delete has
+  always left it, and its `voice.ended` says why. *Changed 2026-10-07 (§1.6's close-code
+  note):* a device's session closes once the delete is committed, as one whose thread left its
+  reach; the owner's stays bound. A deleted thread's `voice.ended` and `turn.done` reach the
+  owner alone, as a hidden thread's do: a device hears `thread.deleted`.
+- **Temporary threads** have no live events either (L7): no `turn.*`, no `voice.*`.
+
 ### 2.3 Storage and delivery (L6)
 
 - **Stored events are change records:** `chat_feed (seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT,
@@ -611,6 +1440,47 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
 - **Retention:** `chat_feed_retention_days` (Settings → Chat, default 7, `0` keeps all), pruned on
   the hourly maintenance tick that runs the Chat sweep (`server.rs:687-702`).
 
+*Changed during the build (WP4), 2026-10-07:*
+- **The table** (migration 0063) adds two columns to the record. `admin` is the thread's kind at
+  the write: a kind never changes, and a deleted thread can no longer be read at delivery, so a
+  device's feed needs it to leave out an Admin Chat thread's `thread.deleted`. `detail` holds an
+  event's facts that are not state (`folder.current`'s previous thread and reason). `at` is
+  `datetime('now')`, like the Chat tables. `seq` is `AUTOINCREMENT`, so a number is never handed out
+  twice.
+- **The meta row** holds the epoch and `pruned_through`. Retention deletes a prefix of the
+  sequence and moves `pruned_through`, and the newest number is SQLite's own counter for the table.
+  A cursor `c` is whole while `pruned_through <= c <= newest`.
+- **Same transaction, everywhere.** Every write that records does so in its own transaction:
+  thread create (every path), Keep, settings, title, pin (with its restore), archive, restore,
+  move, delete, the folder writes (a folder's delete with each thread it deletes or takes out),
+  an agent's thread unlink, the seed draw, and each half of the sweep. A write that fails, or
+  matches no row, records nothing. No write had to record outside its transaction.
+- **What follows a commit is in-process only.** The wake (`Feed::wake`) and the live events are
+  sent after the commit. A crash between the commit and the wake loses nothing: the record is in
+  the table, and the process and its streams are gone with the crash. A client resumes from its
+  cursor and reads it.
+- **The `watch` carries a generation, not the newest `seq`.** The store's writes do not hold the
+  gateway's state, so the layer above wakes the feed after each one. A stream also reads the table
+  at every keep-alive tick, so a path that forgot to wake delays its event by one interval at most,
+  and never loses it.
+- **A live event waits for the table.** Before a live event goes out the stream reads the table
+  up to date, so `turn.started` never precedes its thread's `thread.created`.
+- **Two more settings, both in Settings → Chat → Change feed.** `chat_feed_page_size` (default
+  500) is the records one catch-up query reads; it bounds memory, and every record is still sent.
+  `chat_feed_live_buffer` (default 256) is the live events held for a slow reader. A reader that
+  falls further behind gets `state` with a `reason` naming the setting, and the stream
+  resubscribes, so what follows agrees with that state. A changed buffer size applies at once: the
+  open streams move to the new buffer with a `state` that says it was resized.
+- **L3 and the gaps it leaves (decided from the code).** A device's stream skips every record and
+  live event about an Admin Chat thread, so the `seq` values it sees have gaps. Gaps are accepted,
+  and there is no per-principal sequence. A gap tells a device that something it may not see
+  changed at about that time, never which thread or what. The ids a device already holds tell it
+  as much: thread, message and attachment ids are each one sequence across every kind of thread,
+  so a device's new thread id already counts the Admin Chat threads created since. A dense
+  numbering per principal would need a second sequence per principal and cursors bound to a
+  principal, to hide timing the ids show anyway. `hello`, `state` and a folder's counts are built
+  per reader and carry no Admin Chat thread.
+
 ### 2.4 `resync`
 
 A cursor whose epoch is not this database's, whose `seq` is older than the oldest kept row, or
@@ -618,6 +1488,79 @@ newer than the newest, gets `resync {reason}`, then events from now.
 - The reason names the cause, e.g. "the cursor is older than the feed keeps (Settings → Chat →
   feed retention: 7 days)" or "the cursor is from another database".
 - The client reloads what it shows. Nothing is skipped silently.
+- *Added 2026-10-07 (the branch review's 3b):* a client may coalesce consecutive `resync`s into
+  one reload; a catch-up across two level records sends one per move (L3's note).
+
+*Changed during the build (WP4), 2026-10-07:* the reasons name the setting as the page shows it
+("Settings → Chat → Change feed → retention: 7 days"). A cursor newer than the newest event says
+the data was restored from an older copy.
+
+*Changed during the build (review of WP4), 2026-10-07:*
+- **`admin` is a flag, not a kind** (W4-12). Since W3-1 a record's `admin` says whether the
+  thread or folder drove the self-admin plane at the write; the flag can change, a write that
+  flips it stores `admin_was` in `detail` beside `folder.current`'s facts, and a device's
+  rendering re-checks the state as it is now. Migration 0063's comment still says "the
+  thread's kind": a migration's text cannot change (its checksum), so the Rust doc and this
+  note say it instead.
+- **`principal`, both facts** (W4-12). An owner key's feed is `{kind: "owner", name}` with its
+  key's name without `owner:` (`cli` for `owner:cli`, `dashboard` for the dashboard), while
+  every `by` an owner key causes says "the dashboard".
+- **Nothing is skipped silently.** A page is read with the table's bounds in one transaction:
+  retention that prunes past a stream still catching up is its `resync` (W4-4). A record whose
+  thread or folder cannot be read is an error, never a tombstone: the stream waits at it and
+  reads it again at its next wake or keep-alive (W4-5). The retention reason names the
+  setting as the page labels it, *Keep changes for*, and with retention now 0 says what was
+  pruned under an earlier value (W4-12, W4-24).
+- **A restored copy is another database** (W4-11). The feed keeps a mark of the newest
+  cursor it handed out beside the database (`chat-feed.mark` in the data directory, written
+  when the head it covers moves). At start, a database older than its mark under the same
+  epoch gets a new epoch, so every client resumes with a `resync`.
+  - *Changed 2026-10-07 (review W5-4, decided by the owner):* the mark caught only a database
+    file restored on its own; restoring the data directory as a whole (a snapshot rollback,
+    an rsync from a backup, a dev copy) brought the mark back with it. **The cursor checks
+    itself now:** it is `"<epoch>:<seq>:<tag>"`, the tag 8 hex digits of a hash of the record
+    at `seq` (when, what, which thread or folder, by whom; `store::feed::Record::tag`). At a
+    resume the record the table holds at that number must carry the same tag, or the client
+    gets `resync` ("its data was restored from an older copy"), whatever the numbers say. The
+    mark file is gone (less code). A cursor at a number the table no longer holds (the
+    retention's boundary) or without a tag is checked by its numbers alone, as before;
+    clients treat the cursor as opaque text.
+  - *Changed 2026-10-07 (review W6-3, decided by the owner):* **the tag is a random draw
+    stored with its record**, 16 hex digits (`chat_feed.tag`, migration 0065, drawn by a
+    trigger on every insert and for the rows there were). The hash was of guessable fields,
+    and a device handed the cursor of a record it may not see (a keep-alive's `id:`,
+    `hello.cursor`) could match it offline and learn which thread changed, how, when and by
+    whom. A resume compares the cursor's tag with the stored one, so a restored copy is still
+    found, and a tag says nothing about its record.
+  - *Changed 2026-10-07 (the final review's F-10):* a tag of another form than 16 hex digits
+    (the 8-digit checks the builds before W6-3 issued) is checked by its numbers, as an
+    untagged cursor is, instead of being answered with a false "restored" resync.
+- **A device's cursor moves through what it may not see** (W4-15): the keep-alive carries it
+  as an `id:` with no data, so a reconnect after a stretch of Admin Chat activity resumes
+  without a `resync`. A device's lag `state` says "some" events, not how many (W4-14).
+- **The live view across a flip** (W4-8, W4-3). Attaching the toolset takes the thread from
+  devices before the commit and again after it, taking it off gives it back after it, both
+  decided from the store's before and after. The live registry keeps each flipped thread's
+  latest flag, so a turn or session registered from an older read takes the right side, and
+  every flip that moved a live entry sends each device a fresh `state` of its own.
+- **A record that never renders** (review W5-16) stalled the stream at it for good. A
+  stream now reads it again at its next wake or keep-alive up to 3 times in a row
+  (`RENDER_ATTEMPTS`, named in the log line and the reason), then moves past it with a
+  `resync` naming its cursor, so the client reloads; nothing is skipped silently.
+- **A page loads the folders' purge days once** (review W5-15), not once per `thread.*`
+  record.
+- **The live buffer and the catch-up page have stated maxima** (W4-1): 65 536 events (the
+  buffer is allocated whole, about 80 bytes a slot, at every resize) and 10 000 records. Both
+  save paths refuse past them by name, the page shows them, and a stored value out of range
+  is clamped on load with a warn line.
+- **The route fails closed** (W4-9, W3-12): it takes the Chat API's caller extractor, and an
+  anonymous principal is never the owner anywhere (`Caller::Refused` sees and reaches nothing).
+- **Threads in a folder out of a device's reach** (W4-7, decided from the code): such a
+  thread stays the device's when its own tools are plain, and is in no folder for it — by id,
+  in the list, search (a hidden folder filters to nothing), exports and the feed. A folder's
+  flip records `thread.updated` for each of its threads. *Corrected 2026-10-07 (review W5-5):*
+  pin's and archive's answers named the hidden folder; they read the thread as the device
+  does now.
 
 ### 2.5 Not in the feed (L7)
 
@@ -673,6 +1616,11 @@ Live mirroring of another client's turn is §Later.
 - **A bound voice session on the old thread is left alone.** It keeps its thread; clients follow
   `folder.current`.
 
+*Prepared in WP4, 2026-10-07:* `store::feed::record_folder_current(tx, folder_id, thread_id,
+previous, reason, by)` writes the record inside the caller's transaction, and the feed already
+renders it (`FolderCurrent` in `lmgw-api-types::chat_feed`). The `current` route and the delete of
+a current thread call it; nothing records it before the columns exist.
+
 ### 3.4 Defaults and the current thread (L9)
 
 Folder defaults stay a copy at creation. For an ongoing folder, `POST /chat/api/folders/{id}` with
@@ -694,6 +1642,220 @@ pinned threads. An ongoing folder's past threads archive and purge by the global
 - **The sidebar** marks the current thread.
 - **The folder menu** gains "New conversation", which sends `current {new: true}`.
 
+*Added 2026-10-08 (found in use on 0.4.1: a paired client's changes showed only
+after leaving the Chat tab):* **the Chat page follows other writers live.** `/api/events`
+carries a `chat` frame, `ChatChanged {threads, folders, messages, resync}`: ids only, so the
+page reads them again through the Chat API.
+- **Where it comes from.** `threads` and `folders` are the feed's own records (§2.3), read by
+  each `/api/events` stream on the feed's wake from the head it opened at, for the owner (every
+  thread; the admin-level records are skipped). `messages` has no record yet (`message.*` is
+  WP10's), so every message write through the Chat's repository seam marks its thread in
+  memory (`chat_feed::marks`); WP10's records replace the marks. A thread delete forgets its
+  marks, since its `thread.deleted` record names it. `tests/it/chat_repo_seam_scan.rs` refuses
+  a message write past the seam in any crate, SQL of a file's own that writes `chat_messages`
+  outside the store, and a writer call in the seam outside `marked(`;
+  `web/chat_repo/marks_tests.rs` checks that each of the seam's writes marks its thread.
+- **Delivery.** The first change of a burst waits a fixed 200 ms (not a setting), then one read
+  names everything changed up to it: at most one frame per 200 ms plus that read, except one
+  the keep-alive read finds. One with `resync: true` on every connect, since frames are not
+  replayed across a reconnect. A prune past what a stream had read is a `resync`.
+- **The page** (`chat_sync`) reads the whole list on a frame that names a thread or a folder,
+  or says resync. A frame that names only messages moved those threads' `updated_at` and
+  `last_message_at` and nothing else the list shows: the page reads just their rows,
+  `GET /chat/api/threads/rows?ids=3,7` (the list's own rows, active or archived; the owner's
+  alone, `Cap::Admin`; not in the API document, like the rest of the dashboard's backend),
+  and sorts its list again as the server does (pinned first, then `updated_at`, ties by the
+  newer id; the archived list by `archived_at`). A named row missing from the answer, a failed
+  read, a row that belongs in the list shown and is not in it (or the other way round), or a
+  read of the whole list still out, reads the whole list instead. It reads the open thread when
+  a frame names it, patching its messages in place by id (every field, cleared where the row
+  has none).
+  It waits while its own reply streams into that thread or a voice session holds the transcript
+  (connecting, live or closing; not the Ended panel). Another client's reply shows when it is
+  saved: the feed's live turns are not mirrored (§2.5).
+- **What the page holds wins.** The composer and its drafts are never touched. An unedited
+  settings form follows the stored row; an edited one follows in the fields the owner did not
+  touch. The model picker follows only while it shows the stored model, and the owner's picks
+  are saved one at a time in the order made, so the last one is stored. A read of the open
+  thread that went out before the page's own turn, edit or delete and answers after it is
+  dropped and made again. A reader at the end of the transcript before new rows land is kept
+  there; one who scrolled up is left where they are.
+- **A thread deleted elsewhere** (a 404 from `GET /chat/api/threads/{id}`, and only a 404; a
+  failed read is a 500 and keeps what the page shows) falls through to the next one, as a
+  delete here does. With a draft in the composer (text, files or knowledge picks) the page
+  holds an unsaved new chat instead, in the deleted one's folder while the list has it: an
+  empty transcript, the draft with its chips and picks, a strip ("New chat in “F” · made when
+  you send") and a toast. Nothing is stored until the owner presses Send, which makes it as
+  the page's own New chat in that folder does (an ongoing folder's "New conversation", with the
+  server's ordinary rule; a plain folder's "New chat here"; a New chat once the folder is gone),
+  opens it with the draft and sends. So an ongoing folder's current thread, which the other
+  client may be talking in, moves only at the owner's Send (review CL-14). Opening another
+  thread or leaving the page drops it as an unsent draft goes. A draft never goes into a
+  conversation it was not written for. Its files went with the deleted conversation; their
+  chips say so, and files attach once the chat is made.
+  *Added 2026-10-08 (reviews CL-19 to CL-21):* from Send to the send itself another Send
+  waits and the model picker is held, so the chat is made and opened once. The open reads the
+  made chat: one another writer has written in meanwhile (after a failed open, say) keeps the
+  draft in the composer. A folder that names a model makes the chat on it; a model the owner
+  picked while the draft waited is then set on the chat, before the send. Opening another
+  thread or a New chat drops the waiting chat as it starts: a Send under way then opens and
+  sends nothing, and the chat it made stays, empty, as the New chat button leaves one. An
+  older open that answers after a newer one started is dropped.
+  *Changed 2026-10-08 (reviews CF-1 to CF-4, CF-9):* in an ongoing folder the chat Send makes
+  is the folder's current thread, the conversation a device is bound to, and its model is the
+  folder's. While the draft waits there, the picker is held on the folder's model. A badge
+  and the strip say why: "this folder's ongoing conversation uses its folder's model; change
+  it in the folder settings". Send writes no model. A plain folder, or none, keeps the
+  owner's pick, and only a real pick: a picker the owner did not move off the model it started
+  on writes nothing. A pick that another writer's turn came before is named in the toast. An
+  open or a New chat that left the waiting chat and failed puts it back, when nothing else is
+  on its way to show; until then Send says the conversation is still opening. What the owner
+  chose last is what opens: the open after New chat's or Keep's POST yields to a row clicked
+  meanwhile, and the fall-through after a delete yields to any open started or still out. A
+  New chat that fails cancels no open. Retry after a failed list read leaves a waiting draft
+  where it is.
+
+### 3.7 As built (WP5)
+
+*Changed during the build, 2026-10-07:*
+- **The columns** (migration 0064) are §3.1's two plus the folder's own retention,
+  `archive_days` and `purge_days` (§11 Q2). The folder JSON carries `ongoing:
+  {idle_minutes, current_thread_id} | null`, `archive_days` and `purge_days` (`null`: the
+  global setting). `POST /chat/api/folders` takes `ongoing`, `archive_days` and `purge_days`
+  too, so a client names and marks its folder in one call; a patch takes them, and `null`
+  ends ongoing or goes back to the global retention. Ongoing needs the folder's model on
+  create, on a patch that marks it, and on a patch that would drop the model of a folder that
+  stays ongoing: a 400 naming `defaults.model_alias`.
+- **A current thread always is one** (code over spec, §3.3 rule 1). A delete, a move out of
+  the folder and an archive by hand end it in their own transaction and record
+  `folder.current` with `thread_id: null` and reason `gone`; §3.3 had only the delete record
+  it and found a moved or archived thread on the next call. So `ongoing.current_thread_id`
+  never names a thread that is elsewhere or archived, and clients learn of the end at once.
+  The column's `ON DELETE SET NULL` is the backstop. A folder that stops being ongoing loses
+  its current thread with reason `not_ongoing`. A pin, and a move within the folder, keep it.
+  *Stated 2026-10-07 (review of WP5, decision 1):* an archive followed by a restore does not
+  make the thread current again (the next call starts a new one, `first`), and a device's
+  archive ends the conversation for everyone, within L2.
+- **The reasons, as built.** A new thread: `first` (the folder has no current thread, also
+  after an end the feed already announced as `gone`), `gone` (the current thread is out of
+  the caller's reach: for a device, the self-admin toolset attached to it since, L3),
+  `idle`, `requested` (`new: true`, or a chat thread created in the folder by hand). None any
+  more: `gone`, `not_ongoing`. `current`'s answer also has `note`, the reason in a sentence
+  that names the setting behind it (for `idle`, the folder's idle minutes).
+- **L3 for `current`.** A folder a device cannot see (defaults with the self-admin toolset)
+  is the 404 of a missing one. A current thread out of a device's reach is `gone` for it: the
+  device gets a new chat thread from the folder's defaults, which cannot carry the toolset,
+  and the conversation moves on for everyone. A device's folder JSON does not name a current
+  thread out of its reach.
+  - *Changed 2026-10-07 (review W5-3, decided by the owner):* **a device is never told why.**
+    `gone` could only mean the attach (a delete, a move out and an archive clear the pointer,
+    so a later call says `first`), the same leak as W4-18's close. A device's `current` now
+    answers `first`, with the note any folder without a current thread gets, and its feed's
+    `folder.current` names no previous thread out of its reach and says `first` instead of
+    `gone`; a move to none about such a thread is not rendered for it at all. The record
+    keeps `gone`, and the owner reads it. *Corrected 2026-10-07 (review W6-15):* every reason
+    is `first` for a device when the previous thread is out of its reach, not only `gone` (an
+    owner's `idle` or `requested` rollover away from such a thread said a thread was there).
+    What remains: after an attach a device's feed
+    carries the thread's `thread.deleted` and no `folder.current` with `thread_id: null`,
+    unlike a real delete; the next `current` call moves the conversation on either way. *Stated 2026-10-07 (review W6-4):* the `state` a
+    device gets beside the thread's `thread.deleted` now says only "this is the live state now",
+    no cause; that a `state` with no lag comes beside a `thread.deleted` at all (a real delete
+    sends `turn.done` and no `state`) remains. *Resolved 2026-10-07 (§1.6's close-code note):*
+    a real delete with a turn or a session live now sends a device that `state` and no
+    `turn.done`, as an attach does. The missing `folder.current` with `thread_id: null` after an
+    attach still remains.
+  - *The dashboard says it* (decision 2): attaching the self-admin toolset to an ongoing
+    folder's current thread shows, before Save, that paired devices can no longer reach it and
+    that the conversation continues in a new thread for every client the next time one asks.
+    The owner's thread stays in the folder, which a device still sees: that is why a folder's
+    own retention is the owner's alone (L5's W5-1 note).
+- **Idleness and a running turn** (review W5-11). A thread a turn answers now (a send, an
+  edit, a regenerate, a continue, a bound session's voice turn) is never idle: another
+  client's `current` keeps it however old its newest message is, so a long tool loop's reply
+  does not land in a thread the conversation has left.
+- **The body is optional** (review W5-10): `POST …/current` with none is `new: false`.
+- **`folder.current` and L3** (review W4-6). The record is `admin` when the folder or the
+  new thread drives the self-admin plane at the write. A device's delivery re-checks both as
+  they are now, as `thread.*` and `folder.*` do, and does not name a previous thread out of
+  its reach (`previous_admin` in `detail`, or the thread as it is now).
+- **The lock.** One per folder (`FolderLocks`), held from read to write by `current`, a thread
+  created in the folder, the folder's patch (so a rollover never starts from defaults
+  between the patch's folder write and its current-thread write) and the folder's delete.
+  *Corrected 2026-10-07 (review W5-19):* both of the patch's writes share one transaction,
+  so that rationale is moot; the lock keeps the folder as read (its defaults, its current
+  thread) from changing under the patch, and the current thread's own lock (W5-2) keeps the
+  thread as read. `current` releases the folder's lock once its decision is written, before
+  the answer is built (review W5-9), so another client's call does not wait on the voice
+  resolution of this one's.
+  The rollover's write is a compare-and-set on the pointer: a delete, move or archive that
+  ended the current thread meanwhile (they take no folder lock) makes it decide again on
+  what is there now.
+- **L9, as built.** The changed fields are those whose value a new thread in the folder would
+  start with differs between the old defaults and the new: a field set back to unset takes
+  what a new thread starts with without it (the default prompt, the route's default), and a
+  field the defaults did not change keeps the thread's own, a hand-made change included. The
+  voice is compared field by field and the thread keeps its seed. The changes pass the thread
+  settings route's own checks (one step, `apply_settings_patch`), are written in the folder
+  patch's transaction, and the answer names them: `applied: {thread_id, fields}` (`voice.<field>`
+  for the voice), or `null`. A device's patch never touches a current thread out of its
+  reach. The live L3 flip follows the store's before and after, not a read made earlier
+  (review W4-3).
+  - *Corrected 2026-10-07 (review W5-2):* "never touches" held only at the time of the read.
+    The settings are written whole, from a copy read earlier, so a device's write that read
+    before the owner attached the self-admin toolset and landed after it undid the attach
+    (the thread settings route and a folder patch's current thread alike). Both now take the
+    thread's lock before they read it (folder, then thread, then the database), and the store
+    refuses a device's settings write to a thread that drives the self-admin plane as the
+    write's own transaction finds it: the route's 404, or `applied: null` in a folder patch.
+    The folder patch also writes the thread only while it is still the folder's current
+    thread (W5-12). A write that fails after the pre-commit flip gives the thread back its
+    real flag (W5-7).
+  - *Changed 2026-10-07 (reviews W6-6, W6-13, W6-14):* **reach is checked twice, the lock held
+    from the second check to the write.** A device's move, pin, archive and delete check the
+    thread's reach, then again under the thread's lock, which they hold across the write
+    (`chat::reach_held`; a delete discards under it, `LiveTurns::discard_held`), so none lands
+    on a thread the owner attached meanwhile; move answers with the thread as the caller reads
+    it, and a thread not there for the caller any more is a 404, not a 500. The settings route
+    and the folder patch's current thread run their patch and a device's checks first, without
+    the lock (L5's listing may take the lazy-list budget, and the thread's turn saves would
+    wait on it), then read again under the lock and lay the patch again only when the thread
+    changed. An id out of reach is the 404 before any lock, so the answer's timing says
+    nothing about that thread. The flips after a write (the post-commit flip, W5-7's
+    restore) run before the lock is let go.
+  - *Changed 2026-10-07 (review W6-10):* **a folder save names only what it changed.** The
+    patch takes `defaults_patch` beside `defaults`: each field given replaces the stored one
+    (`null` unsets it), `voice` field by field, the others stay as stored. The dashboard's form
+    sends the defaults fields it changed there, and the name only when changed (the ongoing
+    and retention fields already were, W5-17), so it never writes back, and L9 never
+    re-applies, what a device changed while the form was open.
+- **Retention (§11 Q2).** Any folder may carry `archive_days` and `purge_days`, not only an
+  ongoing one, and only the owner sets them (L5's W5-1 note): both halves of the sweep take
+  the folder's days, else the global setting, `0` disables the step, and every thread's `purge_at` uses the same days. There is no upper
+  bound: a count past what the clock can reach means "never". *Reworded 2026-10-07 (review
+  W6-7): the owner's setting, from the dashboard; a device's write of it is a 403.* A year of history for a
+  desktop client's folder is `purge_days: 365` (or `archive_days: 0`, never archived).
+- **The dashboard.** The folder form has *Ongoing conversation* (its idle minutes, 0 "only
+  when asked"), the model marked required while it is ticked, *Retention* (empty names the
+  global value), and *Also apply the changes to the current thread* in the footer, checked.
+  The sidebar marks the current thread `current`. For an ongoing folder the menu's *New
+  conversation* replaces *New chat here*: a thread made by hand there becomes the current
+  thread anyway, without reusing an empty one.
+  - *Added 2026-10-07 (review W6-11):* the folder form says before Save that the self-admin
+    toolset gained in an ongoing folder's defaults takes the folder and its conversation out
+    of every paired device's reach (and the current thread too, with the change applied).
+  - *Added 2026-10-07 (the first client's review):* **a deep link to a folder's settings
+    form**, `/chat?folder=<id>&settings=1`: the dashboard opens that folder's form once the
+    list is loaded, a folder not in the list said in a toast. A client sends the owner there
+    to mark its folder ongoing, give it a model or its own retention — what a device key
+    cannot set, and `current`'s `folder_no_model` remedy. `lmgw-client`:
+    `requests::folder_settings_page(id)`.
+- **The newest message's time** (the first client's review, 2026-10-07). A thread row carries
+  `last_message_at` (unix seconds, `null` without a message): in the thread list, the feed's
+  `thread.*` and `current`'s thread. An ongoing folder's idleness is measured from it, and a
+  client timed the rollover from the turns it saw, so a missed message delayed it by up to an
+  idle period. `lmgw-client`: `requests::idle_rollover_at(folder, thread)`.
+
 ## 4. The `lmgw-client` crate and the documented Chat subset (D)
 
 ### 4.1 The crate [Desktop 1] (L10)
@@ -710,6 +1872,70 @@ pinned threads. An ongoing folder's past threads archive and purge by the global
   - request builders for the routes a client uses.
 - **Users:** the dashboard's voice panel uses it. Clients depend on it by path or by a tagged
   release; Android later through UniFFI or as the reference for a port.
+
+*Built in WP6, 2026-10-07:*
+- **The modules.** `realtime` (`ServerEvent`, parsed by `realtime::parse`; `ClientEvent` with
+  `to_json`; `SessionFacts`, `ErrorFacts`, `ThreadFacts`, `ChatReply`, `TurnDetection`,
+  `Updates`, the close codes), `voice` (`Machine`, `VoiceState`, `INTERRUPTED_MS`,
+  `cancel_after_truncate`), `truncate` (`Replies`, `Reply`, `Incoming`, `PlaybackCursor`),
+  `feed` (`SseDecoder`, `FeedReader`, `FeedItem`), `requests` (`Request` and the builders of
+  `folders`, `create_folder`, `current`, `threads`, `feed` and `realtime`, with `read_*` for
+  their answers and `read_refusal`) and `base64`. The wire types are `lmgw-api-types`',
+  re-exported as `lmgw_client::types`.
+- **Code over spec: what stays in the dashboard.** The captions line (`Captions`) stays in
+  `machine.rs`: its hints name the dashboard's keys ("Hold Space to talk"). So does the player:
+  the crate's `Replies` keeps each reply's assistant item, and the dashboard keeps the player's
+  item beside it.
+- **`Machine::quiet()`** joins the machine from the desktop client's interim copy: nothing open,
+  waited for or playing, and the user silent.
+- **A few payloads stay `serde_json::Value`** (a chat frame's data, a message's voice record, the
+  timing line): a client passes them on whole. An FFI wrapper hands them over as JSON text.
+- **Shared with the gateway**, so the two cannot drift: the realtime close codes (4000, 4003), a
+  voice stage's `ModelState`, and the feed's `by` names (`BY_ADMIN`, `by_device`,
+  `FeedPrincipal::by`) are `lmgw-api-types`', and the gateway uses them.
+  *Corrected 2026-10-07 (review W6-9):* not `ModelState`: the gateway writes its frames from
+  its own struct (`realtime::warm::outcome::ModelState`, whose enums are its own). A test reads
+  every frame it writes into the API type field for field, and the API type gained the two
+  fields clients dropped (`needed_bytes`, `capacity_bytes`). The 1001 close and its reason
+  joined the shared constants.
+- **No behaviour change in the panel.** The client events are byte for byte the panel's old
+  frames (the crate's tests), and the voice drives that need no model pass on a dev instance
+  (`scripts/chat-drives.sh --voice`: chat-voice-panel, chat-voice-reasoning, chat-voice-viz,
+  with chat-voice-render).
+- **The gate** checks the crate for `wasm32-unknown-unknown` on its own (`ci/check.sh`; in
+  `--changed` when `lmgw-client` or `lmgw-api-types` changed); natively the workspace build,
+  clippy and the suite cover it.
+
+*Changed after the WP6 review, 2026-10-07 (decided by the owner):*
+- **Forward compatible (W6-2).** Every enum a client reads from the wire has an `Unknown`
+  fallback and is `#[non_exhaustive]`: `KbMode`, `TurnDetectionMode` (renamed from the
+  api-types `TurnDetection`, which clashed with the realtime one, W6-18) and `AudioInputMode`
+  keep an unknown value as sent and write it back unchanged (`#[serde(untagged)]`);
+  `CurrentReason::Unknown`; `FeedEvent::Unknown {event, data}` (was `Other`) and
+  `ServerEvent::Unknown {kind, data}` (was `Other(type)`, now the event kept whole). An unknown
+  event or one whose data does not read never stops a client: `FeedReader` yields it as
+  `FeedItem::Unknown {event, data}` (was `Unreadable`), the cursor moving past it knowingly
+  (*changed 2026-10-07, the final review's F-13:* a known event whose data does not read is
+  `FeedItem::Unreadable {event, data}` again, apart from an unknown type: the client reloads what
+  it shows, as for `resync`, while it skips and logs an unknown one). The
+  document lists the known values only. `VoiceState` stays exhaustive: the crate derives it,
+  no wire carries it, and a new state comes with a new crate a client compiles against.
+- **Refusals (W6-5).** `read_refusal` reads the Chat's flat `{code, message}` and the realtime
+  handshake's `{"error": {code, message, …}}`. `key_refused` says when the key itself opens
+  nothing (`device_key_unknown`, `device_disabled`, `key_expired`), `code::CHAT_THREAD_BOUND`
+  the bind's refusal.
+- **Smaller (W6-16 to W6-18).** `ws_url` matches the scheme in any case and refuses anything but
+  http(s) (`bad_base_url`); the module doc names the folder settings page as the remedy for
+  `folder_no_model` (no folder patch builder: the folder's model and retention are the owner's
+  form); `Replies` keeps an ordered list (no hasher seed) and lists its items
+  (`Replies::items`, the first client's review). A few getters still lend (`&str`, `&Reply`):
+  they run per audio frame, and an FFI object keeps the state behind its own lock and clones
+  what it hands over, so owned returns would cost the native client and buy the wrapper
+  nothing.
+- **A later `lmgw.chat.reply` replaces the earlier** for the same message: the journal
+  finalizes a barge-in's reply at the gateway's cut and re-cuts it when the client's truncate
+  comes after (chat-voice §8.3's late truncate), each with its event. Said in the realtime
+  DocRoute and on `ServerEvent::ChatReply`.
 
 ### 4.2 The subset
 
@@ -735,6 +1961,10 @@ Beside it, on `/v1`:
   `thread_row_json`, `get_thread` at `:227-262`). Its types move into `lmgw-api-types` (`chat.rs`),
   so the document and the code cannot drift.
   - **Desktop 1:** `ThreadRow`, `Thread`, `Folder`, `Current`, `FeedEvent` and `ApiError`.
+    *WP4, 2026-10-07:* the feed's own shapes are in `lmgw-api-types::chat_feed` already: the
+    cursor, `Hello`, `LiveState`, each live event, the tombstones and `FolderCurrent`. A
+    `thread.*` or `folder.*` event's data is the thread or folder row plus `by`, typed once
+    `ThreadRow` and `Folder` are. *Typed in WP6* (below).
   - **Android:** `Message`, `Attachment`, `SendRequest` and the send stream's frames.
 - **Documentation.** Each route gets a `DocRoute` under a "Chat" tag, and the API docs page lists
   them. The Chat block leaves `openapi/exclusions.rs`.
@@ -742,6 +1972,39 @@ Beside it, on `/v1`:
   is not a contract (`exclusions.rs:9-14`). The owner's 2026-10-06 decision D is the reason.
 - **Compatibility.** The routes stay lmgw-native: not OpenAI Conversations, no `/v1` prefix.
   Changes are additive within a release line; a breaking change is a new route or field.
+
+*Built in WP6, 2026-10-07:*
+- **The types** are `lmgw-api-types::chat`: `ThreadRow`, `Thread` (the row with
+  `voice_resolved` and, where the thread is read whole, `continue`), `Folder`, `ThreadList`,
+  `FolderList`, `FolderCreate`, and their parts (`ThreadVoice`, `ThreadDefaults`, `ThreadMcp`,
+  `ContinueState`, the enums). `Current` is WP5's `chat_folders::CurrentThread`, its `thread`
+  now a `Thread`. `ApiError` was typed already: the documented routes' error. The feed's
+  `thread.*` and `folder.*` data are `chat_feed::ThreadChanged` / `FolderChanged` (the row with
+  `by`) or the tombstone, and `chat_feed::FeedEvent` reads any event by its name.
+- **The handlers serialize them** through `web/chat_wire.rs`, which converts the store's rows
+  field by field, destructured without `..`: a new column does not compile until it is placed.
+- **Byte-compatible.** The `json!` builders wrote their bodies through a `serde_json::Value`,
+  whose map sorts its keys; the DTOs are written the same way (`chat_wire::wire`, and
+  `chat::wire_order` for `current`'s `thread`), so every answer is byte for byte what it was.
+  The tests compared the DTOs with the old builders on representative rows before the builders
+  went, and pin the bytes.
+- **Documented:** `GET /chat/api/threads`, `GET` and `POST /chat/api/folders`,
+  `POST /chat/api/folders/{id}/current` and the feed, under the "Chat" tag; they left
+  `exclusions.rs`. A test keeps the feed's documented events equal to the ones `FeedEvent`
+  reads.
+- *Changed 2026-10-07 (review W6-8):* the `thread.*` and `folder.*` events' `oneOf` could match
+  no instance (both shapes allow any field and require none); the tombstone branch now requires
+  `deleted: true` and the row branch has no `deleted`, and a test validates both shapes of both
+  events against the document. *W6-7:* the folder create's DocRoute and the folder fields say
+  that a device key cannot set the retention.
+- *Changed during the build, 2026-10-07:* **`voice_resolved` is documented as an object**, its
+  parts named in prose, and typed with Android's DTOs (WP10). Its nested shapes (the stages, the
+  hold fallbacks, the recursive audio-input verdict) are the dashboard's voice editor's, and no
+  Desktop 1 client reads them. **`GET /chat/api/threads/{id}` stays excluded** until then for the
+  same reason: its `messages` are Android's `Message` and `Attachment`.
+- *Added 2026-10-08 (review CL-11):* **`GET /chat/api/threads/rows?ids=`** is the dashboard's,
+  `Cap::Admin`, and excluded as the dashboard's backend (§3.6): the Chat page's re-read of the
+  rows a `chat` frame named. A device's feed carries whole rows already.
 
 ## 5. Device-hosted MCP (E) [Desktop 2, Desktop 3, Android]
 
@@ -872,6 +2135,13 @@ plane: `/mcp`, `/v1/responses` `mcp` blocks, realtime `mcp` tools, `/v1/mcp/serv
 **Visible:** the Devices card lists, per hosted label, every principal that reaches it (owner, the
 device, each named key, device and agent).
 
+*For WP7 (review W3-9), 2026-10-07:* L5's write check has a shortcut, `!scope.narrows()` →
+admitted, for a tool scope with no list of its own (`all`). Once device-hosted labels exist that
+shortcut would let an `all` device write another device's hosted label into a folder default,
+which the owner's turns then call. WP7 must make `narrows()` true for an `All` that carries
+exceptions, or replace the shortcut with `may_reach` plus `admits` on the namespace; §9's reach
+tests gain "an `all` device writes another device's label → 403".
+
 ## 6. MCP approvals (F) [Desktop 3]
 
 ### 6.1 Thread tools gain `require_approval`
@@ -999,6 +2269,12 @@ newer stable revision changed any of them, this section is amended before the bu
 - **The ribbon and the orb** ignore the flag, and the contract says so.
 - **The dashboard** passes nothing and renders byte-identically.
 
+*Built (api WP1), 2026-10-07:* as above. `engine.js` hands every factory `{palette,
+transparent}`, `ring.js` clears where it filled, and the contract (chat-voice §10) and
+`engine.js`'s module doc name the input. A client mounts with `{...inputs, transparent: true}`
+and drops its shim. The viz harness reads the corner pixels: the ring's transparent with the
+flag and opaque without it, the ribbon's opaque with it (`scripts/drive/chat-voice-viz.json`).
+
 ## 9. Tests
 
 - **The route walk** (`tests/it/route_walk.rs`) covers the new rows.
@@ -1038,7 +2314,8 @@ newer stable revision changed any of them, this section is amended before the bu
 - **Reach (L16):** anonymous with auth off, an `all` key, a `deny` key, `allow` with `*` and with
   `desktop__*`, another device, the hosting device, an agent with and without the label, the owner,
   on `/mcp`, `/v1/responses` (including a cross-origin anonymous browser-shaped request),
-  realtime, discovery and Chat turns.
+  realtime, discovery and Chat turns; and an `all` device writing another device's label into a
+  thread or a folder default (L5, review W3-9) refused.
 - **The host link,** with a fake device over WebSocket:
   - `initialize` and listing;
   - a call with `_meta`;
@@ -1103,6 +2380,9 @@ with the checkbox; (4) 7 days, persisted; (5) hash-only, Rotate re-pairs; (6) Us
 
 ## Later
 
+- ~~A per-device opt-in grant for the self-admin toolset, so a chosen device could reach the
+  threads that carry it.~~ *Built 2026-10-07:* the device's switch "may use lmgw's admin tools"
+  (`self_admin`, L3's and L5's notes), a level per device since the pre-merge review's P-3.
 - Folder-scoped device keys (a device that sees only some folders).
 - Push to a backgrounded phone: lmgw posts feed events to the device's UnifiedPush endpoint.
 - TLS on lmgw's listener, which brings the pairing link's `fp`.
@@ -1146,3 +2426,48 @@ with the checkbox; (4) 7 days, persisted; (5) hash-only, Rotate re-pairs; (6) Us
 | R35 | The pairing key on argv | **Changed:** client guidance in §1.4; the client spec carries the handling. |
 | R36 | Destructive actions on the card | **Changed:** confirm, then do (§1.4). |
 | R9, R10, R12, R22, R23, R24, R29 | Client-only findings | Not applicable to this record; dispositions in the client's spec. |
+
+## Appendix: The final review's dispositions (2026-10-07, against 46332aa)
+
+| # | Finding | Disposition |
+|---|---|---|
+| F-1 | The tray's Quit skips the stop | **Changed:** every exit runs `gateway::quit` — the server's stop, its return within `QUIT_WITHIN`, then the containers' stop (§1.6's note); tested in `gateway::tests` and live (`shell-check.py --only quit`). |
+| F-2 | A cut turn's save and row not waited for | **Changed:** turns, model calls and row writes hold a `Running`; the stop waits for them (§1.6). |
+| F-3 | A stream's generation taken when it is built | **Changed:** `ServedAt` on every request; the session's `Running` taken before the 101 (§1.6). |
+| F-4 | The drain unbounded; the agent proxy's streams | **Changed:** one bound (`STOP_WITHIN`) for drain and wait, what is open logged; the proxy's bodies and tunnel end at the stop; a second signal exits at once (§1.6). |
+| F-5 | `takeover=never` refused by an ending session | **Changed:** an ending binding and the same key's do not count (§1.7). |
+| F-6 | The folder delete reads in a deferred transaction | **Changed:** `begin_write`; no other new store path reads first. |
+| F-7 | `devices_hidden` invisible and permanent | **Changed:** shown to the owner, cleared by "Show to devices again" (L3's note). |
+| F-8 | The device-key 401s undocumented | **Changed:** the bearer scheme, the Chat tag and the handshake name them. |
+| F-9 | Test gaps | **Changed:** a Chat turn and `/mcp` at a stop, a stalled stream and the bound, `takeover=never` at once / own key / after a restart, the folder delete beside a commit; the F-3 window by the `Stops` unit test. |
+| F-10 | Old 8-hex tags read as a restore | **Changed:** checked by their numbers (§2.3's note). |
+| F-11 | The in-memory anchors leak, and are partial | **Changed:** held by each pool's `after_connect` hook, for the store, knowledge and quickdoc pools. |
+| F-12 | `idle_rollover_at` overflows | **Changed:** checked arithmetic, `None`. |
+| F-13 | `FeedItem::Unknown` folds two cases | **Changed:** `FeedItem::Unreadable` again (§4.1's note). |
+| F-14 | W6-9's test checks listed fields only | **Changed:** the frame round-trips through the clients' type. |
+| F-15 | `takeover=never`'s 409 before the reach re-check | **Changed:** re-read first, 404 when out of reach (§1.7). |
+| F-16 | Texts | **Changed:** "lmgw is stopping or restarting"; §1.6's heading; `FolderCreate`'s retention fields. |
+| F-17 | UI and crate small things | **Changed:** the toolset notice for any folder; the deep link's query dropped; `Replies` documented, with `forget`. |
+
+## Appendix: The pre-merge review's dispositions (2026-10-07, against a57ee57)
+
+| # | Finding | Disposition |
+|---|---|---|
+| P-1 | A catch-up across a switch-off renders the toolset as it is now | **Changed:** the catch-up renders at the narrower of the reach then and now; a switch met there is one `resync` (L3's note). Tested: away across an off, across an on and an off, across an on. |
+| P-2 | An update's restart skips the quit sequence | **Changed:** the updater runs the sequence, then restarts; an exit during a quit waits for it (§1.6's note). Tested with F-1's seam. |
+| P-3 | At `full`, the switch hands a paired device the host | **Changed (the owner's decision):** a level per device — off, read only, full — capped by the gateway's; programs on this machine need full; confirmations say so (L3's note). |
+| P-4 | Live frames queued under the old reach go out after it moved | **Changed:** re-checked as they go out; a stale `state` is dropped (L3's note). |
+| P-5 | `open()` reads the switch in the wrong order | **Changed:** the switch and the head in one read transaction (L3's note). |
+| P-6 | The switch ignores the device's own `lmgw__*` patterns | **Changed:** they narrow the label; an attach they leave nothing is refused (L5's note). |
+| P-7 | Another device's folder delete strands a switched device's threads | **Changed:** the threads that stay are recorded before the folder's removal (L3's note). |
+| P-8 | Switch-off and Disable leave in-flight work running | **Changed:** turns cancelled, `self_admin` checks enabled and expiry, the row checked per call, realtime lists again (L3's note). |
+| P-9 | A client cannot learn while connected that its switch changed | **Changed:** `state.self_admin`, sent after every change. |
+| P-10 | Test gaps | **Changed:** the P-1 catch-ups, the restart order, read only through the device path, `/v1/responses`, `/v1/mcp/servers` and unbound realtime with the switch, P-4, P-7 and P-8, and P-3's levels. The second signal's exit stays without a test of its own: its status is unit-tested (`server::signal_exit_code`), the live shell check is unchanged. |
+| P-11 | A quit has no visible state, and is not panic-safe | **Changed:** window hidden, tray says "quitting", a second Quit logged, the exit runs from a guard (§1.6's note). |
+| P-12 | Log strings with runs of spaces | **Changed:** the line continuations are back. |
+| P-13 | "The gateway has stopped" after a timeout | **Changed:** the log says whether it returned. |
+| P-14 | The second signal's exit code | **Changed:** 143 for SIGTERM, 130 for Ctrl-C. |
+| P-15 | Doc comments | **Changed:** `principal_list` has its doc back; `labels()` names the device case. |
+| P-16 | A false sentence in the hidden-folder notice | **Changed:** it says what a device allowed the admin tools still sees. |
+| P-17 | `takeover=never` over an ending session says "taken over" | **Changed:** an ending binding is not named taken over. |
+| P-18 | "Show to devices again" in a second transaction | **Changed:** part of the folder patch's transaction. |

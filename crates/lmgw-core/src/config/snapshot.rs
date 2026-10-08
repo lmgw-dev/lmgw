@@ -87,76 +87,9 @@ fn strip_prefix<'a>(prefix: &str, name: &'a str) -> Option<&'a str> {
     }
 }
 
+mod sheet;
+
 impl Snapshot {
-    /// The price sheet that applies to one resolved route, or `None` when the
-    /// scope has no price at all — which is *not* zero (§2.3).
-    ///
-    /// Order: the alias is more specific than the upstream model it resolves
-    /// to, and within one scope the owner's manual row beats the catalog's.
-    pub fn prices_for(
-        &self,
-        alias: &str,
-        upstream_id: Option<i64>,
-        upstream_model: Option<&str>,
-    ) -> Option<crate::pricing::Prices> {
-        use crate::pricing::{PriceSource, Prices};
-
-        // Anything served out of a container on this machine is free, and no
-        // price row can make it otherwise. What a local request really costs is
-        // GPU time, which is recorded as the llama.cpp timings instead (§2.4).
-        if upstream_id.is_some_and(|id| self.is_local_upstream(id)) {
-            return Some(Prices::free_local());
-        }
-
-        let alias_key = alias.to_lowercase();
-        let up_key = match (upstream_id, upstream_model) {
-            (Some(id), Some(m)) => Some(upstream_scope_key(id, m)),
-            _ => None,
-        };
-
-        let pick = |scope: PriceScope, key: &str, source: PriceSource| {
-            self.prices.iter().find(|p| {
-                p.scope_kind == scope
-                    && p.source == source
-                    && p.unit == "per_mtok"
-                    && p.scope_key.eq_ignore_ascii_case(key)
-            })
-        };
-
-        // Usability is part of *selecting* a row, not a test applied after. An
-        // owner who "undoes" a manual override by clearing its fields instead
-        // of deleting it would otherwise have an all-`None` row shadow a
-        // perfectly good catalog row, and every request on that alias would
-        // record `price_source='unknown'` — a silent hole in the spend total
-        // that reads as "the catalog stopped publishing".
-        let usable = |row: &PriceRow| {
-            let p = Prices {
-                price_in: row.price_in,
-                price_out: row.price_out,
-                price_cache_read: row.price_cache_read,
-                price_cache_write: row.price_cache_write,
-                source: row.source,
-            };
-            p.is_usable().then_some(p)
-        };
-
-        pick(PriceScope::Alias, &alias_key, PriceSource::Manual)
-            .and_then(usable)
-            .or_else(|| pick(PriceScope::Alias, &alias_key, PriceSource::Catalog).and_then(usable))
-            .or_else(|| {
-                up_key
-                    .as_deref()
-                    .and_then(|k| pick(PriceScope::UpstreamModel, k, PriceSource::Manual))
-                    .and_then(usable)
-            })
-            .or_else(|| {
-                up_key
-                    .as_deref()
-                    .and_then(|k| pick(PriceScope::UpstreamModel, k, PriceSource::Catalog))
-                    .and_then(usable)
-            })
-    }
-
     /// Is this upstream id one of ours — a container on this machine?
     ///
     /// The four local classes route through **synthetic** upstreams

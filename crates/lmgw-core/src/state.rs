@@ -179,7 +179,9 @@ pub struct AppState {
     _test_dir: Option<TestDir>,
     /// Serializes every read-modify-write of the whole `Settings` blob
     /// (`store::save_settings`'s callers): clone the snapshot's settings,
-    /// mutate the copy, save, `reload_snapshot()` — all under this lock.
+    /// mutate the copy, save, publish the snapshot — all under this lock.
+    /// The MCP reconcile after the publish runs once it is let go
+    /// ([`Self::settings_saved`]).
     ///
     /// Nothing else guards that round trip, so two writers racing (a
     /// dashboard save and `ops::hold_set`, say) could each read the
@@ -188,6 +190,9 @@ pub struct AppState {
     /// already stopped every container, which is the failure that made this
     /// worth fixing (gpu-hold design §3.1).
     pub settings_write: tokio::sync::Mutex<()>,
+    /// The order the snapshot's loads from the store publish in
+    /// ([`Self::publish_snapshot`]).
+    snapshot_loads: SnapshotLoads,
     /// This process is a **dev instance** (container-builds §10): set from
     /// `LMGW_DEV` at [`AppState::init`] (which `scripts/dev-instance.sh`
     /// exports), and always by [`AppState::init_with`]`(…, true)` — the
@@ -218,12 +223,92 @@ pub struct AppState {
     /// only onto the history it answered. In-process, like the workers it
     /// governs.
     pub(crate) chat_live: crate::web::chat_live::LiveTurns,
+    /// The Chat change feed's in-process half (client-apps design §2.3):
+    /// the wake its open streams wait on after a write that recorded a
+    /// change, and the live turns, bound sessions and hold it reports. Its
+    /// live half is the one [`Self::chat_live`] registers turns in.
+    pub(crate) chat_feed: crate::web::chat_feed::Feed,
+    /// One lock per Chat folder, held by every write that reads an ongoing
+    /// folder's current thread and then moves it (client-apps design L8),
+    /// so two clients asking together get one thread.
+    pub(crate) chat_folder_locks: crate::web::FolderLocks,
+    /// Paired devices' open connections and the revocation signal those
+    /// connections watch (client-apps design §1.6). In-process, like the live
+    /// turns: a restart ends every connection anyway.
+    pub devices: crate::devices::Devices,
+    /// The servers' stops (`server::Stops`): every long-lived stream ends
+    /// when the server it was opened on stops, so a graceful shutdown does
+    /// not wait on a client that stays.
+    pub stops: crate::server::Stops,
     /// This state's own `Weak`, set once the `Arc` exists: what a registry's
     /// hooks reach the state through ([`Self::wire_runtime`]) without a cycle.
     me: std::sync::OnceLock<std::sync::Weak<AppState>>,
 }
 
 pub type SharedState = Arc<AppState>;
+
+/// A Chat thread's lock a test holds ([`AppState::hold_chat_thread_for_tests`]).
+#[doc(hidden)]
+pub struct ChatThreadHold(#[allow(dead_code)] crate::web::chat_live::HistoryWrite);
+
+/// The order the loads of the snapshot from the store publish in (the
+/// branch review's N-1). Two reloads may load at once — a key's level saved
+/// while a model is saved — and the one that loaded first may publish last:
+/// an older snapshot then replaced a newer one, and a level a write had
+/// committed and published was taken back until the next publish. Each
+/// load takes a number as it starts, and one that started before a load
+/// already published is not published over it. Every write that changes
+/// the store reloads once it committed, so the load published instead
+/// started after that write's commit too, and read at least what it did.
+#[derive(Debug, Default)]
+struct SnapshotLoads {
+    /// The last number a load took.
+    started: std::sync::atomic::AtomicU64,
+    /// The number of the newest load published; held across its swap.
+    published: std::sync::Mutex<u64>,
+}
+
+impl SnapshotLoads {
+    /// A load starts: its number.
+    fn start(&self) -> u64 {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(1)
+    }
+}
+
+/// What a settings save published ([`AppState::settings_saved`]), under
+/// [`AppState::settings_write`]. The caller lets go of that lock, then
+/// reconciles MCP ([`AppState::reconcile_mcp`]).
+#[must_use = "reconcile MCP (AppState::reconcile_mcp) once settings_write is let go"]
+pub struct SettingsPublished {
+    /// Why the load after the save failed twice, for the answer to say
+    /// beside the save: the saved settings were laid over the published
+    /// snapshot instead. `None` when it loaded.
+    pub reload_failed: Option<String>,
+}
+
+impl SettingsPublished {
+    fn reloaded() -> Self {
+        Self {
+            reload_failed: None,
+        }
+    }
+}
+
+/// What a key op wrote to its row ([`AppState::key_written`]).
+#[derive(Debug, Clone)]
+pub(crate) enum KeyWritten {
+    Disabled,
+    Deleted,
+    /// A new credential: its hash, and the plaintext an owner row keeps.
+    Rehashed {
+        hash: String,
+        plain: Option<String>,
+    },
+    /// A device's admin-tools level (`ApiKey::self_admin`).
+    SelfAdmin(crate::config::DeviceAdmin),
+}
 
 /// Whether `LMGW_DEV` marks this process as a dev instance. Unset, empty,
 /// `0`, `false`, `no` and `off` mean no; **anything else means yes**. What
@@ -403,6 +488,9 @@ impl AppState {
         let snapshot = store::load_snapshot(&db)
             .await
             .map_err(|e| anyhow::anyhow!("loading config snapshot: {e}"))?;
+        // A database restored from an older copy is found by the cursors
+        // themselves: each names its record's check (review W5-4).
+        let chat_feed = crate::web::chat_feed::Feed::new(&snapshot);
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
@@ -415,6 +503,8 @@ impl AppState {
             db,
             corpus,
             knowledge: crate::knowledge::Knowledge::new(knowledge),
+            chat_live: crate::web::chat_live::LiveTurns::with_feed(chat_feed.live.clone()),
+            chat_feed,
             snapshot: ArcSwap::from_pointee(snapshot),
             telemetry: TelemetryBus::new(),
             policy: std::sync::Arc::new(crate::policy::PolicyGate::default()),
@@ -443,14 +533,17 @@ impl AppState {
             started_at: Instant::now(),
             started_at_utc: chrono::Utc::now(),
             background: Default::default(),
+            stops: Default::default(),
             data_dir,
             _test_dir: None,
             settings_write: tokio::sync::Mutex::new(()),
+            snapshot_loads: SnapshotLoads::default(),
             dev: std::sync::atomic::AtomicBool::new(dev),
             builds: Default::default(),
             bench: Default::default(),
             chat_temp: Default::default(),
-            chat_live: Default::default(),
+            chat_folder_locks: Default::default(),
+            devices: Default::default(),
             me: Default::default(),
         });
         app.builds.set_instance_id(instance);
@@ -533,7 +626,32 @@ impl AppState {
 
     /// In-memory state for tests.
     pub async fn init_for_tests() -> anyhow::Result<SharedState> {
-        let db = store::open_in_memory().await?;
+        Self::init_for_tests_on(store::open_in_memory().await?).await
+    }
+
+    /// Chat thread `id`'s lock, held by a test where a write in flight (the
+    /// owner's attach of the self-admin toolset) would hold it: between a
+    /// route's first read and its write, which must then re-check what it
+    /// read (reviews W5-2, W6-6, W6-13). Released when the hold drops.
+    #[doc(hidden)]
+    pub async fn hold_chat_thread_for_tests(&self, id: i64) -> ChatThreadHold {
+        ChatThreadHold(self.chat_live.hold(id).await)
+    }
+
+    /// Chat folder `id`'s lock, held by a test where a write in flight would
+    /// hold it (review W6-12: a thread created by hand in the folder decides
+    /// under it, from the folder as it is then).
+    #[doc(hidden)]
+    pub async fn hold_chat_folder_for_tests(&self, id: i64) -> tokio::sync::OwnedMutexGuard<()> {
+        self.chat_folder_locks.lock(id).await
+    }
+
+    /// [`Self::init_for_tests`] on a database another test state already
+    /// wrote: a restart, as far as anything kept on disk can tell — every
+    /// in-process half (live turns, the Chat feed's live half and wake,
+    /// revocations) is new, the database is the one it left.
+    #[doc(hidden)]
+    pub async fn init_for_tests_on(db: sqlx::SqlitePool) -> anyhow::Result<SharedState> {
         let corpus = quickdoc_core::store::open_in_memory()
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -541,6 +659,7 @@ impl AppState {
         let snapshot = store::load_snapshot(&db)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let chat_feed = crate::web::chat_feed::Feed::new(&snapshot);
         // A directory of its own per gateway. Two tests in one process both
         // resolve `container_prefix`-scoped run directories under it, and boot
         // reconciliation now sweeps *every* prefix under this root (agent
@@ -556,6 +675,8 @@ impl AppState {
             db,
             corpus,
             knowledge: crate::knowledge::Knowledge::new(knowledge),
+            chat_live: crate::web::chat_live::LiveTurns::with_feed(chat_feed.live.clone()),
+            chat_feed,
             snapshot: ArcSwap::from_pointee(snapshot),
             telemetry: TelemetryBus::new(),
             policy: std::sync::Arc::new(crate::policy::PolicyGate::default()),
@@ -616,9 +737,11 @@ impl AppState {
             started_at: Instant::now(),
             started_at_utc: chrono::Utc::now(),
             background: Default::default(),
+            stops: Default::default(),
             _test_dir: Some(TestDir(dir.clone())),
             data_dir: dir,
             settings_write: tokio::sync::Mutex::new(()),
+            snapshot_loads: SnapshotLoads::default(),
             // Never read from the environment: a developer running the suite
             // from a dev shell must not get a different gateway. A test that
             // wants one says so with `set_dev_for_tests`.
@@ -626,7 +749,8 @@ impl AppState {
             builds: Default::default(),
             bench: Default::default(),
             chat_temp: Default::default(),
-            chat_live: Default::default(),
+            chat_folder_locks: Default::default(),
+            devices: Default::default(),
             me: Default::default(),
         });
         app.builds.set_instance_id(instance);
@@ -806,19 +930,180 @@ impl AppState {
         });
     }
 
+    /// Lay a key op's write over the published snapshot when the reload
+    /// after it failed (review W2-6, W3-7): the row is written, and the
+    /// snapshot that still says otherwise must not keep admitting the key it
+    /// revoked — a new request with a disabled, deleted or rotated key is
+    /// refused at once, not at the next successful reload. Every revocation
+    /// watch re-reads its key in it.
+    ///
+    /// Published as every snapshot is ([`Self::publish_over`]): a level laid
+    /// over plays as a reloaded one does.
+    pub(crate) fn key_written(&self, id: i64, written: KeyWritten) {
+        self.publish_over(|cur| {
+            let mut next = Snapshot::clone(cur);
+            match &written {
+                KeyWritten::Disabled => {
+                    if let Some(k) = next.api_keys.iter_mut().find(|k| k.id == id) {
+                        k.enabled = false;
+                    }
+                }
+                KeyWritten::Deleted => next.api_keys.retain(|k| k.id != id),
+                KeyWritten::SelfAdmin(level) => {
+                    if let Some(k) = next.api_keys.iter_mut().find(|k| k.id == id) {
+                        k.self_admin = *level;
+                    }
+                }
+                KeyWritten::Rehashed { hash, plain } => {
+                    if let Some(k) = next.api_keys.iter_mut().find(|k| k.id == id) {
+                        k.key_hash = hash.clone();
+                        if let Some(p) = plain {
+                            k.key_plain = Some(crate::config::Secret::new(p.clone()));
+                        }
+                    }
+                }
+            }
+            next
+        });
+        self.devices.revocations.rearm();
+    }
+
+    /// Publish the snapshot after a settings save that committed `s`, and
+    /// when the load fails twice, lay `s` over the published snapshot
+    /// instead (review G-6): the save is in the store, and a snapshot that
+    /// still says otherwise must not keep a lowered self-admin level's
+    /// devices on threads they no longer reach. Publishing it runs what a
+    /// moved level runs.
+    ///
+    /// The half of a reload that runs under [`Self::settings_write`]: the
+    /// next writer copies the published settings under that lock, so a
+    /// publish after it is let go could hand that writer the settings from
+    /// before this save, and its save would revert this one. The MCP
+    /// reconcile is the other half, and the caller runs it once it has let
+    /// go of the lock ([`SettingsPublished`]): a stdio server's start inside
+    /// it can take as long as a cold image pull, and the GPU hold, which
+    /// takes the lock too, would wait for it (the begin-write review's B-1).
+    pub async fn settings_saved(&self, s: &crate::config::Settings) -> SettingsPublished {
+        let first = match self.publish_snapshot().await {
+            Ok(_) => return SettingsPublished::reloaded(),
+            Err(e) => e,
+        };
+        tracing::warn!("settings saved, but the reload failed ({first}); trying again");
+        let again = match self.publish_snapshot().await {
+            Ok(_) => return SettingsPublished::reloaded(),
+            Err(e) => e,
+        };
+        tracing::error!(
+            "settings saved, but the reload failed twice ({again}); the saved settings are \
+             laid over the published snapshot"
+        );
+        // Laid over the snapshot the swap replaces, inside the `rcu` (the
+        // branch review's verification, V-9): a publish that lands while
+        // this one is made is kept, and the swap retries against it, rather
+        // than being replaced by a copy taken before it.
+        self.publish_over(|cur| {
+            let mut next = Snapshot::clone(cur);
+            next.settings = s.clone();
+            next
+        });
+        SettingsPublished {
+            reload_failed: Some(again.to_string()),
+        }
+    }
+
+    /// Reconcile MCP against the snapshot published now: the step a
+    /// settings writer runs once it has let go of [`Self::settings_write`]
+    /// (`settings_set`, `settings_set_full`, `hold_set`, the router-mode
+    /// sweep). Not against the snapshot that writer published: another path
+    /// (`mcp_server_set`, `key_set`) may have published since, and a
+    /// reconcile of the older one would stop a server the newer one started
+    /// or enabled (the begin-write re-check's R-4). A reconcile only moves
+    /// the live connections towards the snapshot it is given, so the newest
+    /// is always the right one.
+    pub async fn reconcile_mcp(&self) {
+        self.mcp.reconcile(&self.snapshot()).await;
+    }
+
     /// Publish `snap` with whatever lease the snapshot it replaces carries.
     /// `rcu`, so a lease taken or released while `snap` was being loaded is
     /// never lost or revived: the swap retries against the newer snapshot.
     fn store_carrying_lease(&self, snap: Snapshot) -> Arc<Snapshot> {
-        let mut published = None;
-        self.snapshot.rcu(|cur| {
+        self.publish_over(|cur| {
             let mut next = snap.clone();
             next.gpu_lease = cur.gpu_lease.clone();
-            let next = Arc::new(next);
+            next
+        })
+    }
+
+    /// Publish `loaded`, read from the store by load number `load`
+    /// ([`SnapshotLoads`]), unless a load that started after it published
+    /// already: the snapshot published either way. A benchmark's lease is
+    /// runtime state the store does not have, so the published snapshot
+    /// carries the current one over.
+    fn publish_loaded(&self, load: u64, loaded: Snapshot) -> Arc<Snapshot> {
+        let mut newest = self
+            .snapshot_loads
+            .published
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if load < *newest {
+            tracing::debug!(
+                "snapshot load {load} is older than load {} that published already; not published",
+                *newest
+            );
+            return self.snapshot();
+        }
+        *newest = load;
+        self.store_carrying_lease(loaded)
+    }
+
+    /// Publish what `next` makes of the snapshot it replaces, computed inside
+    /// the `rcu` so it is always made of the newest one, then run what every
+    /// publish runs.
+    fn publish_over(&self, next: impl Fn(&Snapshot) -> Snapshot) -> Arc<Snapshot> {
+        let mut published = None;
+        let mut replaced = None;
+        self.snapshot.rcu(|cur| {
+            replaced = Some(cur.clone());
+            let next = Arc::new(next(cur));
             published = Some(next.clone());
             next
         });
-        published.expect("rcu runs its closure at least once")
+        let published = published.expect("rcu runs its closure at least once");
+        let replaced = replaced.expect("rcu runs its closure at least once");
+        // The Chat feed's `hold` event and its live buffer (client-apps
+        // design §2.2): every published snapshot, whichever path saved it.
+        self.chat_feed.published(|| self.snapshot());
+        // A device's admin-tools level moved, or the gateway's that caps
+        // every device's (client-apps design L3's note, 2026-10-07), whichever
+        // path saved it — the gateway's plays as each device's own move does.
+        // The save recorded it in the feed (`store::update_key_policy`,
+        // `store::save_settings`), and each device's stream reads it now: a
+        // level record waits for the snapshot that says it, and a feed opened
+        // in between for its levels (`chat_feed`'s stream doc), so they are
+        // woken here, at the publish — not after whatever the writer does
+        // next, an MCP reconcile that one unreachable server stalls for its
+        // connect timeout (the branch review's N-1). The toolset's threads
+        // come or go, and a fresh `state`. A device's bound sessions on a
+        // thread it no longer reaches close with the neutral 4004 and its
+        // turns there are cancelled; its realtime sessions list `lmgw`
+        // again. A turn's next call reads the level per call.
+        let gateway_moved = replaced.settings.self_admin != published.settings.self_admin;
+        let device_moved = published.api_keys.iter().any(|k| {
+            replaced
+                .api_keys
+                .iter()
+                .any(|was| was.id == k.id && was.self_admin != k.self_admin)
+        });
+        if gateway_moved || device_moved {
+            self.chat_feed.wake();
+            self.chat_live.reach_changed(&published);
+            if device_moved {
+                self.chat_feed.live.devices_refresh();
+            }
+            self.devices.reach_moves.moved();
+        }
+        published
     }
 
     /// Reload the snapshot from the DB after any config mutation, then
@@ -832,7 +1117,9 @@ impl AppState {
     }
 
     /// The half of [`Self::reload_snapshot`] that only touches this process:
-    /// load the config and publish it, so every reader is on the new one.
+    /// load the config and publish it, so every reader is on the new one —
+    /// unless a load that started later published already ([`SnapshotLoads`]):
+    /// then the newer snapshot stays, and is the one returned.
     ///
     /// Split out for `ops::hold_set` (gpu-hold design §5/§6). Reconciling MCP
     /// means a `join_all` over autostart servers, and one unreachable server
@@ -843,9 +1130,14 @@ impl AppState {
     /// the gate is what must happen before the sweep, and that is exactly what
     /// this does; the reconcile can follow the sweep.
     pub(crate) async fn publish_snapshot(&self) -> Result<Arc<Snapshot>, GatewayError> {
-        // A benchmark's lease is runtime state the store does not have, so
-        // the published snapshot carries the current one over.
-        let snap = self.store_carrying_lease(store::load_snapshot(&self.db).await?);
+        let load = self.snapshot_loads.start();
+        let snap = self.publish_loaded(load, store::load_snapshot(&self.db).await?);
+        // Every revocation watch re-reads its key in what was just published
+        // (client-apps design §1.6): a key disabled, rotated or deleted by any
+        // path — the Keys page, an agent's page, a restore — ends the
+        // connections and streams opened with it, not only the ones whose op
+        // raised the signal by name.
+        self.devices.revocations.rearm();
         // A model's ctx-size, cache types or GGUF path may have just changed,
         // and every one of those changes what it costs on the GPU (§9b).
         self.vram.forget_plans().await;
@@ -855,8 +1147,38 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_dir, dev_flag, is_installed_data_dir};
+    use super::{absolute_dir, dev_flag, is_installed_data_dir, AppState};
+    use crate::config::SelfAdmin;
     use std::path::{Path, PathBuf};
+
+    /// The branch review's N-1: two reloads cross a write — the first loads
+    /// before its commit, the second after it — and the first publishes
+    /// last. Its older snapshot does not replace the newer one; a load that
+    /// starts later publishes as ever.
+    #[tokio::test]
+    async fn an_older_load_is_not_published_over_a_newer_one() {
+        let state = AppState::init_for_tests().await.unwrap();
+        let level = |state: &AppState| state.snapshot().settings.self_admin;
+        let first = state.snapshot_loads.start();
+        let stale = crate::store::load_snapshot(&state.db).await.unwrap();
+        let mut s = state.snapshot().settings.clone();
+        assert_ne!(s.self_admin, SelfAdmin::Full);
+        s.self_admin = SelfAdmin::Full;
+        crate::store::save_settings(&state.db, &s).await.unwrap();
+        let second = state.snapshot_loads.start();
+        let fresh = crate::store::load_snapshot(&state.db).await.unwrap();
+
+        state.publish_loaded(second, fresh);
+        assert_eq!(level(&state), SelfAdmin::Full);
+        let published = state.publish_loaded(first, stale);
+        assert_eq!(published.settings.self_admin, SelfAdmin::Full);
+        assert_eq!(level(&state), SelfAdmin::Full, "the older load came last");
+
+        s.self_admin = SelfAdmin::Off;
+        crate::store::save_settings(&state.db, &s).await.unwrap();
+        state.publish_snapshot().await.unwrap();
+        assert_eq!(level(&state), SelfAdmin::Off, "a later load publishes");
+    }
 
     #[test]
     fn a_relative_data_dir_is_made_absolute() {

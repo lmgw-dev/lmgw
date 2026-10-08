@@ -13,7 +13,10 @@ use crate::store::{self};
 /// and each omission is a decision rather than an oversight:
 ///
 /// - `self_admin` — the gate on this whole surface. An agent that can widen its
-///   own permissions is ungated; change it in the dashboard.
+///   own permissions is ungated; change it in the dashboard. It is one of the
+///   access settings `lmgw__settings_set` refuses by name for every caller
+///   (`selfadmin::ACCESS_SETTINGS`, 2026-10-07), with `auth_enabled`, which
+///   only this patch's dashboard op (`/api/op/settings_set`) still takes.
 /// - `bind_addr` — takes effect only on restart, and a wrong value strands the
 ///   gateway on an address nothing is talking to.
 /// - `hf_token` / `update_token` / `forge_tokens` — secrets. They are redacted
@@ -23,8 +26,8 @@ use crate::store::{self};
 /// Container settings (images, ports, model directories) likewise stay on the
 /// dashboard; `lmgw__container` drives their lifecycle, not their definition.
 /// So does `builds_dir`, for the reason a models dir does: it is where lmgw
-/// writes gigabytes and removes directories, and pointing it somewhere is the
-/// owner's call, not a tool's.
+/// writes gigabytes and removes directories, and pointing it somewhere is a
+/// decision for the dashboard, not for a tool.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 // The advertised inputSchema is closed (`additionalProperties: false`), so an
 // argument we don't know is an error, not something to drop on the floor: a
@@ -32,16 +35,33 @@ use crate::store::{self};
 // patch, say) must be told, never silently reported success.
 #[serde(default, deny_unknown_fields)]
 pub struct SettingsPatch {
+    /// Require a gateway API key on /v1/* and /mcp. Taken by this op only:
+    /// the lmgw__settings_set tool refuses it, as it refuses every setting
+    /// that decides who may reach lmgw.
     pub auth_enabled: Option<bool>,
     pub retention_days: Option<i64>,
     pub retention_max_rows: Option<i64>,
     pub max_body_mb: Option<u32>,
     /// Archive an idle Chat thread this many days after its last activity.
-    /// `0` disables auto-archive (chat-archive-pin-attachments design §1).
+    /// `0` disables auto-archive. A folder's own `archive_days` overrides it
+    /// for the threads in that folder, and an ongoing conversation's current
+    /// thread is never archived.
     pub chat_archive_days: Option<i64>,
     /// Delete an archived, unpinned Chat thread this many days after it was
-    /// archived. `0` keeps archived threads forever (design §1).
+    /// archived. `0` keeps archived threads forever. A folder's own
+    /// `purge_days` overrides it for the threads in that folder.
     pub chat_purge_days: Option<i64>,
+    /// Keep the Chat change feed's records this many days; `0` keeps every
+    /// record. A client away longer resumes with a `resync`.
+    pub chat_feed_retention_days: Option<i64>,
+    /// Seconds between the Chat feed's keep-alive comments, at least 1.
+    pub chat_feed_keepalive_s: Option<i64>,
+    /// Records the Chat feed reads per query while a client catches up,
+    /// from 1 to 10000.
+    pub chat_feed_page_size: Option<i64>,
+    /// Live events the Chat feed holds for a slow client before it sends
+    /// it a fresh `state` instead, from 1 to 65536.
+    pub chat_feed_live_buffer: Option<i64>,
     /// The system prompt new Chat threads start with (each thread keeps its
     /// own copy). The built-in text returns to the built-in default; `""`
     /// starts new threads with none.
@@ -49,7 +69,7 @@ pub struct SettingsPatch {
     /// How a text PDF attached in Chat starts out: `text` | `images` | `ask`.
     pub chat_pdf_mode: Option<String>,
     /// The Chat's speech-to-text alias — dictation, realtime mode and audio
-    /// attachments (chat-voice design §2.1); `""` = `realtime.asr_alias`.
+    /// attachments; `""` = `realtime.asr_alias`.
     /// Must resolve to a model whose capability task is `asr`.
     pub chat_stt_alias: Option<String>,
     /// The Chat's text-to-speech alias; `""` = `realtime.tts_alias`. Must be
@@ -79,26 +99,24 @@ pub struct SettingsPatch {
     pub chat_kb_budget_tokens: Option<i64>,
     pub sampling_alias: Option<String>,
     pub update_check_enabled: Option<bool>,
-    /// Global GPU-hold fallback for chat-class local models (gpu-hold design
-    /// §3.1). `""` clears it back to "refuse"; otherwise validated (must
-    /// resolve, must not be local) before it is stored. Deliberately not
-    /// `hold_active` — see [`crate::ops::hold_set`] (package 2).
+    /// Global GPU-hold fallback for chat-class local models. `""` clears it
+    /// back to "refuse"; otherwise validated (must resolve, must not be local)
+    /// before it is stored. Deliberately not `hold_active`: engage or release
+    /// the hold with `hold_set`.
     pub hold_fallback_alias: Option<String>,
-    /// `vram.fallback_on_external` (candidate-aliases design §4.7, §12.25):
-    /// answer a local model's fallback at once when VRAM outside lmgw's
+    /// `vram.fallback_on_external`: answer a local model's fallback at once when VRAM outside lmgw's
     /// control is short, instead of queueing. On by default; turn off on
     /// shared-memory systems (APUs).
     pub fallback_on_external: Option<bool>,
-    /// How often the build update check runs, in hours; `0` turns it off
-    /// (container-builds §8). At most
-    /// [`MAX_CHECK_HOURS`](crate::backends::updates::MAX_CHECK_HOURS).
+    /// How often the build update check runs, in hours; `0` turns it off.
+    /// At most 8760.
     pub build_update_check_hours: Option<u32>,
     /// `audio.catalog_revision`: `pinned` (an audio catalog download takes
     /// the commit the spec pins) or `latest` (always `main`). Not part of
     /// the audio class's container definition, so not one of the dashboard-
     /// only container settings above.
     pub audio_catalog_revision: Option<String>,
-    /// `GET /v1/realtime`'s settings (realtime design §12): any of its fields,
+    /// `GET /v1/realtime`'s settings: any of its fields,
     /// checked as the dashboard's save checks them. The self-admin tool takes
     /// it as a JSON-encoded object (`hoist_json_arg`).
     pub realtime: Option<super::RealtimeSettingsPatch>,
@@ -174,7 +192,7 @@ pub async fn validate_stt_alias(state: &SharedState, alias: &str) -> Result<(), 
 
 pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value, String> {
     // Held across the whole read-modify-write: see `AppState::settings_write`.
-    let _guard = state.settings_write.lock().await;
+    let guard = state.settings_write.lock().await;
     let snap = state.snapshot();
     let mut s: Settings = snap.settings.clone();
     let mut changed: Vec<&str> = Vec::new();
@@ -203,6 +221,15 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
         s.chat_purge_days = v.max(0);
         changed.push("chat_purge_days");
     }
+    changed.extend(super::apply_chat_feed(
+        &mut s,
+        super::ChatFeedPatch {
+            chat_feed_retention_days: p.chat_feed_retention_days,
+            chat_feed_keepalive_s: p.chat_feed_keepalive_s,
+            chat_feed_page_size: p.chat_feed_page_size,
+            chat_feed_live_buffer: p.chat_feed_live_buffer,
+        },
+    )?);
     if let Some(v) = p.chat_system_prompt.as_deref() {
         s.set_default_chat_prompt(v);
         changed.push("chat_system_prompt");
@@ -282,10 +309,23 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
     store::save_settings(&state.db, &s)
         .await
         .map_err(|e| e.to_string())?;
-    state.reload_snapshot().await.map_err(|e| e.to_string())?;
+    // Saved is saved (review G-6): a reload that fails is said beside it.
+    let published = state.settings_saved(&s).await;
+    // Published under the lock, reconciled after it (`settings_saved`),
+    // against the snapshot of then (`reconcile_mcp`).
+    drop(guard);
+    state.reconcile_mcp().await;
+    let message = match published.reload_failed {
+        None => format!("updated {}", changed.join(", ")),
+        Some(e) => format!(
+            "updated {} — the rest of the configuration could not be reloaded ({e}); these \
+             settings apply now, and the rest at the next reload",
+            changed.join(", ")
+        ),
+    };
     Ok(json!({
         "ok": true,
         "changed": changed,
-        "message": format!("updated {}", changed.join(", ")),
+        "message": message,
     }))
 }

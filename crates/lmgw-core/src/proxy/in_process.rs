@@ -20,7 +20,7 @@ use crate::gate::FallbackReason;
 use crate::ir::{ChatRequest, Completion, Timings, Usage};
 use crate::state::{AppState, SharedState};
 use crate::store::{self, NewRequestLog};
-use crate::telemetry::{RequestClass, RequestSummary};
+use crate::telemetry::RequestClass;
 
 use super::*;
 
@@ -61,6 +61,10 @@ pub(crate) struct InProcessLog<'a> {
     /// See [`LogParams::degraded`]: what this call's content lost to a model
     /// that lacks a capability.
     pub degraded: Option<String>,
+    /// See [`LogParams::quantities`]: what the call processed besides
+    /// tokens; `Default::default()` when nothing was measured.
+    /// [`record_in_process`] fills `requests` when it is left `None`.
+    pub quantities: crate::pricing::Quantities,
 }
 
 /// Write one `request_logs` row for an in-process model call and broadcast it on
@@ -68,6 +72,9 @@ pub(crate) struct InProcessLog<'a> {
 /// log identically to a public request (§8 "one path instead of three copies").
 /// Real `prompt/completion_tokens`, `status`, `error_kind`, and latency, exactly
 /// like [`record`]; the only difference is the free-form `ingress_proto` label.
+///
+/// Returns what the row adds to a total — priced on `p.route`, the route that
+/// answered — for a caller that tells its meter (billable-units §7).
 pub(crate) async fn record_in_process(
     p: InProcessLog<'_>,
     status: u16,
@@ -75,16 +82,17 @@ pub(crate) async fn record_in_process(
     usage: Usage,
     error: Option<(&str, String)>,
     state: &AppState,
-) {
+) -> crate::pricing::RowCost {
     let total_ms = p.started.elapsed().as_millis() as i64;
+    let q = with_requests_default(p.quantities, true, status, error.as_ref().map(|(k, _)| *k));
     let priced = price_call(
         state,
         p.alias,
-        Some(p.route.upstream.id),
-        Some(p.route.upstream_model.as_str()),
+        Some(p.route),
         &p.key,
         p.ingress_proto,
         &usage,
+        &q,
     );
     let row = NewRequestLog {
         client_key: priced.client_key,
@@ -116,39 +124,25 @@ pub(crate) async fn record_in_process(
         fallback_reason: p.fallback.map(|r| r.as_str().to_string()),
         rung: p.rung,
         degraded: p.degraded,
+        audio_in_ms: quantity_column(q.audio_in_ms),
+        chars_in: quantity_column(q.chars_in),
+        images_out: quantity_column(q.images_out),
     };
+    let share = row.row_cost();
+    // A caller stamped with a run (`X-Lmgw-Run` on a `/v1/responses` or a
+    // realtime request) has its rows on that run's total, as `record` puts
+    // a `/v1` request's there (§3.1).
+    note_on_run(state, p.key.run, &row, &usage);
     let log_id = store::insert_request_log(&state.db, &row)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("failed to write in-process request log: {e}");
             0
         });
-    state.telemetry.request_finished(RequestSummary {
-        log_id,
-        ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        client_key: row.client_key,
-        ingress_proto: row.ingress_proto,
-        requested_alias: row.requested_alias,
-        upstream_name: row.upstream_name,
-        upstream_model: row.upstream_model,
-        egress_proto: row.egress_proto,
-        status,
-        ttfb_ms: row.ttfb_ms,
-        total_ms: row.total_ms,
-        prompt_tokens: row.prompt_tokens,
-        completion_tokens: row.completion_tokens,
-        cached_in_tokens: row.cached_in_tokens,
-        cache_write_tokens: row.cache_write_tokens,
-        streamed: row.streamed,
-        error_kind: row.error_kind,
-        error_msg: row.error_msg,
-        cost_micro: row.cost.total_micro,
-        class: row.class.as_str().to_string(),
-        key_id: row.key_id,
-        fallback_reason: row.fallback_reason,
-        rung: row.rung,
-        degraded: row.degraded,
-    });
+    state
+        .telemetry
+        .request_finished(row_summary(log_id, row, status));
+    share
 }
 
 /// Run one **non-streaming** in-process model call through the existing egress
@@ -282,6 +276,7 @@ pub(crate) async fn sample_once_noting(
                 fallback,
                 rung: None,
                 degraded: None,
+                quantities: Default::default(),
             },
             e.http_status().as_u16(),
             None,
@@ -475,6 +470,7 @@ pub(crate) async fn sample_once_noting(
                 per_route.and_then(|(p, _)| p.degraded()),
                 lease_degraded,
             ]),
+            quantities: Default::default(),
         },
         status,
         Some(started.elapsed().as_millis() as i64),
@@ -899,8 +895,17 @@ pub(crate) async fn stream_once_on(
         Ok(()) if error.is_some() && !stopped => StatusCode::BAD_GATEWAY.as_u16(),
         Ok(()) => StatusCode::OK.as_u16(),
     };
+    // `Ok` only once the response passed its status check: the upstream
+    // answered, so the row counts its request — a stop or a failure
+    // mid-stream included, which the writer's default would leave unknown
+    // (billable-units §4.5). A stop before that stays unknown.
+    let quantities = if result.is_ok() {
+        crate::pricing::Quantities::answered()
+    } else {
+        crate::pricing::Quantities::default()
+    };
     in_flight.logging();
-    record_in_process(
+    let share = record_in_process(
         InProcessLog {
             key,
             ingress_proto,
@@ -917,6 +922,7 @@ pub(crate) async fn stream_once_on(
                 per_route.and_then(|(p, _)| p.degraded()),
                 lease_degraded,
             ]),
+            quantities,
         },
         status,
         outcome.ttfb_ms,
@@ -925,7 +931,10 @@ pub(crate) async fn stream_once_on(
         state,
     )
     .await;
+    // This route's row — a re-routed call's own, which the caller's meter
+    // cannot price from the route it started on.
     sink.billed(&usage);
+    sink.billed_cost(share);
 
     result?;
     // The consumer asked for the stop; what it got so far is all it gets.

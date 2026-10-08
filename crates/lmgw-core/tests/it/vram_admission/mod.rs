@@ -46,6 +46,7 @@ mod world;
 
 mod abandoned_requests;
 mod admission;
+mod agent_run_reroute;
 mod audio_cpu;
 mod audio_cpu_verbs;
 mod audio_residency;
@@ -74,6 +75,7 @@ mod outside_vram_fallback;
 mod pool_mock;
 mod release_after_llama_server;
 mod request_gate;
+mod stream_usage;
 mod unheld_containers;
 mod unheld_pass;
 

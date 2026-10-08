@@ -7,8 +7,8 @@
 #   scripts/dev-copy.sh copy [dir]      a fresh copy of production's database
 #   scripts/readme-demo.sh [dir]        scrubs it, starts it, adds demo chats and live traffic
 #   scripts/readme-shots.sh [dir]       this; right away, while the demo's models are resident
-# Every page gets the window chrome the app shows in its own window (html.tauri, the window
-# controls), which a plain browser leaves hidden. Look at every image before committing it.
+# Every page gets the app window's class (html.tauri: the desktop's fonts), which a plain browser
+# leaves off; the palette stays the bundled one, as off KDE. Look at every image before committing it.
 #
 # which picks the drives: pages (scripts/drive/readme-pages.json, the gallery), voice
 # (scripts/drive/readme-voice.json, the Chat voice section) or both. The voice shots run in the

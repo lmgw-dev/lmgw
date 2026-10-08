@@ -143,7 +143,7 @@ pub async fn set_passthrough_hidden(
     } else {
         "DELETE FROM hidden_passthrough_models WHERE upstream_id = ?1 AND model_id = ?2"
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = super::begin_write(pool).await?;
     for model_id in model_ids {
         sqlx::query(sql)
             .bind(upstream_id)

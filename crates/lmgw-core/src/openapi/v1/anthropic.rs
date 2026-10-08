@@ -1,6 +1,5 @@
-//! `POST /v1/messages` and `POST /v1/messages/count_tokens` (api-docs design
-//! §4.8, §5.2), read from `ingress::anthropic::parse_messages_request` and
-//! `parse_reasoning` (`ingress/anthropic.rs:14,169`) and
+//! `POST /v1/messages` and `POST /v1/messages/count_tokens`, read from
+//! `ingress::anthropic::parse_messages_request` and `parse_reasoning` and
 //! `serialize_completion`/`AnthropicStreamEncoder`. Unlike the chat ingress,
 //! nothing outside the modeled keys is forwarded (`passthrough: Default`) —
 //! an Anthropic-protocol upstream gets exactly the client body lmgw
@@ -18,9 +17,9 @@ fn content_block() -> Value {
             {type:image,source:{type:base64,media_type,data} | {type:url,url}}, \
             {type:tool_use,id,name,input}, {type:tool_result,tool_use_id,content,is_error}, \
             {type:thinking,thinking,signature} (replayed; unsigned when lmgw itself \
-            produced it), {type:redacted_thinking} (accepted and dropped — this gateway's \
-            Anthropic egress never requests extended thinking with a redaction key). A \
-            custom tool without input_schema (a server tool) is refused with 400.",
+            produced it), {type:redacted_thinking} (accepted and dropped: lmgw never asks \
+            an Anthropic upstream for thinking with a redaction key). A custom tool \
+            without input_schema (a server tool) is refused with 400.",
     })
 }
 
@@ -63,7 +62,7 @@ pub(crate) fn messages_request(g: &mut SchemaGenerator) -> Schema {
                 "system": {"description": "A string, or an array of {type:text,text} blocks, \
                     joined with blank lines."},
                 "tools": {"type": "array", "items": tool_schema(), "description": "Custom \
-                    tools only (input_schema required) — a server tool (web_search, computer \
+                    tools only (input_schema required); a server tool (web_search, computer \
                     use, …) is refused with 400."},
                 "tool_choice": {"description": "{type:auto|any|none|tool} \
                     (tool also carries name)."},
@@ -99,7 +98,7 @@ fn content_json() -> Value {
             "type": "object",
             "description": "{type:text,text} | {type:tool_use,id,name,input}; a leading \
                 {type:thinking,thinking} block when the completion carried reasoning \
-                (unsigned — produced by lmgw, not Anthropic).",
+                (unsigned: produced by lmgw, not by Anthropic).",
             "additionalProperties": true
         }
     })
@@ -155,8 +154,8 @@ pub(crate) fn example() -> Value {
 
 /// One SSE event of the `message_start → content_block_start/delta/stop* →
 /// message_delta → message_stop` sequence `AnthropicStreamEncoder` sends
-/// (WP4 "Extra" gap — `messages_response`'s own doc comment explains why
-/// this did not exist until now), or a mid-stream `error` event on an
+/// (`messages_response`'s own doc comment explains why it is a separate
+/// schema), or a mid-stream `error` event on an
 /// upstream failure. One shape for all of them: the `type` enum is the only
 /// thing that reliably differs at this level of detail, and `additional
 /// Properties: true` carries the event-specific fields (`index`, `delta`,
@@ -186,14 +185,14 @@ pub(crate) fn stream_event(g: &mut SchemaGenerator) -> Schema {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/messages/count_tokens (§5.2)
+// POST /v1/messages/count_tokens
 // ---------------------------------------------------------------------------
 
 /// Exactly the Anthropic SDKs' `messages.count_tokens()` body — the same
 /// shape as [`messages_request`] minus `stream`/`stop_sequences` (the SDK
 /// does not send them), plus `output_config`. lmgw reads `model`; everything
-/// else rides to the Anthropic-protocol path verbatim (§5.2 "the client body
-/// verbatim, only `model` replaced" — the one route where the request schema
+/// else rides to the Anthropic-protocol path verbatim (the client body
+/// verbatim, only `model` replaced — the one route where the request schema
 /// is also, almost, the wire body an Anthropic upstream receives).
 pub(crate) fn count_request(g: &mut SchemaGenerator) -> Schema {
     schemas::named(

@@ -2,14 +2,16 @@
 //! dashboard's realtime mode.
 //!
 //! **The binding is decided at the handshake** (`bind`): `GET
-//! /v1/realtime?chat_thread=<id>`, checked before the 101 — the dashboard's
-//! own capability (`Cap::Admin`), the thread, and no Admin Chat. A bound
-//! session starts bound: `session.created` carries the thread's resolution,
-//! realtime's default-model resolution and its policy check are skipped,
-//! and the connect warm is the thread's Admit group (§4.2). One bound
-//! session per thread: a second bind takes over, and the older session
-//! closes with a reason (`web::chat_live`'s voice binding); the newer
-//! session's journal writes only once the older one's has drained.
+//! /v1/realtime?chat_thread=<id>`, checked before the 101 — the Chat
+//! capability (`Cap::Chat`: the dashboard, an owner key, a paired device),
+//! the thread, and no Admin Chat; for a device, its key's check of the
+//! thread's aliases (client-apps design §1.3). A bound session starts
+//! bound: `session.created` carries the thread's resolution, realtime's
+//! default-model resolution is skipped, and the connect warm is the
+//! thread's Admit group (§4.2). One bound session per thread: a second bind
+//! takes over, and the older session closes with a reason naming the binder
+//! (`web::chat_live`'s voice binding, client-apps §1.7); the newer session's
+//! journal writes only once the older one's has drained.
 //!
 //! **The thread owns** the chat model, the instructions, the tools, the
 //! transcription model, the TTS, the voice, the speech instructions, the tag
@@ -66,17 +68,68 @@ pub(in crate::realtime) use owned::{check_create, check_update, refuse_item};
 
 /// The close code a session taken over by another window closes with:
 /// application-defined (RFC 6455 §7.4.2), so a page tells it from a
-/// network close.
-pub(crate) const CLOSE_TAKEN_OVER: u16 = 4000;
+/// network close. Shared with clients (`lmgw-api-types`).
+pub(crate) use lmgw_api_types::realtime::CLOSE_TAKEN_OVER;
 
-/// The close reason a session taken over gets.
+/// The close code a device's session closes with when its thread left its
+/// reach ([`out_of_reach_reason`]): its own, not a revocation's 4003, since
+/// the key is still good. Shared with clients (`lmgw-api-types`).
+pub(crate) use lmgw_api_types::realtime::CLOSE_OUT_OF_REACH;
+
+/// The close reason a session taken over gets when the binder has no name.
 pub(crate) const TAKEN_OVER: &str = "voice mode moved to another window";
+
+/// The reason a session taken over is given (client-apps design §1.7):
+/// "voice mode moved to device 'phone'", "… to the dashboard" — cut at a
+/// character boundary to the 123 bytes a close frame's reason may hold.
+pub(crate) fn taken_over_reason(by: Option<&str>) -> String {
+    let Some(by) = by else {
+        return TAKEN_OVER.to_string();
+    };
+    let mut text = format!("voice mode moved to {by}");
+    if text.len() > 123 {
+        let mut end = 120;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
+    text
+}
+
+/// The reason a device's session closes with when its thread left its reach
+/// (client-apps design L3, review W3-1), with [`CLOSE_OUT_OF_REACH`]: "chat
+/// thread 7 is out of reach for this key". Neutral, like every other L3 refusal (review W4-18):
+/// it does not say why, so a device does not learn that the self-admin
+/// toolset was attached. A close frame's reason may hold 123 bytes; this
+/// one is at most 70.
+pub(crate) fn out_of_reach_reason(thread_id: i64) -> String {
+    format!("chat thread {thread_id} is out of reach for this key")
+}
+
+/// What a bound session's spoken turn in flight is told when its thread is
+/// not there for its binder any more — deleted, or (for a device) out of
+/// its reach — before the session's close comes: for a device the close's
+/// own neutral words, the same for a deleted thread as for one hidden from
+/// it (review W4-18; client-apps design §1.6's close-code note,
+/// 2026-10-07); for the owner, that it is gone. Its code is
+/// `chat_thread_not_found` in both.
+pub(crate) fn not_there(thread_id: i64, device: bool) -> String {
+    if device {
+        out_of_reach_reason(thread_id)
+    } else {
+        format!("chat thread {thread_id} is gone (deleted, or a temporary chat kept or discarded)")
+    }
+}
 
 /// What a bound session's core keeps of its binding.
 pub(crate) struct Bound {
     pub thread_id: i64,
     /// Raised when another window binds the thread (module doc).
     pub taken: StopSignal,
+    /// Who did, once `taken` is raised (client-apps design §1.7).
+    pub taken_by: crate::web::chat_live::TakenBy,
     /// The session this one took over, until its journal drained: the
     /// journal waits for it (`web::chat_live`'s voice binding).
     pub fence: Option<StopSignal>,
@@ -156,10 +209,30 @@ pub(crate) struct Served {
 }
 
 impl Bound {
+    /// The session ends because its key was revoked (client-apps design
+    /// §1.6): its binding's `voice.ended` says so.
+    pub(crate) fn revoked(&self) {
+        self._binding.revoked();
+    }
+
+    /// The session ends because its thread left its device's reach (the
+    /// self-admin toolset was attached, client-apps design L3, review W3-1),
+    /// not because another window took it over.
+    pub(crate) fn out_of_reach(&self) -> bool {
+        self._binding.out_of_reach()
+    }
+
+    /// The session left its loop and ends now (review F-5): a
+    /// `takeover=never` bind no longer counts its binding.
+    pub(crate) fn closing(&self) {
+        self._binding.closing();
+    }
+
     pub(crate) fn new(b: &mut Binding) -> Self {
         Self {
             thread_id: b.thread_id,
             taken: b.taken.clone(),
+            taken_by: b.taken_by.clone(),
             fence: b.fence.take(),
             journal: None,
             states: None,

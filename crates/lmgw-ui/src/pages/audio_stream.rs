@@ -100,60 +100,9 @@ impl StreamAcc {
     }
 }
 
-/// Standard-alphabet base64 → bytes. Whitespace is tolerated (SSE data lines
-/// can wrap); padding ends the payload; anything else is a decode failure.
-pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    fn sextet(c: u8) -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => (c - b'A') as u32,
-            b'a'..=b'z' => (c - b'a') as u32 + 26,
-            b'0'..=b'9' => (c - b'0') as u32 + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        })
-    }
-    let mut out = Vec::with_capacity(s.len() / 4 * 3);
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &c in s.as_bytes() {
-        if c == b'=' {
-            break;
-        }
-        if c.is_ascii_whitespace() {
-            continue;
-        }
-        acc = (acc << 6) | sextet(c)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
-}
-
-/// Bytes → standard-alphabet base64 with padding, the inverse of
-/// [`b64_decode`]: realtime's `input_audio_buffer.append` carries the page's
-/// PCM this way (chat-voice §11.2).
-pub fn b64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk.len();
-        let v = (chunk[0] as u32) << 16
-            | (chunk.get(1).copied().unwrap_or(0) as u32) << 8
-            | chunk.get(2).copied().unwrap_or(0) as u32;
-        for i in 0..4 {
-            if i <= n {
-                out.push(ALPHABET[(v >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
+/// Standard-alphabet base64 → bytes, as audio.cpp and the realtime
+/// protocol send it: `lmgw-client`'s, which the voice panel runs on.
+pub use lmgw_client::base64::decode as b64_decode;
 
 /// Wrap raw PCM in the canonical 44-byte RIFF/WAVE header.
 ///
@@ -253,33 +202,6 @@ mod tests {
         assert_eq!(&wav[28..32], &(48000u32 * 8).to_le_bytes()); // byte rate
         assert_eq!(&wav[32..34], &[8, 0]); // blockAlign = 2 * 4
         assert_eq!(&wav[34..36], &[32, 0]); // bits
-    }
-
-    #[test]
-    fn base64_round_trips_the_shapes_audio_cpp_sends() {
-        assert_eq!(b64_decode("").unwrap(), Vec::<u8>::new());
-        assert_eq!(b64_decode("QQ==").unwrap(), b"A");
-        assert_eq!(b64_decode("QUI=").unwrap(), b"AB");
-        assert_eq!(b64_decode("QUJD").unwrap(), b"ABC");
-        assert_eq!(b64_decode("QUJD\nREVG").unwrap(), b"ABCDEF");
-        assert_eq!(b64_decode("//8=").unwrap(), vec![0xFF, 0xFF]);
-        assert!(b64_decode("not*base64").is_none());
-    }
-
-    #[test]
-    fn base64_encodes_with_padding_and_round_trips() {
-        assert_eq!(b64_encode(b""), "");
-        assert_eq!(b64_encode(b"A"), "QQ==");
-        assert_eq!(b64_encode(b"AB"), "QUI=");
-        assert_eq!(b64_encode(b"ABC"), "QUJD");
-        assert_eq!(b64_encode(&[0xFF, 0xFF]), "//8=");
-        assert_eq!(b64_encode(&[0xFB, 0xEF, 0xBE]), "++++");
-        // Every byte value at every offset within a group of three.
-        let bytes: Vec<u8> = (0..=255u8).chain((0..=255u8).rev()).collect();
-        for len in [0, 1, 2, 3, 4, 5, 511, 512] {
-            let b = &bytes[..len];
-            assert_eq!(b64_decode(&b64_encode(b)).unwrap(), b, "length {len}");
-        }
     }
 
     fn fold(records: &[&str]) -> StreamAcc {

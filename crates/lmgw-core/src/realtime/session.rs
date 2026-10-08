@@ -82,11 +82,27 @@ pub(crate) struct SessionInit {
     /// The Chat thread the session is bound to (chat-voice design §8), when
     /// the handshake named one.
     pub bound: Option<super::thread::Binding>,
+    /// Held to the session's last line: a stopping server waits for it.
+    /// Taken in the handshake, before the 101, so a stop that comes while
+    /// the upgrade completes still counts it (review F-3).
+    pub running: Option<crate::server::Running>,
 }
 
 /// Run one session until the client closes, the socket fails, a size limit
 /// is tripped, or the client stops answering pings.
-pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
+pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
+    // Held to the session's last line (`SessionInit::running`).
+    let _running = init.running.take();
+    // A device's session is one of its connections (client-apps design
+    // §1.6): online while it lives, `last_seen_at` at both ends, and closed
+    // with 4003 when the device is revoked. `None` for every other caller.
+    let mut device = crate::devices::connect(
+        &init.state,
+        &init.ctx.principal,
+        init.ctx.revocation_mark,
+        crate::devices::LinkKind::Voice,
+    )
+    .await;
     let (sink, stream) = socket.split();
     let ids = Arc::new(Ids::new());
     let (out, mut drained, mut writer_task) = writer::spawn(sink, ids.clone());
@@ -94,6 +110,20 @@ pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
     // Reads ahead at most the largest frame a client may send (`inbox`).
     let mut inbox = Inbox::spawn(stream, limits.max_frame, out.round_trip());
     let ping_interval_s = init.state.snapshot().settings.realtime.ping_interval_s;
+    // The server this session's upgrade came in on stopping closes it
+    // (1001): the drain does not wait for an upgraded connection, so
+    // without this a restarted gateway's old sessions would run on. Its
+    // generation is the request's (review F-3), not the one after a stop
+    // that came during the handshake.
+    let server_stopped = init
+        .state
+        .stops
+        .stopped_after(init.state.stops.at_or_now(init.ctx.served_at));
+    tokio::pin!(server_stopped);
+    // A device's admin-tools switch moved: its `lmgw` label is listed again
+    // (review P-8).
+    let mut reach_moves = init.state.devices.reach_moves.watch();
+    let mut stopping = false;
     let mut live = Liveness::new(ping_interval_s);
     // A "round trip" as long as the ping interval answered no ping of its
     // own (E3). With pings off there are none to bound.
@@ -124,6 +154,8 @@ pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
     // Another window binding the session's thread takes it over (§8.1).
     let taken = core.bound.as_ref().map(|b| b.taken.clone());
     let mut taken_over = false;
+    let mut out_of_reach = false;
+    let mut revoked = None;
 
     let mut stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
         .await
@@ -141,13 +173,32 @@ pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
             },
             Some(score) = from_scorer.recv() => core.on_turn_score(score),
             Some(listed) = from_mcp.recv() => core.on_listed(listed),
+            Ok(()) = reach_moves.changed() => core.mcp_reach_moved(),
             Some(gen) = drained.recv() => core.on_drained(gen),
             Some(ev) = from_journal.recv() => core.journal_event(ev),
             Some(state) = from_warm.recv() => core.model_state(state),
             Some((seq, verdict)) = from_verdict.recv() => core.audio_verdict(seq, verdict),
             () = super::thread::taken(taken.as_ref()) => {
-                core.taken_over();
-                taken_over = true;
+                // The same stop ends a session whose thread left its
+                // device's reach (client-apps design L3, review W3-1).
+                if core.bound.as_ref().is_some_and(|b| b.out_of_reach()) {
+                    core.out_of_reach();
+                    out_of_reach = true;
+                } else {
+                    core.taken_over();
+                    taken_over = true;
+                }
+                break;
+            }
+            () = &mut server_stopped => {
+                stopping = true;
+                break;
+            }
+            reason = crate::devices::revoked(device.as_mut()) => {
+                revoked = Some(reason);
+                if let Some(b) = core.bound.as_ref() {
+                    b.revoked();
+                }
                 break;
             }
             beat = live.beat() => match beat {
@@ -197,16 +248,52 @@ pub(crate) async fn run(socket: WebSocket, init: SessionInit) {
             .err();
     }
     let id = core.id().to_string();
+    // Ending from here: a client's `takeover=never` rebind (after this
+    // close, or a link that died) is not refused by it (review F-5).
+    if let Some(b) = core.bound.as_ref() {
+        b.closing();
+    }
     if taken_over {
         stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
             .await
             .err();
         if stop.is_none() {
-            tracing::info!("realtime {id}: closed — {}", super::thread::TAKEN_OVER);
+            let reason = super::thread::taken_over_reason(core.taken_by().as_deref());
+            tracing::info!("realtime {id}: closed — {reason}");
+            out.close(super::thread::CLOSE_TAKEN_OVER, reason);
+        }
+    }
+    if out_of_reach {
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+            .await
+            .err();
+        if stop.is_none() {
+            let why =
+                super::thread::out_of_reach_reason(core.bound.as_ref().map_or(0, |b| b.thread_id));
+            tracing::info!("realtime {id}: closed — {why}");
+            out.close(super::thread::CLOSE_OUT_OF_REACH, why);
+        }
+    }
+    if stopping {
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+            .await
+            .err();
+        if stop.is_none() {
+            tracing::info!("realtime {id}: closed — {}", crate::server::STOPPING);
             out.close(
-                super::thread::CLOSE_TAKEN_OVER,
-                super::thread::TAKEN_OVER.into(),
+                crate::server::CLOSE_GOING_AWAY,
+                crate::server::STOPPING.to_string(),
             );
+        }
+    }
+    if let (Some(reason), Some(conn)) = (revoked, device.as_ref()) {
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+            .await
+            .err();
+        if stop.is_none() {
+            let why = crate::devices::close_reason(reason, conn.name(), conn.is_device());
+            tracing::info!("realtime {id}: closed — {why}");
+            out.close(crate::devices::CLOSE_REVOKED, why);
         }
     }
     if let Some(stop) = stop {

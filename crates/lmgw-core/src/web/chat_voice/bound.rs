@@ -20,6 +20,7 @@ use crate::store::{ChatMessageRow, ChatThread, MessageVoice, SendMessageOutcome}
 use super::super::agentchat::ADMIN_KIND;
 use super::super::chat_repo::ChatRepo;
 
+pub(crate) use super::super::chat_caller::Caller;
 pub(crate) use super::resolve::{Source, VoiceConfig};
 
 /// Thread `id` as stored now; `None` when there is no such thread (or the
@@ -51,12 +52,22 @@ pub(crate) fn is_admin(thread: &ChatThread) -> bool {
 pub(crate) fn thread_ref(
     snap: &Snapshot,
     thread: &ChatThread,
+    binder: &Caller,
 ) -> crate::realtime::protocol::ChatThreadRef {
+    // The binder's own level caps it as the gateway's does (review G-14): a
+    // device below `full` never reads `true`, at the bind or after it.
+    let binder_full = match binder {
+        Caller::Owner(_) => true,
+        Caller::Device(ctx) => {
+            crate::devices::admin_cap(snap, &ctx.principal) == crate::config::SelfAdmin::Full
+        }
+        Caller::Refused(_) => false,
+    };
     crate::realtime::protocol::ChatThreadRef {
         id: thread.id,
         title: thread.title.clone(),
         temporary: thread.id < 0,
-        admin_tools: super::resolve::admin_tools(snap, thread),
+        admin_tools: super::resolve::admin_tools(snap, thread) && binder_full,
     }
 }
 
@@ -184,10 +195,11 @@ pub(crate) async fn write_user(
     thread: &ChatThread,
     content: &str,
     voice: &MessageVoice,
+    caller: &Caller,
 ) -> Result<i64, String> {
     let repo = ChatRepo::of(thread.id);
     let id = match repo
-        .append_user_message(state, thread.id, content, &[], &[], Some(voice))
+        .append_user_message(state, thread.id, content, &[], &[], Some(voice), caller)
         .await
     {
         Ok(SendMessageOutcome::Sent(id)) => id,
@@ -198,7 +210,7 @@ pub(crate) async fn write_user(
     };
     if thread.title == "New chat" || thread.title.trim().is_empty() {
         let title = super::super::chat::derive_title(content);
-        let _ = repo.set_title(state, thread.id, &title).await;
+        let _ = repo.set_title(state, thread.id, &title, caller).await;
     }
     Ok(id)
 }
@@ -216,13 +228,14 @@ pub(crate) async fn append_spoken_user(
     generation: u64,
     content: &str,
     voice: &MessageVoice,
+    caller: &Caller,
 ) -> Result<Option<i64>, String> {
     let Some(proof) = state.chat_live.write_if(thread.id, generation).await else {
         return Ok(None);
     };
     let repo = ChatRepo::of(thread.id);
     let id = match repo
-        .append_spoken_user(state, &proof, thread.id, content, voice)
+        .append_spoken_user(state, &proof, thread.id, content, voice, caller)
         .await
     {
         Ok(SendMessageOutcome::Sent(id)) => id,
@@ -234,7 +247,7 @@ pub(crate) async fn append_spoken_user(
     drop(proof);
     if !content.is_empty() && (thread.title == "New chat" || thread.title.trim().is_empty()) {
         let title = super::super::chat::derive_title(content);
-        let _ = repo.set_title(state, thread.id, &title).await;
+        let _ = repo.set_title(state, thread.id, &title, caller).await;
     }
     Ok(Some(id))
 }

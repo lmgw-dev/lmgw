@@ -45,7 +45,7 @@ pub async fn heard_response_for_tests(
     let (_row, user_row) = tokio::sync::watch::channel(Some(UserRow::Written(row)));
     super::super::run(super::super::Job {
         state: state.clone(),
-        ctx: Default::default(),
+        ctx: crate::proxy::RequestCtx::dashboard_for_tests(&state.snapshot()),
         gen: 1,
         label: format!("realtime test of thread {thread_id}"),
         thread_id,

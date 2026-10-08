@@ -301,16 +301,16 @@ async fn sign_in(
     )
 }
 
-/// What `GET /api/session` answers: the current principal, as the SPA's load
-/// check reads it.
+/// What `GET /api/session` answers: the current principal, as the dashboard's
+/// load check reads it.
 #[derive(Debug, Default, Serialize, schemars::JsonSchema)]
 pub(crate) struct SessionView {
     authenticated: bool,
-    /// `key`, `agent`, `owner` — empty for [`Principal::Anonymous`]. Present
-    /// and empty rather than absent: one shape is easier to read in a `curl`
-    /// and easier to parse than two.
+    /// `key`, `agent`, `owner` — empty when nobody is signed in. Present
+    /// and empty rather than absent, so the response has one shape.
     kind: String,
-    /// The `api_keys` row name (`owner:dashboard`), empty for Anonymous.
+    /// The name of the API key in use (`owner:dashboard` for the dashboard's
+    /// own), empty when nobody is signed in.
     name: String,
 }
 

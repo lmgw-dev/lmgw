@@ -14,6 +14,7 @@ use crate::store::{ChatAttachmentFull, ChatThread};
 use super::chat_attach::{escape_attr, file_block};
 use super::chat_attach_gate::{native_audio, Caps};
 use super::chat_attach_ingest::apply_transcript;
+use super::chat_caller::Caller;
 use super::chat_repo::ChatRepo;
 
 /// What one attachment renders to: the parts for the message, and the notes
@@ -99,9 +100,10 @@ fn page_list(pages: &[u32]) -> String {
 /// refuses — a fresh send is gated before this (`chat_attach_gate::blockers`);
 /// anything that still cannot go (history replayed on another model) becomes
 /// a note. An audio transcript made now uses the thread's ASR alias
-/// (chat-voice design §2.1).
+/// (chat-voice design §2.1), as the turn's `caller` (client-apps design L4).
 pub async fn render(
     state: &SharedState,
+    caller: &Caller,
     att: &ChatAttachmentFull,
     caps: Caps,
     thread: &ChatThread,
@@ -134,7 +136,7 @@ pub async fn render(
             let text = att.extracted.as_deref().unwrap_or_default();
             out.parts.push(file_block(&att.name, &attrs, text));
         }
-        "audio" => render_audio(state, att, caps, thread, &mut out).await,
+        "audio" => render_audio(state, caller, att, caps, thread, &mut out).await,
         // "text", and any future kind with no arm yet: a labeled text block
         // is what every model already understands.
         _ => out.parts.push(file_block(
@@ -256,6 +258,7 @@ async fn push_page_images(
 
 async fn render_audio(
     state: &SharedState,
+    caller: &Caller,
     att: &ChatAttachmentFull,
     caps: Caps,
     thread: &ChatThread,
@@ -268,7 +271,7 @@ async fn render_audio(
         });
         return;
     }
-    let (transcript, alias) = match transcript_of(state, att, thread).await {
+    let (transcript, alias) = match transcript_of(state, caller, att, thread).await {
         Ok(t) => t,
         Err(why) => {
             out.note(format!(
@@ -293,6 +296,7 @@ async fn render_audio(
 /// `realtime.asr_alias`). The alias that made it comes with it.
 async fn transcript_of(
     state: &SharedState,
+    caller: &Caller,
     att: &ChatAttachmentFull,
     thread: &ChatThread,
 ) -> Result<(String, String), String> {
@@ -307,16 +311,16 @@ async fn transcript_of(
     let Some(stt) = super::chat_voice::asr_alias(&state.snapshot(), thread) else {
         return Err("the model takes no audio and no speech-to-text model is set".into());
     };
-    let text = crate::proxy::transcribe_for(
-        state,
-        super::chat_voice::speech_proto(thread),
-        &stt,
+    let proto = super::chat_voice::speech_proto(thread);
+    let upload = (
         Bytes::from(att.data.clone()),
-        &att.name,
-        &att.mime,
-    )
-    .await
-    .map_err(|e| format!("transcription with '{stt}' failed: {e}"))?;
+        att.name.as_str(),
+        att.mime.as_str(),
+    );
+    let text = caller
+        .transcribe(state, proto, &stt, upload)
+        .await
+        .map_err(|e| format!("transcription with '{stt}' failed: {e}"))?;
     let mut meta = if att.meta.is_object() {
         att.meta.clone()
     } else {

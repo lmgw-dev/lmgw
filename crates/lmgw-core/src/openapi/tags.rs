@@ -124,6 +124,23 @@ pub(crate) const TAGS: &[TagDef] = &[
         group: Group::DashboardApi,
         description: "",
     },
+    TagDef {
+        id: "chat",
+        name: "Chat",
+        group: Group::DashboardApi,
+        description: "The Chat API a client app uses with its device key (the `chat` \
+                       capability): the threads and folders it follows, an ongoing \
+                       conversation's current thread, and the change feed that keeps them \
+                       current. Every route here refuses a device key with 401 \
+                       device_key_unknown once it matches no device (it was rotated or \
+                       deleted: pair the device again), 401 device_disabled while the device \
+                       is disabled, and 401 key_expired past its expiry date. What is open \
+                       when that happens ends: the feed with `revoked`, a turn's stream with \
+                       an `error` event whose code is revoked. Both carry `kind`, what to do: \
+                       device_disabled and key_expired wait for the gateway's side, \
+                       key_unknown means pair the device again, and revoked is any other \
+                       kind of key's revocation.",
+    },
     // -- Ops ---------------------------------------------------------------
     // No human names were carried over from the design table (§4.3 lists ids
     // only); these are the smallest reasonable reading of the self-admin
@@ -206,7 +223,7 @@ pub(crate) const TAGS: &[TagDef] = &[
         id: "agent-runtime",
         name: "Agent runtime",
         group: Group::AgentRuntime,
-        description: "Every AgentSelf and Ledger route — an agent container's own view of \
-                       itself and its runs.",
+        description: "The routes an agent container calls with its own token: reading its own \
+                       definition and runs, and opening and driving a run.",
     },
 ];

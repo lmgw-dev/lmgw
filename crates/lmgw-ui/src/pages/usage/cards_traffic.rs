@@ -491,6 +491,9 @@ pub(super) fn ShareCard(
     /// same colour here; the rest are what those charts fold into Other.
     slots: Memo<HashMap<String, u8>>,
     group_by: Signal<String>,
+    /// "since 15 Jan 2026" when the window starts before quantities were
+    /// recorded ([`since_note`]).
+    since: Signal<Option<String>>,
     entry: RwSignal<bool>,
     tips: Tips,
 ) -> impl IntoView {
@@ -503,7 +506,11 @@ pub(super) fn ShareCard(
         } else {
             "coloured as the per-alias charts; grey rows are past their six colours"
         };
-        format!("cost and tokens per alias, in the server's rank order · {by}")
+        let measured = match since.get() {
+            Some(s) => format!(" · quantities measured {s}"),
+            None => String::new(),
+        };
+        format!("cost and tokens per alias, in the server's rank order · {by}{measured}")
     });
     view! {
         <div class="card chart-card u-share">
@@ -527,6 +534,46 @@ pub(super) fn ShareCard(
                     let toks = |c: &UsageCell| (c.tokens_in + c.tokens_out) as f64;
                     let max_cost = r.rows.iter().map(|c| c.cost_micro as f64).fold(0.0, f64::max).max(1.0);
                     let max_tok = r.rows.iter().map(toks).fold(0.0, f64::max).max(1.0);
+                    // What each alias processed besides tokens (billable units
+                    // §8.3): a column only when anything in the window measured
+                    // something — a chat-only gateway has none to show.
+                    let any_measured = r.rows.iter().any(|c| measured_of(c).is_some());
+                    // Follows the window, as the card note does.
+                    let measured_tip = move || {
+                        let what = "measured input audio, input characters and generated images";
+                        match since.get() {
+                            Some(s) => format!("{what}, recorded {s}"),
+                            None => what.to_string(),
+                        }
+                    };
+                    let cost_text_of = |c: &UsageCell| {
+                        let is_local = meta.get(c.series.as_str()).is_some_and(|m| m.local);
+                        if c.cost_micro > 0 {
+                            money(c.cost_micro, &cur)
+                        } else if is_local {
+                            "free · local".to_string()
+                        } else if c.cost_unknown_requests > 0 {
+                            "unpriced".to_string()
+                        } else {
+                            money(0, &cur)
+                        }
+                    };
+                    // The figure beside each bar takes what the longest one
+                    // printed here needs, not a fixed slot: in a narrow card a
+                    // fixed slot left the bars no track at all.
+                    let val_chars = r
+                        .rows
+                        .iter()
+                        .take(shown.get())
+                        .map(|c| {
+                            cost_text_of(c)
+                                .chars()
+                                .count()
+                                .max(compact(toks(c)).chars().count())
+                        })
+                        .max()
+                        .unwrap_or(4);
+                    let val_w = format!("--val-w:{}px", val_chars * 7 + 6);
                     let body: Vec<AnyView> = r
                         .rows
                         .iter()
@@ -535,18 +582,9 @@ pub(super) fn ShareCard(
                         .map(|(i, c)| {
                             let m = meta.get(c.series.as_str()).copied();
                             let label = m.map(|m| m.label.clone()).unwrap_or_else(|| c.series.clone());
-                            let is_local = m.is_some_and(|m| m.local);
                             let color = charts::slot_of(&sl, &c.series);
                             let t = toks(c);
-                            let cost_text = if c.cost_micro > 0 {
-                                money(c.cost_micro, &cur)
-                            } else if is_local {
-                                "free · local".to_string()
-                            } else if c.cost_unknown_requests > 0 {
-                                "unpriced".to_string()
-                            } else {
-                                money(0, &cur)
-                            };
+                            let cost_text = cost_text_of(c);
                             let per_mtok = if c.cost_micro > 0 && t > 0.0 {
                                 money((c.cost_micro as f64 / (t / 1e6)) as i64, &cur)
                             } else {
@@ -568,15 +606,22 @@ pub(super) fn ShareCard(
                                     </td>
                                 }
                             };
-                            let tip = Tip::new(
-                                label.clone(),
-                                vec![
-                                    TipRow::new(color, "cost", cost_text.clone()),
-                                    TipRow::new(color, "tokens", compact(t)),
-                                    TipRow::new(color, "requests", grouped(c.requests.max(0) as u64)),
-                                    TipRow::new(color, "per Mtok", per_mtok.clone()),
-                                ],
-                            );
+                            let measured = measured_of(c);
+                            let mut tip_rows = vec![
+                                TipRow::new(color, "cost", cost_text.clone()),
+                                TipRow::new(color, "tokens", compact(t)),
+                            ];
+                            if let Some(m) = &measured {
+                                tip_rows.push(TipRow::new(color, "measured", m.clone()));
+                            }
+                            tip_rows.push(TipRow::new(color, "requests", grouped(c.requests.max(0) as u64)));
+                            tip_rows.push(TipRow::new(color, "per Mtok", per_mtok.clone()));
+                            let tip = Tip::new(label.clone(), tip_rows);
+                            let measured_cell = any_measured.then(|| {
+                                let text = measured.clone().unwrap_or_else(|| "—".into());
+                                let title = measured.clone().unwrap_or_else(|| "nothing measured".into());
+                                view! { <td class="dim share-measured" title=title>{text}</td> }
+                            });
                             let href = TrafficLink::scoped(&class.get_untracked(), &key_id.get_untracked())
                                 .alias(c.series.clone())
                                 .href();
@@ -594,6 +639,7 @@ pub(super) fn ShareCard(
                                     </td>
                                     {bar(c.cost_micro as f64, max_cost, cost_text)}
                                     {bar(t, max_tok, compact(t))}
+                                    {measured_cell}
                                     <td class="num col-p3">{grouped(c.requests.max(0) as u64)}</td>
                                     <td class="num col-p2">{per_mtok}</td>
                                 </tr>
@@ -603,12 +649,16 @@ pub(super) fn ShareCard(
                         .collect();
                     view! {
                         <div class="table-scroll share-wrap">
-                            <table class="data share-table">
+                            <table class="data share-table" class:has-measured=any_measured style=val_w>
                                 <thead>
                                     <tr>
                                         <th>"Alias"</th>
                                         <th>"Cost"</th>
                                         <th>"Tokens"</th>
+                                        {any_measured
+                                            .then(|| {
+                                                view! { <th title=measured_tip>"Measured"</th> }
+                                            })}
                                         <th class="num-h col-p3">"Requests"</th>
                                         <th class="num-h col-p2">"Per Mtok"</th>
                                     </tr>
@@ -630,12 +680,10 @@ pub(super) fn ShareCard(
                     let cur = r.currency.clone();
                     // Over every row, shown or not: the foot is the window's
                     // total, whatever the list is folded to.
-                    let unpriced = r
-                        .rows
-                        .iter()
-                        .fold((0i64, 0i64), |a, c| {
-                            (a.0 + c.cost_unknown_requests, a.1 + c.cost_unknown_tokens)
-                        });
+                    let mut window = UsageCell::default();
+                    for c in &r.rows {
+                        cell_add(&mut window, c);
+                    }
                     let (cost, toks, reqs) = r.rows.iter().fold((0i64, 0i64, 0i64), |a, c| {
                         (a.0 + c.cost_micro, a.1 + c.tokens_in + c.tokens_out, a.2 + c.requests)
                     });
@@ -650,7 +698,8 @@ pub(super) fn ShareCard(
                                 compact(toks as f64),
                                 grouped(reqs.max(0) as u64),
                             )}
-                            {unpriced_note(unpriced.0, unpriced.1).map(|n| format!(" · {n}"))}
+                            {measured_of(&window).map(|m| format!(" · measured {m}"))}
+                            {unpriced_of(&window).map(|n| format!(" · {n}"))}
                         </div>
                     }
                         .into_any()

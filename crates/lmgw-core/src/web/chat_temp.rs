@@ -28,7 +28,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::store::{
     self, ChatAttachmentFull, ChatAttachmentMeta, ChatContext, ChatMessageRow, ChatMessageUpdate,
     ChatReply, ChatThread, ContinueSave, DeleteAttachmentOutcome, KeptAttachment, MessageVoice,
-    NewAttachment, SeedWrite, SendMessageOutcome, SetModeOutcome, ThreadVoice,
+    NewAttachment, SeedWrite, SendMessageOutcome, SetModeOutcome,
 };
 
 /// Every temporary thread of this gateway. `state.chat_temp`.
@@ -261,9 +261,20 @@ impl TempChats {
     /// as `store::update_chat_thread_settings` does, the seed included
     /// ([`SeedWrite::Keep`] keeps the one held when the write lands); the
     /// id, the creation time and the flags a temporary thread never has
-    /// stay. The voice as held, `None` when the thread is gone.
-    pub fn update_settings(&self, t: &ChatThread, seed: SeedWrite) -> Option<ThreadVoice> {
+    /// stay. The voice as held and the thread's level before and after,
+    /// `None` when the thread is gone — or when the writer (`admin`, a
+    /// device) does not see its level (the store's backstop, review W5-2).
+    pub fn update_settings(
+        &self,
+        t: &ChatThread,
+        seed: SeedWrite,
+        admin: crate::store::AdminThreads,
+    ) -> Option<crate::store::SettingsWritten> {
         self.with_thread(t.id, |tt| {
+            let before = tt.thread.reach_level();
+            if !admin.sees(before) {
+                return None;
+            }
             let keep_created = std::mem::take(&mut tt.thread.created_at);
             let held_seed = tt.thread.voice.seed;
             tt.thread = ChatThread {
@@ -276,8 +287,14 @@ impl TempChats {
                 tt.thread.voice.seed = held_seed;
             }
             tt.touch();
-            tt.thread.voice.clone()
+            Some(crate::store::SettingsWritten {
+                thread_id: tt.thread.id,
+                voice: tt.thread.voice.clone(),
+                level_before: before,
+                level_after: tt.thread.reach_level(),
+            })
         })
+        .flatten()
     }
 
     /// Draw the thread's TTS seed on first use: `drawn` is held only where
@@ -680,6 +697,16 @@ impl TempChats {
         .unwrap_or_default()
     }
 
+    /// The thread that holds attachment `id`, without its bytes.
+    pub fn attachment_thread(&self, id: i64) -> Option<i64> {
+        let inner = self.lock();
+        inner
+            .threads
+            .values()
+            .find(|t| t.attachments.iter().any(|a| a.id == id))
+            .map(|t| t.thread.id)
+    }
+
     /// One attachment with its bytes, from whichever thread holds it.
     pub fn attachment(&self, id: i64) -> Option<ChatAttachmentFull> {
         let inner = self.lock();
@@ -899,16 +926,75 @@ mod tests {
         // Drawn after the handler's read.
         let mut drawn = read.clone();
         drawn.voice.seed = Some(7);
-        assert!(c.update_settings(&drawn, SeedWrite::AsGiven).is_some());
+        assert!(c
+            .update_settings(
+                &drawn,
+                SeedWrite::AsGiven,
+                crate::store::AdminThreads::Shown
+            )
+            .is_some());
         let mut stale = read.clone();
         stale.voice.voice = Some("alba".into());
-        let held = c.update_settings(&stale, SeedWrite::Keep).unwrap();
+        let held = c
+            .update_settings(&stale, SeedWrite::Keep, crate::store::AdminThreads::Shown)
+            .unwrap()
+            .voice;
         assert_eq!((held.voice.as_deref(), held.seed), (Some("alba"), Some(7)));
         assert_eq!(c.thread(read.id).unwrap().voice, held);
-        let cleared = c.update_settings(&stale, SeedWrite::AsGiven).unwrap();
+        let cleared = c
+            .update_settings(
+                &stale,
+                SeedWrite::AsGiven,
+                crate::store::AdminThreads::Shown,
+            )
+            .unwrap()
+            .voice;
         assert_eq!(cleared.seed, None);
         assert!(c
-            .update_settings(&ChatThread::default(), SeedWrite::Keep)
+            .update_settings(
+                &ChatThread::default(),
+                SeedWrite::Keep,
+                crate::store::AdminThreads::Shown
+            )
             .is_none());
+    }
+
+    /// Review W6-12 (W5-2's backstop): a writer that does not see Admin
+    /// Chat — a device — writes nothing over a temporary thread that drives
+    /// the self-admin plane when the write lands, whatever it read before;
+    /// the owner's write goes through.
+    #[test]
+    fn a_hidden_writer_cannot_write_over_an_attach() {
+        use crate::store::{AdminThreads, ThreadMcp};
+        let c = TempChats::default();
+        let read = c.create("m", "chat", "");
+        // The owner attaches the toolset after the device's read.
+        let mut attached = read.clone();
+        attached.mcp_tools = vec![ThreadMcp {
+            server_label: "lmgw".into(),
+            allowed_tools: None,
+        }];
+        let w = c
+            .update_settings(&attached, SeedWrite::Keep, AdminThreads::Shown)
+            .unwrap();
+        assert_eq!((w.level_before, w.level_after), (0, 1));
+        // The device's stale copy lands: refused, nothing written.
+        let mut stale = read.clone();
+        stale.system_prompt = "from the device".into();
+        assert!(c
+            .update_settings(&stale, SeedWrite::Keep, AdminThreads::Hidden)
+            .is_none());
+        let now = c.thread(read.id).unwrap();
+        assert!(now.drives_self_admin(), "the attach stands");
+        assert_ne!(now.system_prompt, "from the device");
+        // The owner's own write over it lands.
+        let w = c
+            .update_settings(&stale, SeedWrite::Keep, AdminThreads::Shown)
+            .unwrap();
+        assert_eq!((w.level_before, w.level_after), (1, 0));
+        // A device's write over a plain thread lands too.
+        assert!(c
+            .update_settings(&read, SeedWrite::Keep, AdminThreads::Hidden)
+            .is_some());
     }
 }

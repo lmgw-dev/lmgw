@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
             &pool,
             lmgw_core::config::PriceScope::Alias,
             alias,
-            "per_mtok",
+            lmgw_core::config::PriceUnit::PerMtok,
             &lmgw_core::pricing::Prices {
                 price_in: Some(*pin),
                 price_out: Some(*pout),
@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
                 price_cache_write: Some(pin * 1.25),
                 source: lmgw_core::pricing::PriceSource::Manual,
             },
+            None,
             Some("seeded"),
         )
         .await?;

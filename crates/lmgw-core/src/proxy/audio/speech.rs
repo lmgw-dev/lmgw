@@ -6,7 +6,12 @@
 //! engine would refuse) and shaped on the way ([`crate::audio::shape`]) —
 //! on the route admission settled on, so a fallback that answers instead
 //! gets the client's body shaped for itself: a local audio.cpp row in full,
-//! any other route its instructions and inline tags only.
+//! any other route its instructions and inline tags only. An input that
+//! shaping would leave nothing to say (a lone emoji to Supertonic) is
+//! refused before admission on the resolved row's shaping, and on the
+//! answering route's after it ([`refuse_unsayable`]); the characters
+//! shaping replaced or dropped are logged in full, as `x-lmgw-speech` may
+//! name only the first of them ([`crate::audio::shape::HEADER_CODEPOINTS`]).
 
 use std::time::Instant;
 
@@ -14,7 +19,7 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::audio::engine_errors::explain_speech;
-use crate::audio::preflight::{refuse_speech, wants_stream};
+use crate::audio::preflight::{refuse_speech, refuse_unsayable, wants_stream};
 use crate::audio::rates::SAMPLE_RATE_HEADER;
 use crate::audio::shape::{shape_remote, shape_speech, Expressive, ShapeReport};
 use crate::audio::voices::{row_of_route, row_speech, RowSpeech};
@@ -27,6 +32,7 @@ use crate::state::SharedState;
 use crate::telemetry::RequestClass;
 
 use super::{audio_send, body_alias, finish_audio, note_buffered_answer, MediaOutcome};
+use crate::proxy::synthesize::CharsSeen;
 use crate::proxy::{policy_or_refuse, Failed, RequestCtx};
 
 /// `POST /v1/audio/speech` — OpenAI TTS shape (JSON in, audio/JSON/SSE out).
@@ -108,6 +114,30 @@ async fn speech_call(state: &SharedState, body: &Value, started: Instant) -> Spo
             e,
         ));
     }
+    // An input the resolved row's shaping would leave nothing to say is
+    // `empty_input` before anything starts for it, and says which
+    // characters ([`refuse_unsayable`]).
+    if let Some(((row, s), obj)) = resolved
+        .as_ref()
+        .filter(|(_, s)| s.profile.char_vocab.is_some())
+        .zip(body.as_object())
+    {
+        let mut trial = obj.clone();
+        let report = shape_speech(&s.profile, &s.voices, row, &mut trial);
+        let text = trial.get("input").and_then(Value::as_str);
+        if let Err(e) = refuse_unsayable(text, &report, alias, s.profile.char_vocab.as_deref()) {
+            note_chars(&report, alias);
+            return Spoken {
+                result: Err((
+                    Some(Box::new(routed.resolved().clone())),
+                    routed.headers().clone(),
+                    e,
+                )),
+                report,
+                sample_rate: None,
+            };
+        }
+    }
     // Admit: the GPU claim travels out with the outcome.
     let crate::gate::Opened {
         route,
@@ -131,6 +161,19 @@ async fn speech_call(state: &SharedState, body: &Value, started: Instant) -> Spo
     };
     let answering = headers.fallback().unwrap_or(alias);
     let report = shape_on(&snap, speech.as_ref(), answering, &mut out);
+    note_chars(&report, answering);
+    // The route that answers may be another row than the one resolved.
+    let text = out.get("input").and_then(Value::as_str);
+    let vocab = speech
+        .as_ref()
+        .and_then(|(_, s)| s.profile.char_vocab.as_deref());
+    if let Err(e) = refuse_unsayable(text, &report, answering, vocab) {
+        return Spoken {
+            result: Err((Some(Box::new(route)), headers, e)),
+            report,
+            sample_rate: None,
+        };
+    }
     let sample_rate = speech
         .as_ref()
         .filter(|_| body.as_object().is_some_and(wants_stream))
@@ -159,6 +202,9 @@ async fn speech_call(state: &SharedState, body: &Value, started: Instant) -> Spo
                 headers,
                 admission,
                 chunked,
+                answer: super::usage::Answer::Speech,
+                // The characters the TTS reads: counted after shaping.
+                measured: super::measure::speech(&out),
             })
         }
         // audio.cpp's own refusal of a clip without its transcript, or of
@@ -232,4 +278,10 @@ pub(crate) fn remote_rules(snap: &Snapshot, alias: &str) -> Expressive {
         .and_then(|o| o.get("capabilities"))
         .and_then(|c| c.get("speech"));
     Expressive::from_override(speech)
+}
+
+/// Logs every character shaping fitted out of the input, in full — the
+/// header names at most 64 ([`CharsSeen::line`]).
+fn note_chars(report: &ShapeReport, name: &str) {
+    CharsSeen::log_once(report, &format!("speech: TTS '{name}'"));
 }

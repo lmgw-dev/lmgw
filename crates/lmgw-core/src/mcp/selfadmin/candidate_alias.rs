@@ -18,9 +18,10 @@ pub fn tool() -> Builtin {
              alternate. Resolution order: without background, the primary if loaded, else a \
              loaded alternate, else load the primary (evicting as usual), else the fallback \
              under the GPU hold or when VRAM lmgw cannot free is short. With background on, the \
-             traffic is a GPU guest: the primary if loaded and not busy with the owner's work, \
-             else startable without disturbing the owner, else a loaded alternate, else the \
-             fallback — it never evicts anything the owner is using and never waits. One \
+             traffic is a GPU guest: the primary if loaded and not busy with foreground \
+             requests, else startable without disturbing them, else a loaded alternate, else \
+             the fallback — it never evicts a model foreground requests are using and never \
+             waits. One \
              fallback answers for the whole alias in both modes; a candidate's own row fallback \
              is never used through it. Capabilities are explicit: only the five facets \
              (vision, audio, tool_calls, reasoning, structured_output) every candidate supports \
@@ -61,7 +62,7 @@ pub fn tool() -> Builtin {
             (
                 "background",
                 bool_p(
-                    "Scheduled/background traffic: never evicts an owner-used model, never \
+                    "Scheduled/background traffic: never evicts a model foreground requests use, never \
                      waits, and may only start the primary into free VRAM or evict another idle \
                      background-owned entry. Default false.",
                 ),
@@ -88,7 +89,7 @@ pub fn tool() -> Builtin {
                 str_p(
                     "Facet names switched OFF, one per line or comma-separated: vision, audio, \
                      tool_calls, reasoning, structured_output. This is the FULL desired list of \
-                     the owner's own switches, not a delta and never auto-filled — every facet \
+                     the alias's own switches, not a delta and never auto-filled — every facet \
                      not named here that every candidate currently supports ends up enabled, \
                      including one that becomes supported later (it turns on by itself unless \
                      named here). On create, nothing is refused: an unsupported facet is simply \

@@ -58,12 +58,16 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
         //    container the sweep has already walked past.
         // 2. Sweep, while still holding the settings lock, so the setting the
         //    sweep acted on cannot have been reverted underneath it.
-        // 3. Only then reconcile MCP. It is a `join_all` over autostart
-        //    servers, and one unreachable server stalls it for its whole
-        //    connect timeout; between 1 and 2 it would delay handing the card
-        //    back by exactly that long, for a reason with nothing to do with
-        //    the GPU. Same hazard the design's §5 restructured `boot` for.
-        let snap = state.publish_snapshot().await.map_err(|e| e.to_string())?;
+        // 3. Only then reconcile MCP, once the lock is let go. It is a
+        //    `join_all` over autostart servers, and one server's connect can
+        //    take as long as its image pull; between 1 and 2 it would delay
+        //    handing the card back by exactly that long, for a reason with
+        //    nothing to do with the GPU. Same hazard the design's §5
+        //    restructured `boot` for. Under the lock it held up the next
+        //    settings writer as long (`AppState::settings_saved`). It
+        //    reconciles the snapshot of then, which a publish by another
+        //    path during the sweep may have replaced (`reconcile_mcp`).
+        state.publish_snapshot().await.map_err(|e| e.to_string())?;
         // A benchmark run in flight ends here (benchmark design §3.3): hold
         // means lmgw uses no VRAM, and the run's container is not a registry
         // entry the sweep below would see — so it is removed by name now.
@@ -77,14 +81,15 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
         } else {
             lifecycle::HoldSweep::default()
         };
-        state.mcp.reconcile(&snap).await;
         (swept, bench_aborted)
     };
 
     // Event-driven frame: the containers this just stopped (or the badge a
     // release just cleared) are not visible on any surface until something
-    // pushes, and no request ran to do it.
+    // pushes, and no request ran to do it. Before the reconcile, which can
+    // wait on a server's connect.
     crate::vram::broadcast(state);
+    state.reconcile_mcp().await;
 
     let snap = state.snapshot();
     let message = if active {

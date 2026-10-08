@@ -97,14 +97,13 @@ pub(super) fn tools() -> Vec<Builtin> {
             name: "lmgw__settings_set",
             writes: true,
             description:
-                "Change gateway settings. Pass only the fields to change. Deliberately \
-                 excluded: the self-admin mode itself, the bind address, the HF/update/forge \
-                 tokens and the builds directory — change those in the dashboard.",
+                "Change gateway settings. Pass only the fields to change. Never settable \
+                 here, by any caller: the settings that decide who may reach lmgw and with \
+                 what credential — auth_enabled, self_admin, bind_addr and \
+                 agent_origin_suffix. They change on Settings in the dashboard; a call that \
+                 names one is refused, naming it, and changes nothing. Also left to the \
+                 dashboard: the HF/update/forge tokens and the builds directory.",
             props: vec![
-                (
-                    "auth_enabled",
-                    bool_p("Require a gateway API key on /v1/* and /mcp."),
-                ),
                 ("retention_days", int_p("Days of request logs to keep. 0 = forever.")),
                 (
                     "retention_max_rows",
@@ -136,6 +135,39 @@ pub(super) fn tools() -> Vec<Builtin> {
                          was archived. 0 keeps archived threads forever. The clock is when \
                          it was archived, not when it was last active, so a thread archived \
                          by hand gets the full period too.",
+                    ),
+                ),
+                (
+                    "chat_feed_retention_days",
+                    int_p(
+                        "Keep the Chat change feed's records (GET /chat/api/feed) this many \
+                         days. 0 keeps every record. A client away longer resumes with a \
+                         resync that names this setting.",
+                    ),
+                ),
+                (
+                    "chat_feed_keepalive_s",
+                    int_p(
+                        "Seconds between the Chat feed's keep-alive comments, at least 1; \
+                         said in the feed's hello as keepalive_s. An open feed keeps the \
+                         interval it opened with.",
+                    ),
+                ),
+                (
+                    "chat_feed_page_size",
+                    int_p(
+                        "Records the Chat feed reads per query while a client catches up, at \
+                         least 1 and at most 10000. Bounds memory, not delivery: every record \
+                         is sent.",
+                    ),
+                ),
+                (
+                    "chat_feed_live_buffer",
+                    int_p(
+                        "Live Chat feed events (turn.*, voice.*, hold) held for a client that \
+                         reads slower than they happen, at least 1 and at most 65536 (the \
+                         buffer is allocated whole). One that falls further behind gets a \
+                         fresh state frame naming this setting.",
                     ),
                 ),
                 (
@@ -191,7 +223,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     str_p(
                         "The speech instructions the Chat's text-to-speech model gets (a \
                          speaking style, or a voice description for a voice-design model). \
-                         '' = realtime.speech_instructions. Owner-wide like that setting, it \
+                         '' = realtime.speech_instructions. Global like that setting, it \
                          stands back for a voice-design row that describes its own voice. A \
                          thread can override it, '' included (no style for that thread), and a \
                          thread's own style wins over the row's description.",

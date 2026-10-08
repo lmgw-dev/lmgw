@@ -20,6 +20,7 @@ fn row(config: Value) -> AgentRow {
         source: AGENT_SOURCE_IMPORTED.into(),
         provenance: "{}".into(),
         dev_url: None,
+        created_by_key: None,
         created_at: String::new(),
         updated_at: String::new(),
     }

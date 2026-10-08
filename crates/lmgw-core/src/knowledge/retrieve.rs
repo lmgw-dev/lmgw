@@ -118,6 +118,11 @@ pub struct Options {
     /// whole fused depth so that the budget — the visible bound — is what
     /// decides how much comes back.
     pub params: Option<SearchParams>,
+    /// Whose request the search runs for: its embedder and reranker calls
+    /// are checked against this context's key and charged to it — a
+    /// device's Chat turn (client-apps design L4). `None`: the gateway's own
+    /// work, as every search was before.
+    pub caller: Option<crate::proxy::RequestCtx>,
 }
 
 /// Search `kb_ids` for `query`. Never fails; see the module doc.
@@ -207,8 +212,15 @@ pub async fn retrieve(
 
     let mut ranked: Vec<Vec<Hit<KbChunk>>> = Vec::new();
     for kbs in groups.into_values() {
-        if let Some((hits, trace)) =
-            search_group(state, pool, kbs, query, &params, &mut out.notes).await
+        if let Some((hits, trace)) = search_group(
+            state,
+            pool,
+            kbs,
+            (query, opts.caller.as_ref()),
+            &params,
+            &mut out.notes,
+        )
+        .await
         {
             ranked.push(hits);
             out.traces.push(trace);
@@ -247,7 +259,7 @@ async fn search_group(
     state: &SharedState,
     pool: &SqlitePool,
     kbs: Vec<Kb>,
-    query: &str,
+    (query, caller): (&str, Option<&crate::proxy::RequestCtx>),
     params: &SearchParams,
     notes: &mut Vec<String>,
 ) -> Option<(Vec<Hit<KbChunk>>, SearchTrace)> {
@@ -292,7 +304,7 @@ async fn search_group(
             Ok(e) => match refuse_if_held(state, e.alias(), super::ingest::HOLD_WHY) {
                 Ok(()) => {
                     first_alias = Some(e.alias().to_string());
-                    (Some(e.into_arc()), None)
+                    (Some(e.charged_to(caller.cloned()).into_arc()), None)
                 }
                 Err(held) => (None, Some(held.to_string())),
             },
@@ -316,7 +328,7 @@ async fn search_group(
             // A held local reranker is refused up front, like the embedder:
             // its fallback would rank with another model.
             Ok(r) => match refuse_if_held(state, alias, RERANK_HOLD_WHY) {
-                Ok(()) => (Some(r.into_arc()), None),
+                Ok(()) => (Some(r.charged_to(caller.cloned()).into_arc()), None),
                 Err(held) => {
                     notes.push(format!("{names}: not reranked — {held}"));
                     (None, Some(held.to_string()))

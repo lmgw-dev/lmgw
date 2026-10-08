@@ -28,7 +28,8 @@ pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(crate::store::BUSY_TIMEOUT);
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(opts)
@@ -39,13 +40,11 @@ pub async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-/// In-memory `knowledge.db` for tests.
+/// In-memory `knowledge.db` for tests, anchored as the main store's is
+/// (`store::anchored_memory_pool`, review F-11): a cancelled query does not
+/// take the database with it.
 pub async fn open_in_memory() -> anyhow::Result<SqlitePool> {
-    let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await?;
+    let pool = crate::store::anchored_memory_pool(1).await?;
     sqlx::migrate!("./migrations_knowledge").run(&pool).await?;
     Ok(pool)
 }
@@ -636,7 +635,27 @@ pub async fn finish_file(
     chunks: &[NewKbChunk],
     done: &Ingested,
 ) -> Result<bool, String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    // The vectors are normalised and narrowed before the write lock is
+    // taken: a file's worth is CPU work every other writer would wait on.
+    // A wrong width is still said after the version check, as before.
+    let blobs: Result<Vec<Option<Vec<u8>>>, String> = chunks
+        .iter()
+        .map(|c| match &c.embedding {
+            None => Ok(None),
+            Some(v) if v.len() != dims => Err(format!(
+                "a {}-wide vector for a knowledge base pinned to {dims}",
+                v.len()
+            )),
+            Some(v) => {
+                let mut owned = v.clone();
+                vector::l2_normalize(&mut owned);
+                Ok(Some(vector::encode_f16(&owned)))
+            }
+        })
+        .collect();
+    let mut tx = crate::store::begin_write(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let current: Option<String> = sqlx::query("SELECT sha256 FROM kb_file WHERE id = ?1")
         .bind(file_id)
         .fetch_optional(&mut *tx)
@@ -646,26 +665,13 @@ pub async fn finish_file(
     if current.as_deref() != Some(sha) {
         return Ok(false);
     }
+    let blobs = blobs?;
     sqlx::query("DELETE FROM kb_chunk WHERE file_id = ?1")
         .bind(file_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    for c in chunks {
-        let blob = match &c.embedding {
-            None => None,
-            Some(v) if v.len() != dims => {
-                return Err(format!(
-                    "a {}-wide vector for a knowledge base pinned to {dims}",
-                    v.len()
-                ))
-            }
-            Some(v) => {
-                let mut owned = v.clone();
-                vector::l2_normalize(&mut owned);
-                Some(vector::encode_f16(&owned))
-            }
-        };
+    for (c, blob) in chunks.iter().zip(blobs) {
         sqlx::query(
             "INSERT INTO kb_chunk (id, kb_id, file_id, seq, page, heading_path, span_start,
                 span_end, payload, tokens, embedding)
@@ -914,7 +920,7 @@ pub async fn load_matrix(pool: &SqlitePool, kb: &Kb) -> Result<VectorMatrix, Str
 /// Drop every vector of a base, leaving its chunks and their ids — the head
 /// of a re-embed onto another model. The revision moves once.
 pub async fn clear_embeddings(pool: &SqlitePool, kb_id: i64) -> KResult<u64> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::store::begin_write(pool).await?;
     let res = sqlx::query("UPDATE kb_chunk SET embedding = NULL WHERE kb_id = ?1")
         .bind(kb_id)
         .execute(&mut *tx)
@@ -1116,7 +1122,7 @@ pub async fn file_fits(
 /// being ingested right now is left alone. Returns how many changed.
 pub async fn mark_files_pending(pool: &SqlitePool, ids: &[i64], reason: &str) -> KResult<u64> {
     let mut n = 0;
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::store::begin_write(pool).await?;
     for id in ids {
         n += sqlx::query(
             "UPDATE kb_file SET status = 'pending', error = ?2
@@ -1206,13 +1212,20 @@ pub async fn set_chunk_embeddings(
     if batch.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
-    for (id, v) in batch {
-        let mut owned = v.clone();
-        vector::l2_normalize(&mut owned);
+    // Normalised and narrowed before the write lock, as in `finish_file`.
+    let blobs: Vec<Vec<u8>> = batch
+        .iter()
+        .map(|(_, v)| {
+            let mut owned = v.clone();
+            vector::l2_normalize(&mut owned);
+            vector::encode_f16(&owned)
+        })
+        .collect();
+    let mut tx = crate::store::begin_write(pool).await?;
+    for ((id, _), blob) in batch.iter().zip(blobs) {
         sqlx::query("UPDATE kb_chunk SET embedding = ?2 WHERE id = ?1")
             .bind(id)
-            .bind(vector::encode_f16(&owned))
+            .bind(blob)
             .execute(&mut *tx)
             .await?;
     }

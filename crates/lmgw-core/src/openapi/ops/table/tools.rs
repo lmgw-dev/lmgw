@@ -26,7 +26,7 @@ pub(super) const OPS: &[OpDoc] = &[
         tag: TAG,
         summary: "Enable or disable one discovered tool",
         description: Some(
-            "Flip the owner's per-tool switch. Disabling requires the tool to be offered right \
+            "Flip a tool's per-tool switch. Disabling requires the tool to be offered right \
              now — a typo would otherwise persist a switch for a name that does not exist. \
              Enabling never checks, which is how a stale row is cleared.",
         ),

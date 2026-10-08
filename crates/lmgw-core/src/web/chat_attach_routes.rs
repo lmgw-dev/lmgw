@@ -12,7 +12,8 @@ use serde_json::json;
 use crate::state::SharedState;
 use crate::store::SetModeOutcome;
 
-use super::chat::err_json;
+use super::chat::{err_json, unreachable_attachment};
+use super::chat_caller::Caller;
 use super::chat_extract::{ChatJson, ChatPath};
 use super::chat_repo::ChatRepo;
 
@@ -27,9 +28,13 @@ pub struct ModeReq {
 /// mode_not_applicable`: scanned and hybrid ones are automatic).
 pub async fn set_mode(
     State(state): State<SharedState>,
+    caller: Caller,
     ChatPath(id): ChatPath<i64>,
     ChatJson(req): ChatJson<ModeReq>,
 ) -> Response {
+    if let Some(refused) = unreachable_attachment(&state, &caller, id).await {
+        return refused;
+    }
     if !matches!(req.mode.as_str(), "text" | "images") {
         return err_json(
             StatusCode::BAD_REQUEST,
@@ -63,7 +68,14 @@ pub async fn set_mode(
 /// a text file as is, a PDF's or office file's extracted text, an audio
 /// file's transcript, as `text/plain`. 404 `no_text` for an image or an
 /// audio file with no transcript yet.
-pub async fn get_text(State(state): State<SharedState>, ChatPath(id): ChatPath<i64>) -> Response {
+pub async fn get_text(
+    State(state): State<SharedState>,
+    caller: Caller,
+    ChatPath(id): ChatPath<i64>,
+) -> Response {
+    if let Some(refused) = unreachable_attachment(&state, &caller, id).await {
+        return refused;
+    }
     let att = match ChatRepo::of(id).attachment(&state, id).await {
         Ok(Some(a)) => a,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "not_found", "attachment not found"),

@@ -1,0 +1,235 @@
+[
+ {
+  "js": "'SETUP: as chat-folders.json (a dev instance with the fake-echo alias); scripts/chat-drives.sh --only chat-ongoing runs it. Wipes every chat thread and folder of that instance first. Ongoing-conversation folders (client-apps design §3.6): the folder form, New conversation, the current-thread mark, defaults applied to the current thread.'"
+ },
+ {
+  "js": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=await j('/chat/api/folders');for(const x of f.folders)await j('/chat/api/folders/'+x.id+'/delete',{threads:'delete'});const t=await j('/chat/api/threads?archived=all');for(const x of t.threads)await j('/chat/api/threads/'+x.id+'/delete',{});await j('/chat/api/folders',{name:'Assistant',defaults:{model_alias:'fake-echo'}});return 'clean'})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "[...document.querySelectorAll('.thread-folder .folder-name')].map(e=>e.textContent).join('|')==='Assistant'",
+  "label": "the folder is listed"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.thread-folder .menu-pop .menu-item').textContent==='New chat here'",
+  "label": "a plain folder's menu starts a chat"
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 2
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open] .folder-settings')",
+  "label": "Folder settings opens"
+ },
+ {
+  "expect": "!document.querySelector('dialog[open] .ongoing-grid')&&!document.querySelector('dialog[open] .folder-apply')",
+  "label": "not ongoing: no idle minutes, no apply box"
+ },
+ {
+  "click": "dialog[open] .folder-settings input[type=checkbox]",
+  "nth": 0
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open] .ongoing-grid')&&[...document.querySelectorAll('dialog[open] .folder-settings label')].some(l=>l.textContent.includes('required for an ongoing conversation'))",
+  "label": "ticked: the idle minutes show and the model is marked required"
+ },
+ {
+  "click": "dialog[open] .ongoing-grid input"
+ },
+ {
+  "type": "30"
+ },
+ {
+  "click": "dialog[open] input[placeholder^='global']",
+  "nth": 1
+ },
+ {
+  "type": "365"
+ },
+ {
+  "expect": "[...document.querySelectorAll(\"dialog[open] input[placeholder^='global']\")].map(e=>e.placeholder).join('|')==='global: 14|global: 30'",
+  "label": "empty retention names the global values"
+ },
+ {
+  "shot": "chat-ongoing-settings"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]')",
+  "label": "Save closes the modal"
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=(await j('/chat/api/folders')).folders[0];return f.ongoing&&f.ongoing.idle_minutes===30&&f.ongoing.current_thread_id===null&&f.purge_days===365&&f.archive_days===null})()",
+  "label": "stored: ongoing 30 min, purge 365 days, archive global"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.thread-folder .menu-pop .menu-item').textContent==='New conversation'",
+  "label": "an ongoing folder's menu offers New conversation"
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 0
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===1&&document.querySelectorAll('.thread-row .thread-current').length===1&&!!document.querySelector('.thread-row.open .thread-current')",
+  "label": "the new current thread opens, marked current"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "hello"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 0
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===2&&document.querySelectorAll('.thread-row .thread-current').length===1&&!!document.querySelector('.thread-row.open .thread-current')",
+  "label": "New conversation once it has a message: a second thread, only it marked current"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 0
+ },
+ {
+  "wait": 1.2
+ },
+ {
+  "expect": "document.querySelectorAll('.thread-row.nested').length===2",
+  "label": "again while it is empty: no third thread"
+ },
+ {
+  "shot": "chat-ongoing-sidebar"
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 2
+ },
+ {
+  "wait": 0.6
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open] .modal-foot .folder-apply input:checked')",
+  "label": "Also apply to the current thread: shown, checked"
+ },
+ {
+  "click": "dialog[open] input.mono",
+  "nth": 3
+ },
+ {
+  "type": "0.25"
+ },
+ {
+  "shot": "chat-ongoing-apply"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const f=(await j('/chat/api/folders')).folders[0];const t=(await j('/chat/api/threads/'+f.ongoing.current_thread_id)).thread;return f.defaults.temperature===0.25&&t.temperature===0.25})()",
+  "label": "the change reached the current thread"
+ },
+ {
+  "expect": "(async()=>{const j=async(u,b)=>(await fetch(u,{method:b===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)})).json();const t=(await j('/chat/api/threads')).threads.filter(t=>t.folder_id!==null);const f=(await j('/chat/api/folders')).folders[0];return t.length===2&&t.filter(x=>x.id!==f.ongoing.current_thread_id).every(x=>x.temperature===null)})()",
+  "label": "the folder's other thread keeps its own"
+ },
+ {
+  "js": "'The deep link /chat?folder=<id>&settings=1 (client-apps design §3.7): a client sends the owner to the folder settings form. The setup wiped every folder first, so the drive\\'s folder is the instance\\'s first.'"
+ },
+ {
+  "expect": "(async()=>(await (await fetch('/chat/api/folders')).json()).folders.map(f=>f.id).join(',')==='1')()",
+  "label": "the drive's folder is folder 1"
+ },
+ {
+  "nav": "/chat?folder=1&settings=1"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "expect": "!!document.querySelector('dialog[open] .folder-settings')&&document.querySelector('dialog[open] .folder-settings input').value==='Assistant'",
+  "label": "the deep link opens that folder's settings form"
+ },
+ {
+  "shot": "chat-ongoing-deep-link"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.ghost"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "nav": "/chat?folder=999999&settings=1"
+ },
+ {
+  "wait": 2
+ },
+ {
+  "expect": "!document.querySelector('dialog[open]')&&(document.querySelector('.toast-host')||{textContent:''}).textContent.includes('folder 999999')",
+  "label": "a folder not in the list: no form, a toast says so"
+ }
+]

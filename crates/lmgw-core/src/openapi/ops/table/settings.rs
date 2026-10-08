@@ -29,7 +29,16 @@ pub(super) const OPS: &[OpDoc] = &[
              including the self-admin mode, the bind address, the HF/update/forge tokens, the \
              builds directory and the four container classes' definitions, none of which the \
              self-admin tool plane exposes. Secrets: a non-empty value replaces, an empty one \
-             keeps the stored value, and the matching clear_* flag erases it.",
+             keeps the stored value, and the matching clear_* flag erases it. A change of \
+             self_admin applies to every paired device at once, since it caps each device's \
+             own level: a device whose admin tools may now do more or less gets a state event \
+             on its change feed saying so, its realtime sessions that carry the lmgw label \
+             list it again, and a turn still running is refused its next write tool when the \
+             level was lowered. Set to off, every device stops seeing the Chat threads and \
+             folders that carry the self-admin toolset: its change feed receives them as \
+             deleted, its turns on them stop, and its realtime sessions bound to one close \
+             with 4004; raised from off, a device whose own level is above off receives them \
+             as created.",
         ),
         tool: None,
         args: OpArgs::Struct(|g| {

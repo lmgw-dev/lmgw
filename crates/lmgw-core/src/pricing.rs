@@ -5,6 +5,9 @@
 //!
 //! > A request whose price is not known costs `None`. **Never `0`.**
 //!
+//! A total over several requests is `None` once any of them is: **never a
+//! partial sum** ([`sum_micro`]).
+//!
 //! A zero for an unknown reads as authoritative and is wrong downward, which is
 //! the one failure mode that makes an analytics page worse than no analytics
 //! page. Local models are a *different* thing: [`PriceSource::FreeLocal`] is a
@@ -19,8 +22,21 @@
 //! ```
 //!
 //! with no scaling in either direction.
+//!
+//! **Tokens are one unit among several** (billable-units design §2.1): a
+//! scope may also be priced per minute of input audio, per 1M input
+//! characters, per generated image and per answered request. Each rate is
+//! quoted at the scale providers use, so every part is the same kind of plain
+//! product ([`units`]), and [`price_request`] sums the parts under the same
+//! rule: one unknown part makes the whole request unknown.
 
 use serde::{Deserialize, Serialize};
+
+mod total;
+mod units;
+
+pub use total::{CostTotal, RowCost};
+pub use units::{price_request, Quantities, Sheet, UnitRate, UnitRates};
 
 /// Where the numbers that priced a request came from.
 ///
@@ -104,8 +120,9 @@ impl Prices {
 /// get summed. `cached_in` and `cache_write` are therefore *subsets* of
 /// `prompt_tokens`, never additions to it.
 ///
-/// `reasoning` is informational only — every provider already counts reasoning
-/// tokens inside `completion_tokens`, so pricing it again would double-charge.
+/// `completion` is the total output, reasoning included (the Gemini adapter adds
+/// the thoughts Google reports beside the candidates). `reasoning` is a subset
+/// of it and informational only — pricing it again would double-charge.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TokenUsage {
     pub prompt: Option<u64>,
@@ -142,6 +159,14 @@ pub struct Cost {
     /// visible here as two equal numbers — the row records what happened
     /// rather than a flag that says it happened.
     pub used: Prices,
+    /// The part of `total_micro` priced in units other than tokens
+    /// (`request_logs.cost_units_micro`). `None` when the sheet has no rate in
+    /// any of them, and with `total_micro` when any part is unknown.
+    pub units_micro: Option<i64>,
+    /// The non-token rates **as used**, snapshotted like [`Self::used`]: each
+    /// `None` where the sheet has no rate in that unit
+    /// (`request_logs.price_per_*`).
+    pub used_units: UnitRates,
 }
 
 impl Cost {
@@ -154,11 +179,14 @@ impl Cost {
     }
 }
 
-/// Price one request.
+/// Price one request's **tokens** alone: the token part of [`price_request`],
+/// and the whole of it for a sheet that has only a token row (billable-units
+/// design §3.2, decision 1). Also what a counterfactual that wants tokens
+/// alone calls (`/api/usage/local`'s reference price).
 ///
-/// `prices` is the resolved sheet for the alias (manual over catalog), or
-/// `None` when the scope has no price at all.
-pub fn price_request(usage: &TokenUsage, prices: Option<&Prices>) -> Cost {
+/// `prices` is the resolved token sheet for the alias (manual over catalog),
+/// or `None` when the scope has no token price at all.
+pub fn price_tokens(usage: &TokenUsage, prices: Option<&Prices>) -> Cost {
     let Some(p) = prices.filter(|p| p.is_usable()) else {
         return Cost::unknown();
     };
@@ -202,7 +230,19 @@ pub fn price_request(usage: &TokenUsage, prices: Option<&Prices>) -> Cost {
             price_cache_write: Some(rate_cache_write),
             source: p.source,
         },
+        units_micro: None,
+        used_units: UnitRates::default(),
     }
+}
+
+/// Two costs added, for a total over several requests: `None` once either is.
+///
+/// A total that skips the requests nobody could price reads as the whole
+/// and is wrong downward, the same failure as a `0` for an unknown. Who
+/// keeps a running total starts it at its first request's cost, not at a
+/// `Some(0)` or a `None` of its own.
+pub fn sum_micro(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    Some(a?.saturating_add(b?))
 }
 
 /// Format micro-units as a plain decimal amount (no currency symbol — the
@@ -220,6 +260,13 @@ pub fn per_token_to_per_mtok(per_token: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Today's signature, over the new [`super::price_request`] with a
+    /// token-only sheet: every test below predates billable units and runs
+    /// unchanged against it (billable-units design §10).
+    fn price_request(u: &TokenUsage, p: Option<&Prices>) -> Cost {
+        super::price_request(u, &Quantities::default(), &Sheet::tokens(p.copied()))
+    }
 
     fn sheet() -> Prices {
         // Claude-shaped: 3 / 15 per Mtok, cache read at 0.1x, write at 1.25x.
@@ -348,7 +395,8 @@ mod tests {
 
     #[test]
     fn reasoning_tokens_are_not_billed_twice() {
-        // They are already inside completion_tokens on every provider.
+        // They are already inside completion_tokens once the egress adapter
+        // has normalised the provider's report.
         let u = TokenUsage {
             prompt: Some(0),
             completion: Some(100_000),
@@ -362,5 +410,14 @@ mod tests {
     #[test]
     fn catalog_per_token_prices_convert_to_per_mtok() {
         assert_eq!(per_token_to_per_mtok(0.000003), 3.0);
+    }
+
+    #[test]
+    fn a_sum_with_an_unknown_part_is_unknown_never_partial() {
+        assert_eq!(sum_micro(Some(2), Some(3)), Some(5));
+        assert_eq!(sum_micro(Some(0), Some(0)), Some(0), "free is a real 0");
+        assert_eq!(sum_micro(Some(2), None), None);
+        assert_eq!(sum_micro(None, Some(3)), None);
+        assert_eq!(sum_micro(None, None), None);
     }
 }

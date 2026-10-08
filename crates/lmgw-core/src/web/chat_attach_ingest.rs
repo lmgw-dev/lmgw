@@ -10,6 +10,7 @@ use crate::extract::{self, ExtractError, Extracted, Kind, PdfClass, PdfError};
 use crate::state::SharedState;
 use crate::store::{ChatThread, NewAttachment};
 
+use super::chat_caller::Caller;
 use super::chat_turn;
 
 /// A refusal: status, code, message — the flat `ApiError` of the route.
@@ -43,6 +44,7 @@ fn extract_refusal(e: ExtractError) -> Refusal {
 /// speech-to-text alias (chat-voice design §2.1).
 pub(super) async fn ingest(
     state: &SharedState,
+    caller: &Caller,
     thread: &ChatThread,
     name: &str,
     body: Bytes,
@@ -111,15 +113,8 @@ pub(super) async fn ingest(
             let native = super::chat_attach_gate::native_audio(caps, sniffed.mime).is_some();
             if let Some(stt) = stt.filter(|_| !native) {
                 let proto = super::chat_voice::speech_proto(thread);
-                let text = crate::proxy::transcribe_for(
-                    state,
-                    proto,
-                    &stt,
-                    body.clone(),
-                    &new.name,
-                    sniffed.mime,
-                );
-                match text.await {
+                let upload = (body.clone(), new.name.as_str(), sniffed.mime);
+                match caller.transcribe(state, proto, &stt, upload).await {
                     Ok(text) => apply_transcript(&mut new.meta, &stt, &text, &mut new.extracted),
                     Err(e) => new.meta["transcript_error"] = Value::String(e.to_string()),
                 }

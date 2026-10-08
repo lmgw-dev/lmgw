@@ -9,7 +9,7 @@ pub(super) fn tools() -> Vec<Builtin> {
             name: "lmgw__docs_corpus_set",
             writes: true,
             description:
-                "Create or delete a documentation corpus — the owner's half of quickdoc, which \
+                "Create or delete a documentation corpus — the administrative half of the documentation tools, which \
                  the agent-facing `docs__*` tools deliberately cannot do. A corpus is one \
                  library at one version: `create` pins the two models it will use (both are \
                  resolved now, so a wrong alias fails here rather than inside the job), stores \

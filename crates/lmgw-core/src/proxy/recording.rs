@@ -12,10 +12,10 @@ use crate::error::GatewayError;
 use crate::gate::{FallbackReason, GateHeaders};
 use crate::ingress::ClientProto;
 use crate::ir::{ChatRequest, Timings, Usage};
-use crate::pricing::{self, TokenUsage};
+use crate::pricing::{self, Quantities, TokenUsage};
 use crate::state::{AppState, SharedState};
 use crate::store::{self, NewRequestLog};
-use crate::telemetry::{internal_identity, RequestClass, RequestSummary};
+use crate::telemetry::{internal_identity, RequestClass};
 
 /// Per-request context filled by the root middleware / handlers.
 #[derive(Debug, Clone, Default)]
@@ -55,9 +55,43 @@ pub struct RequestCtx {
     /// with a log line in the middleware and never reaches here: a mis-stamped
     /// request is still a request the owner made, so it is never a refusal.
     pub run: Option<i64>,
+    /// The device revocation generation when the principal was resolved
+    /// (client-apps design §1.6): a long-lived connection a device opens
+    /// watches for revocations raised after it, so a Disable that lands
+    /// between the gate and the connection's first frame still ends it.
+    ///
+    /// `None` for a context built by hand rather than resolved at the root (a
+    /// test, a stored principal resumed later): a watch then counts from the
+    /// moment it starts, never every revocation the key ever had (review
+    /// W2-14). The credential's fingerprint still catches a Rotate.
+    pub revocation_mark: Option<u64>,
+    /// The generation of the server the request came in on
+    /// ([`ServedAt`](crate::server::ServedAt)): its streams and sessions end
+    /// at that server's stop, and the stop waits for its turns. `None` for a
+    /// context built by hand, which takes the server serving then.
+    pub served_at: Option<u64>,
 }
 
 impl RequestCtx {
+    /// The dashboard's own request: its owner key (`owner:dashboard`) as
+    /// the principal — what an in-process test drives the Chat or a bound
+    /// session's turn as. `RequestCtx::default()` is anonymous, which the
+    /// Chat refuses rather than taking for the owner (review W3-12).
+    #[doc(hidden)]
+    pub fn dashboard_for_tests(snap: &crate::config::Snapshot) -> Self {
+        let key = snap
+            .api_keys
+            .iter()
+            .find(|k| k.name == crate::agents::token::OWNER_DASHBOARD);
+        Self {
+            principal: key
+                .map(crate::principal::Principal::from_key)
+                .unwrap_or_default(),
+            client_key: key.map(|k| k.name.clone()),
+            ..Default::default()
+        }
+    }
+
     /// The header-tier control, or `None` when absent — or malformed, which
     /// only happens on a route that does not consume it (the consuming routes
     /// reject it first, via [`reasoning_error`](Self::reasoning_error)).
@@ -73,11 +107,12 @@ impl RequestCtx {
 
     /// The key this request is charged to: the name it authenticated with,
     /// and the principal's `api_keys.id` — which every row is resolved by
-    /// when it is written ([`KeyRef`]).
+    /// when it is written ([`KeyRef`]) — and the run it is stamped with.
     pub(crate) fn key_ref(&self) -> KeyRef {
         KeyRef {
             name: self.client_key.clone(),
             id: self.principal.key_id(),
+            run: self.run,
         }
     }
 
@@ -103,16 +138,25 @@ impl RequestCtx {
 /// carries that key's id and its current name; one without is resolved by
 /// name, as it always was (the in-process callers that only have a label,
 /// the internal identities).
+///
+/// It also names the run the call belongs to, when the request was stamped
+/// `X-Lmgw-Run` ([`RequestCtx::run`]): the row a call writes in-process — a
+/// `/v1/responses` turn, a realtime turn — folds into that run's total
+/// where it is written ([`note_on_run`]), as a `/v1` request's row does.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct KeyRef {
     pub name: Option<String>,
     pub id: Option<i64>,
+    pub run: Option<i64>,
 }
 
 impl KeyRef {
     /// A caller known by its label only: resolved by name, as before.
     pub fn named(name: Option<String>) -> Self {
-        Self { name, id: None }
+        Self {
+            name,
+            ..Default::default()
+        }
     }
 
     /// The row's `client_key` label, and the id when the caller had one. A
@@ -166,6 +210,11 @@ pub(super) struct LogParams<'a> {
     /// capability (`request_logs.degraded`, [`crate::degraded`]): the send's
     /// [`crate::gate::TurnLease::degraded`]. `None` for anything else.
     pub(super) degraded: Option<String>,
+    /// What the call processed besides tokens, measured by its route or
+    /// reported by its provider (billable-units design §4):
+    /// `Default::default()` when nothing was. `requests` left `None` is
+    /// filled by [`record`] (`recording/quantities.rs`).
+    pub(super) quantities: Quantities,
 }
 
 pub(super) async fn record(
@@ -176,38 +225,21 @@ pub(super) async fn record(
     error: Option<(&str, String)>,
 ) {
     let total_ms = p.started.elapsed().as_millis() as i64;
+    let q = with_requests_default(
+        p.quantities,
+        p.route.is_some(),
+        status,
+        error.as_ref().map(|(k, _)| *k),
+    );
     let priced = price_call(
         p.state,
         &p.alias,
-        p.route.map(|r| r.upstream.id),
-        p.route.map(|r| r.upstream_model.as_str()),
+        p.route,
         &p.ctx.key_ref(),
         p.proto.as_str(),
         &usage,
+        &q,
     );
-    // Cost per run, for a caller lmgw did not drive (§3.1). No `run_id` column
-    // on `request_logs`: the job row is already the durable home of a run's
-    // totals and a second one would drift.
-    //
-    // Only a call that **reached an upstream and came back** counts, which is
-    // what the in-process `batch::Meter::note_model_call` counts: an unknown
-    // alias never routed anywhere, and a transport failure never got an answer.
-    // Folding those in would make `model_calls` a count of HTTP requests under
-    // a name that promises model turns, and a run that mistyped its alias forty
-    // times would read as forty model calls that cost nothing.
-    //
-    // Nor a row that is no model call at all ([`RequestClass::Tool`]): a token
-    // count that had to load its model reached an upstream and came back,
-    // and is still no model turn.
-    if let Some(run) = p
-        .ctx
-        .run
-        .filter(|_| p.route.is_some() && error.is_none() && p.class != RequestClass::Tool)
-    {
-        p.state
-            .agent_meters
-            .note_model_call(run, &usage, priced.cost.total_micro);
-    }
     let row = NewRequestLog {
         client_key: priced.client_key,
         ingress_proto: p.proto.as_str().to_string(),
@@ -237,10 +269,38 @@ pub(super) async fn record(
         fallback_reason: p.fallback.map(|r| r.as_str().to_string()),
         rung: p.rung,
         degraded: p.degraded,
+        audio_in_ms: quantity_column(q.audio_in_ms),
+        chars_in: quantity_column(q.chars_in),
+        images_out: quantity_column(q.images_out),
     };
+    note_on_run(p.state, p.ctx.run, &row, &usage);
     // Its own task: a handler dropped mid-insert neither loses the row nor
     // leaves the gauge open (`recording/write.rs`).
     write::write_row(p.state, row, status).await;
+}
+
+/// Cost per run, for a caller lmgw did not drive (§3.1): the row of a call
+/// stamped `X-Lmgw-Run` folds into that run's total. No `run_id` column on
+/// `request_logs`: the job row is already the durable home of a run's totals
+/// and a second one would drift.
+///
+/// Only a call **routed somewhere** folds in: an unknown alias never was.
+/// Nor a row that is no model call at all ([`RequestClass::Tool`]): a token
+/// count that had to load its model reached an upstream and is still no
+/// model turn. What a row adds to the cost is its own
+/// [`NewRequestLog::row_cost`], the rollup's rule — a stopped call's priced
+/// tokens, a failed one's fee, a failure that spent tokens no one could
+/// price — and only an answer without an error is a model call: a run that
+/// mistyped its alias forty times, or hit forty refusals, reads as no model
+/// calls that cost nothing.
+pub(super) fn note_on_run(state: &AppState, run: Option<i64>, row: &NewRequestLog, usage: &Usage) {
+    let Some(run) = run.filter(|_| row.upstream_id.is_some() && row.class != RequestClass::Tool)
+    else {
+        return;
+    };
+    state
+        .agent_meters
+        .note_row(run, usage, row.row_cost(), row.error_kind.is_none());
 }
 
 /// Identity + price for one logged call (usage-analytics §2.2, §4.4).
@@ -256,14 +316,23 @@ pub(super) struct Priced {
     pub(super) cost: pricing::Cost,
 }
 
+/// [`Priced`] for one call. `alias` is the name the client asked for, and
+/// `route` where the call went. The price is looked up under the alias that
+/// answered ([`Route::priced_alias`]): a fallback's own rows apply to the
+/// rows it answers, while the row keeps `requested_alias` as asked.
+///
+/// `q` is what the call processed besides tokens, `requests` already
+/// defaulted ([`with_requests_default`]); every unit the answering alias's
+/// [`Sheet`](pricing::Sheet) prices is priced from it (billable-units design
+/// §3.2).
 pub(super) fn price_call(
     state: &AppState,
     alias: &str,
-    upstream_id: Option<i64>,
-    upstream_model: Option<&str>,
+    route: Option<&Route>,
     key: &KeyRef,
     ingress_proto: &str,
     usage: &Usage,
+    q: &Quantities,
 ) -> Priced {
     let snap = state.snapshot();
     let (client_key, known) = key.resolve(&snap);
@@ -293,12 +362,17 @@ pub(super) fn price_call(
         cache_write: usage.cache_write_tokens,
         reasoning: usage.reasoning_tokens,
     };
-    let prices = snap.prices_for(alias, upstream_id, upstream_model);
-    let cost = pricing::price_request(&detail, prices.as_ref());
+    let sheet = snap.sheet_for(
+        route.map_or(alias, |r| r.priced_alias(alias)),
+        route.map(|r| r.upstream.id),
+        route.map(|r| r.upstream_model.as_str()),
+    );
+    let cost = pricing::price_request(&detail, q, &sheet);
 
-    // Advance the cached spend the budget check reads. Unpriced calls add
-    // nothing — which is the honest answer, and the reason a budget cannot be
-    // enforced against traffic whose price nobody knows.
+    // Advance the cached spend the budget check reads — every unit's part,
+    // since all of it is money in the one currency (billable-units §7).
+    // Unpriced calls add nothing — which is the honest answer, and the reason
+    // a budget cannot be enforced against traffic whose price nobody knows.
     if let Some(micro) = cost.total_micro.filter(|m| *m != 0) {
         let now = chrono::Utc::now();
         let key_period = key_id.and_then(|id| {
@@ -379,6 +453,21 @@ pub(crate) async fn policy_checked(
     checked_as(state, proto, ctx, name.as_deref(), alias, class).await
 }
 
+/// A key's refusal that is no alias check — a device turn's concurrency
+/// slot (review W3-8): its row, as every refusal gets one.
+pub(crate) async fn refused_for_key(
+    state: &SharedState,
+    proto: ClientProto,
+    ctx: &RequestCtx,
+    alias: &str,
+    class: RequestClass,
+    e: &GatewayError,
+) {
+    // `record` closes a `request_started`; nothing opened one here.
+    state.telemetry.request_started();
+    record_refusal(state, proto, ctx, alias, Instant::now(), class, e).await;
+}
+
 /// [`policy_checked`] for the key named `key_name`.
 async fn checked_as(
     state: &SharedState,
@@ -412,7 +501,10 @@ async fn checked_as(
 /// lasts as long as its socket — so a key disabled or deleted since then
 /// must stop working at its next call, not at its next connection. Looked up
 /// by `api_keys.id` rather than by name, because a rename keeps the key and
-/// a delete-and-recreate under the same name is a different key.
+/// a delete-and-recreate under the same name is a different key — and
+/// compared by its credential (`Principal::presents`), because a Rotate
+/// keeps the row and changes the key: a turn or a session opened with the
+/// old key stops at its next call (client-apps design §1.6, review W2-2).
 pub(crate) async fn policy_checked_call(
     state: &SharedState,
     proto: ClientProto,
@@ -425,11 +517,11 @@ pub(crate) async fn policy_checked_call(
     let key = match ctx.principal.key_id() {
         None => None,
         Some(id) => match snap.api_keys.iter().find(|k| k.id == id) {
-            Some(k) if k.enabled => Some(k),
+            Some(k) if k.enabled && ctx.principal.presents(k) => Some(k),
             _ => {
                 let e = GatewayError::Unauthorized(
-                    "the API key this request was opened with has since been disabled or \
-                     deleted",
+                    "the API key this request was opened with has since been disabled, rotated \
+                     or deleted",
                 );
                 state.telemetry.request_started();
                 record_refusal(state, proto, ctx, alias, started, class, &e).await;
@@ -484,6 +576,7 @@ pub(super) async fn record_refusal(
             fallback: None,
             rung: None,
             degraded: None,
+            quantities: Quantities::default(),
         },
         e.http_status().as_u16(),
         None,
@@ -873,6 +966,7 @@ pub(crate) async fn record_middleware_refusal(
             fallback: None,
             rung: None,
             degraded: None,
+            quantities: Quantities::default(),
         },
         e.http_status().as_u16(),
         None,
@@ -956,6 +1050,11 @@ pub(crate) async fn record_passthrough(
 /// route at all — the gap between [`record`] (keyed on `ClientProto`) and
 /// [`crate::proxy::record_in_process`] (route required). Tokens are always NULL here: every
 /// caller either failed before generating any or never parsed the body.
+///
+/// Priced like every row all the same (billable-units design §3.2, §4.5): a
+/// local route is a real 0 (Q1), an answered one counts its request, and a
+/// token-priced scope stays unpriced for want of tokens — the unpriced
+/// remainder, which is exactly what it is.
 #[allow(clippy::too_many_arguments)]
 async fn record_free_form(
     state: &AppState,
@@ -971,14 +1070,20 @@ async fn record_free_form(
     error: Option<(String, String)>,
     degraded: Option<String>,
 ) {
+    let q = with_requests_default(
+        Quantities::default(),
+        route.is_some(),
+        status,
+        error.as_ref().map(|(k, _)| k.as_str()),
+    );
     let priced = price_call(
         state,
         alias,
-        route.map(|r| r.upstream.id),
-        route.map(|r| r.upstream_model.as_str()),
+        route,
         &ctx.key_ref(),
         ingress_proto,
         &Usage::default(),
+        &q,
     );
     let row = NewRequestLog {
         client_key: priced.client_key,
@@ -1000,46 +1105,38 @@ async fn record_free_form(
         key_id: priced.key_id,
         fallback_reason: fallback.map(|r| r.as_str().to_string()),
         degraded,
-        // Free-form rows are the audio/task passthroughs and early refusals:
-        // no usage was ever reported, so there is nothing to price. They land
-        // in the unpriced remainder, which is exactly what they are.
+        cost: priced.cost,
+        audio_in_ms: quantity_column(q.audio_in_ms),
+        chars_in: quantity_column(q.chars_in),
+        images_out: quantity_column(q.images_out),
         ..Default::default()
     };
+    // A stamped native passthrough's answer is the run's like any `/v1`
+    // row: unpriced for want of tokens on a token-priced scope, and then a
+    // gap in the run as it is in Usage — never a partial sum without it.
+    note_on_run(state, ctx.run, &row, &Usage::default());
     let log_id = store::insert_request_log(&state.db, &row)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("failed to write request log: {e}");
             0
         });
-    state.telemetry.request_finished(RequestSummary {
-        log_id,
-        ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        client_key: row.client_key,
-        ingress_proto: row.ingress_proto,
-        requested_alias: row.requested_alias,
-        upstream_name: row.upstream_name,
-        upstream_model: row.upstream_model,
-        egress_proto: row.egress_proto,
-        status,
-        ttfb_ms: row.ttfb_ms,
-        total_ms: row.total_ms,
-        prompt_tokens: row.prompt_tokens,
-        completion_tokens: row.completion_tokens,
-        cached_in_tokens: row.cached_in_tokens,
-        cache_write_tokens: row.cache_write_tokens,
-        streamed: row.streamed,
-        error_kind: row.error_kind,
-        error_msg: row.error_msg,
-        cost_micro: row.cost.total_micro,
-        class: row.class.as_str().to_string(),
-        key_id: row.key_id,
-        fallback_reason: row.fallback_reason,
-        rung: row.rung,
-        degraded: row.degraded,
-    });
+    state
+        .telemetry
+        .request_finished(row_summary(log_id, row, status));
 }
 
+mod quantities;
+pub(super) use quantities::{quantity_column, with_requests_default};
+
 mod write;
+pub(super) use write::summary as row_summary;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod row_tests;
+
+#[cfg(test)]
+mod run_tests;

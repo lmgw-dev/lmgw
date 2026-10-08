@@ -9,6 +9,9 @@
 //! ([`refuse_unreferenced`]). [`crate::proxy::synthesize`] runs
 //! [`refuse_row`] and [`refuse_undescribed`] once when a realtime response
 //! opens its route, before admission, and the same checks per clause.
+//! [`refuse_unsayable`] judges a body after shaping: the speech route tries
+//! the resolved row's shaping before admission, and every TTS path checks
+//! what it is about to send.
 
 use serde_json::{Map, Value};
 
@@ -17,8 +20,8 @@ use super::tags::only_tags;
 use crate::config::AudioModel;
 use crate::error::GatewayError;
 
-/// `Err` when the request cannot be served: an input of nothing but inline
-/// tags on any route; on an lmgw audio row (`row`, with its profile), the
+/// `Err` when the request cannot be served: an empty or blank input, or one of
+/// nothing but inline tags, on any route; on an lmgw audio row (`row`, with its profile), the
 /// row's own misconfiguration or a feature it does not have.
 pub fn refuse_speech(
     body: &Map<String, Value>,
@@ -34,6 +37,21 @@ pub fn refuse_speech(
             message: "input holds only inline tags and no text to speak — a tag such as \
                       [laughs] is voiced around text, never alone, and is not read out"
                 .into(),
+        });
+    }
+    // Every engine turns an empty text down, after a container start and
+    // as a 502 (review TC-21).
+    if body
+        .get("input")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.trim().is_empty())
+    {
+        return Err(GatewayError::InvalidRequest {
+            code: "empty_input",
+            message: match body.get("model").and_then(Value::as_str) {
+                Some(model) => format!("input is empty: '{model}' has nothing to speak"),
+                None => "input is empty: there is nothing to speak".into(),
+            },
         });
     }
     let Some((row, profile)) = row else {
@@ -178,6 +196,10 @@ fn said(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str).filter(|t| !t.trim().is_empty())
 }
 
+/// An input that character shaping left nothing to say: `empty_input`.
+mod unsayable;
+pub use unsayable::refuse_unsayable;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +288,14 @@ mod tests {
         assert_eq!(code(refuse_speech(&b, None)), Some("empty_input"));
         let b = body(json!({"model": "m", "input": "[laughs] Ha."}));
         assert_eq!(code(refuse_speech(&b, None)), None);
+        for blank in ["", " \n "] {
+            let b = body(json!({"model": "m", "input": blank}));
+            assert_eq!(
+                code(refuse_speech(&b, None)),
+                Some("empty_input"),
+                "{blank:?}"
+            );
+        }
     }
 
     #[test]

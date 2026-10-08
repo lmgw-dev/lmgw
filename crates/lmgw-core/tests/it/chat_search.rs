@@ -20,7 +20,7 @@ async fn thread(state: &SharedState, title: &str) -> i64 {
     let id = store::create_chat_thread(&state.db, "m", "chat")
         .await
         .unwrap();
-    store::set_chat_thread_title(&state.db, id, title)
+    store::set_chat_thread_title(&state.db, id, title, None)
         .await
         .unwrap();
     id
@@ -204,7 +204,7 @@ async fn edits_reindex_and_deletes_unindex() {
     );
     assert_eq!(ids(&search(&gw, "delta").await), vec![t]);
 
-    store::set_chat_thread_title(&state.db, t, "new heading")
+    store::set_chat_thread_title(&state.db, t, "new heading", None)
         .await
         .unwrap();
     assert!(ids(&search(&gw, "old").await).is_empty());
@@ -253,16 +253,18 @@ async fn deleting_a_thread_cascades_into_the_index() {
 #[tokio::test]
 async fn folder_and_archived_filters() {
     let (state, gw) = gw().await;
-    let f = store::create_chat_folder(&state.db, "Work", &ThreadDefaults::default())
+    let f = store::create_chat_folder(&state.db, "Work", &ThreadDefaults::default(), None)
         .await
         .unwrap();
     let in_folder = thread(&state, "wombat one").await;
-    store::set_chat_thread_folder(&state.db, in_folder, Some(f))
+    store::set_chat_thread_folder(&state.db, in_folder, Some(f), None)
         .await
         .unwrap();
     let loose = thread(&state, "wombat two").await;
     let old = thread(&state, "wombat three").await;
-    store::archive_chat_thread(&state.db, old).await.unwrap();
+    store::archive_chat_thread(&state.db, old, None)
+        .await
+        .unwrap();
 
     let mut active = ids(&search(&gw, "wombat").await);
     active.sort();
