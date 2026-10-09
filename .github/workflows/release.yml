@@ -75,6 +75,9 @@ jobs:
           ref: refs/tags/${{ env.RELEASE_TAG }}
           # Nothing here pushes; keep the write token out of .git/config.
           persist-credentials: false
+      # Container root vs the runner-owned workspace: git refuses it as "dubious ownership".
+      - name: Mark the workspace a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Check the tag exists
         run: git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null || { echo "::error::tag ${RELEASE_TAG} does not exist"; exit 1; }

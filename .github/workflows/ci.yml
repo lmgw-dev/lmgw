@@ -48,6 +48,9 @@ jobs:
       - name: Install rustfmt
         run: dnf -y install git-core cargo rustfmt
       - uses: actions/checkout@v7
+      # Container root vs the runner-owned workspace: git refuses it as "dubious ownership".
+      - name: Mark the workspace a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # cargo-fmt reads the workspace with `cargo metadata --no-deps`: nothing
       # is downloaded or compiled.
       - name: cargo fmt --check --all
@@ -72,6 +75,9 @@ jobs:
       - name: Install checkout and cache tools
         run: dnf -y install git-core tar zstd
       - uses: actions/checkout@v7
+      # Container root vs the runner-owned workspace: git refuses it as "dubious ownership".
+      - name: Mark the workspace a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       # Relative to the workspace, like .gitlab-ci.yml does. Set via
       # GITHUB_ENV: in a container job the `github.workspace` expression is the
