@@ -9,7 +9,7 @@
 #     at this project's generic package registry (LMGW_UPDATE_MANIFEST_URL, plus
 #     the masked LMGW_UPDATE_DEPLOY_TOKEN CI/CD variable), and ci/publish.sh
 #     uploads dist/ there.
-#   GitHub Actions (GITHUB_ACTIONS=true) — public releases, one per pushed tag
+#   GitHub Actions (GITHUB_ACTIONS=true) — public releases, one per pushed tag (or a dispatch naming one)
 #     v<X.Y.Z>. Version X.Y.Z, which must equal the version in Cargo.toml (so the
 #     tagged source says what it is); the binary polls the public default feed
 #     (lmgw_core::update::PUBLIC_MANIFEST_URL), and .github/workflows/release.yml
@@ -40,19 +40,26 @@ if [[ "${GITLAB_CI:-}" == "true" ]]; then
   REF="${CI_COMMIT_BRANCH:-${CI_COMMIT_REF_NAME:-unknown}}"
 elif [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   PLATFORM=github
-  if [[ "${GITHUB_REF_TYPE:-}" != "tag" || "${GITHUB_REF_NAME:-}" != v* ]]; then
-    echo "ERROR: public builds are made from a v<X.Y.Z> tag, not ${GITHUB_REF:-an unknown ref}" >&2
+  # The tag: RELEASE_TAG (release.yml sets it, also for a dispatch of an
+  # existing tag), else the pushed ref.
+  TAG="${RELEASE_TAG:-}"
+  if [[ -z "$TAG" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+    TAG="${GITHUB_REF_NAME:-}"
+  fi
+  if [[ "$TAG" != v* ]]; then
+    echo "ERROR: public builds are made from a v<X.Y.Z> tag, not ${TAG:-${GITHUB_REF:-an unknown ref}}" >&2
     exit 1
   fi
-  VERSION="${GITHUB_REF_NAME#v}"
+  VERSION="${TAG#v}"
   if [[ "$VERSION" != "$BASE" ]]; then
-    echo "ERROR: tag ${GITHUB_REF_NAME} does not match version ${BASE} in Cargo.toml" >&2
+    echo "ERROR: tag ${TAG} does not match version ${BASE} in Cargo.toml" >&2
     echo "       (scripts/release.sh bumps the version and tags in one go)" >&2
     exit 1
   fi
-  COMMIT="${GITHUB_SHA:-unknown}"
+  # The checked-out commit (a dispatch's GITHUB_SHA is the default branch's).
+  COMMIT="$(git rev-parse HEAD 2>/dev/null || echo "${GITHUB_SHA:-unknown}")"
   COMMIT="${COMMIT:0:8}"
-  REF="${GITHUB_REF_NAME}"
+  REF="$TAG"
 else
   PLATFORM=local
   VERSION="$BASE"

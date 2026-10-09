@@ -1,6 +1,6 @@
 # Format + test gate for pull requests and pushes to main, on GitHub's own
 # runners. The same checks as ci/check.sh minus the advisory clippy / file-size
-# report. Runs in fedora:latest because the Tauri build dependencies are
+# report. Runs in Fedora (quay.io/fedora/fedora:latest) because the Tauri build dependencies are
 # installed as Fedora packages by ci/install-build-deps.sh (the release build
 # uses the same image).
 #
@@ -40,7 +40,8 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     container:
-      image: fedora:latest
+      # Fedora's own registry: Docker Hub's unauthenticated pull limit hits GitHub's shared runners.
+      image: quay.io/fedora/fedora:latest
     timeout-minutes: 10
     steps:
       # git so actions/checkout makes a real clone instead of a REST tarball.
@@ -56,7 +57,8 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     container:
-      image: fedora:latest
+      # Fedora's own registry: Docker Hub's unauthenticated pull limit hits GitHub's shared runners.
+      image: quay.io/fedora/fedora:latest
     # A cold run took 42 minutes before the prebuilt tauri-cli, 12 of them
     # compiling it. This bounds what a hung test can cost.
     timeout-minutes: 60

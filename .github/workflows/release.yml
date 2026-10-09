@@ -13,6 +13,14 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Builds an existing tag again (a tag-push run that failed) from this
+  # workflow as it is on the default branch, without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build, e.g. v0.4.3"
+        required: true
+        type: string
 
 permissions:
   contents: write # create the release, upload assets
@@ -36,7 +44,8 @@ jobs:
     # Current Fedora, as on GitLab, so the RPM's webkit2gtk4.1 / appindicator
     # SONAME dependencies match the hosts it is installed on.
     container:
-      image: fedora:latest
+      # Fedora's own registry: Docker Hub's unauthenticated pull limit hits GitHub's shared runners.
+      image: quay.io/fedora/fedora:latest
     # A cold LTO (codegen-units = 1) build on a 4-core runner: 0.3.0 took 59
     # minutes, 35 of them the build and 15 compiling tauri-cli (now a
     # download). This bounds what a hung build can cost.
@@ -47,14 +56,28 @@ jobs:
       # The token itself (contents: write) is handed only to the steps that
       # publish, never to the build: every dependency's build script runs there.
       GH_REPO: ${{ github.repository }}
+      # The tag being released: the pushed one, or the dispatch input. ci/build.sh
+      # takes the version from it.
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
+      - name: Check the tag name
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$RELEASE_TAG' is not a release tag (v<X.Y.Z>)"
+            exit 1
+          fi
       # git for a real clone; gh + jq to publish.
       - name: Install checkout and publish tools
         run: dnf -y install git-core gh jq
       - uses: actions/checkout@v7
         with:
+          # A dispatch runs on the default branch, so ask for the tag's commit.
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           # Nothing here pushes; keep the write token out of .git/config.
           persist-credentials: false
+
+      - name: Check the tag exists
+        run: git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null || { echo "::error::tag ${RELEASE_TAG} does not exist"; exit 1; }
 
       # As in ci.yml (GITHUB_ENV, because `github.workspace` is the host path),
       # so ci/build.sh finds the tools the next step installs.
@@ -71,7 +94,15 @@ jobs:
         run: bash ci/install-build-deps.sh
 
       - name: Build the RPM and latest.json
-        run: bash ci/build.sh
+        run: |
+          # A dispatch runs on the default branch while the checkout is the
+          # tag, whose own ci/build.sh (older tags') reads only these. Shell
+          # exports, because GITHUB_ENV cannot override GITHUB_*; on a tag
+          # push they repeat what the runner set.
+          GITHUB_SHA="$(git rev-parse HEAD)"
+          export GITHUB_SHA GITHUB_REF_TYPE=tag GITHUB_REF_NAME="$RELEASE_TAG" \
+            GITHUB_REF="refs/tags/$RELEASE_TAG"
+          bash ci/build.sh
 
       - name: Read the release from the manifest
         id: manifest
