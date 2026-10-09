@@ -11,8 +11,8 @@
 //! request that carries an `mcp` tool.
 //!
 //! Either way the answer is the aggregate of everything `Ready`: exposed names
-//! depend on every connected server (first-by-server-name wins a collision,
-//! §7), and it is the same map `call` routes on.
+//! depend on every enabled server's tools (a collision prefixes both sides,
+//! [`super::names`]), and it is the same map `call` routes on.
 
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,9 @@ impl McpManager {
             snap.mcp_servers
                 .values()
                 .filter(|s| s.enabled)
+                // A device row connects when its device does, never on a
+                // list: an offline one is answered at once (§5.3).
+                .filter(|s| !s.is_device())
                 .filter(|s| wanted(s))
                 .filter(|s| self.listable_now(s, &dev))
                 .filter(|s| {

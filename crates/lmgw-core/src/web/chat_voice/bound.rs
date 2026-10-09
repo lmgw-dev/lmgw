@@ -20,6 +20,8 @@ use crate::store::{ChatMessageRow, ChatThread, MessageVoice, SendMessageOutcome}
 use super::super::agentchat::ADMIN_KIND;
 use super::super::chat_repo::ChatRepo;
 
+mod answer;
+
 pub(crate) use super::super::chat_caller::Caller;
 pub(crate) use super::resolve::{Source, VoiceConfig};
 
@@ -27,6 +29,37 @@ pub(crate) use super::resolve::{Source, VoiceConfig};
 /// store failed to say).
 pub(crate) async fn thread(state: &SharedState, id: i64) -> Option<ChatThread> {
     ChatRepo::of(id).thread(state, id).await.ok().flatten()
+}
+
+/// The messages of thread `id` as they stand; none when the read fails.
+pub(crate) async fn messages(state: &SharedState, id: i64) -> Vec<crate::store::ChatMessageRow> {
+    ChatRepo::of(id)
+        .messages(state, id)
+        .await
+        .unwrap_or_default()
+}
+
+/// Decide calls of `thread` with `verdicts` as the session's `caller`
+/// (client-apps design §6.4), as the Chat's approvals route decides them:
+/// who the resumed turn runs as, what it resumes and the starter's
+/// concurrency slot for it, or the refusal's code and words. The session
+/// holds its own key's slot already (realtime §10.3): a turn it resumes for
+/// that key takes no second one, one it resumes for another key takes that
+/// key's, as a send of that key's would.
+pub(crate) async fn approve(
+    state: &SharedState,
+    thread: &ChatThread,
+    verdicts: &[crate::store::Verdict],
+    caller: &Caller,
+) -> Result<Approved, (&'static str, String)> {
+    let repo = ChatRepo::of(thread.id);
+    let via = super::super::chat_approvals::Via {
+        proto: crate::ingress::ClientProto::Realtime,
+        holds: caller.key_id(),
+    };
+    super::super::chat_approvals::approve(state, caller, repo, thread, verdicts, via)
+        .await
+        .map_err(|r| (r.code, r.message))
 }
 
 /// [`thread`], telling a store that failed (`Err`) from a thread that is
@@ -86,6 +119,9 @@ pub(crate) async fn connect_stages(state: &SharedState, thread: &ChatThread) -> 
 
 // -- the turn ---------------------------------------------------------------
 
+pub(crate) use super::super::chat_approvals::Approved;
+pub(crate) use super::super::chat_tasks::deliver::Sent;
+pub(crate) use super::super::chat_turn::resume::Resume;
 #[cfg(test)]
 pub(crate) use super::super::chat_turn::SentAs;
 pub(crate) use super::super::chat_turn::{
@@ -164,40 +200,57 @@ pub(crate) fn cold(state: &SharedState, alias: &str) -> bool {
 /// (`start_turn_into`), answering the history as it stands — the user
 /// message `user_message_id` the session just wrote, when it wrote one —
 /// with the thread's capabilities computed for this turn, as a send does.
-/// `Err`: why it was refused before it started.
+/// `answer`: a continuation (MCP Tasks design §3.4) — no new words, and
+/// job results nothing answered yet — which runs the turn `POST …/answer`
+/// runs (`TurnMode::Answer`): only on an idle thread, and only while a
+/// result is still unanswered once its start delivered what waits.
+/// `Err`: why it was refused before it started ([`answer::refused`]).
 pub(crate) async fn start_turn(
     state: &SharedState,
     thread: &ChatThread,
     user_message_id: Option<i64>,
+    answer: bool,
     out: tokio::sync::mpsc::Sender<TurnFrame>,
     opts: TurnOpts,
-) -> Result<(), String> {
+) -> Result<(), crate::error::GatewayError> {
+    use super::super::chat_turn::TurnMode;
     let repo = ChatRepo::of(thread.id);
     let caps = super::super::chat_attach_gate::thread_caps(state, repo, thread).await;
-    let mode = super::super::chat_turn::TurnMode::Fresh { user_message_id };
-    super::super::chat_turn::start_turn_into(state, repo, thread, mode, caps, out, opts)
-        .await
-        .map_err(|refused| {
-            format!(
-                "the chat turn was refused before it started ({})",
-                refused.status()
-            )
-        })
+    // A response that resumes the thread's gated reply (client-apps design
+    // §6.4) continues it; a continuation answers the results; any other
+    // answers the history as it stands.
+    let mode = match &opts.resume {
+        Some(r) => TurnMode::Resume {
+            message_id: r.message_id,
+        },
+        None if answer && user_message_id.is_none() => TurnMode::Answer,
+        None => TurnMode::Fresh { user_message_id },
+    };
+    match super::super::chat_turn::start_turn_into(state, repo, thread, mode, caps, out, opts).await
+    {
+        Ok(()) => Ok(()),
+        Err(refused) => Err(answer::refused(refused, matches!(mode, TurnMode::Answer)).await),
+    }
 }
 
 // -- the history ------------------------------------------------------------
 
 /// A user turn spoken in voice mode (§8.3): written as a send writes one —
-/// a history write, which moves the thread's generation — with how it was
-/// spoken; an untitled thread is named from it, as a send names one.
+/// a history write, which moves the thread's generation, the MCP task
+/// results that waited entering before it — with how it was spoken; an
+/// untitled thread is named from it, as a send names one. With its id, the
+/// hold a send's turn takes over (`TurnOpts::sent`, MCP Tasks design §3.1):
+/// until the turn that answers it has begun, a result that ends waits for
+/// that turn's end.
 pub(crate) async fn write_user(
     state: &SharedState,
     thread: &ChatThread,
     content: &str,
     voice: &MessageVoice,
     caller: &Caller,
-) -> Result<i64, String> {
+) -> Result<(i64, Option<Sent>), String> {
     let repo = ChatRepo::of(thread.id);
+    let sent = super::super::chat_tasks::deliver::sent(state, thread.id, !repo.is_temp());
     let id = match repo
         .append_user_message(state, thread.id, content, &[], &[], Some(voice), caller)
         .await
@@ -212,7 +265,7 @@ pub(crate) async fn write_user(
         let title = super::super::chat::derive_title(content);
         let _ = repo.set_title(state, thread.id, &title, caller).await;
     }
-    Ok(id)
+    Ok((id, sent))
 }
 
 /// A heard voice turn's user row (voice-audio-input design §3.3): an

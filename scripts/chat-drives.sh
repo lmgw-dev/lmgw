@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: scripts/chat-drives.sh [--matrix] [--webkit] [--voice] [--only NAME[,NAME…]] [--addr HOST:PORT]
 #                               [--mock-port N] [--shots DIR] [--dsf SCALE]
-# Runs the 16 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
+# Runs the 17 chat-branch UI drives in sequence on ONE fresh dev instance (scratch data dir,
 # mock upstream, leak listener), prints a PASS/FAIL table, exits non-zero on any FAIL. Everything
 # it starts is stopped by pid/process group on exit and its scratch dir (data, Chrome profiles) removed.
 # --matrix runs `ui-matrix.py --routes all`, --webkit runs webkit-check.py on the chat routes, after the drives.
@@ -99,7 +99,7 @@ op settings_set '{"chat_pdf_mode":"ask"}'
 
 DRIVES=(chat-render chat-actions chat-sampling chat-folders chat-ongoing chat-live chat-search chat-knowledge knowledge
     chat-attachments chat-export chat-security chat-leave-midstream key-scope-editor key-scope-create-deny
-    chat-voice-render)
+    chat-voice-render chat-profiles-discard)
 VOICE_FIXTURES=target/chat-voice/fixtures/voice-de.js
 [ "$VOICE" = 1 ] && DRIVES+=(chat-voice-panel chat-voice-reasoning chat-voice-viz)
 declare -A RESULT

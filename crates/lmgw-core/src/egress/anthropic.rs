@@ -7,8 +7,8 @@ use crate::config::{Protocol, Upstream};
 use crate::egress::{finish_from_anthropic, CountPlan, Egress, EgressStreamDecoder};
 use crate::error::GatewayError;
 use crate::ir::{
-    flatten_tool_result, ChatRequest, Completion, ContentPart, FinishReason, ImageSource, Params,
-    ReasoningControl, Role, StreamDelta, ToolChoice, ToolResultBlock, Usage,
+    flatten_tool_result, wire_call_id, ChatRequest, Completion, ContentPart, FinishReason,
+    ImageSource, Params, ReasoningControl, Role, StreamDelta, ToolChoice, ToolResultBlock, Usage,
 };
 use crate::sse::SseEvent;
 
@@ -146,7 +146,10 @@ fn content_blocks(parts: &[ContentPart]) -> Result<Vec<Value>, GatewayError> {
                 return Err(GatewayError::Unsupported(NO_AUDIO_BLOCK.into()));
             }
             ContentPart::ToolUse { id, name, args } => {
-                out.push(json!({"type": "tool_use", "id": id, "name": name, "input": args}));
+                // A Gemini signature stays with Gemini (gateway design §7.1).
+                out.push(json!({
+                    "type": "tool_use", "id": wire_call_id(id), "name": name, "input": args,
+                }));
             }
             ContentPart::ToolResult {
                 id,
@@ -156,7 +159,7 @@ fn content_blocks(parts: &[ContentPart]) -> Result<Vec<Value>, GatewayError> {
             } => {
                 let mut block = json!({
                     "type": "tool_result",
-                    "tool_use_id": id,
+                    "tool_use_id": wire_call_id(id),
                     "content": Value::Array(tool_result_blocks_json(content)),
                 });
                 if *is_error {

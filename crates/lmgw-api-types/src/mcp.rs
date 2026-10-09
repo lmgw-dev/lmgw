@@ -19,7 +19,9 @@ pub struct McpServerView {
     pub id: i64,
     pub name: String,
     pub enabled: bool,
-    /// `stdio | http | sse`.
+    /// `stdio | http | sse | device`. A `device` row is a paired device's
+    /// hosted tools (client-apps design §5.2): created by its hosting grant,
+    /// connected while the device's host link is open.
     pub transport: String,
     pub command: Option<String>,
     pub args: String,
@@ -43,7 +45,17 @@ pub struct McpServerView {
     /// from the SSE `mcp` frame.
     pub status: String,
     pub tool_count: i64,
+    /// The MCP tasks this server runs for Chat threads now, at list time
+    /// (MCP Tasks design §6): started by a call of one of its `required`
+    /// tools and not ended yet. No cap (T9); a server with open tasks is
+    /// never reaped for idleness (T17).
+    pub open_tasks: i64,
     pub status_detail: Option<String>,
+    /// A `device` row's key id (`api_keys.id`); `null` for every other row.
+    pub device_key_id: Option<i64>,
+    /// A `device` row's device, by its short name (`desktop`); `null` for
+    /// every other row.
+    pub device: Option<String>,
 }
 
 /// `GET /api/mcp-servers/{id}/tools` — one server's exposed surface, for the

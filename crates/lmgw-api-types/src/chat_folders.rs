@@ -112,3 +112,16 @@ pub struct AppliedToCurrent {
     pub thread_id: i64,
     pub fields: Vec<String>,
 }
+
+/// `POST /chat/api/folders/{id}`'s answer: the folder as the list carries
+/// it, and what the patch applied to its current thread.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FolderPatched {
+    #[serde(flatten)]
+    pub folder: crate::chat::Folder,
+    /// For an ongoing folder whose defaults changed: the current thread
+    /// and the settings that reached it; `null` otherwise.
+    pub applied: Option<AppliedToCurrent>,
+}

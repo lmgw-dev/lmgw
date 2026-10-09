@@ -31,7 +31,7 @@ pub(super) fn speech_proto(thread: &ChatThread) -> ClientProto {
 /// Thread → Settings → Chat → Voice → realtime's settings, field by field,
 /// with the facts the page shows beside each choice.
 mod resolve;
-pub(super) use resolve::{asr_alias, turn_language};
+pub(super) use resolve::{asr_alias, resolve_with, turn_language};
 
 /// A thread's `voice` in its settings patch and a folder's `voice` default:
 /// parsed strictly, normalised, the aliases checked.
@@ -57,7 +57,7 @@ pub(super) use turn_state::{admit_reporting, held_at_resolve};
 /// Read-aloud's engine (§6.1): realtime's speech pipeline without a writer,
 /// for a thread's voice, answered as the Chat's speech frames.
 mod speech;
-pub(super) use speech::resolve_shown;
+pub(super) use speech::{device_check, plan_with, resolve_shown, speak_planned};
 
 /// `POST /chat/api/threads/{id}/messages/{mid}/speak` and `POST
 /// /chat/api/threads/{id}/speech/stop` (§6.3, §6.4).

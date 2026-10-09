@@ -1,7 +1,9 @@
 //! The Chat API's thread and folder shapes: what `GET /chat/api/threads`,
 //! `GET /chat/api/folders`, a folder create and
 //! `POST /chat/api/folders/{id}/current` answer, and what the change feed's
-//! `thread.*` and `folder.*` events carry.
+//! `thread.*` and `folder.*` events carry; and a thread's MCP tasks
+//! (a late result's row [`MessageTask`], the open tasks [`ThreadTask`],
+//! `answer` and the cancel's [`TaskCancelled`]).
 //!
 //! The gateway serializes these types, and the API document is generated from
 //! them, so the two cannot drift. Every body is written with its object keys
@@ -11,6 +13,9 @@
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::chat_folders::{FolderOngoing, OngoingInput};
+
+mod tasks;
+pub use tasks::*;
 
 /// Serializes `value` with its object keys in alphabetical order at every
 /// depth, through a `serde_json::Value` (whose map keeps its keys sorted).
@@ -33,6 +38,14 @@ pub struct ThreadMcp {
     /// The tools of that server the thread uses; `null` for all of them.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Which of them wait for an approval before they run, in OpenAI's
+    /// shapes: `"never"` (the default, also when absent), `"always"`, or
+    /// `{"always": {"tool_names": […]}, "never": {"tool_names": […]}}`. A
+    /// name may be the tool's own or its prefixed one. `read_only` is
+    /// refused. A gated call stops the turn; `POST
+    /// /chat/api/threads/{id}/approvals` decides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_approval: Option<serde_json::Value>,
 }
 
 // Forward compatibility (review W6-2): every enum a client reads gets a
@@ -186,6 +199,9 @@ pub struct ThreadRow {
     pub archived_at: Option<String>,
     /// The folder the thread is in; `null` for none.
     pub folder_id: Option<i64>,
+    /// The personality profile the thread talks with
+    /// (`GET /chat/api/profiles`); `null` for none ("Default").
+    pub profile_id: Option<i64>,
     /// Knowledge bases the thread searches, by id.
     pub kb_ids: Vec<i64>,
     pub kb_mode: KbMode,
@@ -273,6 +289,9 @@ pub struct ThreadDefaults {
     pub kb_budget_tokens: Option<i64>,
     /// Voice settings, laid field by field over a new thread's.
     pub voice: Option<ThreadVoice>,
+    /// The personality profile of a new thread; `null` for the Chat's own
+    /// default (Settings → Chat).
+    pub profile_id: Option<i64>,
 }
 
 /// A Chat folder as `GET /chat/api/folders` lists it, with its thread

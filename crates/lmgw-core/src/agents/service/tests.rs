@@ -162,6 +162,32 @@ impl Spawner for Fake {
 }
 
 // ---------------------------------------------------------------------------
+// The cancel (§3.3)
+// ---------------------------------------------------------------------------
+
+/// A Stop that comes before the starter first listens for it — still in its
+/// token and run-directory steps — is kept for when it does. Fired with
+/// `send`, it was dropped while nobody listened (the channel had no
+/// receiver), and the start went on: an unbounded one for good, with the
+/// Stop waiting on its answer. `agents_service`'s stop tests met it once
+/// their Stop stopped waiting a fixed 200–400 ms first, and under load
+/// before that.
+#[test]
+fn a_cancel_fired_before_anyone_listens_is_kept() {
+    use futures::FutureExt;
+    let cancel = Cancel::new();
+    cancel.fire();
+    assert!(
+        cancel.cancelled().now_or_never().is_some(),
+        "the cancel was lost"
+    );
+    assert!(
+        Cancel::new().cancelled().now_or_never().is_none(),
+        "nothing fired"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The argv (§6.5)
 // ---------------------------------------------------------------------------
 

@@ -37,6 +37,11 @@ impl McpManager {
     /// Podman pull, then `Ready`/`Error`. Honors the backoff window (§14): a
     /// recently-failed conn within its backoff is left `Error` untouched.
     pub(super) async fn start_one(&self, server: &McpServer) {
+        // A device row is never dialled: it waits for its device's link
+        // (client-apps design §5.2, `host`).
+        if server.is_device() {
+            return;
+        }
         let hash = connection_config_hash(server);
 
         // Atomically *claim* the connect under one write lock so concurrent
@@ -253,6 +258,7 @@ impl McpManager {
                 let (running, tools) = bounded(server, self.handshake(server, None)).await?;
                 (running, tools, None)
             }
+            McpTransport::Device => return Err(self.offline_words(server).await),
         };
         Ok(Connected {
             running,
@@ -329,6 +335,7 @@ impl McpManager {
                     .await
                     .map_err(|e| format!("http handshake: {e}"))?
             }
+            McpTransport::Device => return Err(self.offline_words(server).await),
         };
         let tools = running
             .peer()

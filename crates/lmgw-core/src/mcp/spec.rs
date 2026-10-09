@@ -95,6 +95,64 @@ impl ApprovalRule {
             Self::Filter { never, always } => always.iter().all(|a| never.contains(a)),
         }
     }
+
+    /// The rule that gates a call when `self` or `other` gates it — names
+    /// compared exactly as written, so a caller that wants both spellings
+    /// of a tool to count lists both. Read as sets of gated names: a rule
+    /// gates a finite set (an `always` list without the names its `never`
+    /// list exempts; none for `"never"`) or every name but a finite set (a
+    /// never-only filter; none exempt for `"always"`), and the union of two
+    /// such sets is again one of them.
+    pub fn or(&self, other: &Self) -> Self {
+        /// What a rule gates: `Only(names)`, or `AllBut(exempt names)`.
+        enum Gated {
+            Only(Vec<String>),
+            AllBut(Vec<String>),
+        }
+        let gated = |r: &Self| match r {
+            Self::Never => Gated::Only(Vec::new()),
+            Self::Always => Gated::AllBut(Vec::new()),
+            // `{}`: no list, nothing gated.
+            Self::Filter { never, always } if never.is_empty() && always.is_empty() => {
+                Gated::Only(Vec::new())
+            }
+            Self::Filter { never, always } if !always.is_empty() => Gated::Only(
+                always
+                    .iter()
+                    .filter(|a| !never.contains(a))
+                    .cloned()
+                    .collect(),
+            ),
+            Self::Filter { never, .. } => Gated::AllBut(never.clone()),
+        };
+        let mut joined = match (gated(self), gated(other)) {
+            (Gated::Only(mut a), Gated::Only(b)) => {
+                a.extend(b);
+                Gated::Only(a)
+            }
+            (Gated::Only(only), Gated::AllBut(but)) | (Gated::AllBut(but), Gated::Only(only)) => {
+                Gated::AllBut(but.into_iter().filter(|n| !only.contains(n)).collect())
+            }
+            (Gated::AllBut(a), Gated::AllBut(b)) => {
+                Gated::AllBut(a.into_iter().filter(|n| b.contains(n)).collect())
+            }
+        };
+        let (Gated::Only(names) | Gated::AllBut(names)) = &mut joined;
+        names.sort();
+        names.dedup();
+        match joined {
+            Gated::Only(names) if names.is_empty() => Self::Never,
+            Gated::Only(names) => Self::Filter {
+                never: Vec::new(),
+                always: names,
+            },
+            Gated::AllBut(names) if names.is_empty() => Self::Always,
+            Gated::AllBut(names) => Self::Filter {
+                never: names,
+                always: Vec::new(),
+            },
+        }
+    }
 }
 
 /// Why a `read_only` filter is refused, on both routes (§1.1).
@@ -153,7 +211,11 @@ pub fn parse_allowed_tools(v: Option<&Value>, label: &str) -> Result<Option<Vec<
     }
 }
 
-/// `require_approval` in either of its two spellings.
+/// `require_approval` in either of its two spellings: `"never"` /
+/// `"always"`, or `{always: {tool_names}, never: {tool_names}}` (either key
+/// may be left out; `{}` is `"never"`). Anything else is refused, never read
+/// as "gates nothing": an unknown key, a filter that is not an object, one
+/// without `tool_names` or with another key.
 pub fn parse_require_approval(v: Option<&Value>, label: &str) -> Result<ApprovalRule, String> {
     match v {
         None | Some(Value::Null) => Ok(ApprovalRule::Never),
@@ -167,20 +229,45 @@ pub fn parse_require_approval(v: Option<&Value>, label: &str) -> Result<Approval
             )),
         },
         Some(Value::Object(o)) => {
+            // Strict, unlike a lenient read that would take a typo for "no
+            // filter" and gate nothing: a key that is not `always` or
+            // `never`, a filter that is not `{tool_names: […]}`, one that
+            // names no list — each is refused.
+            if let Some(key) = o.keys().find(|k| *k != "always" && *k != "never") {
+                return Err(format!(
+                    "require_approval on mcp server '{label}': unknown key '{key}' (expected \
+                     \"always\" and/or \"never\", each {{\"tool_names\": […]}})"
+                ));
+            }
             let names = |key: &str| -> Result<Vec<String>, String> {
-                let Some(filter) = o.get(key).and_then(Value::as_object) else {
-                    return Ok(Vec::new());
+                let at = format!("require_approval.{key} on mcp server '{label}'");
+                let filter = match o.get(key) {
+                    None | Some(Value::Null) => return Ok(Vec::new()),
+                    Some(Value::Object(filter)) => filter,
+                    Some(other) => {
+                        return Err(format!(
+                            "{at} must be {{\"tool_names\": […]}}, got {}",
+                            kind_of(other)
+                        ))
+                    }
                 };
-                refuse_read_only(
-                    filter,
-                    &format!("require_approval.{key} on mcp server '{label}'"),
-                )?;
-                match filter.get("tool_names").and_then(Value::as_array) {
-                    Some(a) => strings(
+                refuse_read_only(filter, &at)?;
+                if let Some(k) = filter.keys().find(|k| *k != "tool_names") {
+                    return Err(format!("{at}: unknown key '{k}' (expected \"tool_names\")"));
+                }
+                match filter.get("tool_names") {
+                    Some(Value::Array(a)) => strings(
                         a,
                         &format!("require_approval.{key}.tool_names on mcp server '{label}'"),
                     ),
-                    None => Ok(Vec::new()),
+                    None | Some(Value::Null) => Err(format!(
+                        "{at} names no tools: give \"tool_names\", or leave {key} out"
+                    )),
+                    Some(other) => Err(format!(
+                        "require_approval.{key}.tool_names on mcp server '{label}' must be an \
+                         array of tool names, got {}",
+                        kind_of(other)
+                    )),
                 }
             };
             Ok(ApprovalRule::Filter {
@@ -310,6 +397,72 @@ mod tests {
             let e = parse_mcp_tool(&json!({"server_label": "x", field: v})).unwrap_err();
             assert!(e.contains(READ_ONLY_REFUSED), "{field} {v}: {e}");
             assert!(e.contains(field), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_require_approval_is_refused_not_read_as_no_filter() {
+        for (v, says) in [
+            (
+                json!({"always": ["a"]}),
+                "must be {\"tool_names\": […]}, got array",
+            ),
+            (json!({"never": "a"}), "got string"),
+            (json!({"always": {}}), "names no tools"),
+            (json!({"always": {"tool_names": null}}), "names no tools"),
+            (
+                json!({"alwyas": {"tool_names": ["a"]}}),
+                "unknown key 'alwyas'",
+            ),
+            (
+                json!({"always": {"toolnames": ["a"]}}),
+                "unknown key 'toolnames'",
+            ),
+            (
+                json!({"always": {"tool_names": "a"}}),
+                "must be an array of tool names",
+            ),
+        ] {
+            let e = parse_require_approval(Some(&v), "x").unwrap_err();
+            assert!(e.contains(says), "{v}: {e}");
+            assert!(e.contains("require_approval"), "{v}: {e}");
+        }
+        // The documented shapes still read.
+        for v in [
+            json!({}),
+            json!({"always": null}),
+            json!({"always": {"tool_names": []}}),
+            json!({"never": {"tool_names": ["a"]}, "always": {"tool_names": ["b"]}}),
+        ] {
+            assert!(parse_require_approval(Some(&v), "x").is_ok(), "{v}");
+        }
+    }
+
+    /// `or` gates exactly what either rule gates, for every shape pair.
+    #[test]
+    fn or_gates_what_either_gates() {
+        let rule = |v: Value| parse_require_approval(Some(&v), "x").unwrap();
+        let shapes = [
+            json!("never"),
+            json!("always"),
+            json!({"always": {"tool_names": ["a", "b"]}}),
+            json!({"always": {"tool_names": ["a", "c"]}, "never": {"tool_names": ["c"]}}),
+            json!({"never": {"tool_names": ["a"]}}),
+            json!({"never": {"tool_names": ["a", "d"]}}),
+            json!({}),
+        ];
+        for x in &shapes {
+            for y in &shapes {
+                let (a, b) = (rule(x.clone()), rule(y.clone()));
+                let both = a.or(&b);
+                for t in ["a", "b", "c", "d", "e"] {
+                    assert_eq!(
+                        both.requires(t, t),
+                        a.requires(t, t) || b.requires(t, t),
+                        "{x} or {y}, tool {t}: {both:?}"
+                    );
+                }
+            }
         }
     }
 

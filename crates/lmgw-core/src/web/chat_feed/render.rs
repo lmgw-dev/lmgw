@@ -4,7 +4,7 @@
 //! not see it (L3).
 
 use lmgw_api_types::chat_feed::{
-    FolderChanged, FolderCurrent, FolderGone, ThreadChanged, ThreadGone,
+    FeedProfile, FolderChanged, FolderCurrent, FolderGone, ThreadChanged, ThreadGone,
 };
 use serde_json::{json, Value};
 
@@ -36,10 +36,14 @@ use crate::store::{self, AdminThreads};
 /// (`Record::admin_was`), and a device that saw it before and not now, or
 /// the other way round, receives it as the thread's or folder's removal
 /// (`*.deleted`) or arrival (`*.created`).
+///
+/// `reader`: the device key the stream reads for (`None`: the owner) — a
+/// `device.revoked` record also reaches the hosts it names
+/// ([`super::devices`]).
 pub(super) async fn render(
     state: &AppState,
     r: &Record,
-    admin: AdminThreads,
+    (admin, reader): (AdminThreads, Option<i64>),
     purge: &PurgeDays,
 ) -> Result<Option<(String, Value)>, crate::error::GatewayError> {
     let device = admin.is_device();
@@ -47,6 +51,9 @@ pub(super) async fn render(
     let mut event = r.kind.clone();
     if r.kind == kind::DEVICE_REACH || r.kind == kind::GATEWAY_REACH {
         return Ok(None);
+    }
+    if r.kind == kind::DEVICE_REVOKED {
+        return Ok(super::devices::render(r, admin, reader).map(|data| (event, data)));
     }
     if device {
         let seen_before = r.admin_was().map(|was| admin.sees(was));
@@ -184,6 +191,30 @@ pub(super) async fn render(
                 by,
             })
         }
+        // A gated call and its decision (client-apps design §6.5), from the
+        // reply's pending state now.
+        kind::APPROVAL_REQUESTED | kind::APPROVAL_DECIDED => {
+            match super::approvals::render(state, r, admin).await? {
+                Some(data) => data,
+                None => return Ok(None),
+            }
+        }
+        // An MCP task a turn started, and its result entering the thread
+        // (MCP Tasks design §4.1), from the facts the record keeps.
+        kind::TASK_STARTED | kind::TASK_DONE => {
+            match super::tasks::render(state, r, admin).await? {
+                Some(data) => data,
+                None => return Ok(None),
+            }
+        }
+        // A profile is every reader's (personality-profiles design §3.2):
+        // named as its write left it.
+        kind::PROFILE_CREATED | kind::PROFILE_UPDATED | kind::PROFILE_DELETED => {
+            let Some((id, name)) = r.profile() else {
+                return Ok(None);
+            };
+            json!(FeedProfile { id, name, by })
+        }
         other => {
             tracing::debug!(
                 "chat feed: record {} has a type this build does not render: {other}",
@@ -205,6 +236,29 @@ async fn hidden_thread(
     Ok(store::get_chat_thread(&state.db, id)
         .await?
         .is_some_and(|t| !admin.sees(t.reach_level())))
+}
+
+/// The whole profile list as `profile.created` frames, with no `id:` and
+/// no author: what follows every `resync` (personality-profiles design
+/// §3.2), so a client that keeps the names has them again without a
+/// request. From the published snapshot, which every profile write
+/// publishes before it wakes the feed.
+pub(super) fn profile_list(state: &AppState) -> Vec<axum::response::sse::Event> {
+    state
+        .snapshot()
+        .chat_profiles
+        .iter()
+        .map(|p| {
+            super::stream::frame(
+                lmgw_api_types::chat_feed::event::PROFILE_CREATED,
+                &FeedProfile {
+                    id: p.id,
+                    name: p.name.clone(),
+                    by: None,
+                },
+            )
+        })
+        .collect()
 }
 
 fn gone_thread(thread_id: i64, by: Option<String>) -> Value {

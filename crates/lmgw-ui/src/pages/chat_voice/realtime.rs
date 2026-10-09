@@ -31,6 +31,7 @@ mod keys;
 mod live;
 mod machine;
 mod panel;
+mod profile_chip;
 mod reload;
 mod socket;
 
@@ -141,6 +142,8 @@ pub(crate) struct Parts {
     pub model_sel: RwSignal<String>,
     /// The settings drawer's Voice draft, kept in step with a chip's write.
     pub draft: VoiceDraft,
+    /// The settings drawer's profile draft, likewise.
+    pub profile: RwSignal<String>,
     /// Re-read the thread list.
     pub refresh: Callback<()>,
     /// Show these rows as the open thread's messages, in place of the

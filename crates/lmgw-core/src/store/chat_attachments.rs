@@ -327,7 +327,54 @@ pub async fn append_user_message_with_voice(
     kb_refs: &[i64],
     voice: Option<&MessageVoice>,
 ) -> DbResult<SendMessageOutcome> {
+    append_user_message_by(
+        pool,
+        thread_id,
+        (content, attachment_ids, kb_refs, voice),
+        &super::Decider::gateway(),
+    )
+    .await
+}
+
+/// [`append_user_message_with_voice`] written by `by`: what the thread's
+/// last reply still waits on is declined in the same transaction, as `by`
+/// moving on without deciding (client-apps design §6.3,
+/// `store::chat_approvals`).
+pub async fn append_user_message_by(
+    pool: &SqlitePool,
+    thread_id: i64,
+    message: (&str, &[i64], &[i64], Option<&MessageVoice>),
+    by: &super::Decider,
+) -> DbResult<SendMessageOutcome> {
+    Ok(send_user_message_by(pool, thread_id, message, by, None)
+        .await?
+        .0)
+}
+
+/// [`append_user_message_by`] for a message a turn is about to answer (a
+/// send, a bound session's spoken turn; MCP Tasks design §3.1): with
+/// `results`, the thread's MCP task results that wait for delivery enter
+/// it in the same transaction, after what the message declines and before
+/// the message — they ended before it was written, so they are stored
+/// before it, and the model answers the message with them as context.
+/// `results` renders a waiting task row as its result row. What entered
+/// comes back beside the outcome; nothing does when the send rolled back
+/// (then they still wait).
+pub async fn send_user_message_by(
+    pool: &SqlitePool,
+    thread_id: i64,
+    (content, attachment_ids, kb_refs, voice): (&str, &[i64], &[i64], Option<&MessageVoice>),
+    by: &super::Decider,
+    results: Option<&(dyn Fn(&super::mcp_tasks::McpTaskRow) -> super::mcp_tasks::ResultRow + Sync)>,
+) -> DbResult<(SendMessageOutcome, Vec<super::mcp_tasks::Delivered>)> {
     let mut tx = super::begin_write(pool).await?;
+    // First what the message declines: a reply its approvals held open no
+    // longer holds the results off once its calls are declined.
+    super::chat_approvals::decline_waiting(&mut tx, thread_id, by).await?;
+    let delivered = match results {
+        Some(render) => super::mcp_tasks::deliver_waiting_in(&mut tx, thread_id, render).await?,
+        None => Vec::new(),
+    };
 
     let res = sqlx::query(
         "INSERT INTO chat_messages (thread_id, role, content, reasoning, kb_refs, voice) \
@@ -361,7 +408,7 @@ pub async fn append_user_message_with_voice(
     }
     if bound as usize != attachment_ids.len() {
         tx.rollback().await?;
-        return Ok(SendMessageOutcome::AttachmentNotDraft);
+        return Ok((SendMessageOutcome::AttachmentNotDraft, Vec::new()));
     }
 
     // Same bump `append_chat_message` does, in the same transaction — a
@@ -373,7 +420,7 @@ pub async fn append_user_message_with_voice(
         .await?;
 
     tx.commit().await?;
-    Ok(SendMessageOutcome::Sent(msg_id))
+    Ok((SendMessageOutcome::Sent(msg_id), delivered))
 }
 
 /// What [`delete_draft_chat_attachment`] found.

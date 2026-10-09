@@ -18,7 +18,7 @@
 #     nothing is published. LMGW_UPDATE_* already in your environment pass
 #     through as-is.
 #
-# The in-app updater (lmgw_core::update::is_newer) and rpm order the two kinds
+# The in-app updater (lmgw_update::is_newer) and rpm order the two kinds
 # the same way: 0.3.0 < 0.3.0+98 < 0.3.0+99 < 0.3.1. A private build is always
 # newer than the release it follows and older than the next one, and the
 # pipeline counter is monotonic without any git history. scripts/release.sh
@@ -68,10 +68,11 @@ echo "Building lmgw ${VERSION} (${PLATFORM})"
 # before cargo runs.
 case "$PLATFORM" in
   gitlab)
-    # URL-encode the project path (group/project -> group%2Fproject) for the
-    # token-resolvable generic-package API URLs: the feed the private test
+    # The numeric project id (not the URL-encoded path) addresses the
+    # generic-package API, so moving or renaming the project never breaks the
+    # feed URL an installed updater has baked in: the feed the private test
     # builds poll, and the RPM download URL embedded in the manifest.
-    REGISTRY="${CI_API_V4_URL}/projects/${CI_PROJECT_PATH//\//%2F}/packages/generic/lmgw"
+    REGISTRY="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/lmgw"
     export LMGW_UPDATE_MANIFEST_URL="${REGISTRY}/latest/latest.json"
     # A masked CI/CD variable is already in the job environment; it only needs
     # to reach cargo. Without it the build still succeeds, but its updater gets

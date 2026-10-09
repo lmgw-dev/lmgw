@@ -620,10 +620,11 @@ async fn an_agent_cannot_register_its_tools_under_a_device_s_label() {
     .await;
     assert!(v.to_string().contains("hosting label"), "{status}: {v}");
     let rows = lmgw_core::store::list_mcp_servers(&state.db).await.unwrap();
+    // The device's own hosted-tools row holds it (§5.2), and no other.
     assert!(
         !rows
             .iter()
-            .any(|r| r.tool_prefix.eq_ignore_ascii_case("board")),
+            .any(|r| r.tool_prefix.eq_ignore_ascii_case("board") && r.device_key_id.is_none()),
         "no server took the device's label"
     );
 }

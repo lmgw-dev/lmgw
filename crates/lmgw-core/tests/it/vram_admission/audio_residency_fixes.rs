@@ -12,7 +12,7 @@ use lmgw_core::runtime::Class;
 
 use super::audio_residency::{
     add_audio_model, audio_resident, learn, models_page_note, note, op, readings_after, residency,
-    speak, speak_and_read, start_idle, CONTEXT,
+    speak, speak_and_read, start_idle, stretches_after, CONTEXT,
 };
 use super::image_pipeline_peak::{
     acquire_image, acquire_model, add_image_model, peak_of, ScriptedGpu,
@@ -49,16 +49,6 @@ async fn in_flight_drains(f: &Fixture, model_id: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("{model_id} still has a request in flight");
-}
-
-async fn stretches_after(f: &Fixture, before: u64) {
-    for _ in 0..500 {
-        if f.state.vram.residency_stretches() > before {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no sampler stretch ended after {before}");
 }
 
 async fn set_audio(f: &Fixture, change: impl FnOnce(&mut lmgw_core::config::AudioSettings)) {

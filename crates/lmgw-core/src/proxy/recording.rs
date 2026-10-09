@@ -272,6 +272,8 @@ pub(super) async fn record(
         audio_in_ms: quantity_column(q.audio_in_ms),
         chars_in: quantity_column(q.chars_in),
         images_out: quantity_column(q.images_out),
+        // A model call: no approval decides one.
+        approved_by: None,
     };
     note_on_run(p.state, p.ctx.run, &row, &usage);
     // Its own task: a handler dropped mid-insert neither loses the row nor

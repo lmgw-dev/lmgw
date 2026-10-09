@@ -75,6 +75,11 @@ pub(crate) struct SettingsReq {
     /// [`super::chat_voice::apply_thread_voice`]); `null` clears them.
     #[serde(default, deserialize_with = "present")]
     voice: Option<Value>,
+    /// The personality profile (personality-profiles design §3.1): an id
+    /// from `GET /chat/api/profiles`, or `null` for none ("Default"). An
+    /// unknown id is a 400 `unknown_profile`.
+    #[serde(default, deserialize_with = "present")]
+    profile_id: Option<Option<i64>>,
 }
 
 /// `Some(value)` for a field that was sent — including one sent as `null`,
@@ -90,7 +95,7 @@ where
 
 /// `POST /chat/api/threads/{id}/settings` — patch model + sampling settings,
 /// the reasoning overrides, the thread's attached MCP servers, its
-/// knowledge bases and its voice (the title is preserved; it auto-names on first send). Overrides that contradict each
+/// knowledge bases, its voice and its personality profile (the title is preserved; it auto-names on first send). Overrides that contradict each
 /// other are a 400 `bad_request`, and nothing is written. Answers `{ok,
 /// continue, voice, voice_resolved}`: the thread's `continue` re-judged under
 /// the new settings (a model switch or reasoning toggle changes it), its
@@ -290,7 +295,7 @@ pub(crate) async fn restore_flag(state: &SharedState, repo: ChatRepo, id: i64) {
 
 /// Lay settings patch `req` over `t` with every check the settings route
 /// runs, in its order: a device's tool labels and knowledge bases (L5), the
-/// reasoning and sampling overrides, the knowledge settings, the voice and
+/// profile (it exists), the reasoning and sampling overrides, the knowledge settings, the voice and
 /// its aliases, the aliases a device writes (review W3-4), and last, when
 /// the patch changed anything, whether a device below `full` may change a
 /// thread with lmgw's admin tools (`chat_steer`, as `change` names the
@@ -310,7 +315,15 @@ pub(crate) async fn apply_settings_patch(
         .map(|a| a.map(str::to_string))
         .collect();
     if let Some(written) = &req.mcp_tools {
-        chat_tool_write::check(state, caller, written, &t.mcp_tools).await?;
+        chat_tool_write::check(
+            state,
+            caller,
+            written,
+            &t.mcp_tools,
+            &t.approval_floor,
+            t.folder_id,
+        )
+        .await?;
     }
     if let Some(ids) = &req.kb_ids {
         chat_tool_write::check_kbs(state, caller, ids, &t.kb_ids).await?;
@@ -321,6 +334,14 @@ pub(crate) async fn apply_settings_patch(
     if let Some(v) = req.system_prompt {
         t.system_prompt = v;
     }
+    // A profile the thread already has is not checked again: one deleted
+    // since is none in the store already.
+    if let Some(v) = req.profile_id {
+        if v != t.profile_id {
+            super::super::chat_profiles::check_profile(state, v)?;
+        }
+        t.profile_id = v;
+    }
     if let Some(v) = req.temperature {
         t.temperature = v;
     }
@@ -328,6 +349,12 @@ pub(crate) async fn apply_settings_patch(
         t.max_tokens = v;
     }
     if let Some(v) = req.mcp_tools {
+        // The owner's write is the thread's approval floor from now on
+        // (client-apps design §6.6); a device's never moves it.
+        if !caller.is_device() {
+            t.approval_floor =
+                chat_tool_write::owner_floor(state, &v, &t.mcp_tools, &t.approval_floor);
+        }
         t.mcp_tools = v;
     }
     if let Some(v) = req.reasoning_enabled {
@@ -416,6 +443,7 @@ mod tests {
         t.mcp_tools = vec![ThreadMcp {
             server_label: "lmgw".into(),
             allowed_tools: None,
+            require_approval: None,
         }];
         let devices = |state: &SharedState| {
             state
@@ -468,6 +496,7 @@ mod tests {
         t.mcp_tools = vec![ThreadMcp {
             server_label: "lmgw".into(),
             allowed_tools: None,
+            require_approval: None,
         }];
         sqlx::query(
             "CREATE TRIGGER refuse_settings BEFORE UPDATE ON chat_threads \

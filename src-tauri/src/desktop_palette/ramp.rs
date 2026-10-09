@@ -1,6 +1,6 @@
 //! The neutrals the page takes from the desktop's title-bar shade.
 //!
-//! The steps are the bundled palette's own (the app.css tokens), measured as
+//! The steps are the bundled palette's own (the kit.css tokens), measured as
 //! OKLCH lightness above or below its --bg0, re-based on the title bar's
 //! shade and kept in its hue and chroma: the panes become lighter greys of
 //! that shade, where the bundled ones get bluer as they get lighter.
@@ -116,7 +116,7 @@ mod tests {
         }
     }
 
-    const APP_CSS: &str = include_str!("../../../crates/lmgw-ui/assets/app.css");
+    const APP_CSS: &str = include_str!("../../../crates/lmgw-ui-kit/assets/kit.css");
 
     /// A token's `#RRGGBB` in the first block that `opens` starts.
     fn bundled(opens: &str, name: &str) -> Rgb {

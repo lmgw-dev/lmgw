@@ -9,9 +9,48 @@
 //! session's own (chat-voice design §8.6). A few payloads a client passes on
 //! whole (a chat frame's data, a message's voice, the timing line) stay
 //! `serde_json::Value`s; an FFI wrapper hands them over as JSON text.
+//!
+//! **Late MCP task results** (MCP Tasks design §3.4, §4.2). A tool whose
+//! server runs it as a task answers its turn at once (`started, job <id>`,
+//! the `tool` frame's `task`), and its result enters the thread later as a
+//! message of role `tool` — only while no turn of the thread runs. The
+//! bound session then says [`ServerEvent::TaskDone`]. lmgw starts no turn
+//! for it: the client picks the moment — never while the user talks or the
+//! model speaks — and sends [`ClientEvent::ResponseCreate`] with no new
+//! words (no commit, no item). That response is a **continuation**: it
+//! answers every result no reply answered yet, the thread's model seeing
+//! each as a call of `lmgw__job_result` and its result, and its reply is
+//! stored as any spoken reply. A client that binds to speak a result it
+//! learned of from the feed (`task.done`; bind with `takeover=never`, so it
+//! never takes the voice from another device) does the same: the results
+//! no reply answered are owed from the bind on. The continuation's
+//! refusals:
+//! - `empty_turn` — nothing to answer: an `error` event before any
+//!   `response.created`, or `response.done {failed}` when a turn of
+//!   another window answered the results meanwhile;
+//! - `turn_running` — a turn of the thread is running (a text send, another
+//!   device's answer); `response.done {failed}`, and nothing is cancelled:
+//!   the results that wait enter when it ends, and its reply may answer
+//!   them.
+//!
+//! Words said before the `response.create` make it an ordinary turn, whose
+//! reply answers the words and the results alike. Only the client's own
+//! `response.create` continues, and only one with no turn the client
+//! committed before it: the automatic response turn detection creates for
+//! a turn without words (a cough) stays `empty_turn`, and so does a
+//! push-to-talk `input_audio_buffer.commit` of silence and its
+//! `response.create` — a cough's equal. A continuation a cough cuts before
+//! anything of it was heard runs again after the cough. A
+//! [`ServerEvent::TaskDone`] that comes while a response runs is answered by
+//! that response (the result entered as its user message was written,
+//! before it, or at its turn's start, and is in its request): send no
+//! `response.create` for it.
 
 use serde_json::Value;
 
+pub use lmgw_api_types::chat::TASK_DONE_EVENT;
+pub use lmgw_api_types::chat_approvals::{ApprovalDecidedEvent, ApprovalRequest};
+pub use lmgw_api_types::chat_feed::TaskDone;
 pub use lmgw_api_types::chat_voice::ModelState;
 pub use lmgw_api_types::realtime::{
     RevokeKind, CLOSE_GOING_AWAY, CLOSE_OUT_OF_REACH, CLOSE_REVOKED, CLOSE_TAKEN_OVER,
@@ -117,6 +156,28 @@ pub enum ServerEvent {
     Timing(Value),
     /// `lmgw.chat.thread`: the thread as a response re-read it.
     Thread(ThreadFacts),
+    /// `conversation.item.done` of an `mcp_approval_request` item: a call
+    /// of the thread's turn waits for an approval (client-apps design
+    /// §6.4). Its `approval_request_id` is the item's id; its `call_id` is
+    /// `None` (OpenAI's item has none): the [`Self::ChatFrame`] relaying the
+    /// turn's `tool {event: "approval"}` frame, sent right after the item,
+    /// carries it beside the same `approval_request_id`. Answer with
+    /// [`ClientEvent::ApprovalResponse`], then [`ClientEvent::ResponseCreate`];
+    /// keep a spoken answer out of the session (no commit while it is open:
+    /// a user turn declines the call) — transcribe it with
+    /// [`crate::requests::transcribe`].
+    ApprovalRequest(ApprovalRequest),
+    /// `lmgw.approval.decided`: a call this session showed was decided by
+    /// another client; close what asks for it.
+    ApprovalDecided(ApprovalDecidedEvent),
+    /// `lmgw.task.done` ([`TASK_DONE_EVENT`]): a late MCP task result
+    /// entered the thread as message `message_id` (role `tool`), with the
+    /// feed's `task.done` facts — `id` the gateway's id of the task, `task_id`
+    /// the server's, `status` `completed`, `failed`, `cancelled` or
+    /// `abandoned`, `by` who cancelled it for a cancel the gateway sent. A
+    /// [`ClientEvent::ResponseCreate`] with no new words answers it (module
+    /// doc).
+    TaskDone(TaskDone),
     /// Any other `type`, or a typed one whose fields do not read: its
     /// `type` and the whole event as sent, for a client to skip and log.
     Unknown { kind: String, data: Value },
@@ -309,6 +370,28 @@ pub fn parse(text: &str) -> Option<ServerEvent> {
             Some(t) => ServerEvent::Thread(t),
             None => ServerEvent::Unknown { kind, data: v },
         },
+        "conversation.item.done" if v["item"]["type"] == "mcp_approval_request" => {
+            let item = &v["item"];
+            ServerEvent::ApprovalRequest(ApprovalRequest {
+                approval_request_id: s(item, "id"),
+                server_label: s(item, "server_label"),
+                name: s(item, "name"),
+                arguments: s(item, "arguments"),
+                // OpenAI's item has none: the `lmgw.chat.frame` relaying
+                // the turn's `approval` frame, right after it, has it.
+                call_id: None,
+            })
+        }
+        TASK_DONE_EVENT => match serde_json::from_value::<TaskDone>(strip(v.clone())) {
+            Ok(d) => ServerEvent::TaskDone(d),
+            Err(_) => ServerEvent::Unknown { kind, data: v },
+        },
+        "lmgw.approval.decided" => {
+            match serde_json::from_value::<ApprovalDecidedEvent>(strip(v.clone())) {
+                Ok(d) => ServerEvent::ApprovalDecided(d),
+                Err(_) => ServerEvent::Unknown { kind, data: v },
+            }
+        }
         _ => ServerEvent::Unknown { kind, data: v },
     })
 }

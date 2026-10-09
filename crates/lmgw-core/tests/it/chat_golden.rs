@@ -3,7 +3,8 @@
 //! send, regenerate (a reply, a user message), edit, continue, an Admin Chat
 //! and an MCP tool thread, a temporary chat, an auto-mode knowledge
 //! retrieval, and the error and `done` payloads of the ways a turn fails or
-//! is stopped.
+//! is stopped. The system messages a thread with no profile sends are
+//! pinned beside them ([`system`]).
 //!
 //! Captured before the turn seam (`TurnFrame`) replaced the SSE channel, and
 //! kept so the wire cannot drift unnoticed. The transcripts are
@@ -24,6 +25,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::chat_actions::{gateway, gateway_at, openai_sse, post};
 use crate::common::{serve, Gw};
 use crate::knowledge as kbfix;
+
+mod system;
+pub(crate) use system::{
+    golden as golden_system, last_sent, plain_thread, sent, text_output_turn, text_turn, voice_turn,
+};
 
 // ---------------------------------------------------------------------------
 // The golden files

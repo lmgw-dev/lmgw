@@ -9,7 +9,7 @@ use super::super::build_messages;
 use super::*;
 use crate::ir::{Message, Role};
 use crate::state::AppState;
-use crate::store::{ChatThread, MessageVoice, VIA_REALTIME};
+use crate::store::{MessageVoice, VIA_REALTIME};
 
 fn audio() -> ContentPart {
     ContentPart::Audio {
@@ -37,17 +37,7 @@ fn spoken_row(transcript_error: Option<&str>) -> Option<MessageVoice> {
 }
 
 fn built(history: &[ChatMessageRow], spoken: Option<&[ContentPart]>) -> Vec<Message> {
-    let thread = ChatThread {
-        system_prompt: "Be brief.".into(),
-        ..Default::default()
-    };
-    build_messages(
-        &thread,
-        "m",
-        (history, spoken),
-        (&HashMap::new(), false),
-        None,
-    )
+    build_messages("Be brief.", (history, spoken), (&HashMap::new(), false))
 }
 
 #[test]

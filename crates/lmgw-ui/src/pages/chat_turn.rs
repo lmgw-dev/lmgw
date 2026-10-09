@@ -19,8 +19,9 @@ use leptos::prelude::*;
 use serde_json::Value;
 
 use super::chat::{scroll_down, ChatThread, Msg, Stats, ToolCard};
+use super::chat_approvals;
 use super::chat_reply::Finished;
-use super::chat_stream::{send_stream, ChatEvent};
+use super::chat_stream::{send_stream_coded, ChatEvent, Refusal};
 use super::chat_sync::OwnEdits;
 use super::chat_voice::PageVoice;
 use crate::scope::Scope;
@@ -64,6 +65,9 @@ pub(super) struct Turn {
     pub continuing: bool,
     /// For the failure toast: "send", "regenerate", …
     pub what: &'static str,
+    /// A refusal before any frame is handed back in [`TurnEnd::refusal`] for
+    /// the caller to word where it happened, instead of a toast.
+    pub inline: bool,
 }
 
 /// How the stream ended.
@@ -75,6 +79,8 @@ pub(super) struct TurnEnd {
     pub aborted: bool,
     /// The stream carried an `error` frame (or the connection died mid-way).
     pub failed: bool,
+    /// The refusal that ended a [`Turn::inline`] turn before its first frame.
+    pub refusal: Option<Refusal>,
 }
 
 /// Open the stream and feed the bubble until it ends. `on_turn` learns the
@@ -94,6 +100,7 @@ pub(super) async fn run_turn(
         target,
         continuing,
         what,
+        inline,
     } = turn;
     let TurnEnv {
         streaming,
@@ -259,6 +266,7 @@ pub(super) async fn run_turn(
                 }
             }
             ChatEvent::Done(done) => {
+                chat_approvals::settle_done(a_tools, &done);
                 let fin = Finished::from_done(&done);
                 match fin.id {
                     Some(id) => a_db_id.set(Some(id)),
@@ -350,7 +358,7 @@ pub(super) async fn run_turn(
         }
     };
     let sig = signal.unwrap_or_else(|| web_sys::AbortController::new().unwrap().signal());
-    let reading = async move { send_stream(&url, &body, &sig, handle).await }.boxed_local();
+    let reading = async move { send_stream_coded(&url, &body, &sig, handle).await }.boxed_local();
     let res = match &speech {
         None => reading.await,
         // The text's `done` settles the turn; the stream is read on for the
@@ -379,14 +387,19 @@ pub(super) async fn run_turn(
         refused: false,
         aborted: false,
         failed: failed.get(),
+        refusal: None,
     };
     match res {
         Err(e) => {
-            end.aborted = e.contains("abort");
+            end.aborted = e.message.contains("abort");
             if !end.aborted {
-                toasts.err(format!("{what} failed: {e}"));
                 end.failed = true;
                 end.refused = !any_event.get();
+                if inline && end.refused {
+                    end.refusal = Some(e);
+                } else {
+                    toasts.err(format!("{what} failed: {}", e.message));
+                }
             }
         }
         Ok(()) => {
@@ -405,6 +418,12 @@ pub(super) async fn run_turn(
 
 /// A `tool` frame: find or open the card at its index and apply the step.
 pub(super) fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
+    // A call that waits for a decision names no index: it is one of the
+    // cards already shown.
+    if v["event"] == "approval" {
+        chat_approvals::hold_for_frame(tools, v);
+        return;
+    }
     let index = v["index"].as_i64().unwrap_or(0);
     tools.update(|tools| {
         let card = match tools.iter().find(|c| c.index == index) {
@@ -418,6 +437,7 @@ pub(super) fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
                     is_error: RwSignal::new(false),
                     ms: RwSignal::new(None),
                     done: RwSignal::new(false),
+                    approval: chat_approvals::Approval::new(),
                 };
                 tools.push(c);
                 c

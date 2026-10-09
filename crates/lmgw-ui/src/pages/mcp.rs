@@ -260,6 +260,15 @@ pub fn McpServers() -> impl IntoView {
         servers.load();
         inv.load();
     };
+    // A Chat job that starts or ends names its thread in the `chat` frame:
+    // the list is read again, so a row's open-task count follows (MCP Tasks
+    // design §6). The frames are the Chat page's to take, not ours.
+    Effect::new(move |prev: Option<()>| {
+        live.chat.arrived();
+        if prev.is_some() {
+            servers.load();
+        }
+    });
 
     view! {
         <PageFrame
@@ -502,7 +511,14 @@ fn McpRow(
             }
         });
     };
-    let endpoint = if s.transport == "stdio" {
+    let endpoint = if s.transport == "device" {
+        // A paired device's hosted tools (client-apps design §5.2): it
+        // dials lmgw, so there is no address to show — its device is.
+        format!(
+            "device '{}' · its own link",
+            s.device.clone().unwrap_or_default()
+        )
+    } else if s.transport == "stdio" {
         match &s.container_image {
             Some(img) if !img.is_empty() => format!("podman: {img}"),
             _ => {
@@ -577,9 +593,18 @@ fn McpRow(
             </td>
             <td>
                 <StatusChip id=id initial=s.status.clone() initial_count=s.tool_count inv=inv/>
+                {open_tasks_chip(s.open_tasks)}
             </td>
             <td class="col-p3">
-                <span class="type-badge">{s.transport.clone()}</span>
+                <span
+                    class="type-badge"
+                    title=(s.transport == "device").then_some(
+                        "a paired device's hosted tools: listed while its host link is open; its \
+                         label and its name follow the device's hosting grant (Usage → Keys)",
+                    )
+                >
+                    {s.transport.clone()}
+                </span>
             </td>
             <td class="clip dim mono-sm" title=endpoint.clone()>
                 {endpoint.clone()}
@@ -600,6 +625,24 @@ fn McpRow(
             </td>
         </tr>
     }
+}
+
+/// "N open tasks" beside a server's status (MCP Tasks design §6): the jobs
+/// it runs for Chat threads now, as of the list's read. Nothing when none.
+fn open_tasks_chip(n: i64) -> Option<impl IntoView> {
+    (n > 0).then(|| {
+        view! {
+            <span
+                class="chip info open-tasks"
+                title="MCP tasks this server runs for Chat threads now (no cap): each thread lists \
+                       its own above the composer, with Cancel. A server with open tasks is never \
+                       stopped for being idle. Counted when the list is read; a job that starts or \
+                       ends reads it again."
+            >
+                {crate::fmt::count_of(n as usize, "open tasks")}
+            </span>
+        }
+    })
 }
 
 /// Everything the gateway serves northbound, per tool, with the owner's switch.
@@ -1088,15 +1131,21 @@ fn McpForm(
         });
     };
 
-    let transport_opts = Signal::derive(|| {
-        [
-            ("stdio", "stdio (subprocess)"),
-            ("http", "streamable http"),
-            ("sse", "sse"),
-        ]
-        .into_iter()
-        .map(|(v, l)| (v.to_string(), l.to_string()))
-        .collect::<Vec<_>>()
+    // A device row's transport is its host link, and only shown.
+    let is_device = s.transport == "device";
+    let transport_opts = Signal::derive(move || {
+        let all: &[(&str, &str)] = if is_device {
+            &[("device", "device (its own host link)")]
+        } else {
+            &[
+                ("stdio", "stdio (subprocess)"),
+                ("http", "streamable http"),
+                ("sse", "sse"),
+            ]
+        };
+        all.iter()
+            .map(|(v, l)| (v.to_string(), l.to_string()))
+            .collect::<Vec<_>>()
     });
 
     let save = move |_| {

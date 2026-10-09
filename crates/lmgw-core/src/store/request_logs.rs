@@ -81,6 +81,10 @@ pub struct RequestLogRow {
     pub price_per_mchar: Option<f64>,
     pub price_per_image: Option<f64>,
     pub price_per_request: Option<f64>,
+    /// Who approved the tool call this row records (client-apps design
+    /// §6.3), as `<kind>:<name>`; `NULL` for a call no approval decided —
+    /// migration 0074.
+    pub approved_by: Option<String>,
 }
 
 fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
@@ -132,6 +136,7 @@ fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
         price_per_mchar: row.get("price_per_mchar"),
         price_per_image: row.get("price_per_image"),
         price_per_request: row.get("price_per_request"),
+        approved_by: row.get("approved_by"),
     }
 }
 
@@ -193,6 +198,8 @@ pub struct NewRequestLog {
     pub audio_in_ms: Option<i64>,
     pub chars_in: Option<i64>,
     pub images_out: Option<i64>,
+    /// Who approved the tool call this row records ([`RequestLogRow::approved_by`]).
+    pub approved_by: Option<String>,
 }
 
 impl Default for NewRequestLog {
@@ -228,6 +235,7 @@ impl Default for NewRequestLog {
             audio_in_ms: None,
             chars_in: None,
             images_out: None,
+            approved_by: None,
         }
     }
 }
@@ -309,10 +317,11 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
             prefill_ms, decode_ms, decode_tok_s, prompt_n, cache_n, draft_n, draft_accepted,
             predicted_n, fallback_reason, rung, degraded,
             audio_in_ms, chars_in, images_out, cost_units_micro,
-            price_per_audio_minute, price_per_mchar, price_per_image, price_per_request)
+            price_per_audio_minute, price_per_mchar, price_per_image, price_per_request,
+            approved_by)
          VALUES (?39,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,
-                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50)",
+                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51)",
     )
     .bind(&l.client_key)
     .bind(&l.ingress_proto)
@@ -368,6 +377,7 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(l.cost.used_units.mchar)
     .bind(l.cost.used_units.image)
     .bind(l.cost.used_units.request)
+    .bind(&l.approved_by)
     .execute(&mut *tx)
     .await?;
     let id = res.last_insert_rowid();

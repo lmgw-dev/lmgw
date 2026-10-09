@@ -245,7 +245,14 @@ pub(super) fn plan(
             tools: Some(KbTools { ids, budget }),
         },
         KbMode::Auto => {
-            let fresh = matches!(mode, TurnMode::Fresh { .. }) && pos + 1 == history.len();
+            // Late MCP task results the turn's start wrote after the user
+            // message (an edit's, a regenerate's; a send's enter before it)
+            // leave it the message this turn answers (MCP Tasks design
+            // §3.1).
+            let fresh = matches!(mode, TurnMode::Fresh { .. })
+                && history[pos + 1..]
+                    .iter()
+                    .all(ChatMessageRow::is_task_result);
             if !fresh {
                 return TurnKb::default();
             }

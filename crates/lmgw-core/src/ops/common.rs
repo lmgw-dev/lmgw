@@ -343,6 +343,16 @@ pub fn reject_agent_name(name: &str) -> Result<(), String> {
             crate::agents::service::MCP_NAME_PREFIX
         ));
     }
+    // A paired device's hosted tools are its own row, named after its key
+    // (client-apps design §5.2), and only its hosting grant writes one.
+    if name.starts_with(crate::devices::NAME_PREFIX) {
+        return Err(format!(
+            "'{name}' starts with the reserved '{}' prefix: rows named that way are a paired \
+             device's hosted tools, created and deleted with its hosting grant (Usage → Keys). \
+             Pick another name.",
+            crate::devices::NAME_PREFIX
+        ));
+    }
     Ok(())
 }
 

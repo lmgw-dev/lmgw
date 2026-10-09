@@ -25,7 +25,7 @@ use lmgw_core::config::hash_api_key;
 use lmgw_core::principal::Cap;
 use lmgw_core::server::CAPABILITY_TABLE;
 use lmgw_core::state::{AppState, SharedState};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use common::Gw;
 
@@ -381,6 +381,11 @@ impl Walk {
     }
 
     async fn status(&self, method: &str, path: &str, who: Who) -> u16 {
+        self.answer(method, path, who).await.0
+    }
+
+    /// The status, and a 403's JSON body (`Null` for any other answer).
+    async fn answer(&self, method: &str, path: &str, who: Who) -> (u16, Value) {
         let url = format!("{}{}", self.gw.base, fill(path));
         let verb = if method == "*" { "GET" } else { method };
         let mut req = self.http.request(verb.parse().unwrap(), &url);
@@ -405,11 +410,17 @@ impl Walk {
         if let Some(session) = self.cookie(who) {
             req = req.header("cookie", format!("lmgw_session={session}"));
         }
-        req.send()
+        let resp = req
+            .send()
             .await
-            .unwrap_or_else(|e| panic!("{verb} {url} as {who:?}: {e}"))
-            .status()
-            .as_u16()
+            .unwrap_or_else(|e| panic!("{verb} {url} as {who:?}: {e}"));
+        let status = resp.status().as_u16();
+        // Only a refusal's body is read: a stream (a feed, `/mcp`'s GET,
+        // `/api/events`) would hold the walk for as long as it lasts.
+        if status != 403 {
+            return (status, Value::Null);
+        }
+        (status, resp.json().await.unwrap_or(Value::Null))
     }
 }
 
@@ -448,8 +459,16 @@ async fn every_table_row_answers_the_status_class_its_capability_implies() {
             Who::Owner,
             Who::OwnerCookie,
         ] {
-            let status = open.status(method, path, who).await;
+            let (status, body) = open.answer(method, path, who).await;
             let want = expected(*cap, who);
+            // The device host link's handler refuses every principal the
+            // `Chat` layer admits but a device with a hosting grant, which
+            // this walk's device has none of (client-apps design §1.8): a
+            // 403 that is the handler's, said by its code.
+            if *path == "/mcp/host" && want == Expect::Admitted && status == 403 {
+                assert_eq!(body["code"], "host_not_granted", "{who:?}: {body}");
+                continue;
+            }
             assert!(
                 want.check(status),
                 "{method} {path} ({cap:?}) as {who:?}: got {status}, wanted {want:?}"

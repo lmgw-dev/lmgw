@@ -54,6 +54,7 @@ fn snapshot(ups: Vec<Upstream>, aliases: Vec<ModelAlias>) -> Snapshot {
         mcp_servers: Default::default(),
         mcp_tool_overrides: Default::default(),
         disabled_tools: Default::default(),
+        chat_profiles: vec![],
         gpu_lease: None,
     }
 }

@@ -1,0 +1,132 @@
+[
+ {
+  "nav": "/chat/profiles"
+ },
+ {
+  "until": "[...document.querySelectorAll('.pf-item')].some(b => b.textContent.includes('Concise'))",
+  "timeout": 20,
+  "label": "the list holds the built-in Concise"
+ },
+ {
+  "js": "(() => { window.__writes = []; const f = window.fetch; window.fetch = (input, init) => { const m = ((init && init.method) || (input && input.method) || 'GET').toUpperCase(); if (m !== 'GET') window.__writes.push(m + ' ' + (input.url || input)); return f.call(window, input, init); }; return 'counting writes'; })()"
+ },
+ {
+  "expect": "!document.querySelector('.pf-editor')",
+  "label": "nothing picked: no editor"
+ },
+ {
+  "click": ".pf-list-head button.btn.sm"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .pf-head input.input')?.value === ''",
+  "label": "New profile opens an empty draft"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.save-bar button')].find(b => b.textContent.trim() === 'Discard').disabled === false",
+  "label": "an untouched draft's Discard is pressable (its way out)"
+ },
+ {
+  "click": ".save-bar button.btn.ghost"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "!document.querySelector('.pf-editor') && !document.querySelector('.pf-item.active')",
+  "label": "Discard on a draft opened from nothing: the pane is empty again"
+ },
+ {
+  "js": "(() => { const b = [...document.querySelectorAll('.pf-item')].find(b => b.textContent.includes('Concise')); b.click(); return !!b; })()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .pf-head input.input')?.value === 'Concise'",
+  "label": "Concise opens"
+ },
+ {
+  "click": ".pf-list-head button.btn.sm"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "click": ".pf-editor .pf-head input.input"
+ },
+ {
+  "type": "Butler"
+ },
+ {
+  "click": ".pf-fields textarea.ta",
+  "nth": 0
+ },
+ {
+  "type": "Very formal."
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.save-bar').textContent.includes('2 unsaved')",
+  "label": "the draft has edits"
+ },
+ {
+  "click": ".save-bar button.btn.ghost"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .pf-head input.input')?.value === 'Concise' && document.querySelector('.pf-item.active')?.textContent.includes('Concise')",
+  "label": "Discard on a draft with edits drops it and goes back to Concise"
+ },
+ {
+  "expect": "document.querySelector('.save-bar').textContent.includes('No unsaved changes')",
+  "label": "with nothing unsaved"
+ },
+ {
+  "expect": "![...document.querySelectorAll('.pf-item')].some(b => b.textContent.includes('Butler'))",
+  "label": "and no Butler in the list"
+ },
+ {
+  "click": ".pf-editor .pf-head input.input"
+ },
+ {
+  "key": "End"
+ },
+ {
+  "type": "X"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .pf-head input.input').value === 'ConciseX' && document.querySelector('.save-bar').textContent.includes('1 unsaved')",
+  "label": "an edit to the stored Concise"
+ },
+ {
+  "click": ".save-bar button.btn.ghost"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.pf-editor .pf-head input.input').value === 'Concise' && document.querySelector('.save-bar').textContent.includes('No unsaved changes')",
+  "label": "Discard on a stored row restores what was stored, the editor stays on it"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.save-bar button')].find(b => b.textContent.trim() === 'Discard').disabled === true",
+  "label": "and a clean stored row's Discard is off"
+ },
+ {
+  "expect": "window.__writes.length === 0",
+  "label": "no Discard wrote anything"
+ },
+ {
+  "js": "window.__writes"
+ }
+]

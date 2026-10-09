@@ -1,5 +1,5 @@
 //! Every message write of a stored thread marks it for the dashboard's
-//! `chat` frame (module doc, client-apps design §3.6): each of the twelve
+//! `chat` frame (module doc, client-apps design §3.6): each of the thirteen
 //! [`ChatRepo`] message writes moves the marks for its own thread, once, by
 //! itself (review CL-6). The user row's mark and the saved reply's are two
 //! marks, so a page open on the thread reads it again for each.
@@ -9,7 +9,7 @@
 
 use super::*;
 
-/// What the twelve writes need: a stored thread, the gateway, the owner.
+/// What the thirteen writes need: a stored thread, the gateway, the owner.
 struct Fixture {
     state: crate::state::SharedState,
     tid: i64,
@@ -180,10 +180,39 @@ async fn each_message_write_marks_its_thread_by_itself() {
     assert!(repo.truncate(&s, tid, user, false).await.unwrap() > 0);
     f.marked("truncate");
 
+    // A late MCP task result entering the thread (MCP Tasks design §3.1).
+    let task = store::mcp_tasks::insert(
+        &s.db,
+        &store::mcp_tasks::NewMcpTask {
+            server_id: 1,
+            server_label: "desktop",
+            task_id: "t1",
+            thread_id: tid,
+            tool: "desktop__build",
+            call_id: "call_1",
+            started_by: None,
+            status: "working",
+            status_message: None,
+            poll_interval_ms: None,
+            ttl_ms: None,
+        },
+    )
+    .await
+    .unwrap();
+    let ended = store::mcp_tasks::Ended {
+        status: "completed",
+        status_message: None,
+        result: r#"[{"type":"text","text":"job t1 (desktop__build) completed"}]"#,
+        ended_by: None,
+    };
+    assert!(store::mcp_tasks::end(&s.db, task, &ended).await.unwrap());
+    let delivered = repo.deliver_task(&s, tid, task).await.unwrap().unwrap();
+    f.marked("deliver_task");
+
     let rows = repo.messages(&s, tid).await.unwrap();
     assert_eq!(
         rows.iter().map(|m| m.id).collect::<Vec<_>>(),
-        vec![user],
+        vec![user, delivered.message_id],
         "the writes all went through"
     );
 }
@@ -216,7 +245,7 @@ async fn a_failed_write_or_a_temporary_thread_marks_nothing() {
         .unwrap();
 
     let temp = ChatRepo::Temp
-        .create_thread(&s, "m", "chat", "", &f.owner)
+        .create_thread(&s, "m", "chat", "", None, &f.owner)
         .await
         .unwrap();
     ChatRepo::Temp

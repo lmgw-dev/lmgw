@@ -120,13 +120,16 @@ pub(in crate::realtime) fn check_create(
 }
 
 /// `conversation.item.create` or `.delete` in a bound session: the
-/// thread's history is the conversation.
+/// thread's history is the conversation. An `mcp_approval_response` is the
+/// one item a bound session takes (client-apps design §6.4,
+/// `thread::approvals`).
 pub(in crate::realtime) fn refuse_item(event: &str) -> ErrorObject {
     ErrorObject::invalid(
         "owned_by_thread",
         format!(
-            "{event} is not available in a session bound to a chat thread: the thread's history \
-             is the conversation — speak a turn, or edit the thread in the Chat"
+            "{event} is not available in a session bound to a chat thread, but for an \
+             mcp_approval_response: the thread's history is the conversation — speak a turn, or \
+             edit the thread in the Chat"
         ),
     )
 }

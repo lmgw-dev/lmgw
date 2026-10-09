@@ -9,11 +9,13 @@ use crate::egress::{
 };
 use crate::error::GatewayError;
 use crate::ir::{
-    flatten_tool_result, ChatRequest, Completion, ContentPart, EmbeddingsRequest,
-    EmbeddingsResponse, FinishReason, ImageSource, Params, Role, StreamDelta, ToolChoice,
-    ToolResultBlock, Usage,
+    call_id_with_signature, flatten_tool_result, split_call_id, wire_call_id, ChatRequest,
+    Completion, ContentPart, EmbeddingsRequest, EmbeddingsResponse, FinishReason, ImageSource,
+    Params, Role, StreamDelta, ToolChoice, ToolResultBlock, Usage,
 };
 use crate::sse::SseEvent;
+
+mod signatures;
 
 pub struct GeminiEgress;
 
@@ -73,8 +75,11 @@ fn sanitize_schema(v: &Value) -> Value {
     }
 }
 
+/// `at`: the message's index in `ir.messages`, which pairs a result with
+/// the nearest call of its id ([`ChatRequest::tool_name_for_result`]).
 fn parts_json(
     ir: &ChatRequest,
+    at: usize,
     m_role: Role,
     parts: &[ContentPart],
 ) -> Result<Vec<Value>, GatewayError> {
@@ -99,8 +104,16 @@ fn parts_json(
             ContentPart::Audio { mime, data } => {
                 out.push(json!({"inlineData": {"mimeType": mime, "data": data}}));
             }
-            ContentPart::ToolUse { name, args, .. } => {
-                out.push(json!({"functionCall": {"name": name, "args": args}}));
+            ContentPart::ToolUse { id, name, args } => {
+                let mut part = json!({"functionCall": {"name": name, "args": args}});
+                // The model's own signature, carried in the id since its
+                // answer (gateway design §7.1), goes back on its part as it
+                // came. A step whose first call has none gets the skip value
+                // later (`signatures::sign_unsigned_steps`).
+                if let (_, Some(sig)) = split_call_id(id) {
+                    part[signatures::FIELD] = json!(sig);
+                }
+                out.push(part);
             }
             ContentPart::ToolResult {
                 id, name, content, ..
@@ -108,16 +121,16 @@ fn parts_json(
                 // Gemini correlates function responses by name, not id.
                 let fn_name = name
                     .clone()
-                    .or_else(|| ir.tool_name_for_id(id).map(String::from))
-                    .unwrap_or_else(|| id.clone());
+                    .or_else(|| ir.tool_name_for_result(id, at).map(String::from))
+                    .unwrap_or_else(|| wire_call_id(id).to_string());
                 out.push(json!({
                     "functionResponse": {"name": fn_name, "response": function_response(content)}
                 }));
             }
             ContentPart::Reasoning { text, .. } => {
                 // Gemini has no slot for replaying a text trace; its own
-                // continuity token is a `thoughtSignature`, which this
-                // adapter never captures.
+                // continuity token is a `thoughtSignature`, which rides in
+                // a call's id (§7.1), not here.
                 tracing::debug!(chars = text.len(), "dropping reasoning for gemini egress");
             }
         }
@@ -137,12 +150,15 @@ fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError
     }
 
     let mut contents: Vec<Value> = Vec::new();
-    for m in ir.non_system_messages() {
+    for (at, m) in ir.messages.iter().enumerate() {
+        if m.role == Role::System {
+            continue;
+        }
         let role = match m.role {
             Role::Assistant => "model",
             _ => "user", // tool results ride in user turns
         };
-        let parts = parts_json(ir, m.role, &m.content)?;
+        let parts = parts_json(ir, at, m.role, &m.content)?;
         if parts.is_empty() {
             continue;
         }
@@ -157,6 +173,7 @@ fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError
         }
         contents.push(json!({"role": role, "parts": parts}));
     }
+    signatures::sign_unsigned_steps(&mut contents);
     body.insert("contents".into(), Value::Array(contents));
 
     let mut gen_cfg = Map::new();
@@ -234,10 +251,42 @@ fn request_body(ir: &ChatRequest, params: &Params) -> Result<Value, GatewayError
     Ok(Value::Object(body))
 }
 
+/// Tool call ids for one Gemini answer, which has none of its own: a random
+/// tag plus a counter, `call_<12 hex digits><n in hex>`, as the realtime
+/// session mints its own (`realtime::ids`). Unique across answers too, not
+/// only within one: a tool loop's steps each get a fresh minter, and a
+/// per-answer `call_0` would repeat in the history the client sends back —
+/// duplicate `tool_use` ids on an Anthropic fallback, a result paired with
+/// an older call's name (`ChatRequest::tool_name_for_id`), and clients that
+/// refuse a reused id (`@openai/agents`).
+struct CallIds {
+    tag: String,
+    next: u64,
+}
+
+impl Default for CallIds {
+    fn default() -> Self {
+        // 48 random bits: plenty to keep one gateway's answers apart.
+        let tag: u64 = rand::random::<u64>() & 0xffff_ffff_ffff;
+        Self {
+            tag: format!("{tag:012x}"),
+            next: 0,
+        }
+    }
+}
+
+impl CallIds {
+    fn mint(&mut self) -> String {
+        let n = self.next;
+        self.next += 1;
+        format!("call_{}{n:x}", self.tag)
+    }
+}
+
 /// Split a Gemini `parts` array into answer content and reasoning text. Parts
 /// flagged `thought: true` carry the model's reasoning and would otherwise be
 /// merged into the answer, so they're routed to the returned reasoning string.
-fn parse_parts(content: Option<&Value>, next_tool: &mut usize) -> (Vec<ContentPart>, String) {
+fn parse_parts(content: Option<&Value>, ids: &mut CallIds) -> (Vec<ContentPart>, String) {
     let mut out = Vec::new();
     let mut reasoning = String::new();
     let parts = content
@@ -255,11 +304,14 @@ fn parse_parts(content: Option<&Value>, next_tool: &mut usize) -> (Vec<ContentPa
                     out.push(ContentPart::text(t));
                 }
             } else if let Some(fc) = p.get("functionCall") {
-                let ordinal = *next_tool;
-                *next_tool += 1;
                 out.push(ContentPart::ToolUse {
-                    // Gemini has no call ids; synthesize stable ones.
-                    id: format!("call_{ordinal}"),
+                    // Gemini has no call ids; mint unique ones. The part's
+                    // `thoughtSignature` rides in the id, the one value
+                    // every client echoes (gateway design §7.1).
+                    id: call_id_with_signature(
+                        &ids.mint(),
+                        signatures::of_part(p).unwrap_or_default(),
+                    ),
                     name: fc
                         .get("name")
                         .and_then(Value::as_str)
@@ -372,8 +424,7 @@ impl Egress for GeminiEgress {
             .ok_or_else(|| {
                 GatewayError::Transport("upstream response without candidates".into())
             })?;
-        let mut next_tool = 0usize;
-        let (content, reasoning) = parse_parts(candidate.get("content"), &mut next_tool);
+        let (content, reasoning) = parse_parts(candidate.get("content"), &mut CallIds::default());
         let saw_tool = content
             .iter()
             .any(|p| matches!(p, ContentPart::ToolUse { .. }));
@@ -500,7 +551,9 @@ impl Egress for GeminiEgress {
 
 #[derive(Default)]
 pub struct GeminiDecoder {
+    /// The stream's tool call index, in emission order.
     next_tool: usize,
+    ids: CallIds,
     saw_tool: bool,
     finish: Option<String>,
     usage: Option<Usage>,
@@ -525,8 +578,7 @@ impl EgressStreamDecoder for GeminiDecoder {
             .and_then(Value::as_array)
             .and_then(|c| c.first())
         {
-            let mut ordinal = self.next_tool;
-            let (parts, reasoning) = parse_parts(candidate.get("content"), &mut self.next_tool);
+            let (parts, reasoning) = parse_parts(candidate.get("content"), &mut self.ids);
             if !reasoning.is_empty() {
                 out.push(StreamDelta::ReasoningDelta(reasoning));
             }
@@ -537,16 +589,13 @@ impl EgressStreamDecoder for GeminiDecoder {
                         self.saw_tool = true;
                         // Gemini delivers complete functionCall parts: emit
                         // start + full args in one go.
-                        out.push(StreamDelta::ToolCallStart {
-                            index: ordinal,
-                            id,
-                            name,
-                        });
+                        let index = self.next_tool;
+                        self.next_tool += 1;
+                        out.push(StreamDelta::ToolCallStart { index, id, name });
                         out.push(StreamDelta::ToolCallArgsDelta {
-                            index: ordinal,
+                            index,
                             fragment: serde_json::to_string(&args).unwrap_or_else(|_| "{}".into()),
                         });
-                        ordinal += 1;
                     }
                     _ => {}
                 }

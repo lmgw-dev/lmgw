@@ -26,7 +26,7 @@ use crate::store::InputPath;
 
 /// A core bound to a thread of its own, whose next turn the verdict says
 /// goes as audio, its journal running; and its writer's frames.
-async fn bound() -> (
+pub(super) async fn bound() -> (
     Core,
     futures::channel::mpsc::UnboundedReceiver<axum::extract::ws::Message>,
 ) {
@@ -56,6 +56,7 @@ async fn bound() -> (
         taken: bind.taken,
         taken_by: bind.taken_by,
         fence: bind.fence,
+        tasks: Default::default(),
     };
     let (sink, frames) = futures::channel::mpsc::unbounded();
     let ids = Arc::new(crate::realtime::ids::Ids::new());
@@ -96,7 +97,7 @@ async fn bound() -> (
 
 /// A turn the detector committed now — the one open, if any — owed its
 /// response (`auto`).
-fn commit(core: &mut Core, auto: bool) -> String {
+pub(super) fn commit(core: &mut Core, auto: bool) -> String {
     let turn = core
         .turn
         .take()
@@ -107,7 +108,7 @@ fn commit(core: &mut Core, auto: bool) -> String {
 }
 
 /// The user started speaking again (the detector's `speech_started`).
-fn speech(core: &mut Core) {
+pub(super) fn speech(core: &mut Core) {
     core.on_judged(Detected {
         event: TurnEvent::SpeechStarted {
             audio_start_ms: 4000,
@@ -141,7 +142,7 @@ fn engine_down() -> GatewayError {
 }
 
 /// `item_id`'s transcript came in.
-fn transcribed(core: &mut Core, item_id: &str, text: &str) {
+pub(super) fn transcribed(core: &mut Core, item_id: &str, text: &str) {
     core.on_transcript(Done {
         item_id: item_id.into(),
         seconds: 0.1,
@@ -164,7 +165,7 @@ async fn sent(
 }
 
 /// The server events the writer has sent so far.
-async fn sent_events(
+pub(super) async fn sent_events(
     core: &mut Core,
     frames: &mut futures::channel::mpsc::UnboundedReceiver<axum::extract::ws::Message>,
 ) -> Vec<Value> {

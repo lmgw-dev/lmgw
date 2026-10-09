@@ -9,7 +9,7 @@
 
 use serde_json::{json, Value};
 
-use super::{of_type, say, until_type, world_on, World};
+use super::{manual_update, of_type, say, until_type, world_on, World};
 use crate::chat_voice_dictation::{resident, tweak};
 use crate::support::gpu_world::{Gpu, GIB};
 use crate::support::realtime_audio::Asr;
@@ -46,6 +46,35 @@ async fn send_text(w: &World, tid: i64) -> Vec<(String, Value)> {
 /// `response.done`.
 async fn bound_turn(w: &World, tid: i64) -> Vec<Value> {
     let mut ws = w.voice(tid).await;
+    w.asr.push(Asr::Text("Hallo?"));
+    say(&mut ws).await;
+    until_type(&mut ws, "response.done").await
+}
+
+/// [`bound_turn`] once the session's connect warm of its chat model has
+/// ended (its last `lmgw.model.state` for the chat stage is no longer
+/// `loading`).
+///
+/// A stock session here warms nothing on connect; a bound one warms its
+/// thread's model through the request admission, and when that model has
+/// to wait for room the warm holds the admission gate for the whole queue
+/// timeout. A response launched meanwhile waited at the gate and, by tens
+/// of milliseconds under load, ran out of time there ("another request was
+/// still being admitted") rather than where the stock session's does
+/// ("held by …"). After the warm, the response is admitted alone, as the
+/// stock one is.
+async fn bound_turn_after_warm(w: &World, tid: i64) -> Vec<Value> {
+    let (mut ws, _) = w.bind(tid).await;
+    send(&mut ws, manual_update(60_000)).await;
+    let (mut updated, mut chat) = (false, None);
+    while !updated || chat.as_ref().is_none_or(|s| *s == "loading") {
+        let ev = next_event(&mut ws).await;
+        match ev["type"].as_str() {
+            Some("session.updated") => updated = true,
+            Some("lmgw.model.state") if ev["stage"] == "chat" => chat = Some(ev["state"].clone()),
+            _ => {}
+        }
+    }
     w.asr.push(Asr::Text("Hallo?"));
     say(&mut ws).await;
     until_type(&mut ws, "response.done").await
@@ -221,7 +250,7 @@ async fn a_vram_queue_timeout_is_refused_with_the_stock_code() {
         .collect();
     assert_eq!(states, [json!("loading"), json!("failed")], "{frames:?}");
     ends_refused(&frames, "vram_queue_timeout");
-    let events = bound_turn(&w, tid).await;
+    let events = bound_turn_after_warm(&w, tid).await;
     same_as_stock(&w, &events, "talk", "vram_queue_timeout").await;
     assert_eq!(g.stops(), Vec::<String>::new(), "the busy model stays");
 }

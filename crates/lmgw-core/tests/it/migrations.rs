@@ -18,8 +18,12 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
+mod approval_floor;
 mod billable_units;
+mod chat_message_task;
+mod chat_profiles;
 mod device_keys;
+mod device_rows;
 mod llama_cpp;
 
 /// An in-memory database migrated up to `version` and no further — the state an

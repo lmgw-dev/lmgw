@@ -221,5 +221,6 @@ pub(super) fn mcp_server_from_row(row: &sqlx::sqlite::SqliteRow) -> McpServer {
         allow_sampling: row.get::<i64, _>("allow_sampling") != 0,
         sampling_alias: row.get("sampling_alias"),
         agent_id: row.get("agent_id"),
+        device_key_id: row.get("device_key_id"),
     }
 }

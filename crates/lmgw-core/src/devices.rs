@@ -27,6 +27,7 @@ mod stream;
 
 pub use links::{LinkGuard, LinkKind, Links};
 pub use minted::MintedLinks;
+pub(crate) use pairing::namespaces_overlap;
 pub use pairing::{label_refusal, mint, pairing_link, KEY_PREFIX, LOOPBACK_NOTE, NAME_PREFIX};
 pub use revoke::{RevocationWatch, Revocations, RevokeReason};
 pub use stream::until_revoked;

@@ -156,3 +156,30 @@ pub struct McpListedTool {
     #[serde(default)]
     pub annotations: Option<Value>,
 }
+
+/// `mcp_approval_request` (client-apps design §6.4): a call a session bound
+/// to a chat thread waits on, as OpenAI's item carries it. The server's own
+/// item — a client cannot create one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpApprovalRequestItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub server_label: String,
+    /// The tool's own name (decision 6).
+    pub name: String,
+    /// A JSON string.
+    #[serde(default)]
+    pub arguments: String,
+}
+
+/// `mcp_approval_response`: a client's decision on an
+/// `mcp_approval_request`, taken on a bound session only (§6.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpApprovalResponseItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub approval_request_id: String,
+    pub approve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}

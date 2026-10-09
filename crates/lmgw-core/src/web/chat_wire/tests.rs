@@ -61,10 +61,12 @@ fn everything() -> ChatThread {
             ThreadMcp {
                 server_label: "kb".into(),
                 allowed_tools: None,
+                require_approval: None,
             },
             ThreadMcp {
                 server_label: "desktop".into(),
                 allowed_tools: Some(vec!["desktop__notify".into()]),
+                require_approval: None,
             },
         ],
         reasoning_enabled: Some(true),
@@ -74,6 +76,7 @@ fn everything() -> ChatThread {
         pinned: false,
         archived_at: Some("2026-10-01 12:00:00".into()),
         folder_id: Some(3),
+        profile_id: Some(4),
         kb_ids: vec![2, 5],
         kb_mode: KbMode::Tool,
         kb_budget_tokens: Some(3000),
@@ -91,6 +94,12 @@ fn everything() -> ChatThread {
         },
         created_at: "2026-09-20 07:00:00".into(),
         updated_at: "2026-09-21 07:00:00".into(),
+        // Internal to the approval check: never on the wire.
+        approval_floor: vec![crate::store::ThreadMcp {
+            server_label: "kb".into(),
+            allowed_tools: None,
+            require_approval: Some(serde_json::json!("always")),
+        }],
     }
 }
 
@@ -142,10 +151,12 @@ fn listed() -> Vec<(&'static str, ChatFolderListed)> {
                 mcp_tools: Some(vec![ThreadMcp {
                     server_label: "desktop".into(),
                     allowed_tools: None,
+                    require_approval: None,
                 }]),
                 kb_ids: Some(vec![1]),
                 kb_mode: Some(KbMode::Auto),
                 kb_budget_tokens: None,
+                profile_id: Some(4),
                 voice: Some(ThreadVoice {
                     tts_alias: Some("supertonic".into()),
                     turn_detection: Some(TurnDetection::ServerVad),
@@ -161,6 +172,7 @@ fn listed() -> Vec<(&'static str, ChatFolderListed)> {
             created_at: "2026-10-06 09:00:00".into(),
             updated_at: "2026-10-07 09:00:00".into(),
             devices_hidden: false,
+            approval_floor: Vec::new(),
         },
         threads_active: 4,
         threads_archived: 11,
@@ -177,6 +189,7 @@ fn listed() -> Vec<(&'static str, ChatFolderListed)> {
             created_at: "2026-10-06 09:00:00".into(),
             updated_at: "2026-10-06 09:00:00".into(),
             devices_hidden: false,
+            approval_floor: Vec::new(),
         },
         threads_active: 0,
         threads_archived: 0,
@@ -337,7 +350,9 @@ fn current_s_answer_is_byte_for_byte_the_old_one() {
 /// The bytes themselves, as the `json!` builders wrote them on
 /// 2026-10-07: a change here is a change of the wire, and needs a reason.
 /// Since: a folder says `devices_hidden` (review F-7: the owner sees the
-/// mark a device's delete set; a device never sees such a folder).
+/// mark a device's delete set; a device never sees such a folder); a
+/// thread and a folder's defaults say `profile_id` (personality-profiles
+/// design §3.1, 2026-10-09).
 #[test]
 fn the_wire_is_pinned() {
     let rows: std::collections::HashMap<_, _> = rows().into_iter().collect();
@@ -346,18 +361,18 @@ fn the_wire_is_pinned() {
     let folder_of = |name| bytes(&wire(&folder(&folders[name])));
     assert_eq!(
         row("plain", None),
-        r#"{"agent_id":null,"archived_at":null,"created_at":"2026-10-07 08:00:00","folder_id":null,"frequency_penalty":null,"id":1,"kb_budget_tokens":null,"kb_ids":[],"kb_mode":"auto","kind":"chat","last_message_at":null,"max_tokens":null,"mcp_tools":[],"min_p":null,"model_alias":"gemma","pinned":false,"presence_penalty":null,"purge_at":null,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":null,"repeat_penalty":null,"seed":null,"stop":[],"system_prompt":"Be brief.","temperature":null,"temporary":false,"title":"New chat","top_k":null,"top_p":null,"updated_at":"2026-10-07 08:01:00","voice":{}}"#
+        r#"{"agent_id":null,"archived_at":null,"created_at":"2026-10-07 08:00:00","folder_id":null,"frequency_penalty":null,"id":1,"kb_budget_tokens":null,"kb_ids":[],"kb_mode":"auto","kind":"chat","last_message_at":null,"max_tokens":null,"mcp_tools":[],"min_p":null,"model_alias":"gemma","pinned":false,"presence_penalty":null,"profile_id":null,"purge_at":null,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":null,"repeat_penalty":null,"seed":null,"stop":[],"system_prompt":"Be brief.","temperature":null,"temporary":false,"title":"New chat","top_k":null,"top_p":null,"updated_at":"2026-10-07 08:01:00","voice":{}}"#
     );
     assert_eq!(
         row("everything", Some(1_758_438_000)),
-        r#"{"agent_id":"folder-chat","archived_at":"2026-10-01 12:00:00","created_at":"2026-09-20 07:00:00","folder_id":3,"frequency_penalty":-0.5,"id":812,"kb_budget_tokens":3000,"kb_ids":[2,5],"kb_mode":"tool","kind":"chat","last_message_at":1758438000,"max_tokens":2048,"mcp_tools":[{"allowed_tools":null,"server_label":"kb"},{"allowed_tools":["desktop__notify"],"server_label":"desktop"}],"min_p":0.05,"model_alias":"qwen","pinned":false,"presence_penalty":0.0,"purge_at":"2027-10-01 12:00:00","reasoning_budget":4096,"reasoning_effort":"high","reasoning_enabled":true,"repeat_penalty":1.1,"seed":42,"stop":["</s>","\n\n"],"system_prompt":"","temperature":0.7,"temporary":false,"title":"Plan the week","top_k":40,"top_p":0.95,"updated_at":"2026-09-21 07:00:00","voice":{"asr_alias":"parakeet","audio_input":"on","language":"de","read_aloud":false,"reply_language":"auto","seed":7,"speech_style":"","tts_alias":"supertonic","turn_detection":"push_to_talk","voice":"F2"}}"#
+        r#"{"agent_id":"folder-chat","archived_at":"2026-10-01 12:00:00","created_at":"2026-09-20 07:00:00","folder_id":3,"frequency_penalty":-0.5,"id":812,"kb_budget_tokens":3000,"kb_ids":[2,5],"kb_mode":"tool","kind":"chat","last_message_at":1758438000,"max_tokens":2048,"mcp_tools":[{"allowed_tools":null,"server_label":"kb"},{"allowed_tools":["desktop__notify"],"server_label":"desktop"}],"min_p":0.05,"model_alias":"qwen","pinned":false,"presence_penalty":0.0,"profile_id":4,"purge_at":"2027-10-01 12:00:00","reasoning_budget":4096,"reasoning_effort":"high","reasoning_enabled":true,"repeat_penalty":1.1,"seed":42,"stop":["</s>","\n\n"],"system_prompt":"","temperature":0.7,"temporary":false,"title":"Plan the week","top_k":40,"top_p":0.95,"updated_at":"2026-09-21 07:00:00","voice":{"asr_alias":"parakeet","audio_input":"on","language":"de","read_aloud":false,"reply_language":"auto","seed":7,"speech_style":"","tts_alias":"supertonic","turn_detection":"push_to_talk","voice":"F2"}}"#
     );
     assert_eq!(
         folder_of("full"),
-        r#"{"archive_days":0,"created_at":"2026-10-06 09:00:00","defaults":{"frequency_penalty":null,"kb_budget_tokens":null,"kb_ids":[1],"kb_mode":"auto","max_tokens":null,"mcp_tools":[{"allowed_tools":null,"server_label":"desktop"}],"min_p":null,"model_alias":"gemma","presence_penalty":null,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":false,"repeat_penalty":null,"seed":null,"stop":["END"],"system_prompt":"You are an assistant.","temperature":0.3,"top_k":20,"top_p":null,"voice":{"tts_alias":"supertonic","turn_detection":"server_vad"}},"devices_hidden":false,"id":3,"name":"Assistant","ongoing":{"current_thread_id":812,"idle_minutes":30},"purge_days":365,"sort":2,"threads_active":4,"threads_archived":11,"updated_at":"2026-10-07 09:00:00"}"#
+        r#"{"archive_days":0,"created_at":"2026-10-06 09:00:00","defaults":{"frequency_penalty":null,"kb_budget_tokens":null,"kb_ids":[1],"kb_mode":"auto","max_tokens":null,"mcp_tools":[{"allowed_tools":null,"server_label":"desktop"}],"min_p":null,"model_alias":"gemma","presence_penalty":null,"profile_id":4,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":false,"repeat_penalty":null,"seed":null,"stop":["END"],"system_prompt":"You are an assistant.","temperature":0.3,"top_k":20,"top_p":null,"voice":{"tts_alias":"supertonic","turn_detection":"server_vad"}},"devices_hidden":false,"id":3,"name":"Assistant","ongoing":{"current_thread_id":812,"idle_minutes":30},"purge_days":365,"sort":2,"threads_active":4,"threads_archived":11,"updated_at":"2026-10-07 09:00:00"}"#
     );
     assert_eq!(
         folder_of("bare"),
-        r#"{"archive_days":null,"created_at":"2026-10-06 09:00:00","defaults":{"frequency_penalty":null,"kb_budget_tokens":null,"kb_ids":null,"kb_mode":null,"max_tokens":null,"mcp_tools":null,"min_p":null,"model_alias":null,"presence_penalty":null,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":null,"repeat_penalty":null,"seed":null,"stop":null,"system_prompt":null,"temperature":null,"top_k":null,"top_p":null,"voice":null},"devices_hidden":false,"id":4,"name":"Misc","ongoing":null,"purge_days":null,"sort":0,"threads_active":0,"threads_archived":0,"updated_at":"2026-10-06 09:00:00"}"#
+        r#"{"archive_days":null,"created_at":"2026-10-06 09:00:00","defaults":{"frequency_penalty":null,"kb_budget_tokens":null,"kb_ids":null,"kb_mode":null,"max_tokens":null,"mcp_tools":null,"min_p":null,"model_alias":null,"presence_penalty":null,"profile_id":null,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":null,"repeat_penalty":null,"seed":null,"stop":null,"system_prompt":null,"temperature":null,"top_k":null,"top_p":null,"voice":null},"devices_hidden":false,"id":4,"name":"Misc","ongoing":null,"purge_days":null,"sort":0,"threads_active":0,"threads_archived":0,"updated_at":"2026-10-06 09:00:00"}"#
     );
 }

@@ -438,6 +438,7 @@ mod tests {
         s.picked.set(vec![ThreadMcp {
             server_label: "docs".into(),
             allowed_tools: None,
+            require_approval: None,
         }]);
         assert_eq!(s.tool_patterns(), "docs__*");
         // Collapse/expand refetches the inventory and sets the groups again.
@@ -486,6 +487,7 @@ mod tests {
         s.picked.set(vec![ThreadMcp {
             server_label: "other".into(),
             allowed_tools: None,
+            require_approval: None,
         }]);
         s.groups.set(Some(vec![docs_group()]));
         s.on_groups();

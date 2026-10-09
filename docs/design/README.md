@@ -36,6 +36,8 @@ is kept stable.
 | 2026-10-06 | [llama.cpp egress](2026-10-06-llama-egress-design.md) (draft): llama-server and ik_llama.cpp as their own `llama_cpp` protocol, `/props` facts, tool-result images |
 | 2026-10-06 | [Client apps](2026-10-06-client-apps-design.md) (draft): device keys and a Chat capability, the Chat change feed, ongoing-conversation folders, device-hosted MCP, approvals, MCP resources |
 | 2026-10-07 | [Billable units](2026-10-07-billable-units-design.md) (draft): prices per minute of audio, per character, per image and per request next to tokens, measured quantities on the request row |
+| 2026-10-09 | [Personality profiles](2026-10-09-personality-profiles-design.md) (draft): how a Chat thread's model talks in text and voice: persona, length rule, examples, voice block, reasoning, TTS voice — and the shared UI crate for the profile editor |
+| 2026-10-09 | [MCP Tasks and late tool results](2026-10-09-mcp-tasks-design.md) (draft): task-augmented calls to hosted servers (MCP 2025-11-25), results that arrive after the turn and enter the thread, bound-session continuations |
 
 ## Dashboard rebuild (2026-08)
 

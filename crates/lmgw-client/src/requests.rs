@@ -7,10 +7,23 @@
 //! - `POST /chat/api/folders/{id}/current`: the ongoing conversation's
 //!   current thread;
 //! - `GET /chat/api/threads`: every thread, for a client that shows them;
+//! - `GET /chat/api/profiles` and the profile writes: the personality
+//!   profiles, listed, created, changed, reset and deleted; and
+//!   `POST /chat/api/folders/{id}` with `defaults_patch: {profile_id}`, the
+//!   profile of a folder's conversation ([`set_folder_profile`]);
 //! - `GET /chat/api/feed`: the change feed ([`crate::feed`]);
 //! - `GET /v1/realtime?chat_thread=<id>`: a voice session bound to a
 //!   thread ([`crate::realtime`]), taking it over from another session or
-//!   not (`&takeover=never`).
+//!   not (`&takeover=never`);
+//! - `GET /mcp/host`: the device's MCP host link ([`crate::mcp_host`]);
+//! - `POST /chat/api/threads/{id}/approvals` and
+//!   `POST /chat/api/threads/{id}/transcribe`: deciding a turn's waiting
+//!   calls, and a voice answer kept out of the conversation
+//!   ([`approvals`](mod@approvals));
+//! - `GET /chat/api/threads/{id}/tasks`, `POST /chat/api/threads/{id}/answer` and
+//!   `POST /chat/api/threads/{id}/tasks/{task}/cancel`: answering a
+//!   thread's MCP task results, and cancelling a task
+//!   ([`tasks`](mod@tasks)).
 //!
 //! A refusal reads with [`read_refusal`] as an [`ApiError`]: the Chat
 //! routes answer the flat `{code, message}`, the realtime handshake
@@ -24,7 +37,12 @@
 //! ([`folder_settings_page`]).
 
 pub use lmgw_api_types::chat::{Folder, FolderCreate, FolderList, Thread, ThreadList, ThreadRow};
-pub use lmgw_api_types::chat_folders::{CurrentReason, CurrentRequest, CurrentThread};
+pub use lmgw_api_types::chat_folders::{
+    AppliedToCurrent, CurrentReason, CurrentRequest, CurrentThread, FolderPatched,
+};
+pub use lmgw_api_types::chat_profiles::{
+    Profile, ProfileCreate, ProfileDeleted, ProfileList, ProfilePatch,
+};
 pub use lmgw_api_types::ApiError;
 
 /// An HTTP method.
@@ -149,6 +167,84 @@ pub fn threads() -> Request {
     Request::new(Method::Get, "/chat/api/threads".into())
 }
 
+/// `GET /chat/api/profiles`: every personality profile and the one new
+/// threads start with; read with [`read_profiles`]. The feed's `profile.*`
+/// events say when to read it again.
+pub fn profiles() -> Request {
+    Request::new(Method::Get, "/chat/api/profiles".into())
+}
+
+/// `GET /chat/api/profiles/{id}`; read with [`read_profile`].
+pub fn profile(id: i64) -> Request {
+    Request::new(Method::Get, format!("/chat/api/profiles/{id}"))
+}
+
+/// `POST /chat/api/profiles`; read with [`read_profile`].
+pub fn create_profile(body: &ProfileCreate) -> Request {
+    Request::new(Method::Post, "/chat/api/profiles".into())
+        .json(serde_json::to_string(body).expect("a profile create always serializes"))
+}
+
+/// `POST /chat/api/profiles/{id}`: the fields `patch` names (absent
+/// unchanged, `null` unset); read with [`read_profile`].
+pub fn update_profile(id: i64, patch: &ProfilePatch) -> Request {
+    Request::new(Method::Post, format!("/chat/api/profiles/{id}"))
+        .json(serde_json::to_string(patch).expect("a profile patch always serializes"))
+}
+
+/// `POST /chat/api/profiles/{id}/reset`: a built-in profile back to its
+/// built-in texts (each follows the built-in again), voice unset, name
+/// kept; read with [`read_profile`]. `400 profile_not_builtin` for one of
+/// the owner's own.
+pub fn reset_profile(id: i64) -> Request {
+    Request::new(Method::Post, format!("/chat/api/profiles/{id}/reset"))
+}
+
+/// `POST /chat/api/profiles/{id}/delete`; read with
+/// [`read_profile_deleted`].
+pub fn delete_profile(id: i64) -> Request {
+    Request::new(Method::Post, format!("/chat/api/profiles/{id}/delete"))
+}
+
+/// `POST /chat/api/folders/{id}` with `{defaults_patch: {profile_id}}`: the
+/// folder's conversation talks with profile `profile_id` from now on
+/// (`None`: none, unless Settings → Chat names one for new threads). New
+/// threads in the folder start with it, and with `apply_to_current` (the
+/// gateway's default) its current thread switches too, from its next turn
+/// on, a bound voice session's included; the answer's `applied` names the
+/// thread. Read with [`read_folder_patched`].
+pub fn set_folder_profile(folder_id: i64, profile_id: Option<i64>) -> Request {
+    Request::new(Method::Post, format!("/chat/api/folders/{folder_id}"))
+        .json(serde_json::json!({ "defaults_patch": { "profile_id": profile_id } }).to_string())
+}
+
+/// The profile `name` names in `list`, as a user says it: any case,
+/// trimmed; `default` is no profile (`Ok(None)`). An unknown name is the
+/// `unknown_profile` refusal, listing the names there are in one line.
+pub fn profile_named(list: &ProfileList, name: &str) -> Result<Option<i64>, ApiError> {
+    let key = name.trim().to_lowercase();
+    if key == lmgw_api_types::chat_profiles::RESERVED_NAME {
+        return Ok(None);
+    }
+    if let Some(p) = list
+        .profiles
+        .iter()
+        .find(|p| p.name.trim().to_lowercase() == key)
+    {
+        return Ok(Some(p.id));
+    }
+    let mut names = vec!["Default".to_string()];
+    names.extend(list.profiles.iter().map(|p| p.name.clone()));
+    Err(ApiError {
+        code: "unknown_profile".into(),
+        message: format!(
+            "there is no profile named '{}'; the profiles are: {}",
+            name.trim(),
+            names.join(", ")
+        ),
+    })
+}
+
 /// `GET /chat/api/feed`, resumed from `cursor` with `Last-Event-ID` when
 /// there is one.
 pub fn feed(cursor: Option<&str>) -> Request {
@@ -185,6 +281,15 @@ pub fn realtime_unless_bound(thread_id: i64) -> Request {
         Method::Get,
         format!("/v1/realtime?chat_thread={thread_id}&takeover=never"),
     )
+}
+
+/// `GET /mcp/host`: a device's MCP host link (client-apps design §5,
+/// [`crate::mcp_host`]). Open it with [`Request::ws_url`] and the device key
+/// ([`Request::bearer`]), and send no `Origin` header. A refusal before the
+/// upgrade reads with [`read_refusal`]: `host_not_granted`,
+/// `cross_origin_refused`, or the key's own.
+pub fn mcp_host() -> Request {
+    Request::new(Method::Get, lmgw_api_types::mcp_host::PATH.into())
 }
 
 /// The bind's URL for a page served by the gateway itself: its origin,
@@ -286,6 +391,8 @@ pub mod code {
     pub const KEY_EXPIRED: &str = "key_expired";
     pub const CHAT_THREAD_BOUND: &str = "chat_thread_bound";
     pub const CHAT_TOOLSET_NEEDS_FULL: &str = "chat_toolset_needs_full";
+    pub const HOST_NOT_GRANTED: &str = lmgw_api_types::mcp_host::HOST_NOT_GRANTED;
+    pub const CROSS_ORIGIN_REFUSED: &str = lmgw_api_types::mcp_host::CROSS_ORIGIN_REFUSED;
 }
 
 /// Whether refusal `e` says the client's key opens nothing now, and why;
@@ -333,6 +440,32 @@ reader!(
     /// `GET /chat/api/threads`'s answer.
     read_threads -> ThreadList
 );
+reader!(
+    /// `GET /chat/api/profiles`'s answer.
+    read_profiles -> ProfileList
+);
+reader!(
+    /// A profile: `GET /chat/api/profiles/{id}`'s answer, and a create's
+    /// or a change's.
+    read_profile -> Profile
+);
+reader!(
+    /// A profile delete's answer: what it cleared.
+    read_profile_deleted -> ProfileDeleted
+);
+reader!(
+    /// A folder patch's answer ([`set_folder_profile`]'s): the folder, and
+    /// what reached its current thread.
+    read_folder_patched -> FolderPatched
+);
+
+/// MCP approvals and the dictation route (client-apps design §6).
+pub mod approvals;
+pub use approvals::{approvals, read_transcription, transcribe};
+
+/// A thread's MCP tasks: `answer` and the cancel (MCP Tasks design §5.1).
+pub mod tasks;
+pub use tasks::{answer, cancel_task, read_task_cancelled, read_thread_tasks, thread_tasks};
 
 #[cfg(test)]
 mod tests {
@@ -403,6 +536,66 @@ mod tests {
         let row: ThreadRow =
             serde_json::from_str(r#"{"id": 5, "last_message_at": 1760000000}"#).unwrap();
         assert_eq!(row.last_message_at, Some(at));
+    }
+
+    #[test]
+    fn a_folder_s_profile_is_a_defaults_patch() {
+        let r = set_folder_profile(4, Some(3));
+        assert_eq!(r.method, Method::Post);
+        assert_eq!(r.path, "/chat/api/folders/4");
+        assert_eq!(
+            r.body.as_deref(),
+            Some(r#"{"defaults_patch":{"profile_id":3}}"#)
+        );
+        assert_eq!(
+            set_folder_profile(4, None).body.as_deref(),
+            Some(r#"{"defaults_patch":{"profile_id":null}}"#)
+        );
+        let p = read_folder_patched(
+            200,
+            r#"{"id": 4, "name": "Assistant", "defaults": {"profile_id": 3},
+                "applied": {"thread_id": 9, "fields": ["profile_id"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(p.folder.defaults.profile_id, Some(3));
+        assert_eq!(p.applied.map(|a| a.thread_id), Some(9));
+    }
+
+    #[test]
+    fn profile_requests_and_names() {
+        assert_eq!(profiles().path, "/chat/api/profiles");
+        assert_eq!(profile(3).path, "/chat/api/profiles/3");
+        assert_eq!(delete_profile(3).path, "/chat/api/profiles/3/delete");
+        assert_eq!(reset_profile(3).path, "/chat/api/profiles/3/reset");
+        let r = update_profile(
+            3,
+            &ProfilePatch {
+                persona: Some(None),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.body.as_deref(), Some(r#"{"persona":null}"#));
+        let r = create_profile(&ProfileCreate {
+            name: Some("Calm".into()),
+            ..Default::default()
+        });
+        assert_eq!(r.method, Method::Post);
+        let list = read_profiles(
+            200,
+            r#"{"profiles": [{"id": 3, "name": "Concise"}, {"id": 5, "name": "Ärger"}],
+                "default_profile_id": null}"#,
+        )
+        .unwrap();
+        assert_eq!(profile_named(&list, " concise ").unwrap(), Some(3));
+        assert_eq!(profile_named(&list, "ÄRGER").unwrap(), Some(5));
+        assert_eq!(profile_named(&list, "Default").unwrap(), None);
+        let e = profile_named(&list, "Pirate").unwrap_err();
+        assert_eq!(e.code, "unknown_profile");
+        assert!(
+            e.message.ends_with("Default, Concise, Ärger"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]

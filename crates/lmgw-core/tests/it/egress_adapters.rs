@@ -559,7 +559,7 @@ fn gemini_parse_completion() {
     assert_eq!(c.usage.prompt_tokens, Some(8));
     assert!(
         matches!(&c.content[1], ContentPart::ToolUse { id, name, .. }
-        if id == "call_0" && name == "f")
+        if id.starts_with("call_") && id.len() > 17 && name == "f")
     );
 }
 

@@ -1,11 +1,17 @@
 //! The Chat change feed's wire shapes:
 //! `GET /chat/api/feed`, one SSE stream per client.
 //!
-//! A **stored** event (threads, folders) has an SSE `id:` — its [`Cursor`]
-//! — and is rendered when it is delivered: `thread.created` and
-//! `thread.updated` carry the thread as `GET /chat/api/threads` lists it now,
-//! with the change's author beside it as `by`, or a [`ThreadGone`] once the
-//! thread is gone. A **live** event (`turn.*`, `voice.*`, `hold`, `state`,
+//! A **stored** event (threads, folders, profiles, approvals, tasks) has an SSE
+//! `id:` — its [`Cursor`] — and is rendered when it is delivered:
+//! `thread.created` and `thread.updated` carry the thread as
+//! `GET /chat/api/threads` lists it now, with the change's author beside it
+//! as `by`, or a [`ThreadGone`] once the thread is gone; `profile.*` carry
+//! the profile's id and name as the write left them ([`FeedProfile`]);
+//! `approval.*` the call as the reply's pending state holds it
+//! ([`ApprovalRequested`], [`ApprovalDecided`]); `task.*` an MCP task a
+//! turn started and its result entering the thread, as the record's write
+//! left them ([`TaskStarted`], [`TaskDone`]); `device.revoked` a paired
+//! device whose key was deleted ([`DeviceRevoked`]). A **live** event (`turn.*`, `voice.*`, `hold`, `state`,
 //! `resync`, `revoked`) has no `id:`; what is live now is in [`Hello`] and
 //! [`LiveState`].
 //!
@@ -36,6 +42,14 @@ pub mod event {
     pub const FOLDER_UPDATED: &str = "folder.updated";
     pub const FOLDER_DELETED: &str = "folder.deleted";
     pub const FOLDER_CURRENT: &str = "folder.current";
+    pub const PROFILE_CREATED: &str = "profile.created";
+    pub const PROFILE_UPDATED: &str = "profile.updated";
+    pub const PROFILE_DELETED: &str = "profile.deleted";
+    pub const APPROVAL_REQUESTED: &str = "approval.requested";
+    pub const APPROVAL_DECIDED: &str = "approval.decided";
+    pub const TASK_STARTED: &str = "task.started";
+    pub const TASK_DONE: &str = "task.done";
+    pub const DEVICE_REVOKED: &str = "device.revoked";
 }
 
 // Review W4-1.
@@ -377,6 +391,147 @@ pub struct FolderCurrent {
     pub by: Option<String>,
 }
 
+/// `profile.created`, `profile.updated` and `profile.deleted`: a
+/// personality profile (`GET /chat/api/profiles`) was created, changed or
+/// deleted, named as that write left it. Every reader receives them,
+/// devices included. After a `resync` the feed sends the whole list again
+/// as `profile.created` events (with no `id:`), so a client that keeps the
+/// names (a menu of profiles) has them again without a request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FeedProfile {
+    /// The profile's id.
+    pub id: i64,
+    pub name: String,
+    /// Who made the change; `null` for the gateway's own, and on the list
+    /// repeated after a `resync`.
+    pub by: Option<String>,
+}
+
+/// `approval.requested`: a turn in the thread stopped on a call that waits
+/// for an approval (client-apps design §6.5). Rendered from the reply's
+/// pending state at delivery; a reply gone by then (deleted, regenerated)
+/// is not delivered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ApprovalRequested {
+    pub thread_id: i64,
+    /// The reply that waits.
+    pub message_id: i64,
+    pub approval_request_id: String,
+    pub server_label: String,
+    /// The tool's own name, as [`crate::chat_approvals::ApprovalRequest`].
+    pub name: String,
+    /// A JSON string.
+    pub arguments: String,
+    /// The call's id, as the turn's `ready`, `approval` and `result` frames
+    /// carry it. Absent from an lmgw before 2026-10-09.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+}
+
+/// `approval.decided`: a waiting call was decided — approved or declined
+/// by a client, or declined because a new message came
+/// ([`crate::chat_approvals::MOVED_ON`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ApprovalDecided {
+    pub thread_id: i64,
+    pub message_id: i64,
+    pub approval_request_id: String,
+    /// Whether the call was approved — and, once that is known, could run:
+    /// `false` with [`Self::not_run`] for one approved whose turn could not
+    /// start.
+    pub approve: bool,
+    /// Who decided, as every author is named ("the dashboard", "device
+    /// 'phone'").
+    pub by: Option<String>,
+    /// Approved, but the turn that was to run it could not start (its
+    /// reply moved on, its starter went, its slot was refused), so it never
+    /// ran and its result says so. Recorded as a second `approval.decided`
+    /// for the call; both render this.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub not_run: bool,
+    /// The call's id, as `approval.requested` has it. Absent from an lmgw
+    /// before 2026-10-09.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+}
+
+/// `task.started`: a tool call of a turn in the thread became an MCP task
+/// (MCP Tasks design §4.1); its result enters the thread later. Named as
+/// the write left it, so it renders after the task is gone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TaskStarted {
+    pub thread_id: i64,
+    /// lmgw's id of the task (the cancel route's `{task}`).
+    pub id: i64,
+    /// The server's id of the task.
+    pub task_id: String,
+    pub server_label: String,
+    /// The name the model called.
+    pub tool: String,
+    /// Who started the turn that called it.
+    pub by: Option<String>,
+}
+
+/// `task.done`: a task's result entered the thread as message `message_id`
+/// (role `tool`). `by` names who cancelled it, for a cancel lmgw sent;
+/// `null` otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TaskDone {
+    pub thread_id: i64,
+    /// The result row.
+    pub message_id: i64,
+    pub id: i64,
+    pub task_id: String,
+    pub server_label: String,
+    pub tool: String,
+    /// `completed`, `failed`, `cancelled` or `abandoned`.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(extend("enum" = ["completed", "failed", "cancelled", "abandoned"]))
+    )]
+    pub status: String,
+    pub by: Option<String>,
+}
+
+/// `device.revoked`: a paired device's key was deleted, so the device is
+/// gone for good; a client that runs work it started — a host of MCP tasks
+/// whose `lmgw/caller` named it — may cancel that work now (MCP Tasks
+/// design §4.1; client-apps design §2.2). Its tasks' results still enter
+/// their threads as they end.
+///
+/// Received by the dashboard and admin keys; by a device the feed showed
+/// the deleted device's changes to (a stored event it may see carries the
+/// deleted device's `by`), and by a device hosting a task the deleted
+/// device started that was still running. No other device hears of it: it
+/// names no device the reader was not shown.
+///
+/// Only a delete is said: a disabled or expired key can be enabled or
+/// renewed again, and its tasks wait meanwhile; a rotated one keeps its
+/// row and pairs again under its name; a cleared hosting grant ends the
+/// device's own hosted tasks, each said by its `task.done` (`abandoned`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DeviceRevoked {
+    /// The deleted device, as [`Hello::principal`] names a device (kind
+    /// `device`, its paired name) and as `lmgw/caller` names it on a
+    /// forwarded call; [`FeedPrincipal::by`] is the `by` its changes
+    /// carried.
+    pub device: FeedPrincipal,
+    /// Who deleted it ("the dashboard").
+    pub by: Option<String>,
+}
+
 /// `thread.created` / `thread.updated` for a thread that exists at delivery:
 /// the thread as `GET /chat/api/threads` lists it now, with `by` beside its
 /// fields.
@@ -425,7 +580,7 @@ pub enum FolderNow {
 
 /// One event of the feed, by its `event:` name, its data typed.
 ///
-/// Non-exhaustive: a newer gateway adds events (approvals, messages), and
+/// Non-exhaustive: a newer gateway adds events (messages), and
 /// a client built against this one reads them as [`FeedEvent::Unknown`].
 #[derive(Debug, Clone, PartialEq)]
 // Owned values, no boxes: a client (or an FFI wrapper) matches them as they are.
@@ -440,6 +595,14 @@ pub enum FeedEvent {
     FolderUpdated(FolderNow),
     FolderDeleted(FolderGone),
     FolderCurrent(FolderCurrent),
+    ProfileCreated(FeedProfile),
+    ProfileUpdated(FeedProfile),
+    ProfileDeleted(FeedProfile),
+    ApprovalRequested(ApprovalRequested),
+    ApprovalDecided(ApprovalDecided),
+    TaskStarted(TaskStarted),
+    TaskDone(TaskDone),
+    DeviceRevoked(DeviceRevoked),
     TurnStarted(TurnStarted),
     TurnDone(TurnDone),
     VoiceBound(VoiceBound),
@@ -485,6 +648,14 @@ pub const EVENTS: &[&str] = &[
     event::FOLDER_UPDATED,
     event::FOLDER_DELETED,
     event::FOLDER_CURRENT,
+    event::PROFILE_CREATED,
+    event::PROFILE_UPDATED,
+    event::PROFILE_DELETED,
+    event::APPROVAL_REQUESTED,
+    event::APPROVAL_DECIDED,
+    event::TASK_STARTED,
+    event::TASK_DONE,
+    event::DEVICE_REVOKED,
     event::TURN_STARTED,
     event::TURN_DONE,
     event::VOICE_BOUND,
@@ -538,6 +709,14 @@ impl FeedEvent {
             event::FOLDER_UPDATED => Self::FolderUpdated(folder(name, data)?),
             event::FOLDER_DELETED => Self::FolderDeleted(read(name, data)?),
             event::FOLDER_CURRENT => Self::FolderCurrent(read(name, data)?),
+            event::PROFILE_CREATED => Self::ProfileCreated(read(name, data)?),
+            event::PROFILE_UPDATED => Self::ProfileUpdated(read(name, data)?),
+            event::PROFILE_DELETED => Self::ProfileDeleted(read(name, data)?),
+            event::APPROVAL_REQUESTED => Self::ApprovalRequested(read(name, data)?),
+            event::APPROVAL_DECIDED => Self::ApprovalDecided(read(name, data)?),
+            event::TASK_STARTED => Self::TaskStarted(read(name, data)?),
+            event::TASK_DONE => Self::TaskDone(read(name, data)?),
+            event::DEVICE_REVOKED => Self::DeviceRevoked(read(name, data)?),
             event::TURN_STARTED => Self::TurnStarted(read(name, data)?),
             event::TURN_DONE => Self::TurnDone(read(name, data)?),
             event::VOICE_BOUND => Self::VoiceBound(read(name, data)?),
@@ -564,6 +743,14 @@ impl FeedEvent {
             Self::FolderUpdated(_) => event::FOLDER_UPDATED,
             Self::FolderDeleted(_) => event::FOLDER_DELETED,
             Self::FolderCurrent(_) => event::FOLDER_CURRENT,
+            Self::ProfileCreated(_) => event::PROFILE_CREATED,
+            Self::ProfileUpdated(_) => event::PROFILE_UPDATED,
+            Self::ProfileDeleted(_) => event::PROFILE_DELETED,
+            Self::ApprovalRequested(_) => event::APPROVAL_REQUESTED,
+            Self::ApprovalDecided(_) => event::APPROVAL_DECIDED,
+            Self::TaskStarted(_) => event::TASK_STARTED,
+            Self::TaskDone(_) => event::TASK_DONE,
+            Self::DeviceRevoked(_) => event::DEVICE_REVOKED,
             Self::TurnStarted(_) => event::TURN_STARTED,
             Self::TurnDone(_) => event::TURN_DONE,
             Self::VoiceBound(_) => event::VOICE_BOUND,
@@ -591,11 +778,11 @@ mod tests {
             let ev = FeedEvent::parse(name, data).unwrap_or_else(|e| panic!("{e}"));
             assert_eq!(ev.name(), *name);
         }
-        let ev = FeedEvent::parse("approval.requested", r#"{"x":1}"#).unwrap();
+        let ev = FeedEvent::parse("message.created", r#"{"x":1}"#).unwrap();
         assert_eq!(
             ev,
             FeedEvent::Unknown {
-                event: "approval.requested".into(),
+                event: "message.created".into(),
                 data: r#"{"x":1}"#.into()
             }
         );
@@ -635,6 +822,39 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(ev, FeedEvent::FolderUpdated(FolderNow::Gone(_))));
+    }
+
+    #[test]
+    fn a_profile_event_names_the_profile() {
+        let ev = FeedEvent::parse(
+            event::PROFILE_UPDATED,
+            r#"{"id": 3, "name": "Concise", "by": "device 'desktop'"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ev,
+            FeedEvent::ProfileUpdated(FeedProfile {
+                id: 3,
+                name: "Concise".into(),
+                by: Some("device 'desktop'".into()),
+            })
+        );
+        assert_eq!(ev.name(), "profile.updated");
+    }
+
+    #[test]
+    fn a_device_revoked_event_names_the_device_as_a_principal() {
+        let ev = FeedEvent::parse(
+            event::DEVICE_REVOKED,
+            r#"{"device": {"kind": "device", "name": "phone"}, "by": "the dashboard"}"#,
+        )
+        .unwrap();
+        let FeedEvent::DeviceRevoked(d) = &ev else {
+            panic!("device.revoked: {ev:?}")
+        };
+        assert_eq!(d.device.by(), "device 'phone'");
+        assert_eq!(d.by.as_deref(), Some(BY_ADMIN));
+        assert_eq!(ev.name(), "device.revoked");
     }
 
     #[test]

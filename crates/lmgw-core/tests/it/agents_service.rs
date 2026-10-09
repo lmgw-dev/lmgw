@@ -165,6 +165,14 @@ async fn detail(base: &Gw, id: &str) -> Value {
     serde_json::from_str(&body).unwrap()
 }
 
+/// Until `board`'s start is in flight: a request has claimed it.
+async fn until_starting(base: &Gw) {
+    common::patience::until_async("board's start is in flight", || async {
+        detail(base, "board").await["service"]["starting"] == json!(true)
+    })
+    .await;
+}
+
 /// A service-mode manifest. `provides` is either empty or the `provides` block.
 fn doc(image: &str, idle_seconds: i64, start_timeout: u64, provides: &str) -> String {
     format!(
@@ -226,7 +234,11 @@ async fn install(base: &Gw, manifest: &str) {
 
 /// What the fake container serves. Everything the proxy has to get right, and
 /// nothing it has to understand.
-fn fake_container_app() -> axum::Router {
+///
+/// `rest` is what `/sse` and `/slow` hold back after their first chunk until
+/// the test lets it go ([`Fake::rest`]): a body still being written for as
+/// long as the test needs, not for a time a loaded box can outlast.
+fn fake_container_app(rest: Arc<tokio::sync::Notify>) -> axum::Router {
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
 
@@ -297,36 +309,49 @@ fn fake_container_app() -> axum::Router {
             "query": req.uri().query(),
         }))
     }
-    /// Three events, 200 ms apart: a body that only proves anything if it is
-    /// streamed.
-    async fn sse() -> impl IntoResponse {
-        let s = futures::stream::unfold(0u32, |n| async move {
-            if n >= 3 {
-                return None;
+    /// Three events, the last two held back until the test lets them go: a
+    /// body that only proves anything if it is streamed.
+    async fn sse(rest: Arc<tokio::sync::Notify>) -> impl IntoResponse {
+        let s = futures::stream::unfold(0u32, move |n| {
+            let rest = rest.clone();
+            async move {
+                if n >= 3 {
+                    return None;
+                }
+                if n == 1 {
+                    rest.notified().await;
+                }
+                Some((
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(format!(
+                        "data: tick {}\n\n",
+                        n + 1
+                    ))),
+                    n + 1,
+                ))
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            Some((
-                Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: tick {}\n\n", n + 1))),
-                n + 1,
-            ))
         });
         (
             [("content-type", "text/event-stream")],
             axum::body::Body::from_stream(s),
         )
     }
-    /// A request that is still in flight for a while — what the idle guard is
-    /// for.
-    async fn slow() -> impl IntoResponse {
-        let s = futures::stream::unfold(0u32, |n| async move {
-            if n >= 2 {
-                return None;
+    /// A request that is still in flight until the test lets its second chunk
+    /// go — what the idle guard is for.
+    async fn slow(rest: Arc<tokio::sync::Notify>) -> impl IntoResponse {
+        let s = futures::stream::unfold(0u32, move |n| {
+            let rest = rest.clone();
+            async move {
+                if n >= 2 {
+                    return None;
+                }
+                if n == 1 {
+                    rest.notified().await;
+                }
+                Some((
+                    Ok::<_, std::io::Error>(bytes::Bytes::from("chunk\n")),
+                    n + 1,
+                ))
             }
-            tokio::time::sleep(Duration::from_millis(700)).await;
-            Some((
-                Ok::<_, std::io::Error>(bytes::Bytes::from("chunk\n")),
-                n + 1,
-            ))
         });
         axum::body::Body::from_stream(s)
     }
@@ -401,8 +426,14 @@ fn fake_container_app() -> axum::Router {
         .route("/echo/{*rest}", get(echo))
         .route("/mcp/seen", get(seen))
         .route("/mcp/{*rest}", post(mcp).get(echo))
-        .route("/sse", get(sse))
-        .route("/slow", get(slow))
+        .route(
+            "/sse",
+            get({
+                let rest = rest.clone();
+                move || sse(rest)
+            }),
+        )
+        .route("/slow", get(move || slow(rest)))
         .route("/ws", get(ws))
         .route("/mcp", post(mcp))
 }
@@ -441,14 +472,17 @@ fn mcp_reply(body: &str) -> String {
 #[derive(Default)]
 struct Fake {
     calls: Arc<Mutex<Vec<Vec<String>>>>,
-    /// How long `podman run -d` takes to answer — a cold pull, in miniature.
-    slow_start: Option<Duration>,
+    /// `podman run -d` does not answer until the start is cancelled — a
+    /// cold pull that outlasts the test.
+    held_start: bool,
     /// Accept TCP and answer nothing: a container that is listening but never
     /// finishes a health probe.
     tcp_only: bool,
-    /// Shuts the fake container's listener down, for the "it died after its
-    /// probe passed" case.
-    kill: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Shuts the fake container down, for the "it died after its probe
+    /// passed" case ([`kill_container`]).
+    kill: Kill,
+    /// What the fake container's streams hold back ([`fake_container_app`]).
+    rest: Arc<tokio::sync::Notify>,
     /// How many `run -d`s answer as if the published port had been taken
     /// before podman bound it, without binding anything.
     taken: AtomicU32,
@@ -458,9 +492,9 @@ impl Fake {
     fn calls(&self) -> Arc<Mutex<Vec<Vec<String>>>> {
         self.calls.clone()
     }
-    fn slow(ms: u64) -> Self {
+    fn held_start() -> Self {
         Self {
-            slow_start: Some(Duration::from_millis(ms)),
+            held_start: true,
             ..Default::default()
         }
     }
@@ -470,8 +504,12 @@ impl Fake {
             ..Default::default()
         }
     }
-    fn kill_switch(&self) -> Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>> {
+    fn kill_switch(&self) -> Kill {
         self.kill.clone()
+    }
+    /// Lets the fake container's held streams go on ([`fake_container_app`]).
+    fn rest(&self) -> Arc<tokio::sync::Notify> {
+        self.rest.clone()
     }
 }
 
@@ -492,8 +530,9 @@ impl Spawner for Fake {
     async fn run(&self, _p: &str, args: &[String]) -> std::io::Result<CmdOutput> {
         self.calls.lock().unwrap().push(args.to_vec());
         if args.first().map(String::as_str) == Some("run") {
-            if let Some(d) = self.slow_start {
-                tokio::time::sleep(d).await;
+            if self.held_start {
+                // Until the start is cancelled, which drops this future.
+                std::future::pending::<()>().await;
             }
             let i = args.iter().position(|a| a == "-p").expect("published");
             let port: u16 = args[i + 1].split(':').nth(1).unwrap().parse().unwrap();
@@ -524,14 +563,15 @@ impl Spawner for Fake {
                 });
             } else {
                 let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-                *self.kill.lock().unwrap() = Some(tx);
-                tokio::spawn(async move {
-                    let _ = axum::serve(listener, fake_container_app())
+                let app = fake_container_app(self.rest.clone());
+                let served = tokio::spawn(async move {
+                    let _ = axum::serve(listener, app)
                         .with_graceful_shutdown(async {
                             let _ = rx.await;
                         })
                         .await;
                 });
+                *self.kill.lock().unwrap() = Some((tx, served));
             }
         }
         // `podman logs --tail <n>` answers with the number of lines it was
@@ -582,7 +622,24 @@ async fn with_fake() -> (SharedState, Gw, Arc<Mutex<Vec<Vec<String>>>>) {
     (state, base, calls)
 }
 
-type Kill = Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>;
+/// The fake container's shutdown signal, and its server's task.
+type Kill = Arc<
+    Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::task::JoinHandle<()>,
+        )>,
+    >,
+>;
+
+/// Shut the fake container down and wait until it is gone: its server ends
+/// once its listener is closed and every connection to it is, the proxy's
+/// kept-alive one included.
+async fn kill_container(kill: &Kill) {
+    let (tx, served) = kill.lock().unwrap().take().expect("a container to kill");
+    let _ = tx.send(());
+    served.await.unwrap();
+}
 
 async fn with(fake: Fake) -> (SharedState, Gw, Arc<Mutex<Vec<Vec<String>>>>, Kill) {
     let (state, base, _prefix) = gateway().await;
@@ -872,10 +929,11 @@ async fn the_proxy_owns_the_forwarded_headers_and_carries_no_credential_in() {
 
 #[tokio::test]
 async fn an_sse_body_arrives_chunk_by_chunk_rather_than_at_the_end() {
-    let (state, base, _calls) = with_fake().await;
+    let fake = Fake::default();
+    let rest = fake.rest();
+    let (state, base, _calls, _kill) = with(fake).await;
     install(&base, &doc("localhost/board:1", 0, 10, "")).await;
 
-    let started = Instant::now();
     let resp = base
         .origin_client(&["board.localhost"])
         .get(format!("{}/sse", base.origin("board.localhost")))
@@ -886,24 +944,25 @@ async fn an_sse_body_arrives_chunk_by_chunk_rather_than_at_the_end() {
         resp.headers().get("content-type").unwrap(),
         "text/event-stream"
     );
+    // The container holds the rest of the stream back until the first event
+    // is here, so a proxy that buffered the body to its end never hands that
+    // event over — not "the first came long before the last" on the clock,
+    // which an on-demand start under load stretched.
     let mut stream = resp.bytes_stream();
-    let mut first: Option<Duration> = None;
-    let mut all = String::new();
+    let first = common::patience::within(
+        "an event while the stream is still open (none: the body was buffered)",
+        stream.next(),
+    )
+    .await
+    .expect("an event")
+    .unwrap();
+    let mut all = String::from_utf8_lossy(&first).into_owned();
+    assert!(all.contains("tick 1") && !all.contains("tick 2"), "{all}");
+    rest.notify_one();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.unwrap();
-        if first.is_none() {
-            first = Some(started.elapsed());
-        }
-        all.push_str(&String::from_utf8_lossy(&chunk));
+        all.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
     }
-    let total = started.elapsed();
-    assert!(all.contains("tick 1") && all.contains("tick 3"), "{all}");
-    let first = first.expect("at least one chunk");
-    // Three events 200 ms apart: the first has to be here long before the last.
-    assert!(
-        first < total / 2,
-        "the body was buffered: first chunk at {first:?}, stream ended at {total:?}"
-    );
+    assert!(all.contains("tick 3"), "{all}");
 
     service::stop(&state, "board", "test over").await;
 }
@@ -1126,11 +1185,10 @@ async fn a_container_that_stops_answering_is_collected_and_restarted() {
     assert_eq!(app_get(&base, "board.localhost", "/").await.0, 200);
     assert_eq!(run_count(&calls), 1);
 
-    // The container goes away underneath us.
-    if let Some(tx) = kill.lock().unwrap().take() {
-        let _ = tx.send(());
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The container goes away underneath us — gone, not going: a request on
+    // the proxy's kept-alive connection while it was still closing would be
+    // answered.
+    kill_container(&kill).await;
 
     let (status, body) = app_get(&base, "board.localhost", "/").await;
     assert_eq!(status, 502, "{body}");
@@ -1157,18 +1215,13 @@ async fn a_container_that_stops_answering_is_collected_and_restarted() {
 /// A start in flight is stoppable (§3.3).
 #[tokio::test]
 async fn stop_cancels_a_start_in_flight_and_says_so() {
-    let (state, base, calls, _kill) = with(Fake::slow(1500)).await;
+    let (state, base, calls, _kill) = with(Fake::held_start()).await;
     install(&base, &doc("localhost/board:1", 0, 30, "")).await;
 
-    // A request that will sit in the start for a while.
+    // A request that sits in the start until the stop.
     let b = base.clone();
     let waiter = tokio::spawn(async move { app_get(&b, "board.localhost", "/").await });
-    // Let the claim happen.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        detail(&base, "board").await["service"]["starting"],
-        json!(true)
-    );
+    until_starting(&base).await;
 
     let (status, v) = op(&base, "agent_service_stop", json!({ "id": "board" })).await;
     assert_eq!(status, 200, "{v}");
@@ -1227,12 +1280,7 @@ async fn an_unbounded_start_is_still_stoppable() {
 
     let b = base.clone();
     let waiter = tokio::spawn(async move { app_get(&b, "board.localhost", "/").await });
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(
-        detail(&base, "board").await["service"]["starting"],
-        json!(true)
-    );
-
+    until_starting(&base).await;
     let (status, v) = op(&base, "agent_service_stop", json!({ "id": "board" })).await;
     assert_eq!(status, 200, "{v}");
     assert_eq!(v["cancelled_start"], json!(true), "{v}");
@@ -1275,10 +1323,13 @@ async fn the_container_stops_after_its_idle_window_and_restarts_on_the_next_requ
 
 #[tokio::test]
 async fn a_request_in_flight_holds_the_idle_stop_off() {
-    let (state, base, _calls) = with_fake().await;
+    let fake = Fake::default();
+    let rest = fake.rest();
+    let (state, base, _calls, _kill) = with(fake).await;
     install(&base, &doc("localhost/board:1", 1, 10, "")).await;
 
-    // `/slow` streams for ~1.4 s, longer than the 1 s idle window.
+    // `/slow` holds its second chunk until the test lets it go: in flight
+    // past the 1 s idle window, however slow the box.
     let resp = base
         .origin_client(&["board.localhost"])
         .get(format!("{}/slow", base.origin("board.localhost")))
@@ -1298,6 +1349,7 @@ async fn a_request_in_flight_holds_the_idle_stop_off() {
     );
 
     // Finish it, and the window starts from there.
+    rest.notify_one();
     while stream.next().await.is_some() {}
     assert!(service::sweep_idle(&state).await.is_empty());
     tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -1678,7 +1730,12 @@ async fn a_tools_call_on_a_sleeping_agents_tool_starts_it() {
     let snap = state.snapshot();
     let (result, server) = state
         .mcp
-        .call(&snap, "board__pin", None)
+        .call(
+            &snap,
+            "board__pin",
+            None,
+            &lmgw_core::mcp::host::CallFrom::gateway(),
+        )
         .await
         .unwrap_or_else(|e| panic!("the call did not reach the container: {e:?}"));
     assert_eq!(server, "agent:board");
@@ -2741,13 +2798,12 @@ async fn the_real_thing_serves_a_page_an_sse_stream_a_websocket_and_its_tools() 
     );
     // §3.3: the tunnel is torn down when *either* end goes, so a closed
     // WebSocket releases its guard and the container can idle-stop. A proxy
-    // that waited for both halves pinned it for good.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        detail(&base, "board").await["service"]["in_flight"],
-        json!(0),
-        "the closed WebSocket left its in-flight guard behind"
-    );
+    // that waited for both halves pinned it for good — so this waits for the
+    // guard to go, as long as the test may, rather than a guessed 500 ms.
+    common::patience::until_async("the closed WebSocket's in-flight guard goes", || async {
+        detail(&base, "board").await["service"]["in_flight"] == json!(0)
+    })
+    .await;
 
     // 4. The container's tool, through `/mcp`, under the manifest's prefix.
     let specs = vec![lmgw_core::ingress::responses::McpToolSpec {

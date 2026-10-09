@@ -326,6 +326,17 @@ pub(super) fn tools() -> Vec<Builtin> {
                     ),
                 ),
                 (
+                    "chat_profile",
+                    str_p(
+                        "The personality profile a new Chat thread starts with: a profile id \
+                         (lmgw__settings chat_profile says the one now; the Chat's \
+                         GET /chat/api/profiles lists them), or '' for none (\"Default\", the \
+                         default). A thread in a folder whose defaults name a profile takes \
+                         that one instead; existing threads are not changed. An unknown id is \
+                         refused. Deleting the profile empties this setting.",
+                    ),
+                ),
+                (
                     "sampling_alias",
                     str_p("Default model alias answering MCP sampling requests."),
                 ),

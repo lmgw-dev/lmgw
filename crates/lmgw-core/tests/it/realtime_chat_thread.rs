@@ -25,9 +25,11 @@ mod cuts;
 mod ends;
 mod journal;
 mod models;
+mod profile;
 mod reasoning;
 mod refusals;
 mod stopped_rows;
+mod tasks;
 mod turns;
 
 // -- harness -------------------------------------------------------------------
@@ -216,16 +218,17 @@ impl World {
 /// leaves at once, so nothing waits for pacing): past its
 /// `session.updated`.
 pub(crate) async fn manual(ws: &mut Ws, lead_ms: u32) {
-    send(
-        ws,
-        json!({"type": "session.update", "session": {"type": "realtime",
-            "output_modalities": ["audio"],
-            "audio": {"input": {"turn_detection": null}},
-            "lmgw": {"output_lead_ms": lead_ms}}}),
-    )
-    .await;
+    send(ws, manual_update(lead_ms)).await;
     let ev = next(ws).await;
     assert_eq!(ev["type"], "session.updated", "{ev}");
+}
+
+/// The `session.update` [`manual`] sends.
+pub(crate) fn manual_update(lead_ms: u32) -> Value {
+    json!({"type": "session.update", "session": {"type": "realtime",
+        "output_modalities": ["audio"],
+        "audio": {"input": {"turn_detection": null}},
+        "lmgw": {"output_lead_ms": lead_ms}}})
 }
 
 /// The next event but the connect warm's model states, which come when

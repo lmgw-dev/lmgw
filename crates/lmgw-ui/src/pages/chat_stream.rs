@@ -103,25 +103,50 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
     })
 }
 
+/// Why a stream was never opened, or broke: the gateway's `code` when a
+/// refusal body carried one (`approval_moved_on`, `key_rate`, …), none for a
+/// transport failure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+/// [`send_stream_coded`] with the refusal reduced to its message.
+pub async fn send_stream(
+    url: &str,
+    body: &Value,
+    signal: &web_sys::AbortSignal,
+    on_event: impl FnMut(ChatEvent),
+) -> Result<(), String> {
+    send_stream_coded(url, body, signal, on_event)
+        .await
+        .map_err(|r| r.message)
+}
+
 /// POST `body` to `url` and feed every parsed SSE frame to `on_event`.
 /// Returns Err only for transport/setup failures and an outright refusal
 /// (non-2xx, so no SSE frame was ever produced — the caller can tell this
 /// apart from a mid-stream failure by whether `on_event` ran at all); an
 /// in-stream `error` frame still arrives through `on_event` and this
 /// resolves `Ok`. `signal` aborts the fetch (Stop button).
-pub async fn send_stream(
+pub async fn send_stream_coded(
     url: &str,
     body: &Value,
     signal: &web_sys::AbortSignal,
     mut on_event: impl FnMut(ChatEvent),
-) -> Result<(), String> {
+) -> Result<(), Refusal> {
+    let transport = |e: String| Refusal {
+        code: None,
+        message: e,
+    };
     let resp = gloo_net::http::Request::post(url)
         .abort_signal(Some(signal))
         .json(body)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| transport(e.to_string()))?
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| transport(e.to_string()))?;
     if !(200..300).contains(&resp.status()) {
         let status = resp.status();
         // A refusal here (`unsupported_attachment`, `model_no_vision`, a
@@ -129,11 +154,15 @@ pub async fn send_stream(
         // send just shows "HTTP 413"/"HTTP 415" and the caller never learns
         // why (review finding: error text never reaches the user).
         let text = resp.text().await.unwrap_or_default();
-        return Err(crate::api::parse_error_body(status, &text).message);
+        let e = crate::api::parse_error_body(status, &text);
+        return Err(Refusal {
+            code: Some(e.code).filter(|c| !c.is_empty() && c != "http_error"),
+            message: e.message,
+        });
     }
     let raw = resp
         .body()
-        .ok_or("response had no body")?
+        .ok_or_else(|| transport("response had no body".into()))?
         .unchecked_into::<web_sys::ReadableStream>();
     let mut stream = wasm_streams::ReadableStream::from_raw(raw).into_stream();
 

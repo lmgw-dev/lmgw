@@ -54,14 +54,19 @@ use super::scope::ToolScope;
 use super::spec::McpToolSpec;
 use super::{docs, kb, selfadmin};
 
+pub(crate) mod content;
+mod effective;
 mod labels;
 mod served_by;
+mod target;
 
+pub use effective::ApprovalFloor;
 use labels::shown_to;
 pub use labels::{
     label_entry, labels, list_label, LabelEntry, LabelError, LabelKind, LabelTool, LabelTools,
 };
 pub(crate) use served_by::server_of;
+pub(crate) use target::{label_target, label_target_in, LabelTarget, Target};
 
 /// The label a client uses to name a registered server in a `{"type":"mcp"}`
 /// tool: its tool prefix, or its name when it has none.
@@ -83,6 +88,9 @@ pub struct Resolved {
     pub listed: Vec<(String, Vec<ToolDef>)>,
     /// `(label, error)` for a server that could not be resolved or listed.
     pub failed: Vec<(String, String)>,
+    /// The labels among `failed` that failed only because their device is
+    /// offline (client-apps design §5.3): a turn is never refused for them.
+    pub offline: Vec<String>,
     /// Names resolved from a **built-in** toolset. The run's executor routes
     /// exactly these in-process; anything else goes to the southbound manager.
     /// An explicit set rather than a prefix test, so a run that never attached
@@ -91,6 +99,13 @@ pub struct Resolved {
     /// Names resolved from a registered server, and its id: a call of one
     /// runs on that server or not at all ([`McpExecutor::with_listed`]).
     pub servers: HashMap<String, i64>,
+    /// The MCP Apps UI resource each offered tool links to, namespaced as
+    /// `/mcp` serves it (client-apps design §7.3): what a Chat `tool` frame
+    /// carries as `ui_resource`.
+    pub ui_resources: HashMap<String, String>,
+    /// For each offered tool a collision gave its server's prefix
+    /// ([`super::names`]), the tool's own name — its wire name.
+    pub moved: HashMap<String, String>,
 }
 
 /// Resolve the `{"type":"mcp"}` entries of a request against the registered
@@ -105,8 +120,11 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
         tools: Vec::new(),
         listed: Vec::new(),
         failed: Vec::new(),
+        offline: Vec::new(),
         builtin: Vec::new(),
         servers: HashMap::new(),
+        ui_resources: HashMap::new(),
+        moved: HashMap::new(),
     };
     if specs.is_empty() {
         return out;
@@ -225,6 +243,9 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
         // Tools the server offers that the caller's scope keeps out, so an
         // empty result can say it was the scope and not the server.
         let mut scoped_out = 0usize;
+        // Tools for the server's app views only (MCP Apps visibility
+        // without "model"), likewise.
+        let mut app_only = 0usize;
         for t in &agg.tools {
             let Some((server_id, upstream_name)) = agg.reverse.get(t.name.as_ref()) else {
                 continue;
@@ -236,17 +257,45 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
             // tool's own name, but see the exposed one in `mcp_list_tools`.
             let exposed = t.name.as_ref();
             // The owner's per-tool switch, applied on every plane.
-            if snap.tool_disabled(exposed) {
+            if agg.tool_disabled(&snap, exposed) {
                 continue;
             }
             if !spec.allows(exposed, upstream_name) {
+                continue;
+            }
+            // A model is never offered a tool the MCP Apps extension keeps
+            // for the server's views (client-apps design §7.2): its rule, a
+            // host's MUST. `/mcp` still lists it, for the hosts.
+            if !super::resources::model_visible(t) {
+                app_only += 1;
                 continue;
             }
             if !scope.admits(exposed) {
                 scoped_out += 1;
                 continue;
             }
-            gated.push(spec.require_approval.requires(exposed, upstream_name));
+            if let Some(uri) = super::resources::ui_resource(t.meta.as_ref()) {
+                out.ui_resources
+                    .insert(exposed.to_string(), uri.to_string());
+            }
+            if agg.qualified.contains_key(exposed) {
+                let q = super::names::name_qualifier(&server.name);
+                let own = exposed
+                    .strip_prefix(q.as_str())
+                    .and_then(|r| r.strip_prefix("__"))
+                    .unwrap_or(exposed);
+                out.moved.insert(exposed.to_string(), own.to_string());
+            }
+            // Gated when the rule gates the tool under any name it has or
+            // would have (a collision's, before or after it): a rule written
+            // while a collision moved it holds once the collision ends.
+            gated.push(
+                spec.require_approval.requires(exposed, upstream_name)
+                    || agg.spellings.get(exposed).is_some_and(|all| {
+                        all.iter()
+                            .any(|n| spec.require_approval.requires(n, upstream_name))
+                    }),
+            );
             defs.push(ToolDef {
                 name: t.name.to_string(),
                 description: t.description.as_ref().map(|d| d.to_string()),
@@ -256,6 +305,16 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
         }
 
         if defs.is_empty() {
+            // An offline device's label is reported at once, and is no
+            // reason to refuse a turn (client-apps design §5.3).
+            if server.is_device() && !state.mcp.is_ready(server.id).await {
+                out.failed.push((
+                    spec.server_label.clone(),
+                    state.mcp.offline_words(server).await,
+                ));
+                out.offline.push(spec.server_label.clone());
+                continue;
+            }
             // Prefer the connection's own error — "container image not found"
             // is a far better answer than "the server exposed no tools".
             let detail = match state.mcp.status_view(server.id, &snap).await {
@@ -266,6 +325,12 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
                     "none of the tools this server offers are within the tool scope of {}",
                     scope.describe()
                 ),
+                _ if app_only > 0 => {
+                    "the tools this server offers here are for its app views only (MCP \
+                    Apps _meta.ui.visibility without \"model\"): a model is offered none of \
+                    them"
+                        .to_string()
+                }
                 _ => match &spec.allowed_tools {
                     Some(a) => format!("none of allowed_tools {a:?} are exposed by this server"),
                     None => "the server exposed no tools".to_string(),
@@ -345,8 +410,8 @@ pub const KB_LABEL: &str = super::RESERVED_KB_PREFIX;
 /// Checked before the registered servers, not after: these labels are reserved
 /// (`ops` refuses them as a tool prefix), and letting a server claim one by
 /// being *named* `docs` would let it answer documentation lookups on the
-/// gateway's behalf — the same shadowing [`build_aggregate`] already blocks for
-/// tool names.
+/// gateway's behalf — the same shadowing [`build_aggregate`] already keeps
+/// tool names out of.
 fn builtin_label(label: &str) -> Option<&'static str> {
     match label {
         SELF_ADMIN_LABEL => Some(SELF_ADMIN_LABEL),
@@ -467,25 +532,46 @@ pub struct McpExecutor {
     state: SharedState,
     ctx: RequestCtx,
     proto: &'static str,
-    /// The names the run listed from a registered server, and its id
-    /// ([`Self::with_listed`]).
+    /// The names the run was offered from a registered server, and its id
+    /// ([`Self::with_listed`]): the only names it calls.
     listed: HashMap<String, i64>,
+    /// Who the calls run as, for a device-hosted server's `_meta`
+    /// (client-apps design §5.5): the context's principal unless told
+    /// otherwise ([`Self::with_caller`]).
+    from: super::host::CallFrom,
+    /// The stored Chat thread the run's tasks belong to, and whether a
+    /// device may know its id ([`Self::with_late`]).
+    late: Option<(i64, bool)>,
 }
 
 impl McpExecutor {
     pub fn new(state: SharedState, ctx: RequestCtx) -> Self {
         Self {
+            from: super::host::CallFrom::of(&ctx),
             state,
             ctx,
             proto: crate::telemetry::RESPONSES_TOOL_PROTO,
             listed: HashMap::new(),
+            late: None,
         }
     }
 
-    /// Run each of these names on the server the run listed it from, and
-    /// nowhere else ([`McpManager::call_listed`](super::McpManager::call_listed)):
+    /// The calls run as `from` (a Chat turn's starter, which the owner's
+    /// turns do not carry in their context).
+    pub fn with_caller(mut self, from: super::host::CallFrom) -> Self {
+        self.from = from;
+        self
+    }
+
+    /// The names the run offered the model ([`Resolved::servers`]): each
+    /// runs on the server the run listed it from, and nowhere else
+    /// ([`McpManager::call_listed`](super::McpManager::call_listed)) —
     /// between the listing and the call another server may have come to own
-    /// the name. A name not among them routes by the aggregate as it is.
+    /// the name. **Any other name is refused**, as a tool error naming why:
+    /// a model that emits a name it was never offered (a guess, a prompt
+    /// injection) reaches no server, a device-hosted one least of all,
+    /// whose calls carry the run's caller as trusted `_meta`. Without this
+    /// call the executor runs nothing.
     pub fn with_listed(mut self, listed: HashMap<String, i64>) -> Self {
         self.listed = listed;
         self
@@ -498,6 +584,43 @@ impl McpExecutor {
     pub fn with_proto(mut self, proto: &'static str) -> Self {
         self.proto = proto;
         self
+    }
+
+    /// The run is a turn of stored Chat thread `thread_id` (MCP Tasks design
+    /// T4): a call that becomes an MCP task takes the late path — answered
+    /// `started, job <task id>` at once, the task followed across turns, its
+    /// result stored for the thread — instead of the bridge, which waits for
+    /// it within the row's `timeout_ms`. `device_sees_thread` is whether a
+    /// device may know the thread's id (not for Admin Chat, client-apps L3).
+    /// Only a stored thread can take a result later, so only the Chat sets
+    /// it.
+    pub fn with_late(mut self, thread_id: i64, device_sees_thread: bool) -> Self {
+        self.late = Some((thread_id, device_sees_thread));
+        self
+    }
+
+    /// Who this call runs as, where a task it starts goes, and who that
+    /// task's request rows are written under.
+    fn call_from(&self) -> super::host::CallFrom {
+        let mut from = self.from.clone();
+        from.logged_as = super::tasks::LoggedAs {
+            client_key: self.ctx.client_key.clone(),
+            proto: self.proto,
+        };
+        from.late = self
+            .late
+            .map(|(thread_id, device_sees_thread)| super::tasks::Late {
+                thread_id,
+                device_sees_thread,
+                call_id: crate::agent::current_call_id().unwrap_or_default(),
+            });
+        // A call an approval decided carries its approver to a device
+        // (`agent::approval`) — beside a task's `lmgw/task`, when it becomes
+        // one; any other carries none.
+        if let Some(by) = crate::agent::approval::approved_by() {
+            from = from.approved_by(by);
+        }
+        from
     }
 }
 
@@ -517,33 +640,41 @@ impl ToolExecutor for McpExecutor {
         // by name — hiding it from `tools/list` is not enough, because a model
         // working from an earlier list still reaches here. It arrives as a tool
         // error carrying the reason, like any other routing failure.
+        //
+        // Only a name the run offered is called, on the server it was offered
+        // from (`with_listed`); never routed by the aggregate as it stands.
         let routed = match self.listed.get(name) {
-            Some(&server) => {
-                self.state
-                    .mcp
-                    .call_listed(&snap, name, server, arguments)
-                    .await
-            }
-            None => self.state.mcp.call(&snap, name, arguments).await,
+            Some(&server) => Ok(self
+                .state
+                .mcp
+                .call_listed(&snap, name, server, arguments, &self.call_from())
+                .await),
+            None => Err(not_offered(name)),
         };
         let (server_name, outcome) = match routed {
-            Ok((result, server)) => {
-                let is_error = result.is_error == Some(true);
-                (
-                    Some(server),
-                    ToolOutcome {
-                        blocks: blocks_from_result(&result),
-                        is_error,
-                    },
-                )
-            }
-            // A routing/transport failure is still the *model's* to recover
-            // from — it can try another tool or answer without one — so it
-            // comes back as a tool error rather than aborting the run.
-            Err(e) => (
-                e.server().map(str::to_string),
-                ToolOutcome::error(e.to_string()),
-            ),
+            Err(why) => (None, ToolOutcome::error(why)),
+            Ok(routed) => match routed {
+                Ok((result, server)) => {
+                    let is_error = result.is_error == Some(true);
+                    (
+                        Some(server),
+                        ToolOutcome {
+                            blocks: blocks_from_result(&result),
+                            is_error,
+                            structured: result.structured_content.clone(),
+                            content: Some(content::of_result(&result)),
+                        },
+                    )
+                }
+                // A routing/transport failure is still the *model's* to
+                // recover from — it can try another tool or answer without
+                // one — so it comes back as a tool error rather than aborting
+                // the run.
+                Err(e) => (
+                    e.server().map(str::to_string),
+                    ToolOutcome::error(e.to_string()),
+                ),
+            },
         };
         super::ingress::record_tool_call(
             &self.state,
@@ -561,6 +692,15 @@ impl ToolExecutor for McpExecutor {
         .await;
         outcome
     }
+}
+
+/// The refusal of a name the run never offered the model
+/// ([`McpExecutor::with_listed`]).
+fn not_offered(name: &str) -> String {
+    format!(
+        "tool '{name}' was not offered to this run, so it was not called: a run calls only the \
+         tools its own MCP labels listed — attach the label that serves it"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +781,8 @@ impl ToolExecutor for SelfAdminExecutor {
             Ok(v) => ToolOutcome {
                 blocks: ToolResultBlock::one(builtin_text(&v)),
                 is_error: v.get("isError") == Some(&Value::Bool(true)),
+                structured: None,
+                content: None,
             },
             // An unknown name reaches the model as a tool error it can correct,
             // not as a failed run: the model picked the name, and it is the one
@@ -739,6 +881,8 @@ impl ToolExecutor for DocsExecutor {
             Ok(v) => ToolOutcome {
                 blocks: ToolResultBlock::one(builtin_text(&v)),
                 is_error: v.get("isError") == Some(&Value::Bool(true)),
+                structured: None,
+                content: None,
             },
             Err(e) => ToolOutcome::error(e.to_string()),
         };
@@ -846,6 +990,8 @@ impl ToolExecutor for KbExecutor {
             Ok(v) => ToolOutcome {
                 blocks: ToolResultBlock::one(builtin_text(&v)),
                 is_error: v.get("isError") == Some(&Value::Bool(true)),
+                structured: None,
+                content: None,
             },
             Err(e) => ToolOutcome::error(e.to_string()),
         };
@@ -889,8 +1035,9 @@ fn builtin_text(v: &Value) -> String {
 /// has one executor. Dispatch is on the tool's name against **the built-in
 /// names this run actually resolved**, not on the `lmgw__`/`docs__` prefix: a
 /// run that never attached the self-admin toolset must not be able to reach it
-/// by having the model guess a name. Everything else goes to MCP, whose router
-/// already answers unknown names with a tool error the model can correct.
+/// by having the model guess a name. Everything else goes to MCP, which calls
+/// only the names the run offered and answers any other with a tool error
+/// the model can correct ([`McpExecutor::with_listed`]).
 pub struct SplitExecutor {
     admin: SelfAdminExecutor,
     docs: DocsExecutor,
@@ -963,11 +1110,12 @@ fn preview(blocks: &[ToolResultBlock]) -> String {
     text.chars().take(200).collect()
 }
 
-/// `CallToolResult` → IR blocks (§7). This is the conversion the block-shaped
-/// `ToolResult` exists for: an MCP tool that returns an image or structured
-/// content reaches the model as an image or structured content, instead of
-/// being stringified on the way in.
-fn blocks_from_result(result: &rmcp::model::CallToolResult) -> Vec<ToolResultBlock> {
+/// `CallToolResult` → IR blocks (§7), what the model is given of it. This is
+/// the conversion the block-shaped `ToolResult` exists for: an MCP tool that
+/// returns an image reaches the model as an image, instead of being
+/// stringified on the way in. Its `structuredContent` only when `content` is
+/// empty (below).
+pub(crate) fn blocks_from_result(result: &rmcp::model::CallToolResult) -> Vec<ToolResultBlock> {
     let mut out: Vec<ToolResultBlock> = Vec::new();
     for c in &result.content {
         let raw = match serde_json::to_value(c) {
@@ -1020,9 +1168,14 @@ fn blocks_from_result(result: &rmcp::model::CallToolResult) -> Vec<ToolResultBlo
         };
         out.push(block);
     }
-    // `structuredContent` is the MCP-native way to return data rather than
-    // prose, and it is exactly what Gemini's functionResponse wants.
-    if let Some(sc) = &result.structured_content {
+    // `content` is what MCP gives the model, `structuredContent` what it
+    // gives the host and its views (client-apps design §7.5, the owner,
+    // 2026-10-09): a tool that sends both has said it twice, and the model
+    // reads `content` only. A result whose `content` is empty has said it
+    // only there, so the model gets it then — as structured JSON, which is
+    // also what Gemini's functionResponse wants. The host's copy travels
+    // beside the blocks (`ToolOutcome::structured`).
+    if let (true, Some(sc)) = (result.content.is_empty(), &result.structured_content) {
         out.push(ToolResultBlock::Json { value: sc.clone() });
     }
     if out.is_empty() {

@@ -7,6 +7,8 @@ description = "Self-hosted LLM API gateway (tray app)"
 
 [dependencies]
 lmgw-core = { path = "../crates/lmgw-core" }
+# The install step and its host check (updater.rs); the feed is lmgw-core's.
+lmgw-update = { path = "../crates/lmgw-update" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"

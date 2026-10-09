@@ -141,7 +141,7 @@ def dist_stale():
     if not os.path.exists(index):
         return "crates/lmgw-ui/dist/index.html does not exist"
     built = os.path.getmtime(index)
-    sources = git("ls-files", "crates/lmgw-ui", "crates/lmgw-api-types", "crates/lmgw-client").split("\n")
+    sources = git("ls-files", "crates/lmgw-ui", "crates/lmgw-ui-kit", "crates/lmgw-api-types", "crates/lmgw-client").split("\n")
     newer = [f for f in sources if f and os.path.exists(os.path.join(ROOT, f))
              and os.path.getmtime(os.path.join(ROOT, f)) > built]
     if newer:
@@ -285,7 +285,7 @@ def main():
             clauses.append(f"(package({CORE}) & binary(it) & ({' | '.join(alts)}))")
 
     # --- trunk and worklets ---------------------------------------------------------
-    ui = [f for f in files if f.startswith((UI_DIR, CLIENT_DIR, "crates/lmgw-api-types/"))]
+    ui = [f for f in files if f.startswith((UI_DIR, "crates/lmgw-ui-kit/", CLIENT_DIR, "crates/lmgw-api-types/"))]
     stale = dist_stale()
     if wide:
         trunk, why = 1, f"{wide[0]} is workspace-wide"

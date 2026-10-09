@@ -70,7 +70,8 @@ impl Rig {
             .await
             .unwrap()
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .map(|w| w.id);
         (id, watch)
     }
 

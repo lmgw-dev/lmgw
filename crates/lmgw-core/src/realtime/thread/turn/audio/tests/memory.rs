@@ -33,6 +33,7 @@ async fn bound_core() -> crate::realtime::session::Core {
         taken: bind.taken,
         taken_by: bind.taken_by,
         fence: bind.fence,
+        tasks: Default::default(),
     };
     let (sink, _frames) = futures::channel::mpsc::unbounded();
     let ids = Arc::new(crate::realtime::ids::Ids::new());

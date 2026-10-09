@@ -16,6 +16,15 @@ Two shapes for `/chat/completions`, picked off the request body:
   readout: STREAM_DELAY=0.05 lands around 20 tok/s). Without `stream` the same
   answer comes back as one JSON body.
 
+* **Tool calls** (`TOOL_SCRIPT` set) — a request that carries `tools` is
+  answered with the next scripted turn's tool calls (`finish_reason:
+  tool_calls`), in order, one list per turn; a request whose last message has
+  role `tool` is answered with the tool results echoed as text ("Tool result:
+  <content>"). Both streamed (OpenAI `tool_calls` deltas) and not. When the
+  script is used up, requests with `tools` fall through to the shapes above.
+  Lets a live check drive a hosted MCP tool through a Chat turn or a bound
+  realtime turn with no model.
+
 Four more routes, matched on the request path (before the shapes above, which
 never look at the path at all and would otherwise swallow them): `/tokenize`
 and `/apply-template` answer in llama-server's own shape (api-docs design
@@ -36,6 +45,15 @@ Environment:
                      so a knowledge-base search finds the right file) instead of the
                      fixed 3-number vector — for driving the Knowledge page
                      (scripts/knowledge-setup.sh, scripts/drive/knowledge.json)
+  TOOL_SCRIPT=<json> scripted tool calls: a JSON list of turns, each a list of
+                     {"name": <tool>, "arguments": <object>} (an optional "id"
+                     is honoured). Example, one call then one with two:
+                     [[{"name":"echo","arguments":{"text":"hi"}}],
+                      [{"name":"a","arguments":{}},{"name":"b","arguments":{}}]]
+                     A turn is consumed by the next request that carries `tools`
+                     and does not end in a tool result; the tool result then
+                     comes back echoed as text. TOOL_SCRIPT=@<path> reads the
+                     JSON from a file
   ECHO=1             streamed chat answers "Echo: <last user message>" instead of
                      the canned text; a trailing assistant message (a prefill,
                      as the Chat's Continue sends) is continued with "…and then
@@ -53,6 +71,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import wave
 import zlib
@@ -65,6 +84,24 @@ STREAM_TOKENS = int(os.environ.get("STREAM_TOKENS", "80"))
 STREAM_CODE = os.environ.get("STREAM_CODE", "1") != "0"
 ECHO = os.environ.get("ECHO", "0") == "1"
 EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "0"))
+
+
+def load_tool_script():
+    raw = os.environ.get("TOOL_SCRIPT", "").strip()
+    if raw.startswith("@"):
+        with open(raw[1:]) as f:
+            raw = f.read()
+    turns = json.loads(raw) if raw else []
+    if not isinstance(turns, list) or not all(
+        isinstance(t, list) and all(isinstance(c, dict) and "name" in c for c in t) for t in turns
+    ):
+        sys.exit("TOOL_SCRIPT must be a JSON list of turns, each a list of {name, arguments}")
+    return turns
+
+
+TOOL_TURNS = load_tool_script()
+TOOL_LOCK = threading.Lock()
+TOOL_NEXT = [0]  # index of the next unused turn
 
 # Matched against the mail's own text only — deliberately narrow keys, so the
 # List-Unsubscribe header every mail carries does not turn everything into a
@@ -219,6 +256,33 @@ def echo_pieces(messages):
     return re.findall(r"\S+\s*", f"Echo: {last}")
 
 
+def trailing_tool_results(messages):
+    """Contents of the tool messages ending the conversation, or None."""
+    out = []
+    for m in reversed(messages):
+        if m.get("role") != "tool":
+            break
+        out.append(message_text(m))
+    return list(reversed(out)) or None
+
+
+def tool_calls_wire(calls, turn):
+    """One scripted turn as OpenAI `tool_calls` entries (arguments as a JSON string)."""
+    out = []
+    for i, c in enumerate(calls):
+        args = c.get("arguments", {})
+        out.append({
+            "index": i,
+            "id": c.get("id") or f"call_mock_{turn}_{i}",
+            "type": "function",
+            "function": {
+                "name": c["name"],
+                "arguments": args if isinstance(args, str) else json.dumps(args),
+            },
+        })
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     # Chunked framing, so a streamed answer is delimited by the protocol rather
     # than by closing the socket — the client sees the same shape a real
@@ -312,6 +376,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        scripted = self.scripted_tools(req)
+        if scripted is not None:
+            kind, payload = scripted
+            if req.get("stream"):
+                self.stream_chat(req, pieces=payload if kind == "text" else None,
+                                 tool_calls=payload if kind == "calls" else None)
+            else:
+                self.complete_scripted(req, kind, payload)
+            return
+
         if req.get("stream"):
             self.stream_chat(req)
             return
@@ -348,10 +422,48 @@ class Handler(BaseHTTPRequestHandler):
             },
         })
 
-    def stream_chat(self, req):
+    def scripted_tools(self, req):
+        """("text", pieces) for a request ending in tool results, ("calls",
+        wire entries) for the next scripted turn, None when the tool mode does
+        not apply (no TOOL_SCRIPT, no `tools`, script used up)."""
+        if not TOOL_TURNS:
+            return None
+        results = trailing_tool_results(req.get("messages", []))
+        if results is not None:
+            return "text", re.findall(r"\S+\s*", "Tool result: " + "\n".join(results))
+        if not req.get("tools"):
+            return None
+        with TOOL_LOCK:
+            turn = TOOL_NEXT[0]
+            if turn >= len(TOOL_TURNS):
+                return None
+            TOOL_NEXT[0] += 1
+        return "calls", tool_calls_wire(TOOL_TURNS[turn], turn)
+
+    def complete_scripted(self, req, kind, payload):
+        if DELAY:
+            time.sleep(DELAY)
+        msg = {"role": "assistant", "content": "".join(payload) if kind == "text" else None}
+        if kind == "calls":
+            msg["tool_calls"] = [{k: v for k, v in c.items() if k != "index"} for c in payload]
+        self._json(200, {
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "model": req.get("model", "triage"),
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop" if kind == "text" else "tool_calls",
+                "message": msg,
+            }],
+            "usage": {"prompt_tokens": 420, "completion_tokens": 8, "total_tokens": 428},
+        })
+
+    def stream_chat(self, req, pieces=None, tool_calls=None):
         model = req.get("model", "triage")
         include_usage = bool(req.get("stream_options", {}).get("include_usage"))
-        pieces = echo_pieces(req.get("messages", [])) if ECHO else answer_pieces(STREAM_TOKENS)
+        if pieces is None:
+            pieces = [] if tool_calls else (
+                echo_pieces(req.get("messages", [])) if ECHO else answer_pieces(STREAM_TOKENS))
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -378,7 +490,21 @@ class Handler(BaseHTTPRequestHandler):
                 if STREAM_DELAY:
                     time.sleep(STREAM_DELAY)
                 self._sse(frame({"content": piece}))
-            self._sse(frame({}, finish="stop"))
+            for c in tool_calls or []:
+                # OpenAI shape: name + id first, then the arguments in fragments.
+                if STREAM_DELAY:
+                    time.sleep(STREAM_DELAY)
+                fn = c["function"]
+                self._sse(frame({"tool_calls": [{
+                    "index": c["index"], "id": c["id"], "type": "function",
+                    "function": {"name": fn["name"], "arguments": ""}}]}))
+                args = fn["arguments"]
+                half = max(1, len(args) // 2)
+                for frag in (args[:half], args[half:]):
+                    if frag:
+                        self._sse(frame({"tool_calls": [{
+                            "index": c["index"], "function": {"arguments": frag}}]}))
+            self._sse(frame({}, finish="tool_calls" if tool_calls else "stop"))
             if include_usage:
                 self._sse(frame({}, usage={
                     "prompt_tokens": 420,

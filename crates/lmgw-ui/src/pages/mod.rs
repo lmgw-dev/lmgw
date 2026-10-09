@@ -19,6 +19,7 @@ mod candidate_alias_editor;
 pub mod chat;
 /// Message actions: Copy, Edit, Delete, Regenerate, Continue.
 mod chat_actions;
+mod chat_approvals;
 mod chat_attach;
 /// Markdown to HTML for replies: math spans, `\(…\)` rewrite, raw HTML escaped.
 /// Chat folders: sidebar grouping, drag-and-drop, folder settings.
@@ -27,6 +28,8 @@ mod chat_folders;
 /// Knowledge bases in the Chat: settings section, `#` picker, chips.
 mod chat_knowledge;
 mod chat_markdown;
+/// The personality-profile editor page and the Chat page's profile pickers.
+mod chat_profiles;
 /// A chat thread's `x-lmgw-reasoning*` overrides: fields, checks, header line.
 mod chat_reasoning;
 /// What a finished reply says of itself: who answered, whether it was stored.
@@ -45,6 +48,8 @@ mod chat_stream;
 /// The Chat page following what other writers change (`/api/events`' `chat`
 /// frame).
 mod chat_sync;
+/// MCP Tasks in the Chat: a late result's card, the jobs strip, Answer.
+mod chat_tasks;
 /// Temporary chats: sidebar group, banner, Keep, silent discard.
 mod chat_temp;
 /// One streamed turn, however it started.
@@ -90,6 +95,7 @@ pub use audio_lab::AudioLab;
 pub use backends::Backends;
 pub use benchmarks::Benchmarks;
 pub use chat::Chat;
+pub use chat_profiles::ChatProfiles;
 pub use conversations::TrafficConversations;
 pub use docs::Docs;
 pub use downloads::Downloads;

@@ -29,14 +29,14 @@ async fn set_fallback_on_external(f: &Fixture, on: bool) {
 /// container's PID in the background the first time it sees it, so the frame
 /// right after a start may still say "being read".
 pub(super) async fn until_vram(f: &Fixture, what: &str, ready: impl Fn(&Value) -> bool) -> Value {
-    for _ in 0..200 {
+    let mut wait = common::patience::Wait::new(what);
+    loop {
         let v = vram_status(&f.gateway).await;
         if ready(&v) {
             return v;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        wait.again(Some(&v)).await;
     }
-    panic!("{what}: {}", vram_status(&f.gateway).await);
 }
 
 /// The motivating case: a game holds VRAM lmgw cannot free. With every lmgw

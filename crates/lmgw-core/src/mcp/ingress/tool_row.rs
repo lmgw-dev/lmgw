@@ -148,6 +148,9 @@ async fn write(
             }),
         ),
         class: crate::telemetry::RequestClass::Tool,
+        // Who approved it, when an approval decided it (`agent::approval`).
+        approved_by: crate::agent::approval::approved_by()
+            .map(|by| crate::agent::approval::row_label(&by)),
         ..Default::default()
     };
     let log_id = store::insert_request_log(&state.db, &row)

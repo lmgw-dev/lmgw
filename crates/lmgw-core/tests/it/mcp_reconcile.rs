@@ -281,7 +281,16 @@ async fn a_connect_whose_caller_hangs_up_still_settles() {
     let st = state.clone();
     let call = tokio::spawn(async move {
         let snap = st.snapshot();
-        let _ = st.mcp.call_listed(&snap, "held__echo", id, None).await;
+        let _ = st
+            .mcp
+            .call_listed(
+                &snap,
+                "held__echo",
+                id,
+                None,
+                &lmgw_core::mcp::host::CallFrom::gateway(),
+            )
+            .await;
     });
     until_connecting(&state, id).await;
     call.abort();

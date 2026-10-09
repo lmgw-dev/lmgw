@@ -154,6 +154,61 @@ modules = ["device_chat"]
 why = "a paired device in the Chat: what it reaches and what it runs as (client-apps WP3)"
 
 [[map]]
+paths = ["crates/lmgw-core/src/mcp/host.rs", "crates/lmgw-core/src/mcp/host/*",
+         "crates/lmgw-core/src/mcp/scope.rs", "crates/lmgw-core/src/mcp/scope/*",
+         "crates/lmgw-core/src/mcp/mod.rs", "crates/lmgw-core/src/mcp/connect.rs",
+         "crates/lmgw-core/src/mcp/lazy_list.rs", "crates/lmgw-core/src/mcp/listed_call.rs",
+         "crates/lmgw-core/src/mcp/exec.rs", "crates/lmgw-core/src/mcp/handler.rs",
+         "crates/lmgw-core/src/store/device_servers.rs", "crates/lmgw-core/src/store/keys.rs",
+         "crates/lmgw-core/src/ops/mcp_server.rs", "crates/lmgw-core/src/ops/mcp_server/*",
+         "crates/lmgw-core/src/ops/keys.rs", "crates/lmgw-core/src/web/agentchat.rs",
+         "crates/lmgw-api-types/src/mcp_host.rs"]
+modules = ["mcp_host", "device_chat", "mcp_ingress", "mcp_reconcile", "route_walk", "mcp_tasks"]
+why = "a paired device's MCP host link, its row and who reaches its tools (client-apps WP7)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/mcp/resources.rs", "crates/lmgw-core/src/mcp/resources/*",
+         "crates/lmgw-core/src/mcp/ingress.rs", "crates/lmgw-core/src/mcp/ingress/*",
+         "crates/lmgw-core/src/mcp/mod.rs", "crates/lmgw-core/src/mcp/exec.rs",
+         "crates/lmgw-core/src/mcp/handler.rs", "crates/lmgw-core/src/mcp/host/*",
+         "crates/lmgw-core/src/mcp/scope.rs", "crates/lmgw-core/src/mcp/scope/*",
+         "crates/lmgw-core/src/web/agentchat.rs", "crates/lmgw-core/src/agent.rs"]
+modules = ["mcp_resources", "mcp_host", "mcp_ingress"]
+why = "/mcp's resources and the MCP Apps metadata: routing, namespacing, reach, visibility, the tool frame (client-apps WP8)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/store/mcp_tasks.rs", "crates/lmgw-core/migrations/0073_mcp_tasks.sql",
+         "crates/lmgw-core/src/ops/mcp_host_settings.rs", "crates/lmgw-core/src/agent.rs",
+         "crates/lmgw-core/src/config/mcp.rs"]
+modules = ["mcp_tasks"]
+why = "MCP Tasks: the followed table, the poll interval setting, the call id a task records (MCP Tasks WP1)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat_tasks.rs", "crates/lmgw-core/src/web/chat_tasks/*",
+         "crates/lmgw-core/src/store/mcp_tasks/*", "crates/lmgw-core/src/store/feed/*",
+         "crates/lmgw-core/migrations/0075_chat_message_task.sql",
+         "crates/lmgw-core/src/openapi/planes/chat_tasks.rs", "crates/lmgw-core/src/mcp/tasks/*",
+         "crates/lmgw-core/src/web/chat_turn.rs", "crates/lmgw-core/src/web/chat_turn/*",
+         "crates/lmgw-core/src/web/agentchat.rs", "crates/lmgw-core/src/store/chat_messages.rs",
+         "crates/lmgw-core/src/store/mcp_servers.rs", "crates/lmgw-core/src/store/device_servers.rs",
+         "crates/lmgw-api-types/src/chat/*", "crates/lmgw-client/src/requests/tasks.rs"]
+modules = ["mcp_tasks", "chat_feed", "chat_golden", "chat_approvals", "chat_actions", "migrations"]
+why = "MCP Tasks in the Chat: a late result's delivery and rendering, answer and cancel, task.*, the removals that end tasks (MCP Tasks WP2)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/store/chat_approvals.rs", "crates/lmgw-core/src/web/chat_approvals.rs",
+         "crates/lmgw-core/src/web/agentchat.rs", "crates/lmgw-core/src/web/agentchat/*",
+         "crates/lmgw-core/src/web/chat_turn.rs", "crates/lmgw-core/src/web/chat_turn/*",
+         "crates/lmgw-core/src/agent.rs", "crates/lmgw-core/src/agent/*",
+         "crates/lmgw-core/src/realtime/thread/*", "crates/lmgw-core/src/realtime/lifecycle/bound.rs",
+         "crates/lmgw-core/src/realtime/session/events.rs", "crates/lmgw-core/src/mcp/exec.rs",
+         "crates/lmgw-core/src/mcp/ingress/tool_row.rs", "crates/lmgw-core/src/web/chat_feed/*",
+         "crates/lmgw-api-types/src/chat_approvals.rs",
+         "crates/lmgw-core/migrations/0074_chat_pending_approvals.sql"]
+modules = ["chat_approvals", "agents_run_responses"]
+why = "MCP approvals in the Chat: the gated turn, the decision and its resume, by, the feed, the bound session (client-apps WP9)"
+
+[[map]]
 paths = ["crates/lmgw-core/src/store/feed.rs", "crates/lmgw-core/src/store/chat*.rs",
          "crates/lmgw-core/src/store/agent_catalog.rs", "crates/lmgw-core/src/web/chat*.rs",
          "crates/lmgw-core/src/web/chat_*/*", "crates/lmgw-core/src/web/api_agents.rs",
@@ -171,6 +226,38 @@ paths = ["crates/lmgw-core/src/web/chat_feed.rs", "crates/lmgw-core/src/web/chat
          "crates/lmgw-core/src/store/feed.rs", "crates/lmgw-api-types/src/chat_changed.rs"]
 modules = ["chat_events", "openapi_live::events_initial_frames_validate"]
 why = "the dashboard's chat frame on /api/events: the feed's records and the message marks every message write leaves (client-apps §3.6, 2026-10-08)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/store/chat_profiles.rs", "crates/lmgw-core/src/store/chat_profiles/*",
+         "crates/lmgw-core/src/config/chat_profile.rs", "crates/lmgw-core/src/config/chat_profile/*",
+         "crates/lmgw-core/src/store/chat.rs", "crates/lmgw-core/src/store/chat_folders.rs",
+         "crates/lmgw-core/src/store/chat_keep.rs", "crates/lmgw-api-types/src/chat_profiles.rs",
+         "crates/lmgw-api-types/src/chat_profiles/*", "crates/lmgw-core/migrations/0071_chat_profiles.sql"]
+modules = ["chat_profiles", "chat_profiles_", "chat_golden", "chat_folders", "chat_temporary"]
+why = "personality profiles: the table, its writes, the snapshot, and the thread, folder and Keep writes that carry profile_id (personality-profiles WP1)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/ops/chat_profiles.rs", "crates/lmgw-core/src/web/chat_profiles.rs",
+         "crates/lmgw-core/src/openapi/planes/chat_profiles.rs", "crates/lmgw-core/src/store/feed.rs",
+         "crates/lmgw-api-types/src/chat_feed.rs", "crates/lmgw-core/src/web/chat_export.rs",
+         "crates/lmgw-core/src/web/chat/settings.rs", "crates/lmgw-core/src/web/chat_folders/*"]
+modules = ["chat_profiles",
+           "device_chat::profiles::a_device_lists_creates_edits_and_deletes_profiles",
+           "device_chat::profiles::a_folder_s_profile_reaches_its_current_thread",
+           "device_chat::profiles::a_tts_alias_outside_the_key_s_scope_is_refused",
+           "device_chat::profiles::an_admin_thread_stays_out_of_reach",
+           "chat_feed::profiles::each_write_is_an_event_every_reader_hears_and_a_resync_repeats_the_list"]
+why = "personality profiles' routes, assignment, feed events and setting (personality-profiles WP4)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat_profiles.rs", "crates/lmgw-core/src/web/chat_profiles/*",
+         "crates/lmgw-core/src/ops/chat_profiles.rs", "crates/lmgw-core/src/proxy/count.rs",
+         "crates/lmgw-core/src/web/chat_profile.rs", "crates/lmgw-core/src/web/chat_profile/*",
+         "crates/lmgw-core/src/web/chat_voice/speech.rs", "crates/lmgw-core/src/web/chat_voice/speech/*",
+         "crates/lmgw-core/src/web/chat_voice/resolve.rs", "crates/lmgw-core/src/realtime/thread.rs",
+         "crates/lmgw-core/src/realtime/thread/*", "crates/lmgw-client/src/requests.rs"]
+modules = ["chat_profiles_try", "chat_profiles::reset", "realtime_chat_thread::profile"]
+why = "personality profiles' Preview, Test, Speak and reset, and a bound session re-shaped by its thread's voice (personality-profiles WP5)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/web/chat/rows.rs", "crates/lmgw-core/src/web/chat_repo.rs",
@@ -210,10 +297,12 @@ why = "the inference proxy"
 
 [[map]]
 paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
-         "crates/lmgw-core/src/ir.rs", "crates/lmgw-core/src/responses.rs"]
+         "crates/lmgw-core/src/ir.rs", "crates/lmgw-core/src/ir/*",
+         "crates/lmgw-core/src/responses.rs"]
 modules = ["egress_adapters", "ingress_roundtrip", "ingress_tool_results", "e2e_proxy",
            "count_compat", "responses_api", "responses_key_ref", "anthropic_beta",
-           "chat_replay_shapes", "stream_usage"]
+           "chat_replay_shapes", "stream_usage", "gemini_signatures",
+           "mcp_tasks::thread::goldens"]
 why = "the protocol adapters"
 
 [[map]]

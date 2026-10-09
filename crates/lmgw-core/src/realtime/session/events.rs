@@ -65,6 +65,13 @@ impl Core {
             ClientEvent::SessionUpdate { event_id, session } => {
                 self.session_update(event_id.as_deref(), &session).await
             }
+            // An answer to a call the thread's turn waits on is the one item
+            // a bound session takes (client-apps design §6.4).
+            ClientEvent::ConversationItemCreate {
+                event_id,
+                item: item @ super::super::protocol::Item::McpApprovalResponse(_),
+                ..
+            } if self.bound.is_some() => self.approval_answered(event_id.as_deref(), item),
             // The thread's history is a bound session's conversation (§8.1).
             ClientEvent::ConversationItemCreate { event_id, .. } if self.bound.is_some() => self
                 .error(
@@ -289,7 +296,7 @@ impl Core {
 /// Echo the resolutions in `session.lmgw.resolved` (§5.1–§5.3), and what
 /// the TTS alias speaks with (WP10 D3) — under `realtime`'s settings and the
 /// seed lmgw drew for the session (`expressive`).
-pub(super) fn set_resolved(
+pub(in crate::realtime) fn set_resolved(
     s: &mut Session,
     chat: &ChatResolution,
     asr: &AsrResolution,

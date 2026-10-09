@@ -13,13 +13,14 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use super::session::{hearing, quiet, rows, session, NOT_TRANSCRIBED};
-use crate::realtime_chat_thread::{eventually, of_type, say, until_type};
+use crate::realtime_chat_thread::{eventually, of_type, say, until_type, World};
 use crate::support::gpu_world::{ANSWER, GIB};
 use crate::support::realtime_audio::Asr;
+use crate::support::realtime_fakes::Ws;
 
 #[tokio::test]
 async fn a_failed_transcription_plays_the_reply_and_marks_the_row() {
@@ -93,8 +94,8 @@ async fn a_failed_transcription_before_the_model_answered_is_said_and_ends_the_t
         500,
         json!({"error": {"message": "engine fell over"}}),
     ));
-    say(&mut ws).await;
-    let events = until_type(&mut ws, "response.done").await;
+    let mut events = say_before_the_turn_fails(&w, &mut ws).await;
+    events.extend(until_type(&mut ws, "response.done").await);
     let failed = of_type(
         &events,
         "conversation.item.input_audio_transcription.failed",
@@ -123,8 +124,8 @@ async fn a_turn_whose_speech_recognition_went_away_is_never_heard() {
         s.realtime.asr_alias = String::new();
     })
     .await;
-    say(&mut ws).await;
-    let events = until_type(&mut ws, "response.done").await;
+    let mut events = say_before_the_turn_fails(&w, &mut ws).await;
+    events.extend(until_type(&mut ws, "response.done").await);
     let failed = of_type(
         &events,
         "conversation.item.input_audio_transcription.failed",
@@ -137,6 +138,41 @@ async fn a_turn_whose_speech_recognition_went_away_is_never_heard() {
     all.extend(quiet(&mut ws).await);
     assert!(of_type(&all, "lmgw.chat.user").is_empty(), "{all:?}");
     assert!(rows(&w, tid).await.is_empty(), "nothing is written");
+}
+
+/// [`say`], with the turn's failure held back until the response it asks
+/// for exists: the events up to and with its `response.created`.
+///
+/// A turn's transcription call first reads the thread (`asr_now`), and one
+/// that fails at once — no transcription model named, or an engine that
+/// answers 500 straight away — can beat the `response.create` sent right
+/// after the commit (the client was slow to write it, or the session took
+/// the failure first). The create then meets a turn already over and is
+/// refused with `empty_turn` before any `response.created`
+/// (`lifecycle/bound.rs`, as designed), and the response these tests are
+/// about never exists. The test store has one connection
+/// (`store::open_in_memory`), held here until the response is created: the
+/// read waits for it, so the failure lands on the response it is meant to
+/// end, every time.
+async fn say_before_the_turn_fails(w: &World, ws: &mut Ws) -> Vec<Value> {
+    assert_eq!(
+        w.state.db.options().get_max_connections(),
+        1,
+        "the turn's read waits only while this test holds the store's only connection"
+    );
+    let store = w.state.db.acquire().await.unwrap();
+    say(ws).await;
+    let events = until_type(ws, "response.created").await;
+    drop(store);
+    assert!(
+        of_type(
+            &events,
+            "conversation.item.input_audio_transcription.failed"
+        )
+        .is_empty(),
+        "the turn failed before its response was created: {events:?}"
+    );
+    events
 }
 
 /// The session ends while a heard response is still held: the turn's

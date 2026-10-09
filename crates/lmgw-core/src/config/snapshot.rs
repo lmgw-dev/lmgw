@@ -53,6 +53,11 @@ pub struct Snapshot {
     /// Presence means disabled; an empty map is "everything is offered", which
     /// is where every install starts.
     pub disabled_tools: HashMap<String, DisabledTool>,
+    /// Every personality profile (personality-profiles design D10), in name
+    /// order: voice resolution and prompt assembly read a thread's profile
+    /// synchronously, and an edit reaches a bound session's cached stages
+    /// as any config change does. Looked up with [`Snapshot::chat_profile`].
+    pub chat_profiles: Vec<ChatProfile>,
     /// A benchmark run's GPU lease — runtime state, never loaded from the
     /// store: carried over by every publish and read through
     /// [`Snapshot::gpu_block`] (see [`crate::bench::lease`]).

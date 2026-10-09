@@ -340,6 +340,7 @@ async fn a_device_s_write_waiting_on_an_attach_rechecks_its_reach() {
         t.mcp_tools = vec![store::ThreadMcp {
             server_label: "lmgw".into(),
             allowed_tools: None,
+            require_approval: None,
         }];
         store::update_chat_thread_settings(&w.state.db, &t, SeedWrite::Keep, Some("the dashboard"))
             .await

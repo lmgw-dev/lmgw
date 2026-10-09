@@ -9,6 +9,11 @@
 //!   heard when one is cut, from the player's cursor;
 //! - [`feed`]: the Chat change feed — an SSE decoder, the typed events, the
 //!   cursor to resume from;
+//! - [`mcp_host`]: a device's MCP host link — its refusals, its closes,
+//!   and the `_meta` lmgw stamps on the calls it forwards;
+//! - [`mcp_apps`]: MCP Apps on `/mcp` — the revision lmgw follows, the
+//!   extension's identifiers, the Chat `tool` ready and result frames a
+//!   host reads;
 //! - [`requests`]: the requests of the routes a client uses, and readers of
 //!   their answers;
 //! - [`base64`]: the audio's encoding.
@@ -33,6 +38,8 @@ pub use lmgw_api_types as types;
 
 pub mod base64;
 pub mod feed;
+pub mod mcp_host;
+pub use lmgw_api_types::mcp_apps;
 pub mod realtime;
 pub mod requests;
 pub mod truncate;

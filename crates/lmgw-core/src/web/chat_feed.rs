@@ -43,12 +43,15 @@ use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 use crate::store::feed as table;
 
+mod approvals;
 pub(super) mod dashboard;
+mod devices;
 mod live;
 mod marks;
 mod opening;
 mod render;
 mod stream;
+mod tasks;
 
 pub(crate) use live::{hold_of, Ending, LiveFeed, TurnObserver, TurnWatch, VoiceEnd, VoiceWatch};
 
@@ -332,6 +335,9 @@ async fn open(
     let mut out = VecDeque::from([stream::frame(event::HELLO, &hello)]);
     if let Some(reason) = start.resync {
         out.push_back(stream::resync(reason));
+        // The profile list follows every `resync` (personality-profiles
+        // design §3.2).
+        out.extend(render::profile_list(state));
     }
     // Counted as the device's feed link, `last_seen_at` stamped; watched
     // for revocation for every key (§1.6).

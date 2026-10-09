@@ -74,6 +74,8 @@ impl Closed {
             blocks: ToolOutcome::error(self.says.as_str()).blocks,
             is_error: true,
             ms: 0,
+            structured: None,
+            content: ToolOutcome::error(self.says.as_str()).mcp_content(),
         }
     }
 }

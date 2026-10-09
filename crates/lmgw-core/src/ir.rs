@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+mod call_id;
+pub use call_id::{
+    call_id_with_signature, split_call_id, wire_call_id, wire_call_ids_in_messages_body,
+    wire_call_ids_in_responses_body, THOUGHT_SIGNATURE_MARKER, THOUGHT_SIGNATURE_TEXT_MARKER,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -20,6 +26,14 @@ pub enum ImageSource {
     Url { url: String },
     Base64 { data: String },
 }
+
+/// The id prefix of a tool call lmgw writes into a request itself, which
+/// no model made: a late MCP task result's `lmgw__job_result` call (MCP
+/// Tasks design §3.2, `lmgw_task_<row id>`). Such a call carries no
+/// model's signature, so where Gemini 3 wants a `thoughtSignature` the
+/// Gemini egress gives it the documented skip value, as it gives every
+/// step's first call without one (gateway design §7.1).
+pub const SYNTHETIC_CALL_ID_PREFIX: &str = "lmgw_task_";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -40,7 +54,10 @@ pub enum ContentPart {
         /// Base64 payload, without a `data:` prefix.
         data: String,
     },
-    /// Assistant-emitted tool invocation.
+    /// Assistant-emitted tool invocation. One lmgw wrote itself, which no
+    /// model made, has an id starting with [`SYNTHETIC_CALL_ID_PREFIX`]; one
+    /// a Gemini model made may carry its `thoughtSignature` inside the id
+    /// ([`split_call_id`]), which only the Gemini egress sends on.
     ToolUse {
         id: String,
         name: String,
@@ -504,14 +521,29 @@ impl ChatRequest {
     }
 
     /// Find the tool name for a tool-call id by scanning prior assistant
-    /// ToolUse parts (Gemini correlates results by name, not id).
+    /// ToolUse parts (Gemini correlates results by name, not id). The id
+    /// as given wins; failing that, the bare ids are compared, for a client
+    /// that kept a call's signature on the call but not on its result.
     pub fn tool_name_for_id(&self, id: &str) -> Option<&str> {
-        self.messages.iter().rev().find_map(|m| {
-            m.content.iter().find_map(|p| match p {
-                ContentPart::ToolUse { id: tid, name, .. } if tid == id => Some(name.as_str()),
-                _ => None,
+        self.tool_name_for_result(id, self.messages.len())
+    }
+
+    /// [`Self::tool_name_for_id`] for the result in `messages[at]`: the
+    /// nearest call at or before it wins, so an id that repeats in the
+    /// history (an older thread's per-answer `call_0`, an upstream that
+    /// numbers its calls per answer) pairs with its own step's call, not the
+    /// newest one.
+    pub fn tool_name_for_result(&self, id: &str, at: usize) -> Option<&str> {
+        let upto = &self.messages[..(at + 1).min(self.messages.len())];
+        let find = |same: &dyn Fn(&str) -> bool| {
+            upto.iter().rev().find_map(|m| {
+                m.content.iter().find_map(|p| match p {
+                    ContentPart::ToolUse { id: tid, name, .. } if same(tid) => Some(name.as_str()),
+                    _ => None,
+                })
             })
-        })
+        };
+        find(&|tid| tid == id).or_else(|| find(&|tid| wire_call_id(tid) == wire_call_id(id)))
     }
 }
 

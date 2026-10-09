@@ -13,10 +13,11 @@
 //! A thread can be both. Everything else about either is an ordinary chat
 //! thread: same sidebar, same model picker, same persistence, same Logs rows.
 //!
-//! **No approvals here.** `/v1/responses` can stop a run and hand a gated call
-//! back to the client; the Chat tab has no round trip to resume one, so threads
-//! resolve their servers with `require_approval: never` and the picker is where
-//! the owner decides what a thread may reach.
+//! **Approvals** (client-apps design §6). A thread's tools may wait for an
+//! approval (`ThreadMcp::require_approval`): the loop stops on a gated call
+//! with its siblings, the reply is saved with them ([`gated`]), and a
+//! decision resumes the turn (`web::chat_approvals`), which settles the
+//! decided calls before its first model call.
 //!
 //! ## Why this exists rather than "point an agent at /mcp"
 //!
@@ -33,7 +34,7 @@
 //! chat can inspect the gateway and nothing more, and the mutating tools are
 //! not even listed. The page says so, rather than failing mysteriously.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -49,7 +50,7 @@ use crate::agent::{
 };
 use crate::config::Route;
 use crate::error::GatewayError;
-use crate::ingress::responses::{ApprovalRule, McpToolSpec};
+use crate::ingress::responses::McpToolSpec;
 use crate::ingress::ClientProto;
 use crate::ir::{flatten_tool_result, ChatRequest, Completion, ContentPart, Message, Role, Usage};
 use crate::mcp::exec::{
@@ -63,8 +64,9 @@ use crate::store::ThreadMcp;
 use crate::telemetry::{ADMIN_PROTO, CHAT_TOOL_PROTO};
 
 mod claim;
+mod gated;
 mod heard;
-mod refused;
+pub(super) mod refused;
 mod unheard;
 
 /// `chat_threads.kind` for an Admin Chat thread.
@@ -88,6 +90,10 @@ pub struct ToolPlan {
     /// Tool mode's knowledge bases (chat-complete design §9.3): the `kb__*`
     /// tools, reaching exactly these bases.
     pub kb: Option<KbTools>,
+    /// The owner's approval floor for this thread (its own, and its
+    /// folder's): every entry's tools run under the strictest rule set for
+    /// the server it names (client-apps design §6.6).
+    pub floor: crate::mcp::exec::ApprovalFloor,
 }
 
 impl ToolPlan {
@@ -413,6 +419,12 @@ struct ChatSink {
     reasoning: String,
     usage: Usage,
     first_at: Option<Instant>,
+    /// The MCP Apps UI resource of each offered tool that links one
+    /// (`Resolved::ui_resources`): a result frame's `ui_resource`.
+    ui_resources: HashMap<String, String>,
+    /// A stored thread's: which call started an MCP task, for its result
+    /// frame's `task` (MCP Tasks design §4.3). `None` for a temporary one.
+    tasks: Option<super::chat_tasks::FrameTasks>,
 }
 
 impl ChatSink {
@@ -450,7 +462,12 @@ impl EventSink for ChatSink {
             // A new turn after tool calls continues the same visible answer:
             // the island renders one assistant bubble per send, with the tool
             // activity shown inline, which is what the transcript looks like.
-            LoopEvent::TurnStarted { .. } => true,
+            LoopEvent::TurnStarted { .. } => {
+                if let Some(t) = self.tasks.as_mut() {
+                    Box::pin(t.turn_started()).await;
+                }
+                true
+            }
             // Nothing said after a stop is relayed or kept.
             LoopEvent::Text(_) | LoopEvent::Reasoning(_) if self.stop.is_raised() => true,
             LoopEvent::Text(t) => {
@@ -479,33 +496,60 @@ impl EventSink for ChatSink {
                 )
                 .await
             }
+            // What a client that shows the call's MCP Apps view needs before
+            // the call runs (client-apps design §7.5): whether it waits for
+            // an approval, the label it came from and its view.
             LoopEvent::CallReady {
-                index, name, args, ..
+                index,
+                call_id,
+                name,
+                args,
+                server_label,
+                needs_approval,
             } => {
+                let ui_resource = self.ui_resources.get(&name);
                 self.emit_raw(
                     "tool",
                     json!({"event": "ready", "index": index, "name": name,
-                           "arguments": args})
+                           "arguments": args, "call_id": call_id,
+                           "server_label": server_label, "needs_approval": needs_approval,
+                           "ui_resource": ui_resource})
                     .to_string(),
                 )
                 .await
             }
+            // What an MCP Apps host needs besides the text (client-apps
+            // design §7.3, §7.5): the label the tool came from, the
+            // namespaced UI resource it links to, and the result as MCP has
+            // it — its content blocks as sent, its structured content. No
+            // bound of its own: a result is as large as its server sent it
+            // (a device's by `mcp.host_max_message_mb`).
             LoopEvent::CallResult {
                 index,
+                call_id,
                 name,
+                server_label,
                 blocks,
                 is_error,
                 ms,
-                ..
+                structured,
+                content,
             } => {
                 let (text, _) = flatten_tool_result(&blocks);
-                self.emit_raw(
-                    "tool",
-                    json!({"event": "result", "index": index, "name": name,
-                           "output": text, "is_error": is_error, "ms": ms})
-                    .to_string(),
-                )
-                .await
+                let ui_resource = self.ui_resources.get(&name);
+                let mut frame = json!({"event": "result", "index": index, "name": name,
+                       "output": text, "is_error": is_error, "ms": ms,
+                       "server_label": server_label, "ui_resource": ui_resource,
+                       "structured_content": structured, "content": content,
+                       "call_id": call_id});
+                // A call that started an MCP task says which (§4.3), so a
+                // client never reads it out of `started, job …`.
+                if let Some(t) = self.tasks.as_ref() {
+                    if let Some(task) = Box::pin(t.of_call(&call_id)).await {
+                        frame["task"] = task;
+                    }
+                }
+                self.emit_raw("tool", frame.to_string()).await
             }
             LoopEvent::Done { usage, reason } => {
                 self.usage = usage;
@@ -534,11 +578,14 @@ impl EventSink for ChatSink {
 /// reading still gets the partial turn saved (review R1 finding 1).
 pub(super) async fn run_send(
     state: SharedState,
-    turn: Turn,
+    mut turn: Turn,
     ir: ChatRequest,
     plan: ToolPlan,
     tx: Events,
 ) {
+    // A resumed turn's decided calls, settled before its first model call
+    // (client-apps design §6.3).
+    let resume = turn.take_resume();
     let started = Instant::now();
     let snap = state.snapshot();
     // A refusal that is no gateway error (a thread with no usable tool):
@@ -596,6 +643,10 @@ pub(super) async fn run_send(
     // server: an admin thread's automatic `lmgw__*` wiring, plus whatever
     // built-in toolset the thread attached by label below.
     let mut builtin_names: Vec<String> = Vec::new();
+    // The names the thread's labels offered, and the server each came from:
+    // the only registered-server names the turn calls (`with_listed`).
+    let mut offered: HashMap<String, i64> = HashMap::new();
+    let mut ui_resources: HashMap<String, String> = HashMap::new();
     if plan.admin {
         let defs = self_admin_tools(&snap);
         builtin_names.extend(defs.iter().map(|d| d.name.clone()));
@@ -614,6 +665,12 @@ pub(super) async fn run_send(
     // kb__read); the executor below restricts them to the thread's bases,
     // and a `kb` label the thread also attached by hand is the same toolset,
     // attached once.
+    // Which tools a collision moved, for the rules' spellings.
+    let agg = if plan.mcp.is_empty() {
+        crate::mcp::Aggregate::default()
+    } else {
+        state.mcp.aggregate(&snap).await
+    };
     let mut specs: Vec<McpToolSpec> = plan
         .mcp
         .iter()
@@ -621,16 +678,24 @@ pub(super) async fn run_send(
         .map(|m| McpToolSpec {
             server_label: m.server_label.clone(),
             allowed_tools: m.allowed_tools.clone(),
-            require_approval: ApprovalRule::Never,
+            // The thread's own gate (client-apps design §6.1), no looser
+            // than any rule the owner set for the server it names (§6.6).
+            require_approval: plan.floor.rule(&snap, &agg, &m.server_label, &plan.mcp),
         })
         .collect();
     if plan.kb.is_some() {
         specs.push(McpToolSpec {
             server_label: KB_LABEL.to_string(),
             allowed_tools: None,
-            require_approval: ApprovalRule::Never,
+            // The thread's `kb` entry and the owner's floor for it still
+            // gate them (client-apps design §6.6): tool mode adds the
+            // toolset, it never ungates it — with the entry removed too.
+            require_approval: plan.floor.rule(&snap, &agg, KB_LABEL, &plan.mcp),
         });
     }
+    // Every label that failed did so only because its device is offline
+    // (client-apps design §5.3): reported, and the turn runs without them.
+    let mut only_offline = false;
     if !specs.is_empty() {
         // The owner's own turn: the owner attached these labels, and the
         // gateway's scope reaches them. A device's turn resolves under its
@@ -656,13 +721,27 @@ pub(super) async fn run_send(
         // A thread may attach the same self-admin toolset an admin thread gets
         // automatically; the set is what dispatches, so duplicates are inert.
         builtin_names.extend(resolved.builtin.iter().cloned());
+        offered.extend(resolved.servers);
+        ui_resources.extend(resolved.ui_resources);
         tools.extend(resolved.tools);
+        only_offline = !resolved.failed.is_empty()
+            && resolved
+                .failed
+                .iter()
+                .all(|(label, _)| resolved.offline.contains(label));
     }
 
     // No tools at all: either self-admin is off, or every attached server
     // failed (each already reported above). Say which rather than letting the
     // model improvise an answer about a gateway or a search it cannot reach.
     if tools.is_empty() {
+        // A device being off never refuses a turn (client-apps design §5.3,
+        // R6): with only offline labels it runs as a plain chat turn.
+        if only_offline && !plan.admin {
+            // Boxed: the plain path's future inside this one's would make
+            // one state machine of both.
+            return Box::pin(super::chat::run_send(state, turn, ir, tx)).await;
+        }
         let msg = if plan.admin {
             "self-admin tools are switched off — set Self-admin tools under Settings → \
              Network & access to 'read only' or 'full' to use Admin Chat"
@@ -803,7 +882,14 @@ pub(super) async fn run_send(
             .with_client(DOCS_CLIENT)
             .charged_to(charged.clone()),
         builtin_names,
-        McpExecutor::new(state.clone(), ctx.clone()).with_proto(CHAT_TOOL_PROTO),
+        late(
+            &plan,
+            &turn,
+            McpExecutor::new(state.clone(), ctx.clone())
+                .with_proto(CHAT_TOOL_PROTO)
+                .with_caller(turn.caller().call_from())
+                .with_listed(offered),
+        ),
     );
     // Tool mode: the thread's bases and nothing else, whatever their
     // `mcp_visible` switch says (§9.4), with the thread's budget as the
@@ -830,8 +916,9 @@ pub(super) async fn run_send(
     // model call in flight then ends at its next await and still writes its
     // row (chat-voice design §7.2).
     let (stop_run, stop_signal) = proxy::stop_pair();
-    let cfg = RunConfig::new(tools, budget(&state), true)
+    let mut cfg = RunConfig::new(tools, budget(&state), true)
         .with_cancel(Cancel::signal(stop_signal.clone()));
+    cfg.resume = resume;
     // A heard voice turn's tools wait for its user row (`heard`), the
     // loop's claim let go meanwhile (`claim`).
     let exec = heard::HeardTools::new(&*exec, turn.user_row(), &stop_run, &runner.claim);
@@ -839,6 +926,10 @@ pub(super) async fn run_send(
     // What the loop's refusal below says its requests carried
     // (`TurnFrame::sent`).
     let images = crate::gate::media_parts(&ir).images > 0;
+    let tasks = match turn.repo.is_temp() {
+        true => None,
+        false => Some(Box::pin(super::chat_tasks::FrameTasks::new(&state, turn.thread_id)).await),
+    };
     let mut sink = ChatSink {
         tx: tx.clone(),
         stop: stop_signal,
@@ -846,6 +937,8 @@ pub(super) async fn run_send(
         reasoning: String::new(),
         usage: Usage::default(),
         first_at: None,
+        ui_resources,
+        tasks,
     };
 
     let mut stopped = None;
@@ -864,8 +957,15 @@ pub(super) async fn run_send(
             r = &mut run => r,
         }
     };
+    // The calls a gated stop waits on (client-apps design §6.2).
+    let mut waiting = None;
     let (mut messages, err) = match result {
-        Ok(r) => (r.messages[base_len.min(r.messages.len())..].to_vec(), None),
+        Ok(r) => {
+            if r.reason == StopReason::Approval {
+                waiting = Some(gated::pending_of(r.pending, turn.starter()));
+            }
+            (r.messages[base_len.min(r.messages.len())..].to_vec(), None)
+        }
         // A turn that failed after tools ran keeps their record: the calls
         // happened, and the model must learn that they did, or it makes a
         // side-effecting call again.
@@ -912,14 +1012,18 @@ pub(super) async fn run_send(
     // page left as they were announced, the model named a tool the thread
     // does not have) get a result too: a record ending in a call with none
     // is one no later request can replay. A thread's loop never hands a
-    // call back to a client, so every trailing call was never made.
-    agent::close_trailing_calls(&mut messages, |name| {
-        Some(if known.contains(name) {
-            agent::UNMADE_CALL.to_string()
-        } else {
-            format!("not run: this thread has no tool named '{name}'")
-        })
-    });
+    // call back to a client, so every trailing call was never made — but
+    // for a gated stop's, which wait for their decision: the decision, or
+    // the next message, answers them (`store::chat_approvals`).
+    if waiting.is_none() {
+        agent::close_trailing_calls(&mut messages, |name| {
+            Some(if known.contains(name) {
+                agent::UNMADE_CALL.to_string()
+            } else {
+                format!("not run: this thread has no tool named '{name}'")
+            })
+        });
+    }
 
     // Persist the assistant turn: the visible text plus the IR the loop
     // produced, so the *next* turn replays the tool calls it actually made.
@@ -942,6 +1046,7 @@ pub(super) async fn run_send(
                 answered_by: answering.answered_by.clone(),
                 stopped: stopped.is_some(),
                 failed: err.is_some(),
+                pending: waiting.clone(),
             },
         )
         .await;
@@ -992,7 +1097,31 @@ pub(super) async fn run_send(
     if let Some(note) = turn.blind().note() {
         done["images_note"] = json!(note);
     }
+    // A gated stop, once its reply is saved: each waiting call announced,
+    // and `done` lists them (client-apps design §6.2). One not saved waits
+    // for nothing: no decision could find it.
+    if let Some(p) = waiting.as_ref().filter(|_| saved.saved()) {
+        gated::announce(&sink.tx, p).await;
+        done["pending_approvals"] = json!(p.requests());
+    }
     sink.say("done", done.to_string()).await;
+}
+
+/// The executor of a stored thread's turn takes the late path (MCP Tasks
+/// design T4): a call that becomes an MCP task is answered `started, job …`
+/// at once and its result enters the thread later. A temporary thread's
+/// calls are bridged (its tasks are waited for, within the row's
+/// `timeout_ms`): it is not stored, so nothing could land in it later.
+/// A device hosting the tool learns the thread's id only for a thread
+/// without lmgw's admin tools: whether one with them is in its reach
+/// depends on its own admin level, which the call does not judge, and an
+/// Admin Chat thread never is (client-apps L3).
+fn late(plan: &ToolPlan, turn: &Turn, exec: McpExecutor) -> McpExecutor {
+    if turn.repo.is_temp() {
+        return exec;
+    }
+    let sees = !plan.admin && !crate::store::carries_self_admin(&plan.mcp);
+    exec.with_late(turn.thread_id, sees)
 }
 
 /// Put a continue's prefill `prefix` in front of the record's first assistant
@@ -1034,7 +1163,14 @@ fn trim_trailing_text(turn: &[Message], text: &str) -> Vec<Message> {
         return out;
     }
     if let Some(last) = out.last_mut() {
-        if last.role == Role::Assistant {
+        // A turn that ends on calls (a gated stop's, waiting for their
+        // decision) has no final answer: its text leads those calls, and
+        // stays with them.
+        let calls = last
+            .content
+            .iter()
+            .any(|p| matches!(p, ContentPart::ToolUse { .. }));
+        if last.role == Role::Assistant && !calls {
             last.content
                 .retain(|p| !matches!(p, ContentPart::Text { .. }));
             if last.content.is_empty() {

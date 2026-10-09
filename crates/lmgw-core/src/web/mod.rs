@@ -50,6 +50,9 @@ pub(crate) use chat::ListThreadsQuery;
 /// Thread-scoped actions that rewrite a conversation: Keep, and the message
 /// actions (chat-complete design §3, §7).
 mod chat_actions;
+/// `POST /chat/api/threads/{id}/approvals`: decide a gated turn's calls and
+/// resume it (client-apps design §6).
+mod chat_approvals;
 /// The `<file>` block format for Chat attachments (chat-archive-pin-
 /// attachments design §2); the kinds themselves are `chat_attach_ingest`
 /// (upload), `chat_attach_render` (into a request) and `chat_attach_gate`
@@ -82,6 +85,13 @@ mod chat_knowledge;
 /// checked against before it is saved (review R1 finding 1).
 pub(crate) mod chat_live;
 mod chat_neutralise;
+/// Personality profiles in a Chat turn's prompt (personality-profiles
+/// design §2): the system message's parts and the profile's reasoning.
+mod chat_profile;
+/// Personality profiles' routes (personality-profiles design §3.1): the
+/// CRUD over `ops::chat_profiles`, and the `unknown_profile` check a
+/// thread's settings and a folder's defaults run.
+mod chat_profiles;
 /// A Chat thread's `x-lmgw-reasoning*` overrides: their checks, their
 /// control, and which of them the answering route drops.
 mod chat_reasoning;
@@ -94,6 +104,11 @@ mod chat_search;
 /// What a device below `full` may not change in a thread or folder that
 /// carries lmgw's admin tools (client-apps design L5's note).
 mod chat_steer;
+/// MCP Tasks in the Chat (MCP Tasks design §3): a late result's delivery
+/// into its thread and its rendering, `answer` and the cancel route.
+/// `pub(crate)` for the follower, which delivers a task that ends while its
+/// thread is idle.
+pub(crate) mod chat_tasks;
 /// Temporary chats' in-memory store. `pub(crate)` because `AppState` holds
 /// it.
 pub(crate) mod chat_temp;
@@ -220,6 +235,33 @@ fn chat_routes() -> Router<SharedState> {
             post(chat_folders::move_thread),
         )
         .route("/chat/api/search", get(chat_search::search))
+        // Personality profiles (personality-profiles design §3.1).
+        .route(
+            "/chat/api/profiles",
+            get(chat_profiles::list_profiles).post(chat_profiles::create_profile),
+        )
+        .route(
+            "/chat/api/profiles/{id}",
+            get(chat_profiles::get_profile).post(chat_profiles::update_profile),
+        )
+        .route(
+            "/chat/api/profiles/{id}/delete",
+            post(chat_profiles::delete_profile),
+        )
+        .route(
+            "/chat/api/profiles/{id}/reset",
+            post(chat_profiles::reset_profile),
+        )
+        // Trying an unsaved draft (personality-profiles design §3.1, D17).
+        .route(
+            "/chat/api/profiles/preview",
+            post(chat_profiles::preview_profile),
+        )
+        .route("/chat/api/profiles/test", post(chat_profiles::test_profile))
+        .route(
+            "/chat/api/profiles/speak",
+            post(chat_profiles::speak_profile),
+        )
         .route("/chat/api/feed", get(chat_feed::feed))
         .route(
             "/chat/api/threads/{id}/export",
@@ -248,6 +290,16 @@ fn chat_routes() -> Router<SharedState> {
         .route(
             "/chat/api/threads/{id}/continue",
             post(chat_actions::continue_reply),
+        )
+        .route(
+            "/chat/api/threads/{id}/approvals",
+            post(chat_approvals::decide),
+        )
+        .route("/chat/api/threads/{id}/tasks", get(chat_tasks::tasks))
+        .route("/chat/api/threads/{id}/answer", post(chat_tasks::answer))
+        .route(
+            "/chat/api/threads/{id}/tasks/{task}/cancel",
+            post(chat_tasks::cancel),
         )
         .route(
             "/chat/api/threads/{id}/messages/{mid}/delete",

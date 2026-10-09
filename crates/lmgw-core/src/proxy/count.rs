@@ -225,6 +225,47 @@ pub async fn handle_count_tokens(state: SharedState, ctx: RequestCtx, body: Valu
     }
 }
 
+/// Count each of `texts` on the upstream `alias` resolves to, as
+/// `/v1/count_tokens` counts one `input` — its key policy for `ctx` (the
+/// alias scope, no budget), one admission for all of them, and its row
+/// rules: written for a failure and for a count that brought its model up,
+/// labelled `proto`. What the profile editor's Preview counts its system
+/// messages with (personality-profiles design D18). The [`GateHeaders`]
+/// name a fallback that counted instead, on the error too.
+pub(crate) async fn count_texts(
+    state: &SharedState,
+    proto: ClientProto,
+    ctx: &RequestCtx,
+    alias: &str,
+    texts: &[&str],
+) -> Result<(Vec<Count>, GateHeaders), (GateHeaders, GatewayError)> {
+    let mut row = counter_row(state, proto, ctx, &json!({ "model": alias }));
+    if let Some(e) = counter_policy(state, ctx, alias) {
+        row.failed(&e).await;
+        return Err((GateHeaders::default(), e));
+    }
+    let check = crate::gate::RouteCheck::Text("/v1/count_tokens");
+    let opened = match admit_counter(state, alias, check, false, Some(&mut row)).await {
+        Ok(o) => o,
+        Err((headers, e)) => {
+            row.failed(&e).await;
+            return Err((headers, e));
+        }
+    };
+    let mut counts = Vec::with_capacity(texts.len());
+    for text in texts {
+        match count_text_route(state, text, &opened.route, opened.hold.as_ref()).await {
+            Ok(c) => counts.push(c),
+            Err(e) => {
+                row.failed(&e).await;
+                return Err((opened.headers, e));
+            }
+        }
+    }
+    row.answered(200, None).await;
+    Ok((counts, opened.headers))
+}
+
 /// Count `input`'s tokens on the upstream `alias` resolves to, using that
 /// upstream's own tokenizer (§6). The real count, not an estimate — which is
 /// what lets ingestion size its extraction windows from a model's actual

@@ -8,10 +8,10 @@ event: tool
 data: {"event":"args","fragment":"{\"text\":\"zzz\"}","index":0}
 
 event: tool
-data: {"arguments":{"text":"zzz"},"event":"ready","index":0,"name":"stub__slow"}
+data: {"arguments":{"text":"zzz"},"call_id":"c1","event":"ready","index":0,"name":"stub__slow","needs_approval":false,"server_label":"stub","ui_resource":null}
 
 event: tool
-data: {"event":"result","index":0,"is_error":true,"ms":0,"name":"stub__slow","output":"abandoned when the run was cancelled; it had already been sent, so it may still have run"}
+data: {"call_id":"c1","content":[{"text":"abandoned when the run was cancelled; it had already been sent, so it may still have run","type":"text"}],"event":"result","index":0,"is_error":true,"ms":0,"name":"stub__slow","output":"abandoned when the run was cancelled; it had already been sent, so it may still have run","server_label":"stub","structured_content":null,"ui_resource":null}
 
 event: error
 data: {"code":"superseded","message":"a newer turn of this thread started (or the thread went away), so this reply was stopped and is not saved"}

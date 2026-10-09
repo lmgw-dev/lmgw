@@ -200,7 +200,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "The Anthropic SDKs' messages.count_tokens(): on an \
                 Anthropic-protocol upstream, the client body is sent through verbatim (only \
-                model replaced), with its anthropic-beta flags, so server tools and new fields \
+                model replaced, and a Gemini thought signature in a tool id dropped), with its anthropic-beta flags, so server tools and new fields \
                 count exactly. \
                 x-lmgw-count-approximate explains any other route's approximation. \
                 Enforces the key's alias scope like every other counter (a refusal is a \
@@ -554,7 +554,13 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 bound session — and no other — also sends lmgw's own events: \
                 lmgw.chat.frame ({response_id, event, data}: the chat turn's frames \
                 verbatim — turn, retrieval, delta, reasoning, tool, usage, stats, stop, \
-                state, error, done; reasoning is shown, stored with the reply and never \
+                state, error, done; a tool frame's ready and result carry call_id, server_label \
+                and ui_resource (the namespaced MCP Apps UI resource the tool links to, for \
+                resources/read on /mcp; null when none), ready needs_approval, and result \
+                structured_content (the MCP result's structuredContent; null when none) and \
+                content (its content blocks as the server sent them), and approval the \
+                waiting call's approval_request_id, server_label, name, arguments and call_id \
+                (the id its ready frame carried); reasoning is shown, stored with the reply and never \
                 spoken, and done's reasoning_note says in a sentence when the model reasoned \
                 although the turn asked for reasoning off — a voice turn does unless the \
                 thread sets reasoning; no off ends in an error — and its images_note when a \
@@ -589,10 +595,46 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 chat_voice_audio_input off, transcript_wait_ms on the transcript path), each model \
                 with the alias that answered when a fallback did, first_clause: \
                 \"announcement\" when the first clause said was one; sent once the reply is \
-                written, message_id null when nothing was saved, and stored with the reply). \
+                written, message_id null when nothing was saved, and stored with the reply), \
+                lmgw.approval.decided ({approval_request_id, approve, by}: a call whose \
+                mcp_approval_request item the session showed was decided by another client, \
+                `by` naming who as the feed names authors; approve false and by null for one \
+                whose reply was edited or deleted) and lmgw.task.done ({thread_id, message_id, \
+                id, task_id, server_label, tool, status, by}: a late MCP task result entered the \
+                thread as message message_id of role tool — the feed's task.done facts; it \
+                enters only while no turn of the thread runs, so one that ended during a \
+                response is said once that response's turn ended; one said while a response \
+                runs entered at that response's start, and that response answers it). lmgw \
+                starts no response for a result: the client's own response.create with no new \
+                words and no turn the client committed before it, while the thread holds \
+                results no reply answered (said in this session, or there before the bind), is a \
+                continuation that answers them, as POST /chat/api/threads/{id}/answer does \
+                (turn detection's automatic response to a turn without words stays empty_turn, \
+                and so does a push-to-talk commit of silence and its response.create; a \
+                continuation a cough cut before any of it was heard runs again after the \
+                cough) — it never cancels a turn of the thread (response.done failed with \
+                turn_running while one runs), and is empty_turn when a turn of another window \
+                answered the results meanwhile. A bound turn's call that waits for \
+                an approval (the thread's require_approval) is OpenAI's mcp_approval_request \
+                item (conversation.item.added and .done; its id is the approval id; OpenAI's \
+                shape, so no call id: the lmgw.chat.frame relaying the turn's approval frame, \
+                sent right after the item, carries call_id beside the same \
+                approval_request_id) and its response ends; the client answers with conversation.item.create of \
+                {type: mcp_approval_response, approval_request_id, approve, reason?} — the one \
+                item a bound session takes — then response.create, and that response resumes \
+                the thread's turn as POST /chat/api/threads/{id}/approvals does, the \
+                session's principal the approver: the approved calls run and the answer comes \
+                in that one response. A refusal of the answers fails the response with the \
+                route's code (approval_missing, approval_not_found, approval_decided, \
+                approval_starter_unavailable, approval_moved_on, approval_out_of_scope, \
+                key_rate). A committed turn with \
+                words is a new message, which declines what waits: a response that answers \
+                one runs as ever. Keep a spoken answer out of the session (transcribe it \
+                with POST /chat/api/threads/{id}/transcribe). \
                 A refusal mid-session is an error event; its codes: owned_by_thread (a \
                 client event changing what the thread owns), empty_turn (a response that would \
-                answer no turn), superseded and not_saved (another turn took the thread, or the \
+                answer no turn and no job result), turn_running (a continuation while a turn of \
+                the thread runs), superseded and not_saved (another turn took the thread, or the \
                 reply could not be saved; its speech stops), chat_thread_not_found and \
                 chat_thread_admin, tts_not_configured, voice_not_configured, voice_not_found, \
                 instructions_required, voice_needs_transcript and speech_unavailable (the \
@@ -701,7 +743,21 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 MCP-Protocol-Version and assigns Mcp-Session-Id, which every later request on \
                 the session must carry; a notification answers 202 with no body. tools/list \
                 and tools/call reach the registered southbound MCP servers' tools, \
-                namespaced <prefix>__.",
+                namespaced <prefix>__. resources/list, resources/templates/list (one page; a \
+                cursor is -32602) and resources/read pass their resources through, a \
+                prefixed server's URIs namespaced before the authority (ui://weather/card from \
+                prefix p is ui://p__weather/card) — in tools' _meta.ui.resourceUri and in tool \
+                results' resource links too; a read of a URI no server has, or of a server the \
+                caller's tool scope does not reach, is -32002. initialize advertises resources \
+                {listChanged} and the MCP Apps extension io.modelcontextprotocol/ui \
+                (mimeTypes [text/html;profile=mcp-app]); every tool is listed with its _meta, \
+                and app-only ones (_meta.ui.visibility without \"model\") only to a session \
+                whose initialize declared that extension. Every tool of a registered server \
+                also carries _meta[\"lmgw/server\"] {label, name, tool}: the server's label \
+                (its tool prefix, else its name), its name, and the tool's name as the server \
+                lists it — so a host routes a view's call of its server's tool to the listed \
+                name, also one a name collision moved to <server name>__<tool> or the owner \
+                renamed; lmgw sets it, replacing anything the server put there.",
             request: Req::JsonRpc,
             response: Resp::Json(mcp::jsonrpc_response),
             dialect: Dialect::JsonRpc,
@@ -710,8 +766,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Opens the server→client notification stream for a valid session \
-                (a session-less GET is 400/404): pushes notifications/tools/list_changed when \
-                the aggregate's composition changes. The stream ends, without a frame (MCP has \
+                (a session-less GET is 400/404): pushes notifications/tools/list_changed and \
+                notifications/resources/list_changed when the aggregate's composition changes, \
+                and notifications/resources/list_changed when a server says its resources \
+                changed. The stream ends, without a frame (MCP has \
                 no notification for it), when the API key that opened it is disabled, rotated, \
                 deleted or expires.",
             response: Resp::Sse(&[("notification", mcp::notification_event)]),

@@ -4,14 +4,14 @@
 //!
 //! Ids are optional on input — `conversation.item.create` normally arrives
 //! without one, and the session mints `item_…` — and always set on the
-//! server's echo. The approval items (realtime-server-tools §6) and
-//! `input_image` content (§19) fail to parse: a client's approval item is
-//! refused by name (`conversation`), anything else as an `error` naming the
-//! variant.
+//! server's echo. The approval items parse (client-apps design §6.4): a
+//! session bound to a chat thread takes a client's `mcp_approval_response`,
+//! and any other refuses both by name (`conversation`). `input_image`
+//! content (§19) fails to parse, as an `error` naming the variant.
 
 use serde::{Deserialize, Serialize};
 
-use super::mcp::{McpCallItem, McpListToolsItem};
+use super::mcp::{McpApprovalRequestItem, McpApprovalResponseItem, McpCallItem, McpListToolsItem};
 
 /// One conversation item, tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,6 +24,10 @@ pub enum Item {
     /// every event that carries an item would pay for it.
     McpCall(Box<McpCallItem>),
     McpListTools(McpListToolsItem),
+    /// A bound session's gated call and a client's answer to it
+    /// (client-apps design §6.4).
+    McpApprovalRequest(McpApprovalRequestItem),
+    McpApprovalResponse(McpApprovalResponseItem),
 }
 
 impl Item {
@@ -34,6 +38,8 @@ impl Item {
             Self::FunctionCallOutput(o) => o.id.as_deref(),
             Self::McpCall(c) => c.id.as_deref(),
             Self::McpListTools(l) => l.id.as_deref(),
+            Self::McpApprovalRequest(r) => r.id.as_deref(),
+            Self::McpApprovalResponse(r) => r.id.as_deref(),
         }
     }
 
@@ -45,6 +51,8 @@ impl Item {
             Self::FunctionCallOutput(o) => &mut o.id,
             Self::McpCall(c) => &mut c.id,
             Self::McpListTools(l) => &mut l.id,
+            Self::McpApprovalRequest(r) => &mut r.id,
+            Self::McpApprovalResponse(r) => &mut r.id,
         };
         if slot.is_none() {
             *slot = Some(mint());

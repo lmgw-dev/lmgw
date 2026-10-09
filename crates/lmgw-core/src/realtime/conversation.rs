@@ -230,7 +230,10 @@ fn status_of(item: &Item) -> Option<ItemStatus> {
         Item::Message(m) => m.status,
         Item::FunctionCall(c) => c.status,
         Item::FunctionCallOutput(o) => o.status,
-        Item::McpCall(_) | Item::McpListTools(_) => None,
+        Item::McpCall(_)
+        | Item::McpListTools(_)
+        | Item::McpApprovalRequest(_)
+        | Item::McpApprovalResponse(_) => None,
     }
 }
 
@@ -241,7 +244,10 @@ fn mark_complete(item: &mut Item) {
         Item::Message(m) => (&mut m.object, &mut m.status),
         Item::FunctionCall(c) => (&mut c.object, &mut c.status),
         Item::FunctionCallOutput(o) => (&mut o.object, &mut o.status),
-        Item::McpCall(_) | Item::McpListTools(_) => return,
+        Item::McpCall(_)
+        | Item::McpListTools(_)
+        | Item::McpApprovalRequest(_)
+        | Item::McpApprovalResponse(_) => return,
     };
     *object = Some(ITEM_OBJECT.into());
     *status = Some(ItemStatus::Completed);
@@ -304,6 +310,8 @@ fn check_item(item: &Item) -> Result<(), ErrorObject> {
         },
         Item::FunctionCallOutput(_) | Item::McpCall(_) => Ok(()),
         Item::McpListTools(_) => Err(mcp::list_tools_refusal()),
+        Item::McpApprovalRequest(_) => Err(mcp::approval_request_refusal()),
+        Item::McpApprovalResponse(_) => Err(mcp::approval_response_refusal()),
     }
 }
 

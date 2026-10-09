@@ -207,4 +207,15 @@ pub async fn process_env_lock() -> EnvGuard {
     }
 }
 
+/// A loopback port nothing answers on, for as long as the socket lives:
+/// bound and never listened on, so a connect is refused, and no other socket
+/// — another test's server, under a parallel suite — can be given the port
+/// meanwhile. A port bound and closed again was free for whoever bound next.
+pub fn refusing_port() -> (u16, tokio::net::TcpSocket) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    (socket.local_addr().unwrap().port(), socket)
+}
+
 pub mod captured_log;
+pub mod patience;

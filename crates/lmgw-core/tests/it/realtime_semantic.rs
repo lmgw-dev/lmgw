@@ -19,6 +19,7 @@ use lmgw_core::realtime::turn::smart_turn::{SmartTurn, INTRA_THREADS, SMART_TURN
 use lmgw_core::state::SharedState;
 use serde_json::{json, Value};
 
+use crate::common::captured_log::{capture_log_at, CapturedLog};
 use crate::support::realtime_audio::{
     add_asr_alias, asr_fake, fixture, silence, stream, AsrFake, ASR_ALIAS,
 };
@@ -220,6 +221,14 @@ async fn a_scorer_that_fails_falls_back_to_the_silence_window() {
 /// The echo is the eagerness's row; a row the owner changed applies:
 /// medium with its threshold at 0.99 takes the question's ~0.98 as unsure
 /// — at or above the floor — and commits at the 500 ms floor window.
+///
+/// Not on the live microphone: the core decides when the score comes back,
+/// and a turn whose window has passed by then commits where the input is —
+/// a debug build's Smart Turn on a loaded box came back late enough to
+/// commit at 694–790 ms (15 of 32 runs, 16 copies on four cores). So the
+/// input stops past the probe and short of the window until the core has
+/// decided, read off its own line, and the window is then counted in frames
+/// alone.
 #[tokio::test]
 async fn each_eagerness_runs_its_row() {
     let (_s, addr, _asr, _chat) = setup(|s| s.realtime.semantic_vad.medium.threshold = 0.99).await;
@@ -247,17 +256,47 @@ async fn each_eagerness_runs_its_row() {
         );
         assert_eq!(r["floor_window_ms"], 500);
     }
-    let (mic, mut ear, _) = live(
+    let (log, _capturing) = capture_log_at(tracing::Level::DEBUG);
+    let (mut ws, _) = session(
         &addr,
         json!({"type": "semantic_vad", "eagerness": "medium"}),
     )
     .await;
-    let at = mic
-        .say(then_silence(fixture("en_complete_short.wav"), 1500))
-        .await;
-    let after = end_ms(&next_stop(&mut ear).await) - (at + QUESTION_END);
+    let question = then_silence(fixture("en_complete_short.wav"), 1500);
+    // 400 ms of the pause: past the probe at 200 ms, short of the window.
+    let held = (QUESTION_END as usize + 400) * 24;
+    stream(&mut ws, &question[..held]).await;
+    let decided = scored(&log).await;
+    assert!(
+        decided.contains("commits at 500 ms of silence (between the floor and the threshold)"),
+        "{decided}"
+    );
+    stream(&mut ws, &question[held..]).await;
+    let stopped = loop {
+        let ev = next_event(&mut ws).await;
+        if ev["type"] == "input_audio_buffer.speech_stopped" {
+            break ev;
+        }
+    };
+    let after = end_ms(&stopped) - QUESTION_END;
     eprintln!("committed {after} ms after the speech");
     assert!((512..650).contains(&after), "{after} ms after the speech");
+}
+
+/// The core's line for the first pause it scored: the decision, as the core
+/// took it (`realtime/input/semantic.rs`) — so a test that waits for it knows
+/// the score has come back and been acted on.
+async fn scored(log: &CapturedLog) -> String {
+    const SCORED: &str = "for the pause from";
+    crate::common::patience::until("the core takes the pause's score", || {
+        log.text().contains(SCORED)
+    })
+    .await;
+    log.text()
+        .lines()
+        .find(|l| l.contains(SCORED))
+        .unwrap()
+        .to_string()
 }
 
 /// Fix package B6 (WP6 review): a stored row that cannot run is the

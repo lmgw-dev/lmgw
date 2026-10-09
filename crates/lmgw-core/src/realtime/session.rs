@@ -62,7 +62,7 @@ mod stop;
 
 use stop::Stop;
 
-use events::set_resolved;
+pub(in crate::realtime) use events::set_resolved;
 use speech::Speech;
 
 /// Everything the handshake settled, handed to the session at the 101.
@@ -153,6 +153,20 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     let mut probed = !live.on();
     // Another window binding the session's thread takes it over (§8.1).
     let taken = core.bound.as_ref().map(|b| b.taken.clone());
+    // Its thread's approvals decided elsewhere (client-apps design §6.4);
+    // an unbound session listens to no thread's wakes.
+    let bound = core.bound.is_some();
+    let mut approval_wakes = bound.then(|| core.state.chat_live.approval_wakes());
+    // Its thread's MCP task results entered or were answered (MCP Tasks
+    // design §3.4), read off this loop and taken at `from_results`; read
+    // once now that the session listens, for a result that entered between
+    // the bind's read and here.
+    let mut result_wakes = bound.then(|| core.state.chat_live.result_wakes());
+    let (results_tx, mut from_results) = mpsc::unbounded_channel();
+    if bound {
+        core.results_listen(results_tx);
+        core.results_woken(false);
+    }
     let mut taken_over = false;
     let mut out_of_reach = false;
     let mut revoked = None;
@@ -178,6 +192,31 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
             Some(ev) = from_journal.recv() => core.journal_event(ev),
             Some(state) = from_warm.recv() => core.model_state(state),
             Some((seq, verdict)) = from_verdict.recv() => core.audio_verdict(seq, verdict),
+            // A wake for this thread — or one missed in a lag, which may
+            // have been — reads its approvals again.
+            woke = wake(approval_wakes.as_mut()) => {
+                let thread = core.bound.as_ref().map(|b| b.thread_id);
+                match woke {
+                    Ok(id) if Some(id) != thread => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                    _ => {
+                        core.approvals_woken().await;
+                        // A history write: a result whose reply went is
+                        // owed again.
+                        core.results_woken(true);
+                    }
+                }
+            }
+            // The same for its job results (`thread::tasks`).
+            woke = wake(result_wakes.as_mut()) => {
+                let thread = core.bound.as_ref().map(|b| b.thread_id);
+                match woke {
+                    Ok(id) if Some(id) != thread => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                    _ => core.results_woken(false),
+                }
+            }
+            Some(read) = from_results.recv() => core.results_read(read),
             () = super::thread::taken(taken.as_ref()) => {
                 // The same stop ends a session whose thread left its
                 // device's reach (client-apps design L3, review W3-1).
@@ -365,6 +404,17 @@ async fn flush_alive(
                 }
             },
         }
+    }
+}
+
+/// The next wake of a bound session's thread wake channel; never, for an
+/// unbound session (it listens to none).
+async fn wake(
+    rx: Option<&mut tokio::sync::broadcast::Receiver<i64>>,
+) -> Result<i64, tokio::sync::broadcast::error::RecvError> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 

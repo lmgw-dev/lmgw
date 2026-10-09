@@ -249,6 +249,13 @@ pub struct KeyRow {
     /// a hosting grant.
     // The client-apps design record, §1.5.
     pub hosts_label: Option<String>,
+    /// Devices with a hosting grant only: every principal that reaches the
+    /// hosted label's tools (client-apps design §5.6, L16) — `owner`, the
+    /// device itself, and each key, device and agent whose tool scope or
+    /// manifest names the label — as a sentence each ("owner", "device
+    /// 'desktop' (hosts it)", "key 'ci'", "agent 'board'"). Empty without a
+    /// grant.
+    pub reaches: Vec<String>,
     /// Devices only: the device's level of lmgw's admin tools — `off`,
     /// `read_only` (it reads lmgw's configuration and state) or `full` (it
     /// also changes it, and may register programs that run on the gateway's

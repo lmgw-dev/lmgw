@@ -970,6 +970,11 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
             last_used,
             last_seen_at,
             hosts_label: k.hosts_label.clone(),
+            // Who reaches its hosted tools (client-apps design §5.6).
+            reaches: match (&k.hosts_label, device) {
+                (Some(label), true) => crate::mcp::scope::reachers(st, &snap, k.id, label).await,
+                _ => Vec::new(),
+            },
             self_admin: k.self_admin.into(),
             online: st
                 .devices

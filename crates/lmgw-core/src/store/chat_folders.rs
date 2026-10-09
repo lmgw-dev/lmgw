@@ -49,6 +49,10 @@ pub struct ThreadDefaults {
     /// Voice overrides (chat-voice design §2.2), laid field by field over
     /// the new thread's (empty) voice.
     pub voice: Option<ThreadVoice>,
+    /// The personality profile a new thread starts with
+    /// (personality-profiles design D9); whether it exists is the route's
+    /// check, and a delete strips it from every folder.
+    pub profile_id: Option<i64>,
 }
 
 impl ThreadDefaults {
@@ -121,6 +125,7 @@ impl ThreadDefaults {
         if let Some(v) = &d.voice {
             t.voice.overlay(v);
         }
+        t.profile_id = d.profile_id.or(t.profile_id);
     }
 }
 
@@ -148,6 +153,12 @@ pub struct ChatFolder {
     /// (`ChatFolderPatch::show_to_devices`, review F-7). The owner's list says
     /// so; a device never sees such a folder.
     pub devices_hidden: bool,
+    /// The owner's approval floor for the defaults' `mcp_tools`
+    /// (client-apps design §6.6; `ChatThread::approval_floor`): set by the
+    /// owner's writes of the defaults alone, and what a new thread in the
+    /// folder starts its own from. Never on the wire.
+    #[serde(skip)]
+    pub approval_floor: Vec<ThreadMcp>,
 }
 
 impl ChatFolder {
@@ -199,6 +210,9 @@ fn folder_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatFolder {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         devices_hidden: row.get::<i64, _>("devices_hidden") != 0,
+        approval_floor: super::chat_approval_floor::from_column(
+            row.get::<String, _>("approval_floor").as_str(),
+        ),
     }
 }
 
@@ -292,14 +306,16 @@ pub async fn get_chat_folder(pool: &SqlitePool, id: i64) -> DbResult<Option<Chat
 }
 
 /// Add a folder at the end of the list (`sort` = one past the current last),
-/// recorded in the feed (`folder.created`) as `by`'s.
+/// recorded in the feed (`folder.created`) as `by`'s. Its defaults' rules
+/// are its approval floor: the gateway's own callers write as the owner.
 pub async fn create_chat_folder(
     pool: &SqlitePool,
     name: &str,
     defaults: &ThreadDefaults,
     by: feed::By<'_>,
 ) -> DbResult<i64> {
-    create_chat_folder_with(pool, name, defaults, &FolderOptions::default(), by).await
+    let floor = defaults.mcp_tools.clone().unwrap_or_default();
+    create_chat_folder_with(pool, name, defaults, &FolderOptions::default(), &floor, by).await
 }
 
 /// What a folder is besides its name and defaults: whether it is one
@@ -312,31 +328,64 @@ pub struct FolderOptions {
     pub purge_days: Option<i64>,
 }
 
-/// [`create_chat_folder`] with its [`FolderOptions`].
+/// [`create_chat_folder`] with its [`FolderOptions`] and its approval
+/// floor (the owner's defaults' `mcp_tools`, none for a device's folder).
 pub async fn create_chat_folder_with(
     pool: &SqlitePool,
     name: &str,
     defaults: &ThreadDefaults,
     opts: &FolderOptions,
+    floor: &[ThreadMcp],
     by: feed::By<'_>,
 ) -> DbResult<i64> {
     let mut tx = super::begin_write(pool).await?;
+    default_profile_exists(&mut tx, defaults).await?;
     let res = sqlx::query(
         "INSERT INTO chat_folders (name, sort, defaults, ongoing_idle_minutes, archive_days,
-                                   purge_days)
-         VALUES (?1, (SELECT COALESCE(MAX(sort), 0) + 1 FROM chat_folders), ?2, ?3, ?4, ?5)",
+                                   purge_days, approval_floor)
+         VALUES (?1, (SELECT COALESCE(MAX(sort), 0) + 1 FROM chat_folders), ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(name)
     .bind(serde_json::to_string(defaults).unwrap_or_else(|_| "{}".into()))
     .bind(opts.ongoing_idle_minutes)
     .bind(opts.archive_days)
     .bind(opts.purge_days)
+    .bind(super::chat_approval_floor::to_column(floor))
     .execute(&mut *tx)
     .await?;
     let id = res.last_insert_rowid();
     feed::record_folder(&mut tx, feed::kind::FOLDER_CREATED, id, by).await?;
     tx.commit().await?;
     Ok(id)
+}
+
+/// The profile folder defaults `d` name exists, read on the write's
+/// transaction (profiles review fix 7): the route checked it against the
+/// snapshot, and a delete in between strips the id from every folder's
+/// defaults in its own transaction, so a write after it must not put the
+/// gone id back. Refused as the route refuses an unknown one (`400
+/// unknown_profile`); the dropped transaction writes nothing.
+async fn default_profile_exists(
+    conn: &mut sqlx::SqliteConnection,
+    d: &ThreadDefaults,
+) -> DbResult<()> {
+    let Some(id) = d.profile_id else {
+        return Ok(());
+    };
+    let found: Option<i64> = sqlx::query_scalar("SELECT id FROM chat_profiles WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    match found {
+        Some(_) => Ok(()),
+        None => Err(crate::error::GatewayError::InvalidRequest {
+            code: "unknown_profile",
+            message: format!(
+                "profile_id: there is no profile with id {id} (it was deleted; GET \
+                 /chat/api/profiles lists them)"
+            ),
+        }),
+    }
 }
 
 /// A folder patch: `None` leaves that column alone; `Some(None)` clears a
@@ -359,6 +408,9 @@ pub struct ChatFolderPatch {
     /// threads a device does not see stay out of its reach by their own
     /// level.
     pub show_to_devices: bool,
+    /// The folder's new approval floor (client-apps design §6.6), when the
+    /// owner wrote the defaults' tools; `None` leaves it alone.
+    pub approval_floor: Option<Vec<ThreadMcp>>,
 }
 
 /// The current thread's settings a folder patch writes with it (client-apps
@@ -404,6 +456,9 @@ pub async fn update_chat_folder(
     // Reads before its writes: the write lock first, so another writer's
     // commit in between cannot fail it (review W4-10).
     let mut tx = super::begin_write(pool).await?;
+    if let Some(d) = &p.defaults {
+        default_profile_exists(&mut tx, d).await?;
+    }
     let was = feed::self_admin_folder_now(&mut tx, id).await?;
     let previous: Option<i64> =
         sqlx::query_scalar("SELECT current_thread_id FROM chat_folders WHERE id = ?1")
@@ -420,6 +475,7 @@ pub async fn update_chat_folder(
          archive_days = CASE WHEN ?7 THEN ?8 ELSE archive_days END,
          purge_days = CASE WHEN ?9 THEN ?10 ELSE purge_days END,
          devices_hidden = CASE WHEN ?11 THEN 0 ELSE devices_hidden END,
+         approval_floor = COALESCE(?12, approval_floor),
          updated_at = datetime('now') WHERE id = ?1",
     )
     .bind(id)
@@ -433,6 +489,11 @@ pub async fn update_chat_folder(
     .bind(p.purge_days.is_some())
     .bind(p.purge_days.flatten())
     .bind(p.show_to_devices)
+    .bind(
+        p.approval_floor
+            .as_deref()
+            .map(super::chat_approval_floor::to_column),
+    )
     .execute(&mut *tx)
     .await?;
     let found = res.rows_affected() > 0;
@@ -582,9 +643,18 @@ pub async fn delete_chat_folder_ids(
         .map(feed::Gone::of)
         .collect();
         feed::record_threads_deleted(&mut tx, &gone, by).await?;
+        // Their MCP tasks: an open one owes its cancel, a result goes
+        // (MCP Tasks design §1.5).
+        super::mcp_tasks::threads_gone(&mut tx).await?;
         deleted = gone.iter().map(|g| g.id).collect();
     }
-    // What is left in it (everything, for `keep`) leaves the folder.
+    // What is left in it (everything, for `keep`) leaves the folder, with
+    // the folder's approval rules in its floor.
+    let leaving: Vec<i64> = sqlx::query_scalar("SELECT id FROM chat_threads WHERE folder_id = ?1")
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+    super::chat_approval_floor::fold_folder_floor(&mut tx, id, &leaving).await?;
     let left: Vec<i64> = sqlx::query_scalar(
         "UPDATE chat_threads SET folder_id = NULL WHERE folder_id = ?1 RETURNING id",
     )
@@ -649,8 +719,21 @@ async fn delete_for_devices(
         .map(feed::Gone::of)
         .collect();
         feed::record_threads_deleted(&mut tx, &gone, by).await?;
+        // Their MCP tasks: an open one owes its cancel, a result goes
+        // (MCP Tasks design §1.5).
+        super::mcp_tasks::threads_gone(&mut tx).await?;
         deleted = gone.iter().map(|g| g.id).collect();
     } else {
+        let leaving: Vec<i64> = sqlx::query_scalar(concat!(
+            "SELECT id FROM chat_threads WHERE folder_id = ?1 AND ",
+            self_admin_thread!(""),
+            " < ?2"
+        ))
+        .bind(id)
+        .bind(admin.reach())
+        .fetch_all(&mut *tx)
+        .await?;
+        super::chat_approval_floor::fold_folder_floor(&mut tx, id, &leaving).await?;
         let moved: Vec<i64> = sqlx::query_scalar(concat!(
             "UPDATE chat_threads SET folder_id = NULL WHERE folder_id = ?1 AND ",
             self_admin_thread!(""),
@@ -685,6 +768,9 @@ async fn delete_for_devices(
 ///
 /// A thread moved out of the ongoing folder it is the current thread of is
 /// that folder's current thread no more (`folder.current`, reason `gone`).
+/// One that leaves a folder takes the folder's approval rules into its own
+/// floor (`chat_approval_floor::fold_folder_floor`; client-apps design
+/// §6.6).
 pub async fn set_chat_thread_folder(
     pool: &SqlitePool,
     thread_id: i64,
@@ -692,6 +778,14 @@ pub async fn set_chat_thread_folder(
     by: feed::By<'_>,
 ) -> DbResult<()> {
     let mut tx = super::begin_write(pool).await?;
+    let was: Option<i64> = sqlx::query_scalar("SELECT folder_id FROM chat_threads WHERE id = ?1")
+        .bind(thread_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+    if let Some(was) = was.filter(|w| Some(*w) != folder_id) {
+        super::chat_approval_floor::fold_folder_floor(&mut tx, was, &[thread_id]).await?;
+    }
     sqlx::query("UPDATE chat_threads SET folder_id = ?2 WHERE id = ?1")
         .bind(thread_id)
         .bind(folder_id)
@@ -704,7 +798,8 @@ pub async fn set_chat_thread_folder(
 }
 
 /// Insert a new thread built from `t`'s settings (model, prompt, sampling,
-/// reasoning, MCP servers, knowledge bases, voice, `kind`, `folder_id`) in one statement, so a thread
+/// reasoning, MCP servers, knowledge bases, voice, profile, `kind`,
+/// `folder_id`) in one statement, so a thread
 /// seeded from a folder's defaults never exists half-configured. Title and
 /// timestamps take the column defaults. Recorded in the feed
 /// (`thread.created`) as `by`'s. Returns the new id.
@@ -732,9 +827,9 @@ pub(super) async fn insert_chat_thread(
            (model_alias, system_prompt, temperature, max_tokens, kind, mcp_tools,
             reasoning_enabled, reasoning_effort, reasoning_budget, folder_id,
             top_p, top_k, min_p, repeat_penalty, presence_penalty, frequency_penalty,
-            seed, stop, kb_ids, kb_mode, kb_budget_tokens, voice)
+            seed, stop, kb_ids, kb_mode, kb_budget_tokens, voice, profile_id, approval_floor)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21, ?22)",
+                 ?19, ?20, ?21, ?22, (SELECT id FROM chat_profiles WHERE id = ?23), ?24)",
     )
     .bind(&t.model_alias)
     .bind(&t.system_prompt)
@@ -758,6 +853,8 @@ pub(super) async fn insert_chat_thread(
     .bind(t.kb_mode.as_str())
     .bind(t.kb_budget_tokens)
     .bind(t.voice.to_stored())
+    .bind(t.profile_id)
+    .bind(super::chat_approval_floor::to_column(&t.approval_floor))
     .execute(&mut *conn)
     .await?;
     let id = res.last_insert_rowid();

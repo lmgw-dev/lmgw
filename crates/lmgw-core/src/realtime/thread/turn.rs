@@ -29,6 +29,11 @@
 //! voice that fails stops the turn the same way, and is the response's
 //! error.
 //!
+//! **A continuation** (MCP Tasks design §3.4, [`Job::answer`]) has no user
+//! message: its turn is the one `POST …/answer` runs, which starts only on
+//! an idle thread and only while a job result is still unanswered once its
+//! start delivered what waits (`web::chat_voice::bound::start_turn`).
+//!
 //! **A heard response** (voice-audio-input design §3.5) goes with the
 //! user's audio first, and once more as its transcript when that attempt
 //! is refused (`audio`).
@@ -74,7 +79,7 @@ pub(crate) struct Job {
     /// The response's cooperative stop.
     pub stop: StopSignal,
     /// The journal's answer to the response's user entry (module doc).
-    pub user: oneshot::Receiver<Result<Option<i64>, ErrorObject>>,
+    pub user: oneshot::Receiver<journal::UserAnswer>,
     pub journal: Option<journal::Tx>,
     /// `None` for text output.
     pub speaking: Option<Speaking>,
@@ -86,6 +91,15 @@ pub(crate) struct Job {
     /// Its turns go as their transcripts because the model lacks audio
     /// input: what its request rows say (`request_logs.degraded`).
     pub degraded: Option<String>,
+    /// The response resumes the thread's gated reply with the session's
+    /// decisions (client-apps design §6.4): what it resumes, once decided.
+    pub resume: Option<bound::Resume>,
+    /// The session's answers to the thread's waiting calls, decided before
+    /// the turn starts (`thread::approvals`).
+    pub verdicts: Option<Vec<crate::store::Verdict>>,
+    /// A continuation (MCP Tasks design §3.4): no new words, and job
+    /// results nothing answered yet — the turn `POST …/answer` runs.
+    pub answer: bool,
 }
 
 /// What the turn saved, for the journal — sent once, on every path.
@@ -179,8 +193,9 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         () = job.stop.raised() => return Err(crate::proxy::canceled("stopped before the turn began")),
         answer = &mut job.user => answer,
     };
-    let user_message_id = match user {
-        Ok(Ok(id)) => id,
+    let (user_message_id, sent) = match user {
+        Ok(Ok(Some(w))) => (Some(w.id), w.sent),
+        Ok(Ok(None)) => (None, None),
         Ok(Err(e)) => return Err(from_object(e)),
         Err(_) => return Err(GatewayError::Internal("the journal is gone".into())),
     };
@@ -224,15 +239,41 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         }
         None => None,
     };
+    // The session's own voice as the thread resolves it now: a profile
+    // switch or edit since the last response reaches the session object
+    // (personality-profiles design D21).
+    let snap = state.snapshot();
+    let voice =
+        super::reshape::Reshape::of(&bound::voice(&snap, &thread), plan.as_ref().map(|(p, _)| p));
     let _ = tx.send((
         gen,
         Msg::Planned {
             chat: thread.model_alias.clone(),
             tts: plan.as_ref().map(|(p, _)| p.speech.alias.clone()),
-            thread: bound::thread_ref(&state.snapshot(), &thread, &bound::Caller::of(&job.ctx)),
+            thread: bound::thread_ref(&snap, &thread, &bound::Caller::of(&job.ctx)),
+            voice: Box::new(voice),
         },
     ));
+    drop(snap);
 
+    // A response that answers the thread's waiting calls decides them
+    // first, as the session's principal; the resumed turn runs as the
+    // principal that started it (client-apps design §6.4, L13).
+    // Its starter's concurrency slot goes with it, unless the session holds
+    // that key's already.
+    let mut runs_as = bound::Caller::of(&job.ctx);
+    let mut slot = None;
+    if let Some(verdicts) = job.verdicts.take() {
+        let approver = bound::Caller::of(&job.ctx);
+        match bound::approve(state, &thread, &verdicts, &approver).await {
+            Ok(a) => {
+                runs_as = a.starter;
+                job.resume = Some(a.resume);
+                slot = a.slot;
+            }
+            Err((code, message)) => return Err(refused(code, message)),
+        }
+    }
     let (turn_stop, turn_signal) = stop_pair();
     let starter = audio::Starter {
         state,
@@ -243,7 +284,11 @@ async fn call(job: &mut Job, saved: &mut Saved) -> Result<Completion, GatewayErr
         language: bound::turn_language(&state.snapshot(), &thread, plan.is_some()),
         stop: turn_signal,
         degraded: job.degraded.take(),
-        caller: bound::Caller::of(&job.ctx),
+        caller: runs_as,
+        resume: job.resume.take(),
+        slot: std::sync::Mutex::new(slot),
+        answer: job.answer,
+        sent: std::sync::Mutex::new(sent),
     };
     let mut attempt = audio::Attempt::new(job.audio.take(), gen, tx, saved.journal.clone());
     let (mut frames, mut began) = attempt.first(&starter, user_message_id, &job.stop).await?;

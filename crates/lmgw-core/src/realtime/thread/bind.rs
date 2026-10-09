@@ -39,6 +39,12 @@
 //!
 //! The bind names its binder (§1.7): a session it takes over is told
 //! "voice mode moved to device 'phone'" — or "… to the dashboard".
+//!
+//! **The owed set at bind** (MCP Tasks design §3.4): the thread's job
+//! results no reply answered yet are read once the binding is registered,
+//! so a client that binds to speak a result it learned of from the feed
+//! (ruling 22, `takeover=never`) has its `response.create` run the
+//! continuation.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -79,6 +85,10 @@ pub(crate) struct Binding {
     /// drained (`web::chat_live`'s voice binding): this session's journal
     /// writes nothing before it.
     pub fence: Option<StopSignal>,
+    /// The thread's job results as the bind found them (MCP Tasks design
+    /// §3.4): the ones no reply answered are owed a continuation; taken by
+    /// the session's core.
+    pub tasks: super::tasks::Owed,
 }
 
 /// The handshake's answer for a bound session: the binding, and the chat,
@@ -266,6 +276,11 @@ pub(crate) async fn handshake(
         let why = (StatusCode::NOT_FOUND, "chat_thread_not_found");
         return Err(refuse(state, ctx, why, format!("there is no chat thread {id}")).await);
     }
+    // The job results the thread holds now that the binding is registered
+    // (MCP Tasks design §3.4): one that entered before is owed without being
+    // said (the feed said it); one entering after is said by the session,
+    // which reads the thread again once it listens for the wakes.
+    let tasks = super::tasks::Owed::at_bind(state, id).await;
     Ok(Bind {
         binding: Binding {
             thread_id: id,
@@ -283,6 +298,7 @@ pub(crate) async fn handshake(
             taken: bind.taken,
             taken_by: bind.taken_by,
             fence: bind.fence,
+            tasks,
         },
         chat,
         asr,

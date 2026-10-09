@@ -23,16 +23,25 @@ pub(crate) mod discovery;
 pub mod docs;
 pub mod exec;
 pub mod handler;
+/// `GET /mcp/host`: a paired device's MCP host link (client-apps design §5).
+pub mod host;
 pub mod ingress;
 pub mod inventory;
 /// The `kb__*` knowledge-base toolset (chat-complete design §9.4).
 pub mod kb;
+mod known;
 mod lazy_list;
 mod listed_call;
+/// The aggregate's exposed names: a collision prefixes, never shadows (§7).
+pub mod names;
+/// `/mcp`'s resources and the MCP Apps metadata (client-apps design §7).
+pub mod resources;
 pub mod scope;
 pub mod selfadmin;
 /// The `{"type": "mcp"}` entry both `/v1/responses` and `/v1/realtime` take.
 pub mod spec;
+/// MCP Tasks for hosted servers (MCP Tasks design §1).
+pub mod tasks;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -184,6 +193,9 @@ pub struct McpConn {
     /// `Arc<AtomicUsize>` so an RAII guard decrements it on drop even if the
     /// northbound request future is cancelled, without taking the async lock.
     in_flight: Arc<AtomicUsize>,
+    /// A device row's link (client-apps design §5.3): the session is the
+    /// link task's, never `running`; this holds its peer ([`host`]).
+    device: Option<host::DeviceLink>,
 }
 
 /// RAII in-flight counter for a `tools/call` (§9 idle-reap guard): increments on
@@ -220,6 +232,7 @@ impl McpConn {
             claim: None,
             idle_reaped: false,
             in_flight: Arc::new(AtomicUsize::new(0)),
+            device: None,
         }
     }
 }
@@ -334,6 +347,16 @@ pub fn connection_config_hash(s: &McpServer) -> u64 {
 /// system that reconstructs a tool's owner without the aggregate — and it is
 /// allowed to, because the answer is used for exactly one thing: deciding
 /// whether this call is the ask that starts a container.
+/// The enabled device row a not-listed tool name would belong to, by its
+/// prefix: a device that is offline now (client-apps design §5.3).
+fn offline_device_for(snap: &Snapshot, exposed: &str) -> Option<McpServer> {
+    let (prefix, _) = exposed.split_once("__")?;
+    snap.mcp_servers
+        .values()
+        .find(|s| s.enabled && s.is_device() && s.tool_prefix == prefix)
+        .cloned()
+}
+
 fn sleeping_agent_for(snap: &Snapshot, exposed: &str) -> Option<McpServer> {
     let (prefix, _) = exposed.split_once("__")?;
     snap.mcp_servers
@@ -374,10 +397,11 @@ pub const MAX_TOOL_NAME_LEN: usize = 64;
 /// the real tool and receive an agent's configuration calls.
 ///
 /// Enforced in two places: [`crate::ops`] rejects the prefix at configuration
-/// time (the good error), and [`build_aggregate`] skips any tool that reaches
-/// it anyway (the backstop — a server can also produce the name via a rename,
-/// or with no prefix at all if its upstream tool is literally called
-/// `lmgw__foo`). Skips are surfaced as [`SkippedTool`]s, never silent.
+/// time (the good error), and [`build_aggregate`] moves any tool that reaches
+/// it anyway out of it under its server's name (the backstop — a server can
+/// also produce the name via a rename, or with no prefix at all if its
+/// upstream tool is literally called `lmgw__foo`; [`names`]), and skips one
+/// that cannot move, surfaced as a [`SkippedTool`], never silent.
 pub const RESERVED_TOOL_PREFIX: &str = "lmgw";
 
 /// The full `lmgw__` string that [`RESERVED_TOOL_PREFIX`] guards.
@@ -415,9 +439,9 @@ pub const RESERVED_NAMESPACES: [(&str, &str); 3] = [
 ];
 
 /// A tool dropped from the aggregate, retained so the UI/log can show *which*
-/// and *why* (§7) instead of it vanishing silently. Two causes today: the
-/// 64-char ceiling, and a bare-server name collision (shadowed by an
-/// earlier-by-server-name server).
+/// and *why* (§7) instead of it vanishing silently: the 64-char ceiling, a
+/// name in a reserved namespace it could not move out of, and a name two
+/// servers still share under their servers' names ([`names`]).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SkippedTool {
     pub server_id: i64,
@@ -425,7 +449,7 @@ pub struct SkippedTool {
     /// The exposed name that would have been used (post rename + prefix).
     pub exposed_name: String,
     /// Human-readable cause, e.g. "exposed name … is N chars (> 64); shorten the
-    /// prefix" or "shadowed by server '…' (bare-name collision)".
+    /// prefix".
     pub reason: String,
 }
 
@@ -440,6 +464,9 @@ pub struct AggServerInput<'a> {
     pub tools: &'a [Tool],
     /// upstream tool name → override (hide / rename) for this server.
     pub overrides: &'a HashMap<String, McpToolOverride>,
+    /// A paired device's hosted-tools row: its tools never leave its
+    /// label's namespace ([`names`]).
+    pub device: bool,
 }
 
 /// The cached aggregate (§7): the exposed `Tool` list (names rewritten to their
@@ -455,157 +482,90 @@ pub struct Aggregate {
     /// structure — never re-derived by splitting on `__` (a bare server may
     /// legitimately expose a literal `x__y`, §7).
     pub reverse: HashMap<String, (i64, String)>,
-    /// Tools dropped (64-char ceiling / bare collision), surfaced not hidden.
+    /// Tools dropped (64-char ceiling, reserved namespace, a collision even
+    /// under the servers' names), surfaced not hidden.
     pub skipped: Vec<SkippedTool>,
+    /// `exposed_name → the name it would have without a collision`, for each
+    /// tool a collision gave its server's prefix ([`names`]).
+    pub qualified: HashMap<String, String>,
+    /// `exposed_name →` every name that tool has or would have
+    /// ([`names`]: its own, then under its server's name), for each tool
+    /// with more than one. The owner's switch and a key's deny list hold
+    /// for a tool under any of them.
+    pub spellings: HashMap<String, Vec<String>>,
+    /// `exposed_name →` who else claims the name it moved from, for each
+    /// tool in [`Self::qualified`].
+    pub moved_by: HashMap<String, Vec<Claimant>>,
 }
 
-/// Compute the exposed (client-facing) name for one upstream tool (§7).
-///
-/// **Rename-then-prefix (§7/§10 ambiguity resolved):** the override `rename`
-/// replaces the *tool-name component only* — the server's `tool_prefix` still
-/// applies on top. This is the M1-review interpretation (`McpServer::exposed_name`
-/// was flagged for ignoring overrides), and it's the useful one: renaming a tool
-/// shouldn't silently strip it out of its server's namespace, and a per-server
-/// "rename = full exposed name, prefix bypassed" would make the prefix toggle
-/// unpredictable per tool. So: `local = rename.unwrap_or(upstream_name)`, then
-/// `prefix.is_empty() ? local : "{prefix}__{local}"`.
-fn exposed_name_for(prefix: &str, upstream_tool: &str, rename: Option<&str>) -> String {
-    let local = rename.unwrap_or(upstream_tool);
-    let prefix = prefix.trim();
-    if prefix.is_empty() {
-        local.to_string()
-    } else {
-        format!("{prefix}__{local}")
+/// Who claims a name a tool moved from ([`Aggregate::moved_by`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claimant {
+    /// One of lmgw's own namespaces (`lmgw__`, `docs__`, `kb__`).
+    Builtin(&'static str),
+    /// Another server's tool; `connected` is false when the claim is only
+    /// what it listed when it was last connected ([`known`]).
+    Server {
+        id: i64,
+        name: String,
+        connected: bool,
+    },
+}
+
+impl Aggregate {
+    /// Whether the owner switched `exposed` off: by that name, or by any
+    /// other name the same tool has or would have ([`Self::spellings`]) — a
+    /// switch set under the name a tool had before a collision holds after
+    /// it, and one set under its moved name holds when the collision ends.
+    /// Not a name in one of lmgw's own namespaces: no server's tool was
+    /// ever offered under it, and its switch is the built-in tool's.
+    pub fn tool_disabled(&self, snap: &Snapshot, exposed: &str) -> bool {
+        snap.tool_disabled(exposed) || self.disabled_by(snap, exposed).is_some()
+    }
+
+    /// The other name of `exposed`'s tool whose switch holds it off, when
+    /// its own name has none.
+    pub fn disabled_by(&self, snap: &Snapshot, exposed: &str) -> Option<&str> {
+        self.spellings
+            .get(exposed)?
+            .iter()
+            .filter(|n| n.as_str() != exposed)
+            .filter(|n| !RESERVED_NAMESPACES.iter().any(|(_, ns)| n.starts_with(ns)))
+            .find(|n| snap.tool_disabled(n))
+            .map(String::as_str)
+    }
+
+    /// The names the tools that would be called `name` have now, each under
+    /// its server's prefix ([`names`]), sorted; empty when none moved.
+    pub fn moved_from(&self, name: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .qualified
+            .iter()
+            .filter(|(_, n)| n.as_str() == name)
+            .map(|(e, _)| e.as_str())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The name `server_id`'s tool once called `name` has now, when a
+    /// collision gave it its server's prefix since.
+    pub fn moved_on(&self, name: &str, server_id: i64) -> Option<&str> {
+        self.moved_from(name)
+            .into_iter()
+            .find(|e| self.reverse.get(*e).is_some_and(|(s, _)| *s == server_id))
     }
 }
 
 /// Build the aggregate from each server's live tools + its overrides (§7). Pure:
 /// no IO, no `McpManager` — the unit-test seam for all the namespacing rules.
 ///
-/// Ordering matters for determinism. Inputs are processed **sorted by server
-/// name** (then id as a tiebreak) so bare-name collisions resolve
-/// *first-by-server-name* (mirroring [`Snapshot::resolve_passthrough`]'s spirit):
-/// the first server (alphabetically) to claim an exposed name wins; a later
-/// server's same-named tool is **skipped + logged**, never silently overwriting.
+/// Two tools of one exposed name are not refused and neither is shadowed:
+/// the colliding tools take their server's prefix ([`names`], the owner,
+/// 2026-10-09). Inputs are processed **sorted by server name** (then id), so
+/// what is left over decides the same way every time.
 pub fn build_aggregate(servers: &mut [AggServerInput<'_>]) -> Aggregate {
-    servers.sort_by(|a, b| {
-        a.server_name
-            .cmp(b.server_name)
-            .then(a.server_id.cmp(&b.server_id))
-    });
-
-    let mut tools: Vec<Tool> = Vec::new();
-    let mut reverse: HashMap<String, (i64, String)> = HashMap::new();
-    let mut skipped: Vec<SkippedTool> = Vec::new();
-
-    for s in servers.iter() {
-        for tool in s.tools.iter() {
-            let upstream_name = tool.name.as_ref();
-            let ov = s.overrides.get(upstream_name);
-
-            // Hidden overrides are excluded from the aggregate entirely (§7).
-            if ov.is_some_and(|o| o.hidden) {
-                continue;
-            }
-
-            let rename = ov
-                .and_then(|o| o.rename.as_deref())
-                .filter(|r| !r.trim().is_empty());
-            let exposed = exposed_name_for(s.tool_prefix, upstream_name, rename);
-
-            // Reserved namespaces: a southbound server never gets to occupy an
-            // `lmgw__*` (§20), `docs__*` (quickdoc §7) or `kb__*` (chat-complete
-            // §9.4) name. `ops` rejects
-            // those prefixes at config time, so reaching here means a rename or
-            // a literally-so-named upstream tool — skip + surface, same as any
-            // other drop.
-            if let Some((_, ns)) = RESERVED_NAMESPACES
-                .iter()
-                .find(|(_, ns)| exposed.starts_with(ns))
-            {
-                let reason = format!(
-                    "exposed name '{exposed}' is in the reserved '{ns}' namespace (one of \
-                     lmgw's own built-in toolsets); rename it or change the tool_prefix"
-                );
-                tracing::warn!(
-                    server = %s.server_name,
-                    tool = %upstream_name,
-                    exposed = %exposed,
-                    "MCP tool dropped from aggregate: {reason}"
-                );
-                skipped.push(SkippedTool {
-                    server_id: s.server_id,
-                    server_name: s.server_name.to_string(),
-                    exposed_name: exposed,
-                    reason,
-                });
-                continue;
-            }
-
-            // 64-char ceiling: skip + surface, never truncate (§7, house rule).
-            if exposed.len() > MAX_TOOL_NAME_LEN {
-                let reason = format!(
-                    "exposed name is {} chars (> {MAX_TOOL_NAME_LEN}); shorten the tool_prefix or rename it",
-                    exposed.len()
-                );
-                tracing::warn!(
-                    server = %s.server_name,
-                    tool = %upstream_name,
-                    exposed = %exposed,
-                    "MCP tool dropped from aggregate: {reason}"
-                );
-                skipped.push(SkippedTool {
-                    server_id: s.server_id,
-                    server_name: s.server_name.to_string(),
-                    exposed_name: exposed,
-                    reason,
-                });
-                continue;
-            }
-
-            // Collision: first-by-server-name wins (servers are pre-sorted), the
-            // shadowed one is skipped + logged. A prefixed server can only collide
-            // with an identically-prefixed sibling; bare servers collide on the
-            // raw tool name — both handled here uniformly via the reverse map.
-            if let Some((prev_id, _)) = reverse.get(&exposed) {
-                let prev_name = servers
-                    .iter()
-                    .find(|o| o.server_id == *prev_id)
-                    .map(|o| o.server_name)
-                    .unwrap_or("?");
-                let reason = format!(
-                    "exposed name '{exposed}' collides with server '{prev_name}' (kept first-by-server-name); shadowed"
-                );
-                tracing::warn!(
-                    server = %s.server_name,
-                    tool = %upstream_name,
-                    exposed = %exposed,
-                    "MCP tool dropped from aggregate: {reason}"
-                );
-                skipped.push(SkippedTool {
-                    server_id: s.server_id,
-                    server_name: s.server_name.to_string(),
-                    exposed_name: exposed,
-                    reason,
-                });
-                continue;
-            }
-
-            // Forward the upstream Tool verbatim with only its name rewritten to
-            // the exposed name; inputSchema and all other fields pass through (§7).
-            let mut exposed_tool = tool.clone();
-            exposed_tool.name = exposed.clone().into();
-            tools.push(exposed_tool);
-            reverse.insert(exposed, (s.server_id, upstream_name.to_string()));
-        }
-    }
-
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
-    Aggregate {
-        tools,
-        reverse,
-        skipped,
-    }
+    names::build(servers, &mut [])
 }
 
 /// The one wording for a call refused by the owner's per-tool switch, used by
@@ -641,6 +601,9 @@ pub enum CallError {
     /// ([`McpManager::call_listed`]): refused rather than run where the
     /// caller was never shown it.
     Relisted { name: String, server: String },
+    /// No tool has the name any more: more than one source offers a tool of
+    /// it, and each is under its server's prefix now ([`names`]) — `now`.
+    Moved { name: String, now: Vec<String> },
 }
 
 impl CallError {
@@ -653,6 +616,7 @@ impl CallError {
             Self::Timeout { .. } => "mcp_timeout",
             Self::Upstream { .. } => "mcp_upstream",
             Self::Relisted { .. } => "tool_relisted",
+            Self::Moved { .. } => "tool_moved",
         }
     }
 
@@ -661,7 +625,10 @@ impl CallError {
     /// it is the same lookup miss — the *message* is what carries the reason.
     pub fn rpc_code(&self) -> i64 {
         match self {
-            Self::ToolNotFound(_) | Self::Disabled(_) | Self::Relisted { .. } => -32601,
+            Self::ToolNotFound(_)
+            | Self::Disabled(_)
+            | Self::Relisted { .. }
+            | Self::Moved { .. } => -32601,
             _ => -32603,
         }
     }
@@ -671,7 +638,7 @@ impl CallError {
     /// has no owning server (the name never resolved).
     pub fn server(&self) -> Option<&str> {
         match self {
-            Self::ToolNotFound(_) | Self::Disabled(_) => None,
+            Self::ToolNotFound(_) | Self::Disabled(_) | Self::Moved { .. } => None,
             Self::NotConnected { server, .. }
             | Self::Timeout { server, .. }
             | Self::Upstream { server, .. }
@@ -689,7 +656,10 @@ impl std::fmt::Display for CallError {
                 write!(f, "server '{server}' is not connected: {detail}")
             }
             Self::Timeout { server, timeout_ms } => {
-                write!(f, "server '{server}' timed out after {timeout_ms}ms")
+                write!(
+                    f,
+                    "server '{server}' timed out after {timeout_ms}ms (its timeout_ms)"
+                )
             }
             Self::Upstream { server, detail } => {
                 write!(f, "server '{server}' returned an error: {detail}")
@@ -700,6 +670,13 @@ impl std::fmt::Display for CallError {
                  routes that name to another server (one without a tool prefix that offers a \
                  tool of the same name): it was not run. List the label again to see what it \
                  offers now"
+            ),
+            Self::Moved { name, now } => write!(
+                f,
+                "no tool is called '{name}' any more: more than one MCP server offers a tool of \
+                 that name, so each is under its server's prefix now ({}). It was not run; list \
+                 the tools again and call one of those",
+                now.join(", ")
             ),
         }
     }
@@ -730,6 +707,16 @@ pub struct McpManager {
     /// M3 recomputes the aggregate on every read there is **no cache to
     /// invalidate** — this only tells clients to re-`tools/list` (§8).
     tools_changed: broadcast::Sender<()>,
+    /// Northbound `resources/list_changed`: an upstream's own
+    /// ([`resources`]).
+    resources_changed: broadcast::Sender<()>,
+    /// The paired devices' open host links (client-apps design §5.3).
+    host: host::HostLinks,
+    /// The followers of MCP tasks (MCP Tasks design §1.3).
+    tasks: tasks::Tasks,
+    /// What each server last listed ([`names`]: the names its tools hold
+    /// while it is not connected).
+    known: known::Known,
 }
 
 impl Default for McpManager {
@@ -746,6 +733,10 @@ impl McpManager {
             claims: AtomicU64::new(0),
             state: OnceLock::new(),
             tools_changed,
+            resources_changed: resources::changed_channel(),
+            host: host::HostLinks::default(),
+            tasks: tasks::Tasks::default(),
+            known: known::Known::default(),
         }
     }
 
@@ -780,6 +771,16 @@ impl McpManager {
     /// no-op.
     pub fn set_state(&self, state: &Arc<AppState>) {
         let _ = self.state.set(Arc::downgrade(state));
+        // The stored MCP tasks resume (MCP Tasks design §1.3), and the
+        // results that waited enter their threads: no turn survived the
+        // restart (§3.1).
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let app = state.clone();
+            rt.spawn(async move {
+                app.mcp.resume_tasks().await;
+                crate::web::chat_tasks::deliver::all(&app).await;
+            });
+        }
     }
 
     /// The headers one dial carries: the row's own, plus — for an `agent:<id>`
@@ -836,8 +837,14 @@ impl McpManager {
     fn handler_for(&self, server: &McpServer) -> GatewayClientHandler {
         GatewayClientHandler {
             state: self.state.get().cloned().unwrap_or_default(),
-            allow_sampling: server.allow_sampling,
+            // Never on a device row (client-apps design §5.2, R26).
+            allow_sampling: server.allow_sampling && !server.is_device(),
             sampling_alias: server.sampling_alias.clone(),
+            device: server
+                .is_device()
+                .then(|| (server.id, Duration::from_millis(server.timeout_ms))),
+            init_meta: None,
+            server_id: server.id,
         }
     }
 
@@ -864,6 +871,10 @@ impl McpManager {
             McpStatus::Stopped if c.idle_reaped => {
                 Some("idle-reaped; reconnects on next use".to_string())
             }
+            // When it was last seen is the store's; `status_views` adds it.
+            McpStatus::Stopped if server.is_some_and(McpServer::is_device) => {
+                Some("device offline".to_string())
+            }
             _ => None,
         };
         McpStatusView {
@@ -877,19 +888,38 @@ impl McpManager {
 
     /// Current status of every known connection, for the MCP tab + SSE feed.
     pub async fn status_views(&self, snap: &Snapshot) -> Vec<McpStatusView> {
-        let conns = self.conns.read().await;
-        let mut out: Vec<McpStatusView> = conns
-            .iter()
-            .map(|(id, c)| Self::view_of(*id, c, snap))
-            .collect();
+        let mut out: Vec<McpStatusView> = {
+            let conns = self.conns.read().await;
+            conns
+                .iter()
+                .map(|(id, c)| Self::view_of(*id, c, snap))
+                .collect()
+        };
         out.sort_by_key(|v| v.id);
+        for v in &mut out {
+            self.device_seen(v, snap).await;
+        }
         out
     }
 
     /// Status of a single connection (for the test-connection / badge fetch).
     pub async fn status_view(&self, id: i64, snap: &Snapshot) -> Option<McpStatusView> {
-        let conns = self.conns.read().await;
-        conns.get(&id).map(|c| Self::view_of(id, c, snap))
+        let mut view = {
+            let conns = self.conns.read().await;
+            conns.get(&id).map(|c| Self::view_of(id, c, snap))
+        }?;
+        self.device_seen(&mut view, snap).await;
+        Some(view)
+    }
+
+    /// An offline device row's detail says when it was last seen (§5.3).
+    async fn device_seen(&self, view: &mut McpStatusView, snap: &Snapshot) {
+        let (Some(server), Some(app)) = (snap.mcp_servers.get(&view.id), self.app()) else {
+            return;
+        };
+        if server.is_device() && view.status == McpStatus::Stopped.as_str() {
+            view.detail = Some(host::offline_detail(&app, server).await);
+        }
     }
 
     /// Tear down one connection (cancel the rmcp service, then stop its
@@ -1007,6 +1037,9 @@ impl McpManager {
             })
             .collect();
 
+        // A deleted server's last listing claims nothing any more.
+        self.forget_known(|id| snap.mcp_servers.contains_key(&id));
+
         // Prune ghost entries: a conn whose server was deleted from the snapshot
         // and that isn't running (so `plan_reconcile` emits no `Stop` for it)
         // would otherwise linger forever as a nameless badge — the unbounded-
@@ -1042,6 +1075,9 @@ impl McpManager {
         };
 
         let actions = plan_reconcile(&desired, &live);
+        // A device row is never dialled: its link closes when the row went
+        // or was switched off (client-apps design §5.2).
+        self.close_unwanted_links(snap);
 
         // Teardowns first (cheap, ordered before connects): stop removed/disabled
         // servers, and tear down the old session of anything being restarted so a
@@ -1140,7 +1176,7 @@ impl McpManager {
                     // than `idle_seconds` would otherwise be `cancel()`'d
                     // mid-call. `last_used` only advances on completion, so this
                     // guard — not `last_used` — is what protects a busy conn.
-                    if c.in_flight.load(Ordering::SeqCst) > 0 {
+                    if c.in_flight.load(Ordering::SeqCst) > 0 || self.tasks.has_open(**id) {
                         return false;
                     }
                     let Some(server) = snap.mcp_servers.get(id) else {
@@ -1180,6 +1216,18 @@ impl McpManager {
     /// normal conn map (mirrors the upstream "test" button). Reuses an existing
     /// `Ready` conn's tool list rather than reconnecting.
     pub async fn test_connection(&self, server: &McpServer) -> Result<usize, String> {
+        // A device row is tested by its link, which lmgw cannot open.
+        if server.is_device() {
+            let conns = self.conns.read().await;
+            return match conns.get(&server.id) {
+                Some(c) if c.status == McpStatus::Ready => Ok(c.tools.len()),
+                Some(McpConn {
+                    status: McpStatus::Error(e),
+                    ..
+                }) => Err(e.clone()),
+                _ => Err(self.offline_words(server).await),
+            };
+        }
         {
             let conns = self.conns.read().await;
             if let Some(c) = conns.get(&server.id) {
@@ -1266,34 +1314,67 @@ impl McpManager {
                 claim: None,
                 idle_reaped: false,
                 in_flight: Arc::new(AtomicUsize::new(0)),
+                device: None,
             },
         );
     }
 
     /// Build the current aggregate from live conns + the snapshot overrides (§7).
     /// Recomputed on read (see the module decision note above); cheap — the tools
-    /// are already in memory. Only `Ready` conns with discovered tools contribute.
+    /// are already in memory. Only `Ready` conns with discovered tools contribute
+    /// routes; every other enabled server claims the names of what it last
+    /// listed ([`names`], [`known`]).
     pub async fn aggregate(&self, snap: &Snapshot) -> Aggregate {
         // Clone out the per-conn tools under the read lock, then build the pure
         // aggregate outside it (build_aggregate borrows, so we need owned tools).
-        let per_server: Vec<(i64, String, String, Vec<Tool>)> = {
+        type Listed = (Vec<(i64, Vec<Tool>)>, Vec<(i64, u64)>);
+        let (per_server, listed): Listed = {
             let conns = self.conns.read().await;
-            conns
-                .iter()
-                .filter_map(|(id, c)| {
-                    let server = snap.mcp_servers.get(id)?;
-                    if c.tools.is_empty() {
-                        return None;
-                    }
-                    Some((
-                        *id,
-                        server.name.clone(),
-                        server.tool_prefix.clone(),
-                        c.tools.clone(),
-                    ))
-                })
-                .collect()
+            let mut live = Vec::new();
+            let mut listed = Vec::new();
+            for (id, c) in conns.iter() {
+                if !snap.mcp_servers.contains_key(id) {
+                    continue;
+                }
+                // A server that is connected and listed nothing listed that.
+                if c.status == McpStatus::Ready {
+                    listed.push((*id, known::fingerprint(&c.tools)));
+                }
+                if !c.tools.is_empty() {
+                    live.push((*id, c.tools.clone()));
+                }
+            }
+            (live, listed)
         };
+        let listed: Vec<(i64, u64, &[Tool])> = listed
+            .into_iter()
+            .map(|(id, print)| {
+                let tools = per_server
+                    .iter()
+                    .find(|(s, _)| *s == id)
+                    .map_or(&[][..], |(_, t)| t.as_slice());
+                (id, print, tools)
+            })
+            .collect();
+        // Only the enabled servers not connected now claim what they last
+        // listed.
+        let known = self
+            .known_tools(&listed, |id| {
+                snap.mcp_servers.get(&id).is_some_and(|s| s.enabled)
+                    && !per_server.iter().any(|(s, _)| *s == id)
+            })
+            .await;
+        let schema = rmcp::model::JsonObject::new();
+        let claimed: Vec<(i64, Vec<Tool>)> = known
+            .into_iter()
+            .map(|(id, names)| {
+                let tools = names
+                    .into_iter()
+                    .map(|n| Tool::new(n, "", schema.clone()))
+                    .collect();
+                (id, tools)
+            })
+            .collect();
 
         // Per-server override maps (upstream tool name → override), sliced from
         // the snapshot's `(server_id, tool) → override` map.
@@ -1305,19 +1386,31 @@ impl McpManager {
             m
         };
         let empty = HashMap::new();
-
+        fn input<'a>(
+            snap: &'a Snapshot,
+            overrides: &'a HashMap<i64, HashMap<String, McpToolOverride>>,
+            empty: &'a HashMap<String, McpToolOverride>,
+            (id, tools): &'a (i64, Vec<Tool>),
+        ) -> Option<AggServerInput<'a>> {
+            let server = snap.mcp_servers.get(id)?;
+            Some(AggServerInput {
+                server_id: *id,
+                server_name: &server.name,
+                tool_prefix: &server.tool_prefix,
+                tools,
+                overrides: overrides.get(id).unwrap_or(empty),
+                device: server.is_device(),
+            })
+        }
         let mut inputs: Vec<AggServerInput<'_>> = per_server
             .iter()
-            .map(|(id, name, prefix, tools)| AggServerInput {
-                server_id: *id,
-                server_name: name,
-                tool_prefix: prefix,
-                tools,
-                overrides: overrides_by_server.get(id).unwrap_or(&empty),
-            })
+            .filter_map(|p| input(snap, &overrides_by_server, &empty, p))
             .collect();
-
-        build_aggregate(&mut inputs)
+        let mut claims: Vec<AggServerInput<'_>> = claimed
+            .iter()
+            .filter_map(|p| input(snap, &overrides_by_server, &empty, p))
+            .collect();
+        names::build(&mut inputs, &mut claims)
     }
 
     /// Lazy-list contract (§9): ensure every enabled-but-not-yet-`Ready` server
@@ -1339,11 +1432,15 @@ impl McpManager {
     /// server's `timeout_ms`** — a hung server fails *this* call, not the gateway.
     /// Results (text/image/audio/resource/structuredContent + `isError`) pass
     /// through verbatim ([`CallToolResult`], no truncation, §7).
+    ///
+    /// `from` is who the call runs as: what a device-hosted server's call
+    /// carries in `_meta` (client-apps design §5.5), and no other's.
     pub async fn call(
         &self,
         snap: &Snapshot,
         exposed_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        from: &host::CallFrom,
     ) -> Result<(rmcp::model::CallToolResult, String), CallError> {
         // The owner's per-tool switch, at the southbound choke point: every
         // caller that routes a tool to a registered server comes through here,
@@ -1372,12 +1469,30 @@ impl McpManager {
                 agg = self.aggregate(snap).await;
             }
         }
-        let owner = agg
-            .reverse
-            .get(exposed_name)
-            .cloned()
-            .ok_or_else(|| CallError::ToolNotFound(exposed_name.to_string()))?;
-        self.call_on(snap, exposed_name, owner, arguments).await
+        // An offline device's tool answers at once that it is offline
+        // (client-apps design §5.3), not as an unknown name.
+        if !agg.reverse.contains_key(exposed_name) {
+            if let Some(row) = offline_device_for(snap, exposed_name) {
+                return Err(self.offline(&row).await);
+            }
+        }
+        // A switch set under the name a collision moved the tool from.
+        if agg.tool_disabled(snap, exposed_name) {
+            return Err(CallError::Disabled(exposed_name.to_string()));
+        }
+        let Some(owner) = agg.reverse.get(exposed_name).cloned() else {
+            let now = agg.moved_from(exposed_name);
+            return Err(if now.is_empty() {
+                CallError::ToolNotFound(exposed_name.to_string())
+            } else {
+                CallError::Moved {
+                    name: exposed_name.to_string(),
+                    now: now.into_iter().map(String::from).collect(),
+                }
+            });
+        };
+        self.call_on(snap, exposed_name, owner, arguments, from)
+            .await
     }
 
     /// The call of `exposed_name`, resolved to its owning server's id and
@@ -1389,11 +1504,37 @@ impl McpManager {
         exposed_name: &str,
         (server_id, upstream_tool): (i64, String),
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        from: &host::CallFrom,
     ) -> Result<(rmcp::model::CallToolResult, String), CallError> {
         let server = snap
             .mcp_servers
             .get(&server_id)
             .ok_or_else(|| CallError::ToolNotFound(exposed_name.to_string()))?;
+        // A device row's call goes over its link, with `_meta` (§5.5).
+        let mut called = if server.is_device() {
+            self.call_device(server, exposed_name, upstream_tool, arguments, from)
+                .await
+        } else {
+            self.call_server(server, exposed_name, upstream_tool, arguments, from)
+                .await
+        };
+        // The result's resource URIs in the server's namespace (L14).
+        if let Ok((result, _)) = &mut called {
+            resources::apps::namespace_result(&server.tool_prefix, result);
+        }
+        called
+    }
+
+    /// [`call_on`](Self::call_on) for a server that is not a device row.
+    async fn call_server(
+        &self,
+        server: &McpServer,
+        exposed_name: &str,
+        upstream_tool: String,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        from: &host::CallFrom,
+    ) -> Result<(rmcp::model::CallToolResult, String), CallError> {
+        let server_id = server.id;
 
         // Lazy connect on demand if the owning server isn't Ready (§9). Honors
         // backoff via start_one; we then re-check readiness.
@@ -1444,6 +1585,12 @@ impl McpManager {
         // can't be torn down mid-flight. Decrements on drop, covering a cancelled
         // northbound request too. Held until the end of the function.
         let _in_flight = in_flight.map(InFlightGuard::new);
+        if let Some(done) = self
+            .call_task(server, exposed_name, &peer, &params, from)
+            .await
+        {
+            return done;
+        }
 
         // Wrap in the owning server's timeout (§9): a hung server fails THIS call.
         let timeout = Duration::from_millis(server.timeout_ms);
@@ -1495,6 +1642,7 @@ mod tests {
             allow_sampling: false,
             sampling_alias: None,
             agent_id: agent_id.map(str::to_string),
+            device_key_id: None,
         }
     }
 
@@ -1705,6 +1853,7 @@ mod tests {
             allow_sampling: true,
             sampling_alias: None,
             agent_id: None,
+            device_key_id: None,
         }
     }
 
@@ -1730,6 +1879,7 @@ mod tests {
             tool_prefix: "gh",
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         // Exposed names are prefixed; sorted.
@@ -1756,41 +1906,10 @@ mod tests {
             tool_prefix: "",
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         assert_eq!(agg.reverse.get("x__y"), Some(&(3, "x__y".to_string())));
-    }
-
-    #[test]
-    fn aggregate_skips_the_reserved_lmgw_namespace() {
-        // The `ops` layer refuses `tool_prefix = "lmgw"`, but a bare server can
-        // still surface the name two other ways: an upstream tool literally
-        // called `lmgw__…`, or a rename into the namespace. Both must be dropped
-        // — otherwise an upstream shadows lmgw's own self-admin tools and
-        // receives an agent's configuration calls (§20).
-        let tools = vec![tool("lmgw__settings_set"), tool("safe")];
-        let mut ov = HashMap::new();
-        ov.insert(
-            "safe".to_string(),
-            McpToolOverride {
-                hidden: false,
-                rename: Some("lmgw__status".into()),
-            },
-        );
-        let mut inputs = vec![AggServerInput {
-            server_id: 5,
-            server_name: "impostor",
-            tool_prefix: "",
-            tools: &tools,
-            overrides: &ov,
-        }];
-        let agg = build_aggregate(&mut inputs);
-
-        assert!(agg.tools.is_empty(), "reserved names must not be exposed");
-        assert!(agg.reverse.is_empty(), "and must not be routable");
-        // Dropped, but surfaced with a reason — never silently.
-        assert_eq!(agg.skipped.len(), 2);
-        assert!(agg.skipped.iter().all(|s| s.reason.contains("reserved")));
     }
 
     #[test]
@@ -1805,6 +1924,7 @@ mod tests {
             tool_prefix: "",
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         assert_eq!(agg.reverse.len(), 1);
@@ -1829,6 +1949,7 @@ mod tests {
             tool_prefix: "gh",
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         assert_eq!(agg.tools[0].name.as_ref(), "gh__find");
@@ -1856,43 +1977,12 @@ mod tests {
             tool_prefix: "gh",
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         let names: Vec<&str> = agg.tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(names, vec!["gh__search"]);
         assert!(!agg.reverse.contains_key("gh__danger"));
-    }
-
-    #[test]
-    fn aggregate_bare_collision_resolves_first_by_server_name() {
-        // Two bare servers expose `read`. Determinism: first-by-server-name wins
-        // ("alpha" < "beta"), the other is skipped + surfaced (not overwritten).
-        let alpha_tools = vec![tool("read")];
-        let beta_tools = vec![tool("read")];
-        let ov = no_overrides();
-        // Pass them in the "wrong" order to prove the sort, not input order, decides.
-        let mut inputs = vec![
-            AggServerInput {
-                server_id: 2,
-                server_name: "beta",
-                tool_prefix: "",
-                tools: &beta_tools,
-                overrides: &ov,
-            },
-            AggServerInput {
-                server_id: 1,
-                server_name: "alpha",
-                tool_prefix: "",
-                tools: &alpha_tools,
-                overrides: &ov,
-            },
-        ];
-        let agg = build_aggregate(&mut inputs);
-        // `read` routes to alpha (server 1); beta's is shadowed + surfaced.
-        assert_eq!(agg.reverse.get("read"), Some(&(1, "read".to_string())));
-        assert_eq!(agg.skipped.len(), 1);
-        assert_eq!(agg.skipped[0].server_id, 2);
-        assert!(agg.skipped[0].reason.contains("alpha"));
     }
 
     #[test]
@@ -1908,6 +1998,7 @@ mod tests {
             tool_prefix: "longprefix", // 10 + 2 ("__") + 60 = 72 > 64
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         assert!(agg.tools.is_empty(), "oversized tool must be skipped");
@@ -1930,6 +2021,7 @@ mod tests {
             tool_prefix: "", // bare → exposed name is exactly 64 chars
             tools: &tools,
             overrides: &ov,
+            device: false,
         }];
         let agg = build_aggregate(&mut inputs);
         assert_eq!(agg.tools.len(), 1);

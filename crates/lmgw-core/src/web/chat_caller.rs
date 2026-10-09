@@ -115,6 +115,18 @@ impl Caller {
         }
     }
 
+    /// Who its tool calls run as, for a device-hosted server's `_meta`
+    /// (client-apps design §5.5): the owner by its key, the gateway for an
+    /// in-process caller, the device.
+    pub(crate) fn call_from(&self) -> crate::mcp::host::CallFrom {
+        match self {
+            Self::Owner(None) => crate::mcp::host::CallFrom::gateway(),
+            Self::Owner(Some(ctx)) | Self::Device(ctx) | Self::Refused(ctx) => {
+                crate::mcp::host::CallFrom::of(ctx)
+            }
+        }
+    }
+
     /// Whom its rows are charged to: the device's key, or nobody — the row's
     /// label then names the internal identity (`internal:chat`).
     pub(crate) fn key(&self) -> KeyRef {
@@ -303,6 +315,17 @@ impl Caller {
         }
     }
 
+    /// The device key whose own admin-tools level a write is checked
+    /// against (`ops::chat_profiles`'s admin-use guard); `None` for the
+    /// owner. A caller that holds nothing is a device without a key here:
+    /// id 0, which no key has, so it holds no level (fails closed).
+    pub(crate) fn device_id(&self) -> Option<i64> {
+        match self {
+            Self::Owner(_) => None,
+            Self::Device(ctx) | Self::Refused(ctx) => Some(ctx.principal.key_id().unwrap_or(0)),
+        }
+    }
+
     /// How far a listing it reads reaches into the threads and folders that
     /// drive the self-admin plane (L3), as `snap` says now: everything for
     /// the owner; the toolset's for a device allowed lmgw's admin tools;
@@ -312,6 +335,52 @@ impl Caller {
             Self::Owner(_) => AdminThreads::Shown,
             Self::Device(ctx) => crate::devices::reach(snap, ctx.principal.key_id()),
             Self::Refused(_) => AdminThreads::Hidden,
+        }
+    }
+
+    /// The principal that started a gated turn, by its key (`None`: the
+    /// gateway's own in-process run), as the resumed turn runs as it
+    /// (client-apps design L13): `Err` naming the key when it is gone or
+    /// disabled. `name` is its name when the turn started.
+    pub(crate) fn resumed(
+        snap: &crate::config::Snapshot,
+        key_id: Option<i64>,
+        name: Option<&str>,
+    ) -> Result<Self, String> {
+        let Some(id) = key_id else {
+            return Ok(Self::Owner(None));
+        };
+        let named = name.map_or_else(|| format!("key {id}"), |n| format!("key '{n}'"));
+        let Some(key) = snap.api_keys.iter().find(|k| k.id == id) else {
+            return Err(format!(
+                "{named}, which started this turn, is gone, and a resumed turn runs as the \
+                 principal that started it"
+            ));
+        };
+        if !key.enabled {
+            return Err(format!(
+                "key '{}', which started this turn, is disabled, and a resumed turn runs as the \
+                 principal that started it",
+                key.name
+            ));
+        }
+        let ctx = RequestCtx {
+            principal: Principal::from_key(key),
+            client_key: Some(key.name.clone()),
+            ..RequestCtx::default()
+        };
+        Ok(match key.kind {
+            ApiKeyKind::Internal => Self::Owner(None),
+            _ => Self::of(&ctx),
+        })
+    }
+
+    /// Who it decides as (client-apps design §6.3): its principal as a
+    /// device reads it, and its name in the feed.
+    pub(crate) fn decider(&self) -> crate::store::Decider {
+        crate::store::Decider {
+            who: self.call_from().caller,
+            named: self.named(),
         }
     }
 

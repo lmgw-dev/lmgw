@@ -584,18 +584,22 @@ fn responses_object(
             subprotocol,
             frames,
         } => {
-            let switching = json!({
+            let mut switching = json!({
                 "description": format!(
                     "Switching Protocols: the connection is now a WebSocket. {frames}"
                 ),
-                "headers": {
+            });
+            // A route with no subprotocol of its own (the device host link)
+            // selects none.
+            if !subprotocol.is_empty() {
+                switching["headers"] = json!({
                     "Sec-WebSocket-Protocol": {
                         "description": "The subprotocol selected, present when the client \
                             offered it.",
                         "schema": { "type": "string", "enum": [subprotocol] },
                     },
-                },
-            });
+                });
+            }
             responses.insert(
                 "101".to_string(),
                 with_headers(switching, method, path, is_inference),

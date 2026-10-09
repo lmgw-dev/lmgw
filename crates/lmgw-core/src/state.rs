@@ -251,6 +251,11 @@ pub type SharedState = Arc<AppState>;
 #[doc(hidden)]
 pub struct ChatThreadHold(#[allow(dead_code)] crate::web::chat_live::HistoryWrite);
 
+/// A turn of a Chat thread a test keeps running
+/// ([`AppState::chat_turn_held_for_tests`]).
+#[doc(hidden)]
+pub struct ChatTurnHold(#[allow(dead_code)] crate::web::chat_live::Ticket);
+
 /// The order the loads of the snapshot from the store publish in (the
 /// branch review's N-1). Two reloads may load at once — a key's level saved
 /// while a model is saved — and the one that loaded first may publish last:
@@ -636,6 +641,24 @@ impl AppState {
     #[doc(hidden)]
     pub async fn hold_chat_thread_for_tests(&self, id: i64) -> ChatThreadHold {
         ChatThreadHold(self.chat_live.hold(id).await)
+    }
+
+    /// A turn of Chat thread `id` that runs until the hold drops, as the
+    /// owner's: while it runs, an ended MCP task's result waits to enter
+    /// the thread (MCP Tasks design §3.1), so a test reads the task's row
+    /// as the follower left it.
+    #[doc(hidden)]
+    pub async fn chat_turn_held_for_tests(&self, id: i64) -> ChatTurnHold {
+        ChatTurnHold(self.chat_live.begin_as(id, None, 0).await)
+    }
+
+    /// What waits to enter Chat thread `id` enters now, if no turn of it
+    /// runs, as an ended task's follower delivers it (MCP Tasks design
+    /// §3.1): how many results entered. A test that seeds its task rows by
+    /// hand has no follower to do it.
+    #[doc(hidden)]
+    pub async fn deliver_chat_tasks_for_tests(&self, id: i64) -> usize {
+        crate::web::chat_tasks::deliver::when_idle(self, id).await
     }
 
     /// Chat folder `id`'s lock, held by a test where a write in flight would

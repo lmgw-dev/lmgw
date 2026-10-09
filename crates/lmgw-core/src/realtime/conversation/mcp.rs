@@ -115,8 +115,10 @@ impl Conversation {
 
 const LIST_TOOLS: &str =
     "a session lists an MCP label's tools itself, when the label is in session.tools";
-const APPROVAL: &str = "approvals are not built on /v1/realtime yet, so a session's mcp tools \
-     never ask for one";
+const APPROVAL_REQUEST: &str = "the gateway makes these, when a call waits for an approval";
+const APPROVAL_RESPONSE: &str = "approvals are taken on a session bound to a chat thread only \
+     (?chat_thread=), whose thread's tools ask for them; a session's own mcp tools never ask for \
+     one";
 
 fn refused(kind: &str, why: &str) -> ErrorObject {
     ErrorObject::invalid(
@@ -131,6 +133,17 @@ pub(super) fn list_tools_refusal() -> ErrorObject {
     refused("mcp_list_tools", LIST_TOOLS)
 }
 
+/// A client's `mcp_approval_request` item.
+pub(super) fn approval_request_refusal() -> ErrorObject {
+    refused("mcp_approval_request", APPROVAL_REQUEST)
+}
+
+/// A client's `mcp_approval_response` item on a session bound to no chat
+/// thread (a bound one takes it, `thread::approvals`).
+pub(super) fn approval_response_refusal() -> ErrorObject {
+    refused("mcp_approval_response", APPROVAL_RESPONSE)
+}
+
 /// The refusal for a `conversation.item.create` frame whose item is one of
 /// the refused types — asked when the frame did not parse.
 pub(in crate::realtime) fn refusal_of_frame(frame: &Value) -> Option<ErrorObject> {
@@ -140,7 +153,9 @@ pub(in crate::realtime) fn refusal_of_frame(frame: &Value) -> Option<ErrorObject
     let kind = frame.pointer("/item/type").and_then(Value::as_str)?;
     let why = match kind {
         "mcp_list_tools" => LIST_TOOLS,
-        "mcp_approval_request" | "mcp_approval_response" => APPROVAL,
+        "mcp_approval_request" => APPROVAL_REQUEST,
+        // A malformed answer gets the shape's own error: a bound session
+        // takes a well-formed one.
         _ => return None,
     };
     Some(refused(kind, why))

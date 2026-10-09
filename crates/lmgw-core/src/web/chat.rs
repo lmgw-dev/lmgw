@@ -138,8 +138,8 @@ pub struct CreateReq {
 }
 
 /// `POST /chat/api/threads` — create a thread, returning it. A plain chat
-/// thread starts from the default system prompt (Settings → Chat), as its own
-/// copy; an Admin Chat thread has its built-in prompt already, and starts
+/// thread starts from the default system prompt and profile (Settings →
+/// Chat), the prompt as its own copy; an Admin Chat thread has its built-in prompt already, and starts
 /// with nothing of the thread's own to append to it. `{temporary: true}`
 /// creates a temporary one, with a negative id; `{folder_id}` starts it from
 /// that folder's defaults. A device asking for an Admin Chat thread is a
@@ -180,12 +180,9 @@ pub async fn create_thread(
     } else {
         "chat"
     };
-    let snap = state.snapshot();
-    let prompt = if kind == ADMIN_KIND {
-        ""
-    } else {
-        snap.settings.default_chat_prompt()
-    };
+    // An Admin Chat thread takes neither the default prompt nor the default
+    // profile (personality-profiles design §3.1: a profile as the prompt).
+    let (prompt, profile_id) = super::chat_folders::thread_start(&state.snapshot(), kind);
     let repo = if req.temporary {
         ChatRepo::Temp
     } else {
@@ -213,7 +210,7 @@ pub async fn create_thread(
         };
     }
     match repo
-        .create_thread(&state, &req.model_alias, kind, prompt, &caller)
+        .create_thread(&state, &req.model_alias, kind, &prompt, profile_id, &caller)
         .await
     {
         Ok(t) => Json(thread_json(&state, &t).await).into_response(),
@@ -283,16 +280,30 @@ pub async fn get_thread(
         .map(|m| {
             let mut v = serde_json::to_value(m).expect("ChatMessageRow always serializes");
             v["attachments"] = json!(by_message.get(&m.id).cloned().unwrap_or_default());
+            // The calls a gated turn's reply still waits on (client-apps
+            // design §6.2): what `POST …/approvals` decides.
+            if let Some(waiting) = m
+                .pending_approvals
+                .as_ref()
+                .map(|p| p.requests())
+                .filter(|r| !r.is_empty())
+            {
+                v["pending_approvals"] = json!(waiting);
+            }
             v
         })
         .collect();
     let snap = state.snapshot();
     let mut thread_v = chat_wire::thread(&state, &thread).await;
     thread_v.continue_state = Some(chat_turn::continue_state(&snap, &thread, last));
+    // Its MCP tasks still running or waiting to enter it (MCP Tasks design
+    // §5.1).
+    let tasks = super::chat_tasks::thread_tasks(&state, id).await;
     Json(json!({
         "thread": chat_wire::wire(&thread_v),
         "messages": messages,
         "draft_attachments": drafts,
+        "tasks": tasks,
     }))
     .into_response()
 }
@@ -788,6 +799,11 @@ pub async fn send(
         );
     }
 
+    // From before the message's write until its turn has begun, a task
+    // result that ends waits for the turn's end; what waited enters before
+    // the message (MCP Tasks design §3.1).
+    let sent = super::chat_tasks::deliver::sent(&state, id, !repo.is_temp());
+
     // Persist the user turn up front so a disconnect still records what was
     // asked, and name an untitled thread from its first message — the first
     // attachment's name when there is no text (design §2). Insert + bind are
@@ -843,7 +859,13 @@ pub async fn send(
         user_message_id: Some(user_message_id),
     };
     let speak = req.speak.then(super::chat_voice::ReadAloud::default);
-    chat_turn::start_turn(&state, &caller, repo, &thread, mode, caps, speak).await
+    let turn = chat_turn::TurnAs {
+        caller: caller.clone(),
+        resume: None,
+        slot: None,
+        sent,
+    };
+    chat_turn::start_turn_as(&state, &caller, turn, repo, &thread, (mode, caps), speak).await
 }
 
 /// Open the upstream chat stream through the gate's send. A failure is the
@@ -1411,6 +1433,8 @@ where
                 answered_by: answered_by.clone(),
                 stopped: outcome.aborted,
                 failed: outcome.error.is_some(),
+                // A plain turn calls no tool, so none waits.
+                pending: None,
             },
         )
         .await;

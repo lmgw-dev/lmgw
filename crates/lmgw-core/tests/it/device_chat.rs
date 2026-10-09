@@ -12,10 +12,20 @@
 //!   Admin Chat thread (L3), and not for a chat thread;
 //! - `collections`: the list, folder counts, search, exports and a folder
 //!   delete leave Admin Chat out;
+//! - `profiles`: personality profiles as a device lists, edits and assigns
+//!   them (personality-profiles design D13, D14);
 //! - `writes`: creating an admin thread, tool labels and knowledge bases a
 //!   device writes (L5, review W2-4);
 //! - `turns`: a device's turn runs as its key — rows, scope, rpm, its tool
 //!   scope, the knowledge skip — and its non-turn routes do too (W2-3);
+//! - `approval_tighten`: a device only tightens `require_approval` (owner's
+//!   decision, 2026-10-09), on a thread, a folder's defaults, `apply_to_current`;
+//! - `approval_floor`: what it is measured against — the server, not the
+//!   label; either spelling of a tool; the owner's floor, which removing,
+//!   moving or a folder's delete never lowers — and malformed rules;
+//! - `approval_runtime`: the floor at the turn, for a label that names its
+//!   server only later; two stored entries for one server; the two-entries
+//!   `400` after the scope check; a stored malformed default carried;
 //! - `bind`: `/v1/realtime?chat_thread=` as a device, and the takeover
 //!   naming its binder (§1.7);
 //! - `revoke`: a Rotate ends a running Chat stream and fails its next call
@@ -66,8 +76,13 @@ mod admin_reach;
 mod admin_steer;
 mod admin_surfaces;
 mod admin_tools;
+mod approval_floor;
+mod approval_runtime;
+mod approval_tighten;
 mod bind;
 mod collections;
+mod profiles;
+mod profiles_admin;
 mod reach_order;
 mod revoke;
 mod self_admin;

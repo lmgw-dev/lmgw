@@ -15,7 +15,6 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -365,12 +364,12 @@ pub async fn text_session(addr: &str) -> Ws {
     ws
 }
 
-/// The next JSON event, failing the test after five seconds of silence.
+/// The next JSON event, as long as the test may wait for it
+/// ([`crate::common::patience`]).
 pub async fn next_event(ws: &mut Ws) -> Value {
     loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        let msg = crate::common::patience::within("the server's next event", ws.next())
             .await
-            .expect("the server said nothing for 5 s")
             .expect("the socket closed")
             .expect("the socket failed");
         match msg {

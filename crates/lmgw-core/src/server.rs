@@ -111,7 +111,10 @@ pub fn build_router(state: SharedState) -> Router {
 
     // MCP gateway (northbound). Two capabilities on one path — see
     // `ingress::routes` — so it declares them itself.
-    let mcp = crate::mcp::ingress::routes(&state);
+    let mcp = crate::mcp::ingress::routes(&state)
+        // A paired device's MCP host link (client-apps design §5.1): `Chat`,
+        // declared by the route itself.
+        .merge(crate::mcp::host::routes(&state));
 
     Router::new()
         .nest("/v1", api)
@@ -232,6 +235,9 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/mcp/admin", Cap::Admin),
     ("GET", "/mcp/admin", Cap::Inference),
     ("DELETE", "/mcp/admin", Cap::Inference),
+    // A paired device's MCP host link (client-apps design §5.1): the `Chat`
+    // layer, then the handler wants a device with a hosting grant.
+    ("GET", "/mcp/host", Cap::Chat),
     // -- The dashboard plane -----------------------------------------------
     // The one `/api` read a page may do before it has a session: the SPA
     // prints the version in its footer and on the login view.
@@ -356,6 +362,15 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/chat/api/threads/{id}/pin", Cap::Chat),
     ("POST", "/chat/api/threads/{id}/move", Cap::Chat),
     ("GET", "/chat/api/search", Cap::Chat),
+    ("GET", "/chat/api/profiles", Cap::Chat),
+    ("POST", "/chat/api/profiles", Cap::Chat),
+    ("GET", "/chat/api/profiles/{id}", Cap::Chat),
+    ("POST", "/chat/api/profiles/{id}", Cap::Chat),
+    ("POST", "/chat/api/profiles/{id}/delete", Cap::Chat),
+    ("POST", "/chat/api/profiles/{id}/reset", Cap::Chat),
+    ("POST", "/chat/api/profiles/preview", Cap::Chat),
+    ("POST", "/chat/api/profiles/test", Cap::Chat),
+    ("POST", "/chat/api/profiles/speak", Cap::Chat),
     ("GET", "/chat/api/feed", Cap::Chat),
     ("GET", "/chat/api/threads/{id}/export", Cap::Chat),
     ("GET", "/chat/api/folders/{id}/export", Cap::Chat),
@@ -368,6 +383,14 @@ pub const CAPABILITY_TABLE: &[(&str, &str, Cap)] = &[
     ("POST", "/chat/api/threads/{id}/archive", Cap::Chat),
     ("POST", "/chat/api/threads/{id}/persist", Cap::Chat),
     ("POST", "/chat/api/threads/{id}/continue", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/approvals", Cap::Chat),
+    ("GET", "/chat/api/threads/{id}/tasks", Cap::Chat),
+    ("POST", "/chat/api/threads/{id}/answer", Cap::Chat),
+    (
+        "POST",
+        "/chat/api/threads/{id}/tasks/{task}/cancel",
+        Cap::Chat,
+    ),
     (
         "POST",
         "/chat/api/threads/{id}/messages/{mid}/delete",
@@ -592,6 +615,8 @@ pub async fn chat_upkeep(state: &crate::state::AppState) {
             state.chat_live.purged(&purged).await;
             state.chat_feed.threads_deleted(&purged);
             state.chat_feed.wake();
+            // Their open MCP tasks owe a cancel now (MCP Tasks design §1.5).
+            state.mcp.resume_tasks().await;
             tracing::info!(
                 "chat sweep: archived {archived}, purged {} threads",
                 purged.len()

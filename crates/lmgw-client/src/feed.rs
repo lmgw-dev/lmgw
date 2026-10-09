@@ -16,7 +16,8 @@
 //! arrives is a sign of life.
 
 pub use lmgw_api_types::chat_feed::{
-    Cursor, FeedEvent, FeedEventError, FolderNow, Hello, ThreadNow, EVENTS,
+    ApprovalDecided, ApprovalRequested, Cursor, DeviceRevoked, FeedEvent, FeedEventError,
+    FeedPrincipal, FeedProfile, FolderNow, Hello, TaskDone, TaskStarted, ThreadNow, EVENTS,
 };
 
 /// One SSE record: its `event:` (`message` when it names none), its
@@ -329,6 +330,60 @@ mod tests {
             Some("ep:6:dd44"),
             "past each of them, and the client was told of each"
         );
+    }
+
+    /// Personality profiles (personality-profiles design §3.2): a stored
+    /// `profile.*` moves the cursor; the list after a `resync` comes as
+    /// `profile.created` without an `id:`, and leaves it where it is.
+    #[test]
+    fn profile_events_read_with_and_without_a_cursor() {
+        let mut r = FeedReader::new(Some("e:3:0a1b"));
+        let got = r.push(
+            b"id: e:4:aa\nevent: profile.updated\ndata: {\"id\":3,\"name\":\"Calm\",\"by\":\"the dashboard\"}\n\n\
+              event: resync\ndata: {\"reason\":\"x\"}\n\n\
+              event: profile.created\ndata: {\"id\":3,\"name\":\"Calm\",\"by\":null}\n\n",
+        );
+        let calm = |by: Option<&str>| FeedProfile {
+            id: 3,
+            name: "Calm".into(),
+            by: by.map(str::to_string),
+        };
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(
+            got[0],
+            FeedItem::Event(FeedEvent::ProfileUpdated(calm(Some("the dashboard"))))
+        );
+        assert_eq!(
+            got[2],
+            FeedItem::Event(FeedEvent::ProfileCreated(calm(None)))
+        );
+        assert_eq!(r.cursor(), Some("e:4:aa"));
+    }
+
+    /// A deleted device (MCP Tasks design §4.1): a stored event, typed,
+    /// that moves the cursor; its device reads as a principal, whose `by`
+    /// is what that device's changes carried.
+    #[test]
+    fn a_device_revoked_event_moves_the_cursor_and_names_the_device() {
+        let mut r = FeedReader::new(None);
+        let got = r.push(
+            b"id: e:12:ab\nevent: device.revoked\ndata: {\"device\":{\"kind\":\"device\",\"name\":\"phone\"},\"by\":\"the dashboard\"}\n\n",
+        );
+        let [FeedItem::Event(FeedEvent::DeviceRevoked(d))] = got.as_slice() else {
+            panic!("{got:?}")
+        };
+        assert_eq!(
+            d,
+            &DeviceRevoked {
+                device: FeedPrincipal {
+                    kind: "device".into(),
+                    name: "phone".into(),
+                },
+                by: Some("the dashboard".into()),
+            }
+        );
+        assert_eq!(d.device.by(), "device 'phone'");
+        assert_eq!(r.cursor(), Some("e:12:ab"));
     }
 
     #[test]

@@ -324,3 +324,81 @@ fn the_client_events_are_byte_for_byte_the_panel_s_frames() {
         assert_eq!(ev.to_json(), want, "{ev:?}");
     }
 }
+
+#[test]
+fn an_approval_request_and_a_decision_elsewhere_are_typed() {
+    let ev = parse(
+        r#"{"type": "conversation.item.done", "event_id": "e1", "previous_item_id": null,
+            "item": {"id": "mcpr_1", "type": "mcp_approval_request",
+                     "server_label": "desktop", "name": "notify",
+                     "arguments": "{\"text\":\"hi\"}"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        ev,
+        ServerEvent::ApprovalRequest(ApprovalRequest {
+            approval_request_id: "mcpr_1".into(),
+            server_label: "desktop".into(),
+            name: "notify".into(),
+            arguments: r#"{"text":"hi"}"#.into(),
+            call_id: None,
+        })
+    );
+    // Any other item's done stays untyped.
+    let other = parse(r#"{"type": "conversation.item.done", "item": {"type": "message"}}"#);
+    assert!(matches!(other, Some(ServerEvent::Unknown { .. })));
+    let ev = parse(
+        r#"{"type": "lmgw.approval.decided", "event_id": "e2",
+            "approval_request_id": "mcpr_1", "approve": false, "by": "the dashboard"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        ev,
+        ServerEvent::ApprovalDecided(ApprovalDecidedEvent {
+            approval_request_id: "mcpr_1".into(),
+            approve: false,
+            by: Some("the dashboard".into()),
+        })
+    );
+    let answer = ClientEvent::ApprovalResponse {
+        approval_request_id: "mcpr_1".into(),
+        approve: true,
+        reason: None,
+    };
+    let v: Value = serde_json::from_str(&answer.to_json()).unwrap();
+    assert_eq!(v["type"], "conversation.item.create");
+    assert_eq!(v["item"]["type"], "mcp_approval_response");
+    assert_eq!(v["item"]["approve"], true);
+    assert!(v["item"].get("reason").is_none());
+}
+
+#[test]
+fn a_late_task_result_is_typed() {
+    let ev = parse(
+        r#"{"type": "lmgw.task.done", "event_id": "e3", "thread_id": 7, "message_id": 41,
+            "id": 3, "task_id": "t1", "server_label": "desktop", "tool": "desktop__build",
+            "status": "completed", "by": null}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        ev,
+        ServerEvent::TaskDone(TaskDone {
+            thread_id: 7,
+            message_id: 41,
+            id: 3,
+            task_id: "t1".into(),
+            server_label: "desktop".into(),
+            tool: "desktop__build".into(),
+            status: "completed".into(),
+            by: None,
+        })
+    );
+    // One whose fields do not read stays untyped.
+    let odd = parse(r#"{"type": "lmgw.task.done", "message_id": "x"}"#);
+    assert!(matches!(odd, Some(ServerEvent::Unknown { .. })), "{odd:?}");
+    // The continuation is a plain `response.create`.
+    assert_eq!(
+        ClientEvent::ResponseCreate.to_json(),
+        r#"{"type":"response.create"}"#
+    );
+}

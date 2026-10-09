@@ -1021,7 +1021,7 @@ async fn every_executor_refuses_a_disabled_tool_by_name() {
     let mock = MockServer::start().await;
     let (state, base) = setup(&mock.uri(), SelfAdmin::Full).await;
     let stub = mcp_stub().await;
-    register_mcp(&state, &stub).await;
+    let server = register_mcp(&state, &stub).await;
     for name in ["stub__echo", "lmgw__status", "docs__resolve"] {
         let (status, body) = set_tool(&base, name, false).await;
         assert_eq!(status, 200, "{body}");
@@ -1031,7 +1031,12 @@ async fn every_executor_refuses_a_disabled_tool_by_name() {
     let cases: Vec<(&str, Box<dyn ToolExecutor>)> = vec![
         (
             "stub__echo",
-            Box::new(McpExecutor::new(state.clone(), RequestCtx::default())),
+            // As a run that was offered it: a name it was not offered is
+            // refused before anything else.
+            Box::new(
+                McpExecutor::new(state.clone(), RequestCtx::default())
+                    .with_listed([("stub__echo".to_string(), server)].into()),
+            ),
         ),
         (
             "lmgw__status",
@@ -1548,7 +1553,7 @@ async fn the_run_executor_reads_the_keys_scope_at_each_call() {
     let mock = MockServer::start().await;
     let (state, base) = setup(&mock.uri(), SelfAdmin::Full).await;
     let stub = mcp_stub().await;
-    register_mcp(&state, &stub).await;
+    let server = register_mcp(&state, &stub).await;
     scoped_key(&state, &base, "ci", "allow", "docs__*").await;
     // What a run's resolve step does first: connect and list the server, so
     // the executor has a route for the name.
@@ -1572,7 +1577,8 @@ async fn the_run_executor_reads_the_keys_scope_at_each_call() {
         ..RequestCtx::default()
     };
     let exec = ScopedExecutor::new(
-        McpExecutor::new(state.clone(), ctx.clone()),
+        McpExecutor::new(state.clone(), ctx.clone())
+            .with_listed([("stub__echo".to_string(), server)].into()),
         state.clone(),
         ctx,
     );

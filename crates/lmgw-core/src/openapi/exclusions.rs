@@ -65,7 +65,6 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
     ("POST", "/chat/api/threads/{id}/delete", CHAT_API),
     ("POST", "/chat/api/threads/{id}/send", CHAT_API),
     ("POST", "/chat/api/threads/{id}/voice/warm", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/transcribe", CHAT_API),
     ("POST", "/chat/api/threads/{id}/speech/stop", CHAT_API),
     ("POST", "/chat/api/threads/{id}/pin", CHAT_API),
     ("POST", "/chat/api/threads/{id}/move", CHAT_API),

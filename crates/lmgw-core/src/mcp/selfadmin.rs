@@ -54,6 +54,11 @@ mod bench;
 /// package B7) — the tools themselves are `catalog/audio.rs`.
 mod audio;
 
+/// `lmgw__profiles`, `lmgw__profile_set` and `lmgw__profile_delete`
+/// dispatch (personality-profiles design §3.4) — the tools themselves are
+/// `catalog/chat_profiles.rs`.
+mod chat_profiles;
+
 /// The access settings no tool changes (client-apps design L5's notes,
 /// 2026-10-07).
 mod guards;
@@ -275,7 +280,7 @@ fn hoist_json_arg(args: &mut Map<String, Value>, key: &str) -> Result<(), String
 /// name like a patch tool's `deny_unknown_fields` refuses it, instead of
 /// running with the default. (`lmgw__build_set` goes through a patch struct
 /// that already refuses.)
-const CLOSED_ARG_TOOLS: [&str; 8] = [
+const CLOSED_ARG_TOOLS: [&str; 11] = [
     "lmgw__builds",
     "lmgw__build_log",
     "lmgw__container_images",
@@ -284,6 +289,9 @@ const CLOSED_ARG_TOOLS: [&str; 8] = [
     "lmgw__build_check_merge",
     "lmgw__container_image_delete",
     "lmgw__container_image_pull",
+    "lmgw__profiles",
+    "lmgw__profile_set",
+    "lmgw__profile_delete",
 ];
 
 /// An argument `def` does not declare, as the refusal that names it and the
@@ -799,6 +807,9 @@ async fn run(
         bench if bench.starts_with("lmgw__bench_") => self::bench::run(state, bench, args).await,
         "lmgw__audio_catalog" | "lmgw__audio_model_set" | "lmgw__voice_transcribe" => {
             self::audio::run(state, name, args).await
+        }
+        "lmgw__profiles" | "lmgw__profile_set" | "lmgw__profile_delete" => {
+            self::chat_profiles::run(state, name, args, caller).await
         }
         other => Err(format!("unhandled built-in tool '{other}'")),
     }

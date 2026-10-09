@@ -13,6 +13,10 @@ lmgw-api-types = { path = "../lmgw-api-types", features = ["schema"] }
 # gives quickdoc-core its own OpenAI-compatible embedder, which is what lets the
 # crate be iterated against a running gateway without a second instance (§3).
 quickdoc-core = { path = "../quickdoc-core", features = ["http"] }
+# The self-update mechanism (manifest, version order, verified download, the
+# dnf install step), shared with the desktop clients; `update` builds lmgw's
+# feed for it.
+lmgw-update = { path = "../lmgw-update" }
 anyhow = "1.0.102"
 arc-swap = "1.9.1"
 async-trait = "0.1.89"
@@ -28,6 +32,10 @@ axum = { version = "0.8.9", features = ["macros", "multipart", "ws"] }
 base64 = "0.22.1"
 bytes = "1.11.1"
 chrono = { version = "0.4.45", features = ["serde"] }
+# The integrity check on a Gemini thought signature carried in a tool call's
+# id (gateway design §7.1): a truncated id reads as unsigned, not as a corrupt
+# signature. Already in the lock through flate2 and zip.
+crc32fast = "1.5.0"
 futures = "0.3.32"
 hex = "0.4.3"
 # `Limited`, the body wrapper enforcing the `max_body_mb` setting (§13). Same
@@ -167,6 +175,9 @@ lmgw-client = { path = "../lmgw-client" }
 # against a fetched meta-schema, only the document's own inline schemas.
 jsonschema = { version = "0.58", default-features = false }
 tempfile = "3.27.0"
+# How long a test waits is read from .config/nextest.toml as nextest reads it
+# (tests/it/common/patience.rs). The version tauri-build already locks.
+toml = "1.1.2"
 # The realtime suites' WebSocket client (realtime design §16). The version
 # axum's `ws` feature pulls in, so the test client and the server speak through
 # the same tungstenite.

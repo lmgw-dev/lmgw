@@ -60,6 +60,9 @@ pub async fn heard_response_for_tests(
             user_row,
         }),
         degraded: None,
+        resume: None,
+        verdicts: None,
+        answer: false,
     })
     .await;
     let mut out = HeardForTests {

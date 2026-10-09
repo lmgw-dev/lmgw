@@ -192,6 +192,8 @@ pub(super) struct Follow {
     pub picks: StoredValue<ModelPicks>,
     /// The composer's chips: their blockers follow the stored model.
     pub drafts: RwSignal<Vec<DraftChip>>,
+    /// The open thread's MCP tasks (`chat_tasks`): read with it.
+    pub tasks: super::chat_tasks::Tasks,
     /// Messages for rows, owned by the page.
     pub make: Callback<Vec<MsgRow>, Vec<Msg>>,
     /// Show these rows as the open thread's messages, afresh.
@@ -379,6 +381,7 @@ async fn read_open(f: Follow, wants: StoredValue<Wants>, id: i64) {
     wants.update_value(|w| w.failing = false);
     take_thread(f, d.thread);
     fold_drafts(f.drafts, &d.draft_attachments);
+    super::chat_tasks::take(f.tasks, id, d.tasks);
     take_messages(f, d.messages);
 }
 
@@ -455,7 +458,7 @@ fn take_messages(f: Follow, rows: Vec<MsgRow>) {
         })
         .collect();
     let keys: Vec<(i64, &str)> = rows.iter().map(|r| (r.id, r.role.as_str())).collect();
-    let (pairs, adopt, drop, append) = match plan(&page, &keys) {
+    let (pairs, adopt, drop, insert, append) = match plan(&page, &keys) {
         Plan::Reload => {
             f.load.run(rows);
             if follow {
@@ -467,8 +470,9 @@ fn take_messages(f: Follow, rows: Vec<MsgRow>) {
             pairs,
             adopt,
             drop,
+            insert,
             append,
-        } => (pairs, adopt, drop, append),
+        } => (pairs, adopt, drop, insert, append),
     };
     let mut changed = false;
     f.msgs.with_untracked(|v| {
@@ -480,15 +484,25 @@ fn take_messages(f: Follow, rows: Vec<MsgRow>) {
             changed |= patch(&v[pi], &rows, ri, f.make);
         }
     });
-    if !drop.is_empty() || !append.is_empty() {
+    if !drop.is_empty() || !insert.is_empty() || !append.is_empty() {
         let added = appended(f.make, &rows, &append);
+        let ahead: Vec<usize> = insert.iter().map(|&(_, ri)| ri).collect();
+        let ahead = insert
+            .iter()
+            .map(|&(pi, _)| pi)
+            .zip(appended(f.make, &rows, &ahead));
         f.msgs.update(|v| {
-            let mut i = 0usize;
-            v.retain(|_| {
-                let keep = !drop.contains(&i);
-                i += 1;
-                keep
-            });
+            let mut ahead = ahead.peekable();
+            let shown = std::mem::take(v);
+            for (i, m) in shown.into_iter().enumerate() {
+                while let Some((_, a)) = ahead.next_if(|(at, _)| *at == i) {
+                    v.push(a);
+                }
+                if !drop.contains(&i) {
+                    v.push(m);
+                }
+            }
+            v.extend(ahead.map(|(_, a)| a));
             v.extend(added);
         });
         changed = true;

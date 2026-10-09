@@ -215,6 +215,8 @@ pub async fn settings_full(State(st): State<SharedState>) -> Response {
     body["chat_kb_budget_tokens"] = json!(s.chat_kb_budget_tokens);
     body["chat_system_prompt"] = json!(s.default_chat_prompt());
     body["chat_system_prompt_builtin"] = json!(crate::config::BUILTIN_CHAT_SYSTEM_PROMPT);
+    // The profile new threads start with (personality-profiles §3.3).
+    body["chat_profile"] = json!(s.chat_profile);
     // Container builds (container-builds §5, §7, §8), outside the macro for
     // the recursion-limit reason above. The effective dir is spelled out
     // because "unset" means a default that differs between prod and a dev
@@ -227,6 +229,7 @@ pub async fn settings_full(State(st): State<SharedState>) -> Response {
     body["forge_tokens"] = crate::ops::redact_map(&s.forge_tokens);
     body["build_update_check_hours"] = json!(s.build_update_check_hours);
     body["realtime"] = json!(crate::ops::realtime_view(&s.realtime));
+    body["mcp"] = crate::ops::mcp_settings_view(&s.mcp);
     // A derived fact, like the built-in prompt above: what an audio row on
     // the CPU runs with when it names no thread count.
     let cpu = crate::host::cpu();
@@ -428,6 +431,9 @@ pub struct SettingsFullPatch {
     /// returns to the built-in default (and follows it from then on); `""`
     /// starts new threads with no system prompt.
     chat_system_prompt: Option<String>,
+    /// The personality profile new Chat threads start with: a profile id,
+    /// or `""` for none. An unknown id is refused.
+    chat_profile: Option<crate::ops::ProfileChoice>,
     /// How a text PDF attached in Chat starts out: `text` | `images` | `ask`.
     chat_pdf_mode: Option<String>,
     /// The Chat's speech-to-text alias; `""` = `realtime.asr_alias`.
@@ -512,6 +518,8 @@ pub struct SettingsFullPatch {
     /// `GET /v1/realtime`'s settings — the same patch
     /// `settings_set` takes, with the same checks.
     realtime: Option<crate::ops::RealtimeSettingsPatch>,
+    /// The device MCP host link's limits (Settings → MCP).
+    mcp: Option<crate::ops::McpSettingsPatch>,
 }
 
 /// VRAM admission control. Every field is optional so one knob moves
@@ -799,6 +807,9 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.chat_system_prompt {
         s.set_default_chat_prompt(&v);
     }
+    if let Some(v) = &p.chat_profile {
+        s.chat_profile = crate::ops::validate_chat_profile(&st.snapshot(), v)?;
+    }
     if let Some(v) = p.chat_pdf_mode {
         s.chat_pdf_mode = crate::ops::validate_chat_pdf_mode(&v)?;
     }
@@ -891,6 +902,9 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     }
     if let Some(r) = p.realtime {
         crate::ops::apply_realtime(st, &mut s.realtime, r).await?;
+    }
+    if let Some(m) = p.mcp {
+        crate::ops::apply_mcp_settings(&mut s.mcp, m)?;
     }
     if let Some(h) = p.hold {
         if let Some(v) = h.fallback_alias {
@@ -1553,6 +1567,10 @@ pub async fn key_delete(st: &SharedState, id: i64) -> Result<Value, Refusal> {
     store::delete_api_key(&st.db, id)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
+    // A device's delete is recorded in the feed (`device.revoked`).
+    if key.kind == ApiKeyKind::Device {
+        st.chat_feed.wake();
+    }
     // The row is gone: what it opened ends now, whether or not the reload
     // succeeds (review W2-6).
     let reloaded = st.reload_snapshot().await;
@@ -1560,6 +1578,11 @@ pub async fn key_delete(st: &SharedState, id: i64) -> Result<Value, Refusal> {
         st.key_written(key.id, crate::state::KeyWritten::Deleted);
     }
     device_keys::deleted(st, &key);
+    // A device's hosted-tools row went with it, and its MCP tasks ended
+    // (MCP Tasks design §1.6): the results enter their threads.
+    if key.kind == ApiKeyKind::Device {
+        crate::web::chat_tasks::servers_gone(st).await;
+    }
     reloaded.map_err(|e| bad_request(e.to_string()))?;
     Ok(json!({ "ok": true, "message": "key revoked" }))
 }

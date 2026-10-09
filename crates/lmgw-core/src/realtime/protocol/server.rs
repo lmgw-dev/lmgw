@@ -299,6 +299,32 @@ pub enum ServerEvent {
     /// switched on or off (§8.7, WP8 review m10).
     #[serde(rename = "lmgw.chat.thread")]
     LmgwChatThread { chat_thread: ChatThreadRef },
+    /// A call whose `mcp_approval_request` item this session showed was
+    /// decided by another client (client-apps design §6.4): the deciding
+    /// client's request runs the turn on, and the session's next response
+    /// renders it. `by` names who, as the feed names authors. `approve` is
+    /// `false` for a call approved whose turn could not start; a call whose
+    /// reply went or lost its calls (edited, deleted) is said with
+    /// `approve: false` and `by: null`.
+    #[serde(rename = "lmgw.approval.decided")]
+    LmgwApprovalDecided {
+        approval_request_id: String,
+        approve: bool,
+        by: Option<String>,
+    },
+    /// A late MCP task result entered the session's thread (MCP Tasks
+    /// design §4.2): the feed's `task.done` facts, flat — `{thread_id,
+    /// message_id, id, task_id, server_label, tool, status, by}`. Sent once
+    /// no turn of the thread runs (the result enters only then), so never
+    /// in the middle of a response that did not see it: one sent while a
+    /// response runs entered at its turn's start, and that response answers
+    /// it. Otherwise the client's `response.create` with no new words answers
+    /// it (`lifecycle::bound`'s continuation).
+    #[serde(rename = "lmgw.task.done")]
+    LmgwTaskDone {
+        #[serde(flatten)]
+        done: lmgw_api_types::chat_feed::TaskDone,
+    },
 }
 
 impl ServerEvent {

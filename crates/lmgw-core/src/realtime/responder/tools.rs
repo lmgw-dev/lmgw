@@ -284,7 +284,11 @@ async fn one(
     report.running(call);
     let started = Instant::now();
     let watch = RowWatch::default();
-    let run = watch.scope(exec.call(&call.name, &args));
+    // The call's id, for an MCP task it starts (MCP Tasks design §2.1).
+    let run = watch.scope(crate::agent::with_call_id(
+        call.id.clone(),
+        exec.call(&call.name, &args),
+    ));
     tokio::pin!(run);
     let outcome = tokio::select! {
         biased;

@@ -8,6 +8,7 @@ use super::super::super::transcribe::Facts;
 use super::super::reply::Heard;
 use super::{row, Op, Slot, Task};
 use crate::store::{ServedModel, VoiceTiming};
+use crate::web::chat_voice::bound;
 
 pub(crate) use super::super::super::lifecycle::RowTx;
 
@@ -37,6 +38,27 @@ pub(crate) struct Ended {
     pub voice: Option<String>,
 }
 
+/// A response's user entry, as its barrier answers it (`In::Response`'s
+/// `reply`): the user message written for it, `None` when it wrote none.
+pub(crate) type UserAnswer = Result<Option<Written>, ErrorObject>;
+
+/// A user message the journal wrote for a response's turn.
+pub(crate) struct Written {
+    pub id: i64,
+    /// Held until the response's turn has begun (`TurnOpts::sent`, MCP
+    /// Tasks design §3.1): a task result that ends after the message waits
+    /// for that turn's end. Dropped unused, it lets what waits in.
+    pub sent: Option<bound::Sent>,
+}
+
+impl std::fmt::Debug for Written {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Written")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 pub(crate) enum In {
     /// A response was launched: its user entry, then its reply slot
     /// (`super`'s module doc). `reply` gets the user message's id — `None`
@@ -45,7 +67,7 @@ pub(crate) enum In {
         gen: u64,
         response_id: String,
         turns: Vec<UserTurn>,
-        reply: oneshot::Sender<Result<Option<i64>, ErrorObject>>,
+        reply: oneshot::Sender<UserAnswer>,
         /// A response that hears the user's audio: its user row is deferred
         /// (`super`'s module doc), and this is its pre-save barrier's
         /// sending end.

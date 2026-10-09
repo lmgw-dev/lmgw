@@ -127,6 +127,8 @@ pub(crate) async fn record_in_process(
         audio_in_ms: quantity_column(q.audio_in_ms),
         chars_in: quantity_column(q.chars_in),
         images_out: quantity_column(q.images_out),
+        // A model call: no approval decides one.
+        approved_by: None,
     };
     let share = row.row_cost();
     // A caller stamped with a run (`X-Lmgw-Run` on a `/v1/responses` or a

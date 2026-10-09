@@ -7,6 +7,7 @@ pub mod golden;
 pub mod gpu_world;
 pub mod live_vram;
 pub mod llama_fake;
+pub mod mcp_apps_stub;
 pub mod mcp_stub;
 pub mod realtime_audio;
 pub mod realtime_fakes;

@@ -59,6 +59,34 @@ impl Messages {
         self.out.extend(ms);
     }
 
+    /// Push a late MCP task result's pair (`chat_tasks::render`): its call
+    /// joins a directly preceding assistant message — one message, its
+    /// parts then the call — and its result follows; neither merges with
+    /// anything else. A pair that would open the conversation (the
+    /// messages before it deleted) follows a user turn saying so
+    /// (`render::OPENING`): Anthropic and Gemini take a call only after
+    /// the user's turn.
+    pub fn extend_joined(&mut self, ms: Vec<Message>) {
+        let mut ms = ms.into_iter();
+        let Some(first) = ms.next() else {
+            return;
+        };
+        if self.out.iter().all(|m| m.role == Role::System) {
+            self.out.push(Message::text(
+                Role::User,
+                crate::web::chat_tasks::render::OPENING.to_string(),
+            ));
+        }
+        self.context_at = None;
+        match self.out.last_mut() {
+            Some(prev) if prev.role == Role::Assistant && first.role == Role::Assistant => {
+                prev.content.extend(first.content);
+            }
+            _ => self.out.push(first),
+        }
+        self.out.extend(ms);
+    }
+
     pub fn into_vec(self) -> Vec<Message> {
         self.out
     }

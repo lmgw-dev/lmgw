@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-/// The text the subscriber wrote, at INFO and above.
+/// The text the subscriber wrote, at its level and above.
 #[derive(Clone, Default)]
 pub struct CapturedLog(Arc<Mutex<Vec<u8>>>);
 
@@ -43,13 +43,19 @@ static SECOND: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new
 
 /// Start capturing; the capture ends when the guard drops.
 pub fn capture_log() -> (CapturedLog, tracing::subscriber::DefaultGuard) {
+    capture_log_at(tracing::Level::INFO)
+}
+
+/// [`capture_log`] down to `level`: DEBUG, for a line that marks a step a
+/// test has to wait for and nothing else shows.
+pub fn capture_log_at(level: tracing::Level) -> (CapturedLog, tracing::subscriber::DefaultGuard) {
     SECOND.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
     let log = CapturedLog::default();
     let guard = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .with_writer(log.clone())
             .with_ansi(false)
-            .with_max_level(tracing::Level::INFO)
+            .with_max_level(level)
             .finish(),
     );
     // Callsites judged before this capture existed are judged again.

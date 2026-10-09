@@ -103,6 +103,8 @@ pub struct VramScheduler {
     next_id: AtomicU64,
     /// Every admission that ever entered the queue ([`Self::waits_begun`]).
     waits: AtomicU64,
+    /// Every decision that ever asked for the gate ([`Self::gate_asks`]).
+    gate_asks: AtomicU64,
     /// The host's process tree, for a container's processes under its init
     /// (§4.7). `/proc`; a seam for the tests.
     pub(super) procs: RwLock<Arc<dyn ProcTree>>,
@@ -146,6 +148,7 @@ impl VramScheduler {
             live: Mutex::new(Live::default()),
             next_id: AtomicU64::new(1),
             waits: AtomicU64::new(0),
+            gate_asks: AtomicU64::new(0),
             procs: RwLock::new(Arc::new(ProcFs::default())),
             pids: Arc::new(Mutex::new(PidCache::default())),
             boot_settled: AtomicBool::new(false),
@@ -186,6 +189,23 @@ impl VramScheduler {
     /// from "queued, then answered" without timing it (review finding 9).
     pub fn waits_begun(&self) -> u64 {
         self.waits.load(Ordering::Relaxed)
+    }
+
+    /// How many admission decisions have asked for the gate since this
+    /// scheduler was made — a request's and a start's pre-flight, counted
+    /// when they ask, before they hold it. A counter, never reset, like
+    /// [`Self::waits_begun`]: what lets a test tell a decision is waiting
+    /// behind the gate without timing it.
+    pub fn gate_asks(&self) -> u64 {
+        self.gate_asks.load(Ordering::Relaxed)
+    }
+
+    /// The gate, for a decision: counted ([`Self::gate_asks`]), then locked.
+    pub(super) fn ask_gate(
+        &self,
+    ) -> impl std::future::Future<Output = tokio::sync::MutexGuard<'_, ()>> + '_ {
+        self.gate_asks.fetch_add(1, Ordering::Relaxed);
+        self.gate.lock()
     }
 
     /// Forget every memoized footprint — the model rows or the models dir moved.

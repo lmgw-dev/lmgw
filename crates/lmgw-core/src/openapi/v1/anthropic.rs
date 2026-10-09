@@ -15,7 +15,9 @@ fn content_block() -> Value {
     json!({
         "description": "A string, or an array of blocks: {type:text,text}, \
             {type:image,source:{type:base64,media_type,data} | {type:url,url}}, \
-            {type:tool_use,id,name,input}, {type:tool_result,tool_use_id,content,is_error}, \
+            {type:tool_use,id,name,input} (the id as lmgw gave it: a Gemini model's carries \
+            its thought signature and runs to hundreds of characters; echo it exactly, and \
+            do not send it to another provider directly), {type:tool_result,tool_use_id,content,is_error}, \
             {type:thinking,thinking,signature} (replayed; unsigned when lmgw itself \
             produced it), {type:redacted_thinking} (accepted and dropped: lmgw never asks \
             an Anthropic upstream for thinking with a redaction key). A custom tool \

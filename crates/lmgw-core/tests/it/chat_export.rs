@@ -100,6 +100,7 @@ async fn rich_thread(state: &SharedState, title: &str) -> i64 {
             answered_by: Some("cloud-fb".into()),
             images_note: None,
             voice: None,
+            pending_approvals: None,
         },
     )
     .await

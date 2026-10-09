@@ -77,6 +77,6 @@ publish:
   # concurrent pipeline.
   resource_group: registry-latest
   before_script:
-    - dnf -y install curl >/dev/null
+    - dnf -y install curl jq >/dev/null
   script:
     - bash ci/publish.sh

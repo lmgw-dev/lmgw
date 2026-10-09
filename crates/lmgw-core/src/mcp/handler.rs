@@ -86,6 +86,17 @@ pub struct GatewayClientHandler {
     /// Per-server sampling alias override (falls back to the global
     /// `Settings.sampling_alias` at call time).
     pub sampling_alias: Option<String>,
+    /// A device row's id and its `timeout_ms` (client-apps design §5): its
+    /// sampling requests are refused, and its `tools/list_changed` makes
+    /// lmgw list its tools again. `None` for every other server.
+    pub device: Option<(i64, Duration)>,
+    /// `initialize`'s `params._meta` on a device's host link: the link's
+    /// limits (`lmgw/host_limits`, client-apps design §5.1). `None` for
+    /// every other server.
+    pub init_meta: Option<rmcp::model::Meta>,
+    /// The server row's id, which its task status notifications are keyed
+    /// by (MCP Tasks design §1.3).
+    pub server_id: i64,
 }
 
 impl ClientHandler for GatewayClientHandler {
@@ -102,8 +113,21 @@ impl ClientHandler for GatewayClientHandler {
         let mut capabilities = ClientCapabilities::default();
         // The §8 DOA-avoiding declaration: advertise `sampling` iff allowed.
         capabilities.sampling = self.allow_sampling.then(SamplingCapability::default);
+        // MCP Apps (SEP-1865): the host's capability, which a server checks
+        // before it registers its UI tools. lmgw passes them, their `_meta`
+        // and their `ui://` resources on to the hosts behind `/mcp` and the
+        // Chat (client-apps design §7, `resources`).
+        capabilities.extensions = Some(
+            [(
+                super::resources::UI_EXTENSION.to_string(),
+                super::resources::apps::ui_extension_settings(),
+            )]
+            .into_iter()
+            .collect(),
+        );
         let mut info = ClientInfo::default();
         info.capabilities = capabilities;
+        info.meta = self.init_meta.clone();
         info
     }
 
@@ -118,6 +142,15 @@ impl ClientHandler for GatewayClientHandler {
         params: CreateMessageRequestParams,
         _ctx: RequestContext<RoleClient>,
     ) -> Result<CreateMessageResult, McpError> {
+        // A device row never samples (client-apps design §5.2, R26): it
+        // would spend under `internal:mcp-sampling`, outside the device key.
+        if self.device.is_some() {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                crate::ops::DEVICE_SAMPLING_REFUSAL,
+                None,
+            ));
+        }
         // Weak → Arc; gone only mid-shutdown or pre-init.
         let state = self
             .state
@@ -212,8 +245,38 @@ impl ClientHandler for GatewayClientHandler {
     /// effort — if the gateway is shutting down (Weak gone) there's nothing to
     /// notify.
     async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
+        let Some(state) = self.state.upgrade() else {
+            return;
+        };
+        match self.device {
+            // A device's own `list_changed` makes lmgw list again (§5.3),
+            // off the session's loop: the list is a request on it.
+            Some((id, timeout)) => {
+                tokio::spawn(async move { state.mcp.relist_device(id, timeout).await });
+            }
+            None => state.mcp.on_upstream_tools_changed(),
+        }
+    }
+
+    /// An upstream server's resources changed: `/mcp` subscribers re-list
+    /// (`resources`). A device's as well — its resources are listed per
+    /// request, so there is nothing to refresh.
+    async fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) {
         if let Some(state) = self.state.upgrade() {
-            state.mcp.on_upstream_tools_changed();
+            state.mcp.on_upstream_resources_changed();
+        }
+    }
+
+    /// A task's `notifications/tasks/status` (MCP Tasks design §1.3): to
+    /// its follower, which acts at once. Never relied on — the follower
+    /// polls beside it, as the spec asks.
+    async fn on_task_status(
+        &self,
+        params: rmcp::model::TaskStatusNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        if let Some(state) = self.state.upgrade() {
+            state.mcp.on_task_status(self.server_id, params);
         }
     }
 }

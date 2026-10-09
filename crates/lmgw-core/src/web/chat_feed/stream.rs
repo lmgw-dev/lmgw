@@ -330,6 +330,7 @@ impl FeedStream {
             let days = self.state.snapshot().settings.chat_feed_retention_days;
             self.out
                 .push_back(resync(pruned_reason(days, bounds.pruned_through)));
+            self.resynced();
             // `sent` stays: the next keep-alive hands the client the new
             // cursor (review W4-15).
             let mut head = bounds.head;
@@ -383,7 +384,7 @@ impl FeedStream {
                 continue;
             }
             let reach = self.reach_at(r.seq);
-            match super::render::render(&self.state, r, reach, purge).await {
+            match super::render::render(&self.state, r, (reach, self.key_id), purge).await {
                 Ok(rendered) => {
                     self.stalled = None;
                     self.cursor = r.seq;
@@ -426,6 +427,7 @@ impl FeedStream {
                          reload what you show",
                         self.cursor_text(r.seq, Some(r.tag.clone()))
                     )));
+                    self.resynced();
                     self.stalled = None;
                     self.cursor = r.seq;
                     self.cursor_tag = Some(r.tag.clone());
@@ -556,6 +558,7 @@ impl FeedStream {
             )
             .id(self.cursor_text(r.seq, Some(r.tag.clone()))),
         );
+        self.resynced();
     }
 
     /// The levels are `levels` from here (a prune passed their records): a
@@ -675,6 +678,7 @@ impl FeedStream {
                     "what this device reaches changed and could not be read ({e}); reload what \
                      you show"
                 )));
+                self.resynced();
                 self.refresh_live();
                 return;
             }
@@ -689,6 +693,12 @@ impl FeedStream {
             self.out.push_back(frame);
         }
         self.refresh_live();
+    }
+
+    /// After a `resync` frame: the profile list again, as `profile.created`
+    /// frames (personality-profiles design §3.2).
+    fn resynced(&mut self) {
+        self.out.extend(super::render::profile_list(&self.state));
     }
 
     /// A pending live frame goes out, when it still may (module doc).
@@ -913,11 +923,13 @@ mod tests {
         assert_eq!(table::prune(&state.db, 7).await.unwrap(), 4);
         s.out.clear();
         s.read_page().await;
-        assert_eq!(s.out.len(), 1);
+        // The resync, then the profile list (personality-profiles §3.2).
+        let said = 1 + state.snapshot().chat_profiles.len();
+        assert_eq!(s.out.len(), said);
         assert_eq!(s.cursor, 4, "on from the newest");
         assert!(s.dirty);
         s.read_page().await;
-        assert!(s.out.len() == 1 && !s.dirty, "nothing more to read");
+        assert!(s.out.len() == said && !s.dirty, "nothing more to read");
     }
 
     /// Review G-9: a prune past a `gateway.reach` record its stream was
@@ -969,7 +981,12 @@ mod tests {
             .unwrap();
         assert!(table::prune(&state.db, 7).await.unwrap() >= 2);
         s.read_page().await;
-        assert_eq!(s.out.len(), 1, "the resync");
+        // The resync, then the profile list (personality-profiles §3.2).
+        assert_eq!(
+            s.out.len(),
+            1 + state.snapshot().chat_profiles.len(),
+            "the resync"
+        );
         assert_eq!(s.admin, AdminThreads::Hidden, "the toolset's reach is gone");
         assert_eq!(s.levels.gateway, SelfAdmin::Off);
         assert!(
@@ -1060,7 +1077,14 @@ mod tests {
             s.dirty = true;
         }
         s.read_page().await;
-        assert_eq!((s.cursor, s.out.len()), (1, 1), "passed, with one frame");
+        // The resync, then the profile list (personality-profiles §3.2).
+        let profiles = state.snapshot().chat_profiles.len();
+        assert!(profiles > 0, "the built-in is seeded");
+        assert_eq!(
+            (s.cursor, s.out.len()),
+            (1, 1 + profiles),
+            "passed, with its resync"
+        );
         assert!(s.cursor_tag.is_some());
         sqlx::query("ALTER TABLE chat_threads_away RENAME TO chat_threads")
             .execute(&state.db)
@@ -1080,7 +1104,8 @@ mod tests {
         state.db.close().await;
         let purge = super::super::super::chat_folders::retention::PurgeDays::fixed(30, &[]);
         let rendered =
-            super::super::render::render(&state, &record, AdminThreads::Shown, &purge).await;
+            super::super::render::render(&state, &record, (AdminThreads::Shown, None), &purge)
+                .await;
         assert!(rendered.is_err(), "{rendered:?}");
     }
 }

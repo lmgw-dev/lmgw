@@ -11,6 +11,9 @@ use crate::store::{self, NewMcpServer};
 use super::credential_move::{self, RowWriter};
 use super::*;
 
+mod device_row;
+pub(crate) use device_row::SAMPLING_REFUSAL as DEVICE_SAMPLING_REFUSAL;
+
 /// Sparse patch for a southbound MCP server. List-valued fields arrive as
 /// newline-delimited text (`args`, `extra_run_args`), `KEY=VALUE` lines
 /// (`env`), or `Name: Value` lines (`headers`) — flat strings rather than
@@ -73,25 +76,56 @@ pub(super) fn validate_tool_prefix(prefix: &str) -> Result<(), String> {
 }
 
 /// A paired device's hosting label is its tools' prefix (client-apps design
-/// §1.5), so no server may take it as its prefix or its name — the same
-/// uniqueness the label was checked for when it was granted.
+/// §1.5), so no server may take it as its name — the same uniqueness the
+/// label was checked for when it was granted — nor a name whose spelling as
+/// a prefix (`mcp::names::name_qualifier`, what a collision prefixes its
+/// tools with) runs into the label's namespace: `phone.` and `phone_` are
+/// `phone_`, whose `phone___…` would fall among `phone__…`. Nor a prefix
+/// whose namespace runs into the label's ([`reject_device_namespace`]).
 pub(crate) fn reject_device_label(
     snap: &crate::config::Snapshot,
     word: &str,
 ) -> Result<(), String> {
+    let q = crate::mcp::names::name_qualifier(word);
+    reject_device_word(snap, word, |l| {
+        l.eq_ignore_ascii_case(word.trim()) || crate::devices::namespaces_overlap(l, &q)
+    })
+}
+
+/// A tool prefix whose names would fall in a device's namespace, or whose
+/// namespace a device's would fall in: `desktop`, `desktop_` (names
+/// `desktop___…`), `desktop__x` beside label `desktop`.
+pub(crate) fn reject_device_namespace(
+    snap: &crate::config::Snapshot,
+    prefix: &str,
+) -> Result<(), String> {
+    reject_device_word(snap, prefix, |l| {
+        crate::devices::namespaces_overlap(l, prefix)
+    })
+}
+
+fn reject_device_word(
+    snap: &crate::config::Snapshot,
+    word: &str,
+    clashes: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     if word.is_empty() {
         return Ok(());
     }
-    match snap.api_keys.iter().find(|k| {
-        k.hosts_label
-            .as_deref()
-            .is_some_and(|l| l.eq_ignore_ascii_case(word))
-    }) {
-        Some(k) => Err(format!(
-            "'{word}' is device '{}''s hosting label — its tools are named '{word}__…' — pick \
-             another",
-            crate::devices::short_name(&k.name)
-        )),
+    match snap
+        .api_keys
+        .iter()
+        .find(|k| k.hosts_label.as_deref().is_some_and(&clashes))
+    {
+        Some(k) => {
+            let label = k.hosts_label.as_deref().unwrap_or_default();
+            Err(format!(
+                "'{word}' clashes with device '{}''s hosting label '{label}' — its tools are \
+                 named '{label}__…', and no other server's name or tool names may fall among \
+                 them — pick another",
+                crate::devices::short_name(&k.name)
+            ))
+        }
         None => Ok(()),
     }
 }
@@ -119,6 +153,9 @@ pub async fn mcp_server_set(
                 McpTransport::parse(&t)
                     .ok_or_else(|| format!("invalid transport '{t}' (stdio|http|sse)"))?
             };
+            if transport == McpTransport::Device {
+                return Err(device_row::create_refusal());
+            }
             let command = opt(&p.command);
             let container_image = opt(&p.container_image);
             let url = opt(&p.url);
@@ -137,7 +174,7 @@ pub async fn mcp_server_set(
             }
             let tool_prefix = opt(&p.tool_prefix).unwrap_or_default();
             validate_tool_prefix(&tool_prefix)?;
-            reject_device_label(&snap, &tool_prefix)?;
+            reject_device_namespace(&snap, &tool_prefix)?;
             reject_device_label(&snap, &name)?;
 
             let new = NewMcpServer {
@@ -177,15 +214,20 @@ pub async fn mcp_server_set(
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no MCP server with id {id}"))?;
+            if cur.is_device() {
+                return device_row::update(state, &p, &cur).await;
+            }
             let enabled = match p.action.as_str() {
                 "enable" => true,
                 "disable" => false,
                 _ => p.enabled.unwrap_or(cur.enabled),
             };
             let transport = match opt(&p.transport) {
-                Some(t) => {
-                    McpTransport::parse(&t).ok_or_else(|| format!("invalid transport '{t}'"))?
-                }
+                Some(t) => match McpTransport::parse(&t) {
+                    Some(McpTransport::Device) => return Err(device_row::create_refusal()),
+                    Some(t) => t,
+                    None => return Err(format!("invalid transport '{t}'")),
+                },
                 None => cur.transport,
             };
             let url = match opt(&p.url) {
@@ -227,7 +269,7 @@ pub async fn mcp_server_set(
             let tool_prefix = opt(&p.tool_prefix).unwrap_or(cur.tool_prefix.clone());
             validate_tool_prefix(&tool_prefix)?;
             if tool_prefix != cur.tool_prefix {
-                reject_device_label(&snap, &tool_prefix)?;
+                reject_device_namespace(&snap, &tool_prefix)?;
             }
 
             // Redacted-on-read fields are only rewritten when supplied, so a
@@ -304,9 +346,15 @@ pub async fn mcp_server_set(
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no MCP server with id {id}"))?;
+            if cur.is_device() {
+                return Err(device_row::delete_refusal(&cur));
+            }
             store::delete_mcp_server(&state.db, id)
                 .await
                 .map_err(|e| e.to_string())?;
+            // Its MCP tasks ended with the row: the results enter their
+            // threads (MCP Tasks design §1.6).
+            crate::web::chat_tasks::servers_gone(state).await;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
             Ok(json!({
                 "ok": true, "id": id,
@@ -330,5 +378,39 @@ pub async fn mcp_server_set(
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable|test)"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ApiKey, ApiKeyKind, KeyPolicy, Snapshot};
+
+    /// A server's name whose spelling as a prefix runs into a device's
+    /// label is refused, as the label itself is: a collision would put its
+    /// tools among the device's.
+    #[test]
+    fn a_name_spelt_into_a_device_s_namespace_is_refused() {
+        let mut snap = Snapshot::default();
+        snap.api_keys.push(ApiKey {
+            id: 7,
+            name: "device:phone".into(),
+            key_hash: String::new(),
+            enabled: true,
+            kind: ApiKeyKind::Device,
+            key_plain: None,
+            agent_id: None,
+            policy: KeyPolicy::default(),
+            note: String::new(),
+            hosts_label: Some("phone".into()),
+            self_admin: crate::config::DeviceAdmin::Off,
+        });
+        for name in ["phone", "PHONE", "phone.", "phone_", "phone!"] {
+            let e = reject_device_label(&snap, name).expect_err(name);
+            assert!(e.contains("hosting label 'phone'"), "{name}: {e}");
+        }
+        for name in ["phones", "my phone", "phon", "phone x"] {
+            assert_eq!(reject_device_label(&snap, name), Ok(()), "{name}");
+        }
     }
 }

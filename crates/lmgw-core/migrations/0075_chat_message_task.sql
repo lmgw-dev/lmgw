@@ -1,0 +1,11 @@
+-- A late MCP task result in its Chat thread (MCP Tasks design §2.2, §3).
+--
+-- A task lmgw started for a stored thread ends after the turn that started
+-- it; its result is written into the thread as a message of role 'tool'
+-- (`chat_messages.role` takes 'user', 'assistant', 'system' and now 'tool':
+-- the column has no check), only while no turn of the thread runs. Such a
+-- row's `content` is the result as text (images as their placeholders), its
+-- `ir_messages` the synthetic `lmgw__job_result` call and its result every
+-- later turn replays, and `task` the facts, as JSON:
+-- {task_id, server_label, tool, status, ended_by}. NULL on every other row.
+ALTER TABLE chat_messages ADD COLUMN task TEXT NULL;

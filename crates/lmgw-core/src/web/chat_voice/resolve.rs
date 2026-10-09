@@ -1,5 +1,6 @@
 //! What a thread's voice resolves to (chat-voice design §2.3): each field in
-//! the order thread → `chat_*` setting → `realtime.*` setting → none, and the
+//! the order thread → personality profile (personality-profiles design D8)
+//! → `chat_*` setting → `realtime.*` setting → none, and the
 //! facts the page shows beside each choice — where it came from, whether it
 //! is served on this machine, whether it runs on the CPU, and what the GPU
 //! hold (or, for a CPU row too, a benchmark run's lease) would answer with
@@ -26,7 +27,7 @@
 
 use serde::Serialize;
 
-use crate::config::{SelfAdmin, Settings, Snapshot};
+use crate::config::{ChatProfile, SelfAdmin, Settings, Snapshot};
 use crate::runtime::{Class, Placement};
 use crate::store::{ChatThread, ThreadVoice, TurnDetection};
 
@@ -36,6 +37,8 @@ mod tests;
 /// The two languages — the one the user speaks and the one replies are in
 /// — and a turn's of them.
 mod languages;
+/// The profile tier (personality-profiles design D8).
+mod profile;
 pub(crate) use languages::{language, reply_language, turn_language};
 
 /// Which level of the chain a value came from.
@@ -44,6 +47,8 @@ pub(crate) use languages::{language, reply_language, turn_language};
 pub(crate) enum Source {
     /// The thread's own override.
     Thread,
+    /// The thread's personality profile (personality-profiles design D8).
+    Profile,
     /// Settings → Chat → Voice.
     Chat,
     /// Settings → Realtime.
@@ -266,6 +271,19 @@ pub(crate) fn owner_style(s: &Settings) -> SpeechStyle {
 
 /// Resolve `thread`'s voice against the snapshot (module doc).
 pub(crate) fn resolve(snap: &Snapshot, thread: &ChatThread) -> VoiceConfig {
+    // A thread naming a profile that is gone has none (design §2.1).
+    let prof = thread.profile_id.and_then(|id| snap.chat_profile(id));
+    resolve_with(snap, thread, prof)
+}
+
+/// [`resolve`] with `prof` as the thread's profile, whatever its
+/// `profile_id` says: the profile editor's unsaved draft in place of the
+/// thread's own (personality-profiles design D17).
+pub(crate) fn resolve_with(
+    snap: &Snapshot,
+    thread: &ChatThread,
+    prof: Option<&ChatProfile>,
+) -> VoiceConfig {
     let s = &snap.settings;
     let v = &thread.voice;
     let mut problems = Vec::new();
@@ -276,9 +294,13 @@ pub(crate) fn resolve(snap: &Snapshot, thread: &ChatThread) -> VoiceConfig {
         chat_asr(s),
         &mut problems,
     );
-    let tts_chosen = first([(v.tts_alias.as_deref(), Source::Thread)]).or_else(|| chat_tts(s));
+    let tts_chosen = first([
+        (v.tts_alias.as_deref(), Source::Thread),
+        profile::tts_level(prof),
+    ])
+    .or_else(|| chat_tts(s));
     let tts = stage(snap, "tts", tts_chosen, chat_tts(s), &mut problems);
-    let voice = voice(s, v, tts_chosen);
+    let voice = voice(s, v, prof, tts_chosen);
     // A thread's own `""` is "none for this thread", so it is a value here,
     // unlike an empty setting, which falls through.
     let speech_style = match v.speech_style.as_deref() {
@@ -286,7 +308,13 @@ pub(crate) fn resolve(snap: &Snapshot, thread: &ChatThread) -> VoiceConfig {
             text: t.trim().to_string(),
             source: Source::Thread,
         },
-        None => owner_style(s),
+        None => match profile::style(prof) {
+            Some(t) => SpeechStyle {
+                text: t.trim().to_string(),
+                source: Source::Profile,
+            },
+            None => owner_style(s),
+        },
     };
     let language = language(s, v);
     let reply_language = reply_language(s, v, &language);
@@ -328,11 +356,17 @@ pub(crate) fn resolve(snap: &Snapshot, thread: &ChatThread) -> VoiceConfig {
 }
 
 /// The voice for a thread whose TTS alias came from `tts` (module doc): the
-/// thread's own always; Settings → Chat's when the TTS is the Chat's own
-/// (no thread override, or one naming the same alias); otherwise none, and
+/// thread's own always; the profile's when the TTS is the one it was chosen
+/// for ([`profile::voice`]); Settings → Chat's when the TTS is the Chat's
+/// own (no override, or one naming the same alias); otherwise none, and
 /// `realtime.default_voice` is reported as what realtime's chain starts
 /// from.
-fn voice(s: &Settings, v: &ThreadVoice, tts: Option<(&str, Source)>) -> VoiceName {
+fn voice(
+    s: &Settings,
+    v: &ThreadVoice,
+    prof: Option<&ChatProfile>,
+    tts: Option<(&str, Source)>,
+) -> VoiceName {
     if let Some((n, src)) = first([(v.voice.as_deref(), Source::Thread)]) {
         return VoiceName {
             name: Some(n.to_string()),
@@ -341,11 +375,17 @@ fn voice(s: &Settings, v: &ThreadVoice, tts: Option<(&str, Source)>) -> VoiceNam
             note: None,
         };
     }
-    let mut note = None;
+    let mut notes = Vec::new();
+    if let Some(p) = prof {
+        match profile::voice(p, s, tts) {
+            Ok(named) => return named,
+            Err(note) => notes.extend(note),
+        }
+    }
     if let Some((n, src)) = first([(Some(s.chat_voice.as_str()), Source::Chat)]) {
         let chat_model = chat_tts(s).map(|(a, _)| a);
         let same_model = match tts {
-            Some((alias, Source::Thread)) => chat_model == Some(alias),
+            Some((alias, Source::Thread | Source::Profile)) => chat_model == Some(alias),
             _ => true,
         };
         if same_model {
@@ -356,7 +396,7 @@ fn voice(s: &Settings, v: &ThreadVoice, tts: Option<(&str, Source)>) -> VoiceNam
                 note: None,
             };
         }
-        note = Some(format!(
+        notes.push(format!(
             "the voice '{n}' set in Settings → Chat was chosen for {}; this thread's \
              text-to-speech model does not use it",
             chat_model.map_or("another text-to-speech model".to_string(), |m| format!(
@@ -369,7 +409,7 @@ fn voice(s: &Settings, v: &ThreadVoice, tts: Option<(&str, Source)>) -> VoiceNam
         name: None,
         source: inherits.map(|(_, src)| src),
         inherits: inherits.map(|(d, _)| d.to_string()),
-        note,
+        note: (!notes.is_empty()).then(|| notes.join("; ")),
     }
 }
 
@@ -452,6 +492,7 @@ fn stage(
 fn source_label(s: Source) -> &'static str {
     match s {
         Source::Thread => "this thread's voice settings",
+        Source::Profile => "this thread's personality profile",
         Source::Chat => "Settings → Chat → Voice",
         Source::Realtime => "Settings → Realtime",
         Source::Row => "the model's own description",

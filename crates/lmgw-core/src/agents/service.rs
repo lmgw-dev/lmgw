@@ -862,7 +862,12 @@ impl Cancel {
         Self(Arc::new(watch::channel(false).0))
     }
     fn fire(&self) {
-        let _ = self.0.send(true);
+        // `send_replace`, not `send`: `send` stores nothing while no receiver
+        // exists, and there is none until the starter first awaits
+        // [`cancelled`](Self::cancelled) — a Stop that came before that was
+        // lost, and the start went on (an unbounded one for good, with the
+        // Stop waiting on it).
+        self.0.send_replace(true);
     }
     /// Resolves as soon as [`fire`](Self::fire) has been called — now or later.
     /// **Never** resolves otherwise, so it is only ever the losing branch of a
@@ -1849,6 +1854,8 @@ pub async fn sync_mcp_registration(state: &SharedState, agent: &Agent) -> Result
             store::delete_mcp_server(&state.db, row.id)
                 .await
                 .map_err(|e| e.to_string())?;
+            // Its MCP tasks ended with the row (MCP Tasks design §1.6).
+            crate::web::chat_tasks::servers_gone(state).await;
             reload(state).await
         }
         (true, None) => {
@@ -1858,7 +1865,7 @@ pub async fn sync_mcp_registration(state: &SharedState, agent: &Agent) -> Result
             // The agent's id is its tools' prefix: never a device's hosting
             // label, as `mcp_server_set` refuses for a hand-made row
             // (client-apps design §1.1, review W2-8).
-            crate::ops::reject_device_label(&state.snapshot(), &new.tool_prefix).map_err(
+            crate::ops::reject_device_namespace(&state.snapshot(), &new.tool_prefix).map_err(
                 |why| {
                     format!(
                         "agent '{}': its tools cannot register — {why}",
@@ -1937,6 +1944,8 @@ pub async fn drop_mcp_registration(state: &SharedState, agent_id: &str) -> Resul
     store::delete_mcp_server(&state.db, row.id)
         .await
         .map_err(|e| e.to_string())?;
+    // Its MCP tasks ended with the row (MCP Tasks design §1.6).
+    crate::web::chat_tasks::servers_gone(state).await;
     reload(state).await
 }
 

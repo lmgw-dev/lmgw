@@ -286,6 +286,7 @@ impl Core {
             params: None,
             answers: owed,
             auto: true,
+            continuation: false,
         });
     }
 

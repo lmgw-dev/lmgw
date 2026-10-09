@@ -1,6 +1,7 @@
 //! **Keep** for a temporary chat (chat-complete design §7): a thread that
-//! lived only in memory written to the DB whole — settings (its voice
-//! included), messages (each with its voice), attachments — as one ordinary
+//! lived only in memory written to the DB whole — settings (its voice and
+//! its profile included; a profile deleted meanwhile is kept as none),
+//! messages (each with its voice), attachments — as one ordinary
 //! thread.
 
 use std::collections::HashMap;
@@ -49,9 +50,10 @@ pub async fn insert_kept_chat_thread(
             reasoning_enabled, reasoning_effort, reasoning_budget, agent_id,
             created_at, updated_at,
             top_p, top_k, min_p, repeat_penalty, presence_penalty, frequency_penalty, seed, stop,
-            kb_ids, kb_mode, kb_budget_tokens, voice)
+            kb_ids, kb_mode, kb_budget_tokens, voice, profile_id, approval_floor)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
+                 (SELECT id FROM chat_profiles WHERE id = ?26), ?27)",
     )
     .bind(&thread.title)
     .bind(&thread.model_alias)
@@ -78,6 +80,10 @@ pub async fn insert_kept_chat_thread(
     .bind(thread.kb_mode.as_str())
     .bind(thread.kb_budget_tokens)
     .bind(thread.voice.to_stored())
+    .bind(thread.profile_id)
+    .bind(super::chat_approval_floor::to_column(
+        &thread.approval_floor,
+    ))
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
@@ -88,8 +94,8 @@ pub async fn insert_kept_chat_thread(
             "INSERT INTO chat_messages
                (thread_id, role, content, reasoning, prompt_tokens, completion_tokens,
                 ir_messages, created_at, kb_refs, context, model, answered_by, voice,
-                images_note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                images_note, pending_approvals)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )
         .bind(thread_id)
         .bind(&m.role)
@@ -105,6 +111,11 @@ pub async fn insert_kept_chat_thread(
         .bind(&m.answered_by)
         .bind(super::chat_voice::message_voice_json(m.voice.as_ref()))
         .bind(&m.images_note)
+        .bind(
+            m.pending_approvals
+                .as_ref()
+                .map(super::PendingApprovals::to_json),
+        )
         .execute(&mut *tx)
         .await?
         .last_insert_rowid();

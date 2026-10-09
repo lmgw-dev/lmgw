@@ -361,7 +361,9 @@ pub async fn regenerate_message(
                 .position(|m| m.id == mid)
                 .and_then(|p| p.checked_sub(1))
                 .map(|p| &history[p]);
-            if !before.is_some_and(|m| m.role == "user") {
+            // A late MCP task result is answered again too (MCP Tasks
+            // design T13): the reply after it was a continuation.
+            if !before.is_some_and(|m| m.role == "user" || m.is_task_result()) {
                 return err_json(
                     StatusCode::CONFLICT,
                     "nothing_to_answer",

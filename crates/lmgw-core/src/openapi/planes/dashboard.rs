@@ -253,8 +253,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         // -- MCP servers & tools -------------------------------------------------
         DocRoute {
-            description: "Every registered southbound MCP server, its connection state and \
-                its exposed tools.",
+            description: "Every registered southbound MCP server, its connection state, \
+                its exposed tools and how many MCP tasks it runs for Chat threads now \
+                (`open_tasks`).",
             tool: Some("lmgw__mcp_servers"),
             response: Resp::Json(|g| g.root_schema_for::<dto::McpServersResponse>()),
             ..base(

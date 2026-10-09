@@ -1,0 +1,53 @@
+/* lmgw-ui-kit: the personality-profile editor. Tokens only (kit.css); the
+   host's stylesheet supplies .btn, .input, .chip and .seg as for every kit
+   widget. Linked after kit.css. */
+
+.pf-panel { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.pf-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pf-list-head { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.pf-item { display: flex; align-items: center; gap: 6px; width: 100%; min-height: var(--ctl-h, 32px); padding: 0 10px;
+  border: 1px solid transparent; border-radius: 8px; background: none; color: var(--text-2); text-align: left; cursor: pointer; }
+.pf-item:hover { background: var(--surface-hi); color: var(--text); }
+.pf-item.active { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
+.pf-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-pane { min-width: 0; }
+@media (max-width: 640px) { .pf-panel { grid-template-columns: minmax(0, 1fr); } }
+
+.pf-editor { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.pf-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
+.pf-head > .field { flex: 1 1 260px; min-width: 0; }
+.pf-head .input { width: 100%; }
+.pf-badges { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 6px; }
+.pf-fields { gap: 14px; }
+.pf-fields .ta { width: 100%; }
+.pf-fields .seg { margin-bottom: 8px; }
+.pf-voice .input { width: 100%; }
+
+.pf-ex-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.pf-ex-list { display: flex; flex-direction: column; gap: 8px; }
+.pf-ex { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 8px; align-items: start;
+  padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.pf-ex-n { padding-top: 6px; font: 500 11px var(--mono); color: var(--text-3); text-align: right; }
+.pf-ex-boxes { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pf-ex-boxes .ta { min-height: 44px; }
+.pf-ex-acts { display: flex; flex-direction: column; gap: 2px; }
+
+.pf-ref, .pf-pre { margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg0); font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pf-ref { color: var(--text-3); }
+.pf-pre { color: var(--text); max-height: 360px; overflow: auto; }
+.pf-reply { font-family: var(--sans); font-size: 13px; }
+
+.pf-problems { margin: 0; padding: 0 0 0 18px; font-size: 12px; color: var(--err); }
+
+.pf-try-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+.pf-part { margin-top: 6px; font-size: 12px; color: var(--text-2); }
+.pf-part > summary { cursor: pointer; }
+.pf-part > summary:hover { color: var(--text); }
+.pf-part > .pf-pre { margin-top: 6px; }
+.pf-tokens { margin-left: 8px; font: 500 11px var(--mono); color: var(--text-3); }
+.pf-answer { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.pf-meta { font: 500 11px var(--mono); color: var(--text-3); }
+.pf-audio { display: block; margin-top: 8px; width: 100%; max-width: 420px; }
+
+.pf-foot { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }

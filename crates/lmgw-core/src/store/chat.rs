@@ -6,19 +6,47 @@ use super::*;
 
 /// One registered MCP server attached to a chat thread.
 ///
-/// Deliberately the same two fields the Responses API's `{"type":"mcp"}` tool
-/// block carries, because they resolve through the same
-/// [`crate::mcp::exec::resolve`]. `require_approval` is *not* stored: the Chat
-/// tab has no approval round trip, so a gated call would stop a run the UI
-/// cannot resume — threads run their tools or don't attach the server.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Deliberately the fields the Responses API's `{"type":"mcp"}` tool block
+/// carries, because they resolve through the same
+/// [`crate::mcp::exec::resolve`].
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadMcp {
     /// A registered server's tool prefix (or its name when it has no prefix).
+    /// Read trimmed, from a request and from a stored row alike: a label
+    /// names what its trimmed text names (the tool-scope and approval
+    /// checks read it so), so it is stored and resolved that way too.
+    #[serde(deserialize_with = "trimmed_label")]
     pub server_label: String,
     /// `None` — the server's whole surface. `Some(list)` narrows it, so a
     /// thread pays prompt tokens only for the tools it might call.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Which of its tools wait for an approval before they run
+    /// (client-apps design §6.1), in OpenAI's shapes as written: `"never"`,
+    /// `"always"` or `{always: {tool_names}, never: {tool_names}}`, read by
+    /// [`crate::mcp::spec::parse_require_approval`] and checked when it is
+    /// written (`read_only` refused). `None` is `"never"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_approval: Option<serde_json::Value>,
+}
+
+/// A `server_label` with the spaces around it taken off.
+fn trimmed_label<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let label = <String as serde::Deserialize>::deserialize(d)?;
+    Ok(match label.trim() {
+        t if t.len() == label.len() => label,
+        t => t.to_string(),
+    })
+}
+
+impl ThreadMcp {
+    /// What [`Self::require_approval`] gates. A value that does not parse
+    /// (written by hand into the database) gates every tool: the reading
+    /// that fails closed.
+    pub fn approval_rule(&self) -> crate::mcp::spec::ApprovalRule {
+        crate::mcp::spec::parse_require_approval(self.require_approval.as_ref(), &self.server_label)
+            .unwrap_or(crate::mcp::spec::ApprovalRule::Always)
+    }
 }
 
 /// A persisted chat conversation with its own model + sampling settings.
@@ -50,6 +78,16 @@ pub struct ChatThread {
     /// Registered MCP servers whose tools this thread attaches. Empty is the
     /// plain 1:1 chat; non-empty routes the send through the agent loop.
     pub mcp_tools: Vec<ThreadMcp>,
+    /// The owner's approval floor (client-apps design §6.6): the
+    /// `require_approval` of the entries the owner last wrote, per target —
+    /// what a device's later write of `mcp_tools` may not go below, even
+    /// after removing the entry. Only the owner's writes change it
+    /// (`web::chat_tool_write`'s `approval` module); a thread made in a
+    /// folder starts from the folder's, and a thread that leaves a folder
+    /// takes the folder's rules for the targets it has none for
+    /// (`chat_approval_floor::fold_folder_floor`). Never on the wire.
+    #[serde(skip)]
+    pub approval_floor: Vec<ThreadMcp>,
     /// Reasoning overrides, sent with every turn at the `x-lmgw-reasoning*`
     /// headers' tier: `x-lmgw-reasoning` on/off, `-effort`, `-budget`. `None`
     /// leaves the route's default alone.
@@ -69,6 +107,10 @@ pub struct ChatThread {
     /// The folder this thread sits in (chat-complete design §5); `None` = no
     /// folder. A temporary thread never has one.
     pub folder_id: Option<i64>,
+    /// The personality profile this thread talks with
+    /// (personality-profiles design §1); `None` is none ("Default"), as is
+    /// an id whose profile is gone (a temporary thread's, held in memory).
+    pub profile_id: Option<i64>,
     /// Knowledge bases this thread uses on every turn (chat-complete design
     /// §9.3), by id in `knowledge.db`; how is `kb_mode`.
     pub kb_ids: Vec<i64>,
@@ -152,7 +194,27 @@ pub struct ChatMessageRow {
     /// How the turn was spoken (chat-voice design §3); `None` for a typed
     /// turn.
     pub voice: Option<MessageVoice>,
+    /// A gated turn's calls and their decisions (client-apps design §6):
+    /// `None` on every other row. Not in the row's JSON: the thread's read
+    /// lists the waiting calls as `pending_approvals` itself.
+    #[serde(skip)]
+    pub pending_approvals: Option<PendingApprovals>,
+    /// A late MCP task result's facts (MCP Tasks design §2.2): `Some` on a
+    /// row of role `tool`, `None` on every other row, and then left out of
+    /// the JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<lmgw_api_types::chat::MessageTask>,
     pub created_at: String,
+}
+
+impl ChatMessageRow {
+    /// A late MCP task result (MCP Tasks design §2.2): a row of role `tool`,
+    /// the only rows that role names. Its task's facts are not asked for: a
+    /// row whose `task` does not read is still placed as a result
+    /// (`web::chat_tasks::render`).
+    pub fn is_task_result(&self) -> bool {
+        self.role == "tool"
+    }
 }
 
 fn chat_thread_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatThread {
@@ -179,6 +241,9 @@ fn chat_thread_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatThread {
             row.get::<String, _>("mcp_tools").as_str(),
         )
         .unwrap_or_default(),
+        approval_floor: super::chat_approval_floor::from_column(
+            row.get::<String, _>("approval_floor").as_str(),
+        ),
         reasoning_enabled: row
             .get::<Option<i64>, _>("reasoning_enabled")
             .map(|v| v != 0),
@@ -188,6 +253,7 @@ fn chat_thread_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatThread {
         pinned: row.get::<i64, _>("pinned") != 0,
         archived_at: row.get("archived_at"),
         folder_id: row.get("folder_id"),
+        profile_id: row.get("profile_id"),
         kb_ids: id_list(row.get::<String, _>("kb_ids").as_str()),
         kb_mode: KbMode::parse(row.get::<String, _>("kb_mode").as_str()).unwrap_or_default(),
         kb_budget_tokens: row.get("kb_budget_tokens"),
@@ -213,6 +279,14 @@ pub(super) fn chat_message_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatMessag
         answered_by: row.get("answered_by"),
         images_note: row.get("images_note"),
         voice: MessageVoice::from_stored(row.get("voice")),
+        pending_approvals: PendingApprovals::parse(
+            row.get::<Option<String>, _>("pending_approvals").as_deref(),
+        ),
+        // A column this process wrote: one that does not parse reads as
+        // none, and the row as the text it holds.
+        task: row
+            .get::<Option<String>, _>("task")
+            .and_then(|t| serde_json::from_str(&t).ok()),
         created_at: row.get("created_at"),
     }
 }
@@ -267,9 +341,10 @@ pub async fn create_agent_chat_thread(
     let mcp = serde_json::to_string(mcp_tools).unwrap_or_else(|_| "[]".to_string());
     let mut tx = super::begin_write(pool).await?;
     let res = sqlx::query(
+        // The catalog is the owner's: its tools' rules are the floor.
         "INSERT INTO chat_threads
-           (model_alias, system_prompt, temperature, kind, mcp_tools, agent_id)
-         VALUES (?1, ?2, ?3, 'chat', ?4, ?5)",
+           (model_alias, system_prompt, temperature, kind, mcp_tools, agent_id, approval_floor)
+         VALUES (?1, ?2, ?3, 'chat', ?4, ?5, ?4)",
     )
     .bind(model_alias)
     .bind(system_prompt)
@@ -323,10 +398,14 @@ pub enum AdminThreads {
     Hidden,
 }
 
+/// The level only the owner sees (`self_admin_thread!`'s `2`): the first a
+/// device that may use lmgw's admin tools does not reach.
+pub const OWNER_ONLY: i64 = AdminThreads::ToolsShown.reach();
+
 impl AdminThreads {
     /// The first level the reader does not see (`self_admin_thread!`,
     /// `self_admin_folder!`): what a query's `… < ?n` binds.
-    pub fn reach(self) -> i64 {
+    pub const fn reach(self) -> i64 {
         match self {
             Self::Shown => 3,
             Self::ToolsShown => 2,
@@ -469,6 +548,9 @@ pub async fn delete_chat_thread(pool: &SqlitePool, id: i64, by: feed::By<'_>) ->
     .map(feed::Gone::of)
     .collect();
     feed::record_threads_deleted(&mut tx, &gone, by).await?;
+    // Their MCP tasks: an open one owes its cancel, a result goes
+    // (MCP Tasks design §1.5).
+    super::mcp_tasks::threads_gone(&mut tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -634,6 +716,9 @@ pub async fn sweep_chat_threads_ids(
         .map(feed::Gone::of)
         .collect();
         feed::record_threads_deleted(&mut tx, &gone, None).await?;
+        // Their MCP tasks: an open one owes its cancel, a result goes
+        // (MCP Tasks design §1.5).
+        super::mcp_tasks::threads_gone(&mut tx).await?;
         tx.commit().await?;
         gone.iter().map(|g| g.id).collect::<Vec<i64>>()
     };
@@ -642,8 +727,9 @@ pub async fn sweep_chat_threads_ids(
 
 /// Write a thread's editable settings as `t` holds them — title, model,
 /// prompt, sampling, reasoning overrides, the MCP servers it attaches, its
-/// knowledge bases and its voice — to the row `t.id` (the conversation's
-/// settings form). With [`SeedWrite::Keep`] the voice's seed is the one
+/// knowledge bases, its voice and its profile — to the row `t.id` (the
+/// conversation's settings form). A profile that is gone by the time the
+/// write lands is written as none, as its delete would have left it. With [`SeedWrite::Keep`] the voice's seed is the one
 /// stored when the write lands, not `t`'s copy: a seed drawn since `t` was
 /// read survives (chat-voice design §2.2). The voice as stored, `None` when
 /// there is no such row.
@@ -722,7 +808,8 @@ pub(super) async fn write_chat_thread_settings(
          max_tokens=?6, mcp_tools=?7, reasoning_enabled=?8, reasoning_effort=?9,
          reasoning_budget=?10, top_p=?11, top_k=?12, min_p=?13, repeat_penalty=?14,
          presence_penalty=?15, frequency_penalty=?16, seed=?17, stop=?18,
-         kb_ids=?19, kb_mode=?20, kb_budget_tokens=?21,
+         kb_ids=?19, kb_mode=?20, kb_budget_tokens=?21, approval_floor=?25,
+         profile_id = (SELECT id FROM chat_profiles WHERE id = ?24),
          voice = CASE
            WHEN ?23 AND ",
         seed_held!(),
@@ -755,6 +842,8 @@ pub(super) async fn write_chat_thread_settings(
     .bind(t.kb_budget_tokens)
     .bind(voice.to_stored())
     .bind(seed == SeedWrite::Keep)
+    .bind(t.profile_id)
+    .bind(super::chat_approval_floor::to_column(&t.approval_floor))
     .fetch_optional(&mut *conn)
     .await?;
     feed::record_thread_since(&mut *conn, feed::kind::THREAD_UPDATED, t.id, by, was).await?;

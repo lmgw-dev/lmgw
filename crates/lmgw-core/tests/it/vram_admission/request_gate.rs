@@ -140,14 +140,14 @@ pub(super) fn pools(v: &Value) -> Vec<Value> {
 /// Poll the (only) pool until `ready` holds, so a test's ordering rests on
 /// what the ledger says rather than on a sleep being long enough under load.
 pub(super) async fn until_pool(f: &Fixture, what: &str, ready: impl Fn(&Value) -> bool) {
-    for _ in 0..500 {
+    let mut wait = common::patience::Wait::new(format!("the pool shows {what}"));
+    loop {
         let p = pools(&vram_status(&f.gateway).await);
         if p.first().is_some_and(&ready) {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        wait.again(Some(&Value::from(p))).await;
     }
-    panic!("the pool never showed {what}");
 }
 
 pub(super) fn queued(p: &Value) -> usize {
@@ -829,16 +829,14 @@ async fn a_client_that_disconnects_while_waiting_leaves_the_pool_queue() {
 
 /// Poll until no pool has any activity left.
 pub(super) async fn until_pools_empty(f: &Fixture) {
-    for _ in 0..500 {
-        if pools(&vram_status(&f.gateway).await).is_empty() {
+    let mut wait = common::patience::Wait::new("every reservation goes");
+    loop {
+        let v = vram_status(&f.gateway).await;
+        if pools(&v).is_empty() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        wait.again(Some(&v)).await;
     }
-    panic!(
-        "a reservation never went: {}",
-        vram_status(&f.gateway).await
-    );
 }
 
 /// An in-process loop takes its lease per turn, not per hold: Admin Chat runs

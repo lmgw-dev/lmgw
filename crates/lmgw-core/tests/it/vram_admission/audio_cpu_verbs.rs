@@ -161,6 +161,10 @@ async fn an_operator_start_waiting_for_the_gate_is_held_after_its_row_moved_to_t
     add_audio_model(&f, "tts", 3 * GIB, 3 * GIB, None).await;
     let asr = add_audio_model(&f, "asr", GIB, GIB, None).await;
     assert_eq!(chat(&f.gateway).await.status(), 200);
+    // No queue timeout: the waiting request leaves the queue by the hold
+    // below, not by the fixture's 2 s, which a loaded box can spend before
+    // the hold comes on — and then the gate opens for the start too early.
+    set_queue_timeout(&f, 0).await;
     // 6 + 3 does not fit 8 and the chat model is generating: the TTS request
     // waits for room, holding the gate. 6 + 1 would fit.
     f.world().busy.insert("chat-model".into());
@@ -168,16 +172,30 @@ async fn an_operator_start_waiting_for_the_gate_is_held_after_its_row_moved_to_t
         let f = f.gateway.clone();
         async move { speak_via(&f, "tts").await }
     });
-    until_vram(&f, "the TTS start queues", |v| {
-        v["queue"].as_array().is_some_and(|q| q.len() == 1)
-    })
+    // Its steady wait, past the one pass at its first dead end that lets
+    // the gate go for a moment (`stall`): from here it holds the gate.
+    until_vram(
+        &f,
+        "the TTS start waits for the busy model, holding the gate",
+        |v| {
+            v["queue"].as_array().is_some_and(|q| {
+                q.len() == 1 && q[0]["stage"] == "waiting for a busy model to finish"
+            })
+        },
+    )
     .await;
+    let asked = f.state.vram.gate_asks();
     let start = tokio::spawn({
         let state = f.state.clone();
         async move { lmgw_core::ops::container(&state, None, Some("asr"), "start", false, None).await }
     });
-    // The operator start is behind the gate by now.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The operator start has read the row (a GPU one) and asks for the gate
+    // the waiting request holds — not a sleep: under load the start could
+    // still be ahead of its read when the row moved, and start it on the CPU.
+    common::patience::until("the operator start asks for the gate", || {
+        f.state.vram.gate_asks() > asked
+    })
+    .await;
     assert!(!start.is_finished());
 
     op(

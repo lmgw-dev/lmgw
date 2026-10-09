@@ -9,20 +9,11 @@ use lmgw_core::vram::residency::SETTLE_AFTER;
 
 use super::audio_residency::{
     add_audio_model, audio_resident, models_page_note, note, readings_after, residency, speak,
+    stretches_after,
 };
 use super::*;
 
 const MIB: u64 = 1024 * 1024;
-
-async fn stretches_after(f: &Fixture, before: u64) {
-    for _ in 0..500 {
-        if f.state.vram.residency_stretches() > before {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no sampler stretch ended after {before}");
-}
 
 /// One request, and wait for both its reading after the answer and the end
 /// of the sampler's stretch (when one ran).
@@ -79,10 +70,8 @@ async fn sampling_stops_once_the_figure_has_settled() {
     speak_sampled(&f, "tts", true).await;
     let learned = 3 * GIB + 60 * MIB;
     assert_eq!(residency(&f, "tts").map(|r| r.bytes), Some(learned));
-    assert!(
-        models_page_note(&f, "tts").await.contains("(0 so far)"),
-        "a rise starts the count"
-    );
+    let n = models_page_note(&f, "tts").await;
+    assert!(n.contains("(0 so far)"), "a rise starts the count: {n}");
     for _ in 0..SETTLE_AFTER {
         speak_sampled(&f, "tts", true).await;
     }

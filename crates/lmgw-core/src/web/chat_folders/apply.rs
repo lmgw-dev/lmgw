@@ -50,15 +50,13 @@ impl Applied {
     }
 }
 
-/// What a new thread in a folder with `d` starts as, for the comparison.
-fn fresh(state: &SharedState, d: &ThreadDefaults) -> ChatThread {
-    let mut t = ChatThread {
-        system_prompt: state.snapshot().settings.default_chat_prompt().to_string(),
-        kind: "chat".into(),
-        ..Default::default()
-    };
-    d.apply(&mut t);
-    t
+/// What a new thread of `kind` in a folder with `d` starts as, for the
+/// comparison: the very start a folder's new thread takes
+/// (`current::new_thread`), so the current thread is brought where a new
+/// one of its kind would be — an Admin Chat thread never to Settings →
+/// Chat's profile, which its create never gives it (profiles review fix 3).
+fn fresh(state: &SharedState, d: &ThreadDefaults, kind: &str) -> ChatThread {
+    super::current::new_thread(&state.snapshot(), d, kind, "")
 }
 
 /// The settings patch that brings `current` from `old`'s defaults to
@@ -73,7 +71,10 @@ pub(super) fn delta(
         Ok(Value::Object(m)) => m,
         _ => Map::new(),
     };
-    let (was, now) = (as_map(&fresh(state, old)), as_map(&fresh(state, new)));
+    let (was, now) = (
+        as_map(&fresh(state, old, &current.kind)),
+        as_map(&fresh(state, new, &current.kind)),
+    );
     let mut patch = Map::new();
     let mut fields = Vec::new();
     // Every default is a thread setting of the same name; the defaults'

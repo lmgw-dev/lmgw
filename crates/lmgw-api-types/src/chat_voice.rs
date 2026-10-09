@@ -161,3 +161,27 @@ mod tests {
         assert_eq!(turn_detection_label("auto"), "auto");
     }
 }
+
+/// `POST /chat/api/threads/{id}/transcribe`'s answer (chat-voice design
+/// §5): a recording transcribed by the thread's speech-to-text model —
+/// dictation, and a voice answer to an approval that must stay out of the
+/// conversation (client-apps design §6.4).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Dictation {
+    pub text: String,
+    /// The speech-to-text alias the thread resolves to.
+    pub alias: String,
+    /// The alias that answered in its place (a GPU-hold or outside-VRAM
+    /// fallback); `null` when it answered itself.
+    pub asr_answered_by: Option<String>,
+    /// The transcription call, admission included.
+    pub asr_ms: Option<u64>,
+    /// The recording's length, from its WAV header; `null` for any other
+    /// container.
+    pub audio_ms: Option<u64>,
+    /// What the model says it heard, in its own spelling, else the language
+    /// the thread's user speaks; `null` when neither is known.
+    pub language: Option<String>,
+}

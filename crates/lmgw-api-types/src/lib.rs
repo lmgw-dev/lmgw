@@ -45,6 +45,8 @@ pub mod candidate_alias;
 /// a folder, what a folder create takes — the types the gateway serializes
 /// and the API document is generated from.
 pub mod chat;
+/// MCP approvals in the Chat (client-apps design §6).
+pub mod chat_approvals;
 // The client-apps design record, §2.
 /// The Chat change feed's events and cursor: what `GET /chat/api/feed`
 /// sends, a namespace of its own like [`chat_voice`].
@@ -53,11 +55,22 @@ pub mod chat_feed;
 /// Ongoing-conversation folders: a folder's `ongoing` field and
 /// `POST /chat/api/folders/{id}/current`.
 pub mod chat_folders;
+// The personality-profiles design record, §1 and §3.1.
+/// Personality profiles: `/chat/api/profiles*`'s shapes and the examples'
+/// text form, a namespace of its own like [`chat_voice`].
+pub mod chat_profiles;
 /// The Chat's voice rules (chat-voice design §2): turn-detection names and
 /// labels, the language hint's shape — checked by the gateway and said
 /// before Save by the dashboard.
 pub mod chat_voice;
 pub mod image_lab;
+// The client-apps design record, §5.
+/// MCP Apps on `/mcp` (§7): the revision followed, its identifiers, and
+/// the Chat `tool` result frame's fields a host reads.
+pub mod mcp_apps;
+/// The device MCP host link (`GET /mcp/host`): its refusals, its close
+/// codes, and the `_meta` lmgw stamps on the calls it forwards over it.
+pub mod mcp_host;
 /// OpenAPI extension-key names (api-docs design §4.4), read by both the
 /// document builder (lmgw-core) and the page that renders it (lmgw-ui).
 pub mod openapi_ext;

@@ -35,10 +35,28 @@
 //! default, a message's `#` picks) needs `kb__search` within its scope —
 //! what an auto-mode retrieval is. A base already named is not checked again.
 //!
+//! **`require_approval`** is checked for every writer, the owner too: an
+//! entry the write changes must read as `/v1/responses` reads it, and no
+//! two entries may name the same server — by its tool prefix and by its
+//! name, say — where the write changed one of them (`400 bad_request`
+//! otherwise). Entries carried unchanged are not checked again: a value
+//! stored before these rules must not block an unrelated write.
+//!
+//! A device (any non-owner) only tightens it: a write that makes a server
+//! require approval for fewer calls than the stored rule or the owner's
+//! floor is `403 approval_loosen_refused` (owner's decision, 2026-10-09;
+//! the `approval` module). Checked after the tool scope, so a label out of
+//! the device's reach is answered as such — the two-entries `400` too,
+//! which would otherwise say the server exists. The owner's writes set the
+//! floor ([`owner_floor`]); a turn applies it again
+//! (`mcp::exec::ApprovalFloor`).
+//!
 //! A refusal is `403 tool_label_out_of_scope`, naming the label and the
 //! tool — or, for a base, the tool alone, never the base (review W3-5) — and
 //! nothing is written. The owner's writes are not checked:
 //! the owner attached them.
+
+mod approval;
 
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -64,15 +82,36 @@ fn refuse(message: String) -> Response {
 }
 
 /// Check the `mcp_tools` entries `caller` writes, against what was stored
-/// `before` (module doc).
+/// `before`, the owner's approval `floor` and, for a thread, its `folder`
+/// (module doc).
 pub(super) async fn check(
     state: &SharedState,
     caller: &Caller,
     written: &[ThreadMcp],
     before: &[ThreadMcp],
+    floor: &[ThreadMcp],
+    folder: Option<i64>,
 ) -> Result<(), Response> {
+    // `require_approval` reads as `/v1/responses` reads it, for every
+    // writer (client-apps design §6.1): an unknown value, or a `read_only`
+    // filter lmgw cannot honour, is refused rather than stored. Only for
+    // the entries this write changes: one stored before these rules, sent
+    // back unchanged with an unrelated field, is no new value (a turn reads
+    // one that does not parse as "always").
+    for entry in written.iter().filter(|e| !before.contains(e)) {
+        if let Err(why) = crate::mcp::spec::parse_require_approval(
+            entry.require_approval.as_ref(),
+            &entry.server_label,
+        ) {
+            return Err(err_json(StatusCode::BAD_REQUEST, "bad_request", why));
+        }
+    }
+    let duplicates = || {
+        approval::duplicates(&state.snapshot(), written, before)
+            .map_err(|why| err_json(StatusCode::BAD_REQUEST, "bad_request", why))
+    };
     if !caller.is_device() {
-        return Ok(());
+        return duplicates();
     }
     let scope = caller.scope(state).await;
     for entry in written.iter().filter(|e| !before.contains(e)) {
@@ -85,7 +124,23 @@ pub(super) async fn check(
             return Err(refuse(why));
         }
     }
-    Ok(())
+    // After the scope: two labels for one server a device cannot reach
+    // would tell it that server exists.
+    duplicates()?;
+    // A device only tightens `require_approval` (module `approval`).
+    approval::check(state, written, before, floor, folder).await
+}
+
+/// The approval floor after the owner's write of `written` over `before`
+/// (the `approval` module): what a thread's settings and a folder's
+/// defaults store when the owner writes their tools.
+pub(super) fn owner_floor(
+    state: &SharedState,
+    written: &[ThreadMcp],
+    before: &[ThreadMcp],
+    floor: &[ThreadMcp],
+) -> Vec<ThreadMcp> {
+    approval::owner_floor(&state.snapshot(), written, before, floor)
 }
 
 /// A device attaching `lmgw` (module doc): its admin tools must be at
@@ -169,10 +224,23 @@ async fn refusal(state: &SharedState, scope: &ToolScope, entry: &ThreadMcp) -> O
             )
         });
     }
+    let builtin = label == DOCS_LABEL || label == KB_LABEL;
+    let snap = state.snapshot();
+    let named = snap
+        .mcp_servers
+        .values()
+        .find(|s| server_label(s) == label)
+        .or_else(|| snap.mcp_servers.values().find(|s| s.name == label));
     // A scope with no list of its own admits every tool the label can ever
     // expose: nothing to list, nothing to connect (a bare server that is not
-    // connected included — it cannot be out of such a scope's reach).
-    if !scope.narrows() {
+    // connected included — it cannot be out of such a scope's reach). Except
+    // another device's hosted label, which such a scope holds back (L16,
+    // review W3-9): that one is checked below, and only that one.
+    let narrows = match named {
+        Some(s) => scope.narrows_for(s),
+        None => scope.narrows(),
+    };
+    if !narrows {
         return None;
     }
     // A registered server the device can never use is answered as an
@@ -181,15 +249,7 @@ async fn refusal(state: &SharedState, scope: &ToolScope, entry: &ThreadMcp) -> O
     // within its reach that lists nothing now says so, and a reachable
     // server's first out-of-scope tool is named — what `/v1/mcp/servers`
     // already shows the same device.
-    let builtin = label == DOCS_LABEL || label == KB_LABEL;
-    let snap = state.snapshot();
-    let server = snap
-        .mcp_servers
-        .values()
-        .find(|s| server_label(s) == label)
-        .or_else(|| snap.mcp_servers.values().find(|s| s.name == label))
-        .filter(|s| scope.may_reach(s))
-        .cloned();
+    let server = named.filter(|s| scope.may_reach(s)).cloned();
     if !builtin && server.is_none() {
         return Some(format!(
             "'{label}': no MCP server with this label is within the tool scope of {}",

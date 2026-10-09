@@ -46,9 +46,11 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
             .fetch_all(pool)
             .await?;
     let settings = load_settings(pool).await?;
+    let chat_profiles = chat_profiles::list_chat_profiles(pool).await?;
 
     let mut snap = Snapshot {
         settings,
+        chat_profiles,
         ..Default::default()
     };
     for r in &upstream_rows {
@@ -172,6 +174,28 @@ pub async fn load_settings(pool: &SqlitePool) -> DbResult<Settings> {
         settings.realtime.max_message_mb = d.max_message_mb;
         settings.realtime.max_frame_mb = d.max_frame_mb;
     }
+    // The same rule for the device MCP host link (client-apps design §5.1).
+    if settings.mcp.host_max_message_mb == 0 && settings.mcp.host_max_frame_mb == 0 {
+        let d = crate::config::McpSettings::default();
+        tracing::error!(
+            "stored settings mcp.host_max_message_mb and host_max_frame_mb are both 0 (no \
+             bound), which leaves a WebSocket frame unbounded; using the defaults ({} / {} MiB) \
+             until one of them is set",
+            d.host_max_message_mb,
+            d.host_max_frame_mb
+        );
+        settings.mcp.host_max_message_mb = d.host_max_message_mb;
+        settings.mcp.host_max_frame_mb = d.host_max_frame_mb;
+    }
+    // MCP Tasks' poll interval is at least 1 s (MCP Tasks design §5.2).
+    if settings.mcp.task_poll_interval_s == 0 {
+        let d = crate::config::TASK_POLL_INTERVAL_DEFAULT_S;
+        tracing::error!(
+            "stored setting mcp.task_poll_interval_s is 0, which would poll a task without \
+             pause; using the default ({d} s) until it is set"
+        );
+        settings.mcp.task_poll_interval_s = d;
+    }
     Ok(settings)
 }
 
@@ -238,10 +262,34 @@ fn capture_legacy_container_names(raw: &str, settings: &mut Settings) {
 /// the move in commit order. Before the first save the level in force is
 /// the default (`load_settings`, the feed's `bounds_and_switch`), so a
 /// first save away from it is a move too (review G-5).
+///
+/// A `chat_profile` naming a profile that is gone is saved as none, with a
+/// warning (profiles review fix 7): a delete empties the key in its own
+/// transaction, but a save made from a snapshot that still held the id (its
+/// reload after the delete failed) would otherwise write it back.
 pub async fn save_settings(pool: &SqlitePool, s: &Settings) -> DbResult<()> {
-    let json = serde_json::to_string(s).map_err(|e| GatewayError::Internal(e.to_string()))?;
     // Reads before it writes: the write lock first.
     let mut tx = begin_write(pool).await?;
+    let cleared: Settings;
+    let mut s = s;
+    if let Some(id) = s.chat_profile {
+        let found: Option<i64> = sqlx::query_scalar("SELECT id FROM chat_profiles WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if found.is_none() {
+            tracing::warn!(
+                "settings: the profile for new chats (chat_profile) names profile {id}, which \
+                 was deleted; it is saved as none (Settings → Chat)"
+            );
+            cleared = Settings {
+                chat_profile: None,
+                ..s.clone()
+            };
+            s = &cleared;
+        }
+    }
+    let json = serde_json::to_string(s).map_err(|e| GatewayError::Internal(e.to_string()))?;
     let was = gateway_self_admin_in(&mut tx).await?;
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('settings', ?1)

@@ -46,7 +46,11 @@ fn message_schema() -> Value {
             "tool_calls": {
                 "type": "array",
                 "description": "role: assistant only: [{id, type:function, \
-                    function:{name, arguments: <JSON string>}}].",
+                    function:{name, arguments: <JSON string>}}]. Send each id back as lmgw \
+                    gave it: a Gemini model's call id carries the model's thought \
+                    signature, which Gemini 3 refuses a replayed call without. Such ids \
+                    run to hundreds of characters; echo them exactly, and do not send \
+                    them to another provider directly (lmgw strips the signature there).",
                 "items": {"type": "object", "additionalProperties": true}
             }
         },

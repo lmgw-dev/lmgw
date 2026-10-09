@@ -586,6 +586,50 @@ async fn an_aborted_dictation_still_writes_its_row() {
     );
 }
 
+/// Billable units (billable-units design §4.2, §10): a dictation that
+/// arrives as a WAV records its length on its ASR row, measured from the
+/// recording as it went up — the provider reports none — and one that is no
+/// WAV records none rather than a guess.
+#[tokio::test]
+async fn a_wav_dictation_records_its_length_on_the_asr_row() {
+    let (chat, stt, stt2) = mocks().await;
+    let (state, gw) = gateway(&chat, &stt, &stt2).await;
+    let tid = new_thread(&gw, "plain", false).await;
+    tweak(&state, |s| s.chat_stt_alias = "my-asr".into()).await;
+    let rows = || async {
+        store::query_logs(
+            &state.db,
+            &store::LogFilter {
+                alias: Some("my-asr".into()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    };
+
+    let (status, v) = transcribe(&gw, tid, recording(3)).await;
+    assert_eq!(status, 200, "{v}");
+    crate::common::patience::until_async("the dictation's row", || async {
+        rows().await.len() == 1
+    })
+    .await;
+    let row = rows().await.remove(0);
+    assert_eq!(row.ingress_proto, "chat");
+    assert_eq!(row.audio_in_ms, Some(3_000), "{row:?}");
+
+    let webm = b"\x1a\x45\xdf\xa3 a stand-in for a WebM recording".to_vec();
+    let (status, _, v) = transcribe_with(&gw, tid, Some("audio/webm;codecs=opus"), webm).await;
+    assert_eq!(status, 200, "{v}");
+    crate::common::patience::until_async("the WebM dictation's row", || async {
+        rows().await.len() == 2
+    })
+    .await;
+    let row = rows().await.remove(0);
+    assert_eq!(row.audio_in_ms, None, "not a WAV: no length read: {row:?}");
+}
+
 // -- the press's warm ---------------------------------------------------------------
 
 /// A cold lazy ASR row: `loading`, then `ready` with its time — the

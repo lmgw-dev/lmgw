@@ -103,13 +103,19 @@ pub(super) async fn speak(f: &Fixture, model_id: &str) -> u16 {
 
 /// Until the residency reading after `before` readings is over.
 pub(super) async fn readings_after(f: &Fixture, before: u64) {
-    for _ in 0..500 {
-        if f.state.vram.residency_readings() > before {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no residency reading finished after {before}");
+    common::patience::until(
+        &format!("a residency reading finished after {before}"),
+        || f.state.vram.residency_readings() > before,
+    )
+    .await;
+}
+
+/// Until the sampler stretch after `before` stretches is over.
+pub(super) async fn stretches_after(f: &Fixture, before: u64) {
+    common::patience::until(&format!("a sampler stretch ended after {before}"), || {
+        f.state.vram.residency_stretches() > before
+    })
+    .await;
 }
 
 /// [`speak`], and wait for the reading it starts.

@@ -1,0 +1,155 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "What was the weather?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "city": "Paris"
+            },
+            "name": "get_weather"
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "get_weather",
+            "response": {
+              "result": "Rain"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "It rained."
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "text": "And now, with the time?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "city": "Paris"
+            },
+            "name": "get_weather"
+          },
+          "thoughtSignature": "Eq0BCqoBAXLI2n+/sig/A+A="
+        },
+        {
+          "functionCall": {
+            "args": {
+              "city": "Paris"
+            },
+            "name": "get_time"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "get_weather",
+            "response": {
+              "result": "Sunny"
+            }
+          }
+        },
+        {
+          "functionResponse": {
+            "name": "get_time",
+            "response": {
+              "result": "14:00"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "city": "Paris"
+            },
+            "name": "get_weather"
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "get_weather",
+            "response": {
+              "result": "Still sunny"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "get_weather",
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "description": "get_time",
+          "name": "get_time",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

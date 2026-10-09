@@ -132,6 +132,11 @@ pub(super) async fn fixture_n(
         let mut w = world.lock().unwrap();
         w.size.insert("chat-model".into(), chat_bytes);
         w.size.insert("embed-model".into(), embed_bytes);
+        // Weak: the state holds the driver that holds this world.
+        let st = Arc::downgrade(&state);
+        w.samples = Some(Arc::new(move || {
+            st.upgrade().map_or(0, |s| s.vram.residency_samples())
+        }));
     }
 
     let dir = tempfile::tempdir().unwrap();

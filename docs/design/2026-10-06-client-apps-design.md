@@ -1261,6 +1261,7 @@ the thread first: one that left the binder's reach meanwhile is the 404, never "
 | 401 | `device_key_unknown` | a rotated or deleted device key (it matches no row; *changed 2026-10-07*, was `session_required`) |
 | 403 | `forbidden` | a device on an `Admin` route, or creating an admin thread |
 | 403 | `tool_label_out_of_scope` | a device writes a label L5 refuses |
+| 403 | `approval_loosen_refused` | a device writes a `require_approval` that gates fewer calls of a server than the stored rule or the owner's floor (§6.6; *2026-10-09*) |
 | 403 | `chat_toolset_needs_full` | a device whose admin tools are below `full` (its own level capped by the gateway's) attaches the self-admin toolset, or changes the settings or messages of a thread that carries it or the defaults of a folder that does, an ongoing folder's change reaching such a current thread included (L5's notes; *the branch review's verification, 2026-10-07*). The same settings sent back are no change |
 | 403 | `host_not_granted` | `GET /mcp/host` without a hosting grant, or from a non-device principal |
 | 403 | `cross_origin_refused` | `GET /mcp/host` with an `Origin` header (§5.6) |
@@ -1363,6 +1364,7 @@ updated with it:
 | `message.added`, `message.updated` | `{thread_id, messages}` as `GET …/threads/{id}` returns them now | stored | Android |
 | `message.deleted` | `{thread_id, message_ids}` | stored | Android |
 | `approval.requested`, `approval.decided` | §6.6 | stored | Desktop 3 |
+| `device.revoked` | `{device: {kind: "device", name}, by}` (added 2026-10-09, below) | stored | Desktop 3 |
 | `turn.started` | `{thread_id, by, voice}` | live | Desktop 1 |
 | `turn.done` | `{thread_id, message_id, saved, code}` (`superseded`, `gpu_hold`, … or null) | live | Desktop 1 |
 | `voice.bound` | `{thread_id, by}` | live | Desktop 1 |
@@ -1415,6 +1417,27 @@ updated with it:
   reach; the owner's stays bound. A deleted thread's `voice.ended` and `turn.done` reach the
   owner alone, as a hidden thread's do: a device hears `thread.deleted`.
 - **Temporary threads** have no live events either (L7): no `turn.*`, no `voice.*`.
+
+*Added 2026-10-09 (`device.revoked`; for the desktop client's WP18):* a paired device's key
+deleted is a stored event, so a client that runs work the device started (a host of MCP tasks
+whose `lmgw/caller` named it) may cancel that work; before it, a client heard only its own key's
+`revoked`. Recorded in the delete's own transaction (`store::feed::record_device_revoked`, from
+`store::delete_api_key`), `by` the owner (key ops are on `/api` alone). `device` names the deleted
+device as `hello.principal` names one and as `lmgw/caller` does on a forwarded call; its `by` form
+(`FeedPrincipal::by`, "device 'phone'") is what its changes carried.
+- **Who hears it** — no device the reader was not shown (L3): the dashboard and admin keys; a
+  device that may see a stored record carrying the deleted device's `by` (the record's level is
+  the lowest of those records', the owner's alone when the feed holds none, e.g. pruned by the
+  retention); and a device hosting a task the deleted device started that was still open —
+  running, or cancelled with the cancel still owed to its server (`cancel_owed`) — (its
+  `lmgw/caller` named the device on the call, whatever the thread's level; the record keeps those
+  hosts' key ids in `detail`).
+- **Only a delete.** A disable and an expiry are reversible (the key can be enabled or renewed;
+  a disabled host's tasks wait, MCP Tasks design §1.6), a rotate keeps the row and the device
+  pairs again under its name, and a cleared hosting grant takes away hosting, not the device: the
+  tasks it hosted end `abandoned`, each said by its `task.done`. None of them records anything.
+- **lmgw ends nothing for it.** The deleted device's tasks run on and their results enter their
+  threads; what to cancel is the host's call (the client's ruling; MCP Tasks design T7, T16).
 
 ### 2.3 Storage and delivery (L6)
 
@@ -2142,6 +2165,59 @@ which the owner's turns then call. WP7 must make `narrows()` true for an `All` t
 exceptions, or replace the shortcut with `may_reach` plus `admits` on the namespace; §9's reach
 tests gain "an `all` device writes another device's label → 403".
 
+*As built (WP7), 2026-10-09:* `mcp/host.rs` and its children (`transport`, `link`, `links`,
+`conn`, `calls`, `caller`), `mcp/scope/hosted.rs`, migration 0072. Where this section was silent:
+- **The row** is named after the device key (`device:<name>`), as an agent's is `agent:<id>`; a
+  server name with that prefix is refused for every other writer. The MCP page may change its
+  `enabled` flag and `timeout_ms` only; a create or a delete by hand is refused, naming the
+  grant. The grant writes the row in the key write's own transaction.
+- **A row switched off** refuses the upgrade (`403 host_not_granted`, saying so) and closes an
+  open link with 1000; so does a cleared grant. The handshake (`initialize` and the paged list)
+  is bounded by the row's `timeout_ms`; a failure leaves the row `Error` with the message and
+  closes the link 1002. A binary frame, a batch or text that is no JSON-RPC message closes 1002
+  too; a missed pong 1011, an overrun 1009 (naming the setting), a stop 1001.
+- **`_meta`:** `lmgw/approval` is `null` until F (WP9) decides calls; the gateway's own runs are
+  `{kind: "gateway", name: "lmgw"}`; a request with no key would be `anonymous` (L16 keeps it
+  from ever reaching a device row, so it is never sent; a device reads it as the least trusted).
+  A reader takes each part as optional: a missing timeout is no deadline.
+- **A turn whose every failed label is an offline device** runs as a plain chat turn (the plain
+  path, not the tool loop), after the `error` frame naming each label.
+- **Settings:** `mcp.host_*` are the dashboard's settings save (Settings → MCP), not
+  `lmgw__settings_set`'s; a change applies to links opened after it.
+
+*Changed after the WP7 review, 2026-10-09:*
+- **A run calls only the tools it offered.** Every in-process run's MCP executor (a Chat turn, an
+  agent run, `/v1/responses`, realtime) takes the names its labels listed, with the server each
+  came from, and calls each there only (`call_listed`); any other name is a tool error naming
+  why, never routed by the aggregate. So a `/v1/responses` continuation that resumes approved
+  calls must carry its `mcp` blocks again, as OpenAI's API has it.
+- **A name is a device's by the server that serves it** (the aggregate's routes), not by its
+  spelling: a bare server's own `desktop__x`, or a server prefixed `desktop_`, is not the
+  device's while it serves the name. A name nothing serves now is held back by the device
+  namespace it falls in (the longest label's), failing closed. A `/mcp` call is held to the
+  server its name routed to when the scope admitted it. A hosting label ending in `_`, and a
+  label and a tool prefix (or two labels) whose namespaces run into each other, are refused.
+- **W3-9, as built:** `narrows_for(server)` — the list narrows, or `server` is a device row the
+  caller does not reach whole. An `all` scope keeps its other servers (a bare one not connected
+  included) listed and writable without connecting anything.
+- **Closes:** a key deleted or disabled closes its link 4003 with the revocation's reason, also
+  when the configuration reload that drops its row comes first. Of two links of one device
+  opening at once, the one with the lower link number is told to close (4000) and the other
+  serves. A call cut off by a close lmgw made reports that close's reason, not "disconnected".
+  Every write on the link is bounded: by `mcp.host_ping_interval_s`, or with pings off (0) by
+  the row's `timeout_ms`, so a device that stops reading cannot hold a close or a revocation.
+- **`initialize` carries the link's limits** in `params._meta["lmgw/host_limits"]`
+  (`lmgw_api_types::mcp_host::HostLimits`, re-exported by `lmgw-client`):
+  `{max_message_bytes, max_frame_bytes, ping_interval_s, call_timeout_ms}` — the sizes set on
+  the upgrade (`max_message_bytes` `null` when `mcp.host_max_message_mb` is 0, no bound; the
+  frame is always bounded), the ping interval the link runs with (0 = no pings) and the row's
+  `timeout_ms`. Read once per link; a setting changed later applies to the next link.
+- **An older server row named `device:<name>`** (from before the prefix was the grant's) keeps
+  0072 from creating that device's row. lmgw renames nothing: the start that runs 0072 logs a
+  warning naming both, the upgrade's `403 host_not_granted` names the row, and a key write that
+  sets or changes the grant is refused naming it (other writes of the key go through) until
+  the owner renames or deletes that row.
+
 ## 6. MCP approvals (F) [Desktop 3]
 
 ### 6.1 Thread tools gain `require_approval`
@@ -2161,7 +2237,7 @@ tests gain "an `all` device writes another device's label → 403".
    `pending_approvals` column (migration) that holds the calls and the starting principal's key
    id.
 4. It emits `tool {event: "approval", approval_request_id, server_label, name, arguments}` for each
-   gated call, then `done {pending_approvals: […]}`. `arguments` is a JSON string, as OpenAI's,
+   gated call (`call_id` added 2026-10-09, §6.6), then `done {pending_approvals: […]}`. `arguments` is a JSON string, as OpenAI's,
    and `name` is the wire name (server-tools decision 6).
 
 ### 6.3 Deciding
@@ -2205,10 +2281,194 @@ tests gain "an `all` device writes another device's label → 403".
 ### 6.5 Feed
 
 - **`approval.requested`:** `{thread_id, message_id, approval_request_id, server_label, name,
-  arguments}`.
+  arguments}` (and `call_id`, added 2026-10-09, §6.6).
 - **`approval.decided`:** the same ids plus `{approve, by}`.
 
 Both are stored records rendered from the thread's pending state.
+
+### 6.6 As built (WP9), 2026-10-09
+
+`store/chat_approvals.rs`, `web/chat_approvals.rs`, `web/agentchat/gated.rs`,
+`web/chat_turn/resume.rs`, `web/chat_temp/approvals.rs`, `web/chat_feed/approvals.rs`,
+`agent/approval.rs`, `realtime/thread/approvals.rs`, migration 0074;
+`lmgw_api_types::chat_approvals`, re-exported by `lmgw-client` (`requests::approvals`). Where §6
+was silent:
+- **The stamping rule.** `_meta["lmgw/approval"]` is `{decision: "approved", by}` exactly for a
+  gated call a verdict approved, run by the turn that verdict resumed, and `by` is the principal
+  that decided (`{kind, name}`, as `lmgw/caller`). The loop runs each such call inside a
+  task-local scope (`agent::approval`); the MCP executor and the call's request row read it there,
+  so no wrapper between them can drop it. A sibling that waited beside a gated call, a declined
+  call (never forwarded), and every call outside a resume carry `null`. A `/v1/responses`
+  continuation's verdicts are decisions too, by the request's principal. It composes with MCP
+  Tasks: the call id is set as for any loop call, so an approved `required` call carries both
+  `lmgw/approval` and `lmgw/task`. Every other call the loop makes runs inside the scope with
+  nobody as approver, so a run started inside an approved call's scope cannot inherit it.
+- **Self-approval is the device's call.** lmgw stamps every real decision, whoever made it: `by`
+  is always the principal that decided (the route's and a bound session's caller, a
+  `/v1/responses` continuation's request principal), also when that is the call's own caller. A
+  device decides whether a self-approval counts: Kai treats `approval.by == lmgw/caller` as not
+  approved unless the caller is the owner, the gateway or its own key.
+- **The decider's reach** (taken in this draft, open to the owner's veto). The resumed turn runs
+  as its starter, whose reach may be wider than the decider's, so an approval would be a
+  device's path to calls it may not make itself. When the decider is not the owner, every
+  approving verdict is refused whose call its own tool scope (`ToolScope::admits`) does not
+  admit, and every approving verdict on an `lmgw__*` call unless its own admin tools may do
+  everything (its level `full`, capped by the gateway's): `403 approval_out_of_scope`, naming
+  each call, and nothing of the batch is decided. Declining stays open to any client that sees
+  the thread. The owner approves anything the thread offers.
+- **Stored state.** `chat_messages.pending_approvals` (JSON): the starter's key id and name, the
+  calls of the turn's last stop (gated and siblings, in the model's order) and every decision
+  made on the reply (call, verdict, reason, who, whether by moving on). `request_logs.approved_by`
+  is `<kind>:<name>` (`owner:dashboard`, `device:phone`). An edited reply loses it with its tool
+  record; a deleted or regenerated one takes it along.
+- **Ids.** A gated call's id is `mcpr_` and 64 random bits, unique in the gateway whatever ids the
+  model gave its calls. A bound session's `mcp_approval_request` item has it as its `id`, which
+  its `mcp_approval_response` quotes, as OpenAI's.
+- **The call's id** (added 2026-10-09, for the desktop client's app views, which match an
+  approval to the call whose view they show). Every place an approval is named carries the
+  model's id for the call, `call_id`, the id the turn's `ready` and `result` frames carry
+  (§7.6): the `tool {event: "approval"}` frame, `done.pending_approvals` and a message's
+  `pending_approvals` (`ApprovalRequest::call_id`), and the feed's `approval.requested` and
+  `approval.decided`. Only added: every other field stays, and a reader of an earlier lmgw finds
+  none (`Option`). A bound session's `mcp_approval_request` item stays OpenAI's shape, which has
+  no call id; the `lmgw.chat.frame` relaying the turn's `approval` frame, sent right after the
+  item, carries `call_id` beside the same `approval_request_id` (lmgw-only data stays in
+  `lmgw.*`). `lmgw-client`'s `ServerEvent::ApprovalRequest`, read off the item, has `call_id:
+  None` for that reason.
+- **The route's answers.** `400 bad_request` for no verdicts, `400 approval_missing` naming each
+  waiting call without one, `404 approval_not_found`, `409 approval_decided` naming who decided,
+  `409 approval_starter_unavailable` naming the key (checked before anything is decided), `409
+  approval_moved_on` when the reply is no longer the thread's last message (checked inside the
+  decision's own write, so nothing is decided then), `403 approval_out_of_scope` (above). The
+  starter's concurrency slot is taken before the decision too: a key at its limit is its `429
+  key_rate`, nothing decided, and the resumed turn holds the slot for its length. `speak: true` reads
+  the resumed reply aloud as a send's does; the stream and the read-aloud belong to the approver's
+  request, the turn (its model calls, slot, tool scope, rows) to the starter.
+- **The resumed turn** always runs the tool loop (also when the thread's tools went since: their
+  calls then answer that the tool was not offered), and is appended to the gated reply: text,
+  record and pending state, the decisions kept, so a second gated stop gets new requests on the
+  same reply.
+- **Decided, not saved.** A decision is written before its turn runs. When that turn is
+  superseded or fails before it saves, the next message closes the calls: an approved one (and
+  a sibling decided with it) with "decided to run, but the turn that ran it ended before its
+  result was saved, so it may or may not have run".
+- **Decided, never started.** When the turn cannot start after the decision was written (its
+  starter's key went in between, a send made the reply no longer the last message, the turn
+  was refused or stopped before its tool loop), its calls are closed at once (`close_unrun`):
+  an approved call and its siblings read "not run: the turn that was to run it once it was
+  decided could not start" (a result the next message had already closed with the "may or may
+  not have run" words is reworded), a declined one keeps its words. Each decision is marked
+  `not_run`, and an approved one gets a second `approval.decided` record, rendered (as the first
+  is from then on) with `approve: false, not_run: true`: the feed never says approved for a
+  call that never ran.
+- **A new message** from any writer (a send, a bound session's turn, a temporary thread's)
+  declines in its own insert; a sibling reads "not run: it waited beside a call that needed an
+  approval, and the user moved on without deciding"; `approval.decided` names the writer.
+- **Feed.** Records carry `{message_id, approval_request_id}` in `detail`, at the thread's level
+  (L3); the rest is rendered from the reply at delivery, and a reply gone by then renders
+  nothing. `approval.decided` carries `{thread_id, message_id, approval_request_id, approve,
+  by}`, `by` the feed's author name, as `lmgw.approval.decided`'s.
+- **The thread's read** lists a reply's waiting calls as its `pending_approvals`.
+- **A bound session's answer** runs without the journal: it writes no user turn, and its reply is
+  the gated one, saved already, so no heard cut or voice timing is recorded for it. A committed
+  turn with words takes precedence (it is a new message, which declines what waits) and the
+  queued answers go. The answers are checked when that response runs: a refusal fails it with the
+  route's code. Every decision and every new message wakes the thread's bound sessions by thread
+  id, and so does every edit, delete, resend or cut-back of the history; a session that lagged
+  reads its own thread again. A session does not show the calls that waited before it bound: a
+  client reads them from the thread or the feed.
+- **A call gone from under a bound session** (taken in this draft, open to the owner's veto):
+  when the reply that holds a call the session showed is edited, deleted or cut away, the
+  session says `lmgw.approval.decided` with `approve: false` and `by: null`, and stops waiting
+  for it: nobody decided it, and it never runs. A decided call whose turn never started is said
+  with `approve: false` too.
+- **A bound session's resume holds its starter's slot** (taken in this draft, open to the
+  owner's veto): as the route's, it takes the starter key's concurrency slot before deciding,
+  unless the session holds that key's own already (the session's slot holds its place, realtime
+  §10.3); a refusal fails the response with `key_rate`.
+- **An unbound session** refuses `mcp_approval_response` (`invalid_value`, saying approvals are
+  taken on a session bound to a chat thread) and `mcp_approval_request`, as before.
+- **Temporary threads** take approvals too, in memory, and record nothing in the feed.
+- **`POST …/transcribe`** is documented now (`Dictation`), with `requests::transcribe`.
+- **Dashboard (built after WP9):** a waiting call's card shows its arguments with Approve and
+  Decline under it (with several waiting, each card picks a verdict and a bar sends them, or
+  approves or declines all), the resumed reply streams into the same message, and the route's
+  refusals read inline on the card. A call that ended without running reads as declined, not
+  decided (a new message came), not run, or possibly not run, from the words of its result. The
+  thread drawer's and the folder defaults' tool picker edit `require_approval` per source: never,
+  always, or a per-tool list (`{always: {tool_names}}`); a value those cannot show (a `never` list)
+  is kept as read until a mode is picked. `scripts/chat-approvals-drive.sh` drives all of it.
+- **Devices only tighten `require_approval`** (decided by the owner 2026-10-09; built in
+  `web/chat_tool_write/approval.rs`). A device, or any non-owner, that writes a thread's
+  settings, a folder's defaults or `apply_to_current` (which runs the thread's settings
+  checks) may not make a server require approval for fewer calls than before. A loosening is
+  `403 approval_loosen_refused`, naming the label and the tool, and nothing is written;
+  tightening passes, a server whose stored entries are all carried unchanged (none added)
+  passes, and the owner may do anything. Labels are stored trimmed (`" kb"` is `kb`), from a
+  request and from a stored row alike.
+  - *Scope.* The floor protects Chat threads — stored threads and the realtime sessions bound
+    to them. Per-request tools on `/v1/responses` and unbound realtime sessions are bounded
+    only by the caller's tool scope, not by any thread's floor.
+  - *Servers, not labels.* Entries are compared by what their label names as a turn resolves
+    it (`mcp::exec::label_target`): a built-in toolset, or a registered server by its tool
+    prefix or its name; a label that names nothing is compared with the same label only. Two
+    entries of one write that name one server (`gh` and `github`, or one label twice) are `400
+    bad_request` for every writer, the owner too, where the write changed one of them: which
+    rule holds is not what the list shows. A pair stored before this rule and sent back
+    unchanged passes; dropping the stricter of the two is a loosening. For a device the `400`
+    comes after the scope check, so a label out of its reach is answered as such and never
+    says a server exists.
+  - *Either spelling.* A tool name in a `tool_names` list is compared in the tool's own
+    spelling (`<prefix>__` taken off once, `<label>__` for a built-in), as a turn matches
+    either: `{always: [search]}` to `{always: [search], never: [gh__search]}` ungates
+    `search` and is refused; `{always: [gh__a]}` to `{always: [a]}` is the same rule.
+  - *The comparison.* Per baseline, the old and new rules are compared tool by tool over every
+    tool either names and over "the server's other tools": `always` to `never`, a tool dropped
+    from an `always` list or added to a `never` list, a dropped field, a filter that stops
+    gating the other tools (`{never: [x]}` to one whose lists are both empty, which gates
+    nothing).
+  - *The owner's floor* (migration 0076: `approval_floor` on every thread and folder). A
+    device's entry is compared with the stored rule for its server **and** with the owner's
+    floor for it, the strictest of both counting. Only the owner's writes move the floor: a
+    server the owner writes takes the owner's rule (a looser one too), one the owner removes
+    has none, one the write does not touch keeps what it had. A device removing an entry
+    leaves its floor, so an entry added back is no looser than the owner's last rule. Rows
+    stored before 0076 start with their stored rules as the floor (they were written before
+    this rule existed). A thread made in a folder starts from the folder's floor, whoever
+    makes it (a rollover too); a device's new folder has none.
+  - *Folders.* For a thread in a folder, a server the thread has neither a floor nor an entry
+    for is compared with the folder's floor and defaults for it, so a new entry is never
+    looser than the folder's default (a refusal, not a silent rewrite). A thread leaving its
+    folder — a move out or into another folder, or the folder's delete keeping its threads —
+    takes those folder rules into its own floor for the servers its floor does not name
+    (`store::chat_approval_floor`), so moving never lowers it.
+  - *At the turn.* A write checks labels as they resolve then; a label that named nothing at
+    the write (a server deleted, a device's grant cleared) or that an owner's rename or
+    re-prefix retargets later resolves at a turn. So a turn applies the floor again
+    (`mcp::exec::ApprovalFloor`): per server it resolves, the effective rule is the strictest
+    of every thread entry naming it and every entry of the thread's floor naming it — or,
+    where that floor names it nowhere and the thread is in a folder, of the folder's floor and
+    defaults (the same baselines a write is compared with, so an owner who loosened a
+    thread's entry against its folder's default keeps that). Names compare in either
+    spelling.
+  - *Tool mode.* The `kb` toolset knowledge-base tool mode attaches runs under the same
+    effective rule for `kb`: tool mode never ungates the owner's `kb: always`, also when a
+    device drops the entry in the write that turns tool mode on.
+  - *Shapes.* `require_approval` is `"never"`, `"always"` or `{always: {tool_names},
+    never: {tool_names}}` (either key may be left out, `{}` is `"never"`); any other shape — an
+    unknown key, a filter that is not an object (`{always: ["a"]}`), one without `tool_names`
+    (`{always: {}}`) — is `400 bad_request` for every writer, and refused on `/v1/responses`
+    and `/v1/realtime` too, never read as "gates nothing". Checked on the entries a write
+    changes: a stored value sent back unchanged (a `defaults_patch` of another field) passes.
+    A stored value that does not parse gates every tool.
+  - *What stays robust.* Only `"always"` and a never-only filter (`{never: [...]}`: every tool
+    but those named) gate a tool the server adds or renames later; an `always` list gates the
+    names it lists. A device hosting its own server controls its tool names, so on such a
+    server only those two forms hold against it; and on such a server, a tool whose own name
+    starts with `<prefix>__` can make the either-spelling equivalence map a name to the wrong
+    tool. And a device whose admin tools are `full` is the owner's equal on configuration:
+    changing a server's tool prefix with `lmgw__mcp_server_set` retargets every stored rule
+    that names the server by it.
 
 ## 7. `/mcp` passes resources through; MCP Apps metadata (G) [Desktop 2]
 
@@ -2233,8 +2493,9 @@ Both are stored records rendered from the thread's pending state.
 - **Namespacing.** A server with tool prefix `p` has its resource URIs rewritten by prefixing the
   authority: `ui://weather/card` becomes `ui://p__weather/card`. The same rewrite applies to tools'
   `_meta.ui.resourceUri` in `tools/list`, and to resource links and embedded resource URIs in tool
-  results. A server without a prefix keeps its URIs, and the first connected wins, as for tool
-  names. The rewrite of results is the one departure from server-tools decision 7.
+  results. A server without a prefix keeps its URIs, and the first by name wins (tool names
+  no longer work that way: §7.6). The rewrite of results is the one departure from
+  server-tools decision 7.
 - **Scope:** a resource is readable when the caller reaches its server (§5.6 for device rows).
 - **`_meta.ui.visibility`:**
   - runs that offer tools to a model (Chat, `/v1/responses`, realtime) skip a tool whose
@@ -2259,6 +2520,221 @@ Both are stored records rendered from the thread's pending state.
 Re-read the extension's current stable specification and pin its revision in the code's doc
 comment: the capability key, the MIME type, the `_meta.ui.*` keys and the host obligations. If a
 newer stable revision changed any of them, this section is amended before the build.
+
+*Re-read for WP8, 2026-10-09:* `specification/2026-01-26/apps.mdx` (SEP-1865) is still the newest
+stable revision (the repository holds it and `draft`). The capability key, the MIME type and the
+`_meta.ui.*` keys are as §"What exists today" lists them; the flat `_meta["ui/resourceUri"]` is
+deprecated (removed before GA) and still read. One point moved against §7.2: the revision defines
+`io.modelcontextprotocol/ui` as the **host's (client's)** capability and says servers SHOULD check
+it before registering UI tools; it defines no server-side declaration. So lmgw advertises it in
+its own `initialize` to every southbound server (and device link), without which an SDK-built
+server offers no UI tools at all; `/mcp`'s server capabilities keep it as §7.2 says, which
+SEP-1724 permits on either side. A server MAY leave a UI resource out of `resources/list` (hosts
+find it through tool metadata), which shaped the routing below. Pinned in
+`mcp/resources.rs`'s module doc and `lmgw_api_types::mcp_apps::REVISION`.
+
+### 7.5 As built (WP8), 2026-10-09
+
+`mcp/resources.rs` with `uri` (the rewrite, template matching), `apps` (tool metadata, results)
+and `route` (aggregate, read routing, reach); `mcp/ingress/resources.rs`; `lmgw_api_types::mcp_apps`
+(the revision, the identifiers, `ToolResultFrame`), re-exported by `lmgw-client`. Where §7 was
+silent:
+- **Whose a URI is.** Its candidates are the enabled servers it can belong to, by name: the servers
+  of the longest tool prefix whose namespace holds it, else every bare server (and for a URI with
+  no authority — `urn:…`, `data:…`, which no prefix changes — every server). A candidate *claims*
+  it in one of three ways, strongest first: a tool of its own names it in
+  `_meta.ui.resourceUri`; it lists it; it has a `uriTemplate` it fits (each `{…}` matching any run
+  of characters). The strongest claim has it, and the first by name among the candidates that
+  claim it that way, so a template never takes a URI another server lists or a tool names. A
+  prefixed server's template needs a literal `scheme://` (which the namespace then prefixes); one
+  without (`{uri}`, `urn:{id}`) would claim every other server's `urn:…`, so it claims nothing and
+  is not listed. A URI in a namespace that no candidate claims is still the first candidate's (an
+  unlisted UI resource, a server not connected); any other unclaimed URI is `-32002`. A namespace
+  with one server is answered without listing anything. The template match is linear in the URI
+  per literal run (each run at its leftmost place), not a backtracking search, so a long URI
+  costs no more than reading it.
+- **The listings agree with reads.** `resources/list` shows a server's resource only where that
+  rule gives it the URI; a bare server's URI in a prefix's namespace, or one another server claims
+  more strongly or earlier by name, is left out (logged at debug). Who has each URI is worked out
+  once per listing. Templates are shown once each, by their namespaced text. Both lists answer in
+  one page (a cursor is `-32602`) and connect nothing: the ready servers'.
+- **Who is asked.** A listing asks the servers the caller reaches, and of the others only those
+  that could take one of their URIs (a candidate earlier by name; a tool's claim is known without
+  asking). A read asks the URI's candidates, and none when the caller's scope reaches none of
+  them (`-32002` at once, nothing started). A device row the caller does not reach is never asked
+  about a URI with an authority; what its tools name still counts. A URI without one can still
+  take an unreached device's listing to settle.
+- **Reads go where calls go.** A server not connected is connected (a service agent's app started
+  first); for a caller whose scope narrows it, before its reach is judged, since a stopped (idle-
+  reaped) server offers no tools to judge by — only for a caller whose scope can reach it at all
+  (`may_reach`). Any other read is bounded by the row's `timeout_ms`; a device row's goes over its
+  link as a call does — `_meta` (`lmgw/caller`, `lmgw/approval`, `lmgw/timeout_ms`), cancelled on
+  the device at the timeout and when lmgw stops waiting, cancelled before lmgw closes the link
+  (the link's open requests count reads as well as calls), and a closed link reported with the
+  close's reason; an offline device row is answered at once. The answer's
+  `contents[].uri` comes back namespaced; a server's JSON-RPC error passes on with its code. No
+  size bound beyond the link's own (`mcp.host_max_message_mb` closes a device link, naming it).
+  Reads write no `request_logs` row; they are no tool calls.
+- **Reach.** A resource is listed to and readable by a caller that reaches its server:
+  `ToolScope::may_reach` for the row (L16 for a device row), and where the scope narrows it
+  (`narrows_for`), a tool of that server the scope admits and the owner has not switched off, or
+  the server's whole namespace (`admits_namespace`). So a bare server that offers no tools is
+  out of reach for every narrowing scope. Out of reach is `-32002` with why, as a tool out of
+  scope answers `-32601` with why.
+- **Notifications.** `GET /mcp` sends `notifications/resources/list_changed` beside every
+  `tools/list_changed` (a server connecting or going changes whose resources are listed) and on
+  an upstream's own `notifications/resources/list_changed`. `subscribe` is not offered; the method
+  answers `-32601`.
+- **`/mcp/admin`** serves no resources and does not advertise them.
+- **`visibility`** is applied in `exec::resolve`, the one path every model run lists tools through
+  (Chat, `/v1/responses`, realtime, in-process agents, `/v1/mcp/servers/{label}`); a label whose
+  remaining tools are all app-only fails with that reason. On `/mcp`, `tools/list` gives the
+  app-only tools only to a session whose `initialize` declared `io.modelcontextprotocol/ui` in
+  `capabilities.extensions` (the session keeps that beside its client name): lmgw advertises the
+  extension to every southbound server, so their app-only tools would otherwise reach clients
+  that have no views to call them for. A call is not refused on it. A malformed `visibility` (no list)
+  counts as absent; a single string is read as a list of one.
+- **The `tool` result frame** always carries `server_label`, `ui_resource` and
+  `structured_content` (`null` when none). `structured_content` is `ToolOutcome::structured`, the
+  MCP result's `structuredContent` kept apart; the model still gets it among the result's blocks,
+  as before (the extension says hosts keep it out of the model's context: open for the owner —
+  decided 2026-10-09, §7.6: it does not, when the content is not empty).
+
+### 7.6 Decided by the owner, 2026-10-09, and as built
+
+**Overlapping tool names are not refused, and neither tool is shadowed: the colliding tools take
+their server's prefix** (`mcp/names.rs`). Before, two servers whose tools had one exposed name (two
+bare servers' `read`, a bare server's literal `gh__search` beside the `search` of the server
+prefixed `gh`, two servers sharing a prefix) kept the first by server name and dropped the other
+with a warning; a bare server's tool in `lmgw__`, `docs__` or `kb__` was dropped too.
+- **A tool's names, in order:** its own name (the upstream's, or the owner's rename), under its
+  server's prefix when it has one — the name it has when nothing collides — then
+  `<server name>__<own name>`, the server's name with every character a tool name cannot carry as
+  `_` (what a bare server's label is, spelt as a prefix; `my server` → `my_server__read`).
+- **Who moves: every side of equal standing.** Decided by the owner (2026-10-09): every tool
+  caught in a collision moves, so the collision stays visible. A collision is not settled quietly in one server's favour: every tool caught in it shows,
+  by its new name, that another source offers its name. A name is held most strongly by a prefix,
+  then by a server's name, then not at all (a bare name). Where two tools have one name, the weaker
+  hold moves to its next name; two of one strength both move. So two bare servers' `read` are
+  `alpha__read` and `beta__read`, and `read` routes nowhere — not the first by name keeping it,
+  because which server is "first" changes when a server is added, renamed or not connected, and a
+  name that silently routes to another server than the one a client listed it from is what
+  `call_listed` exists to refuse. A bare server's literal `gh__search` moves for the prefixed
+  server's (`aaa__gh__search`), which keeps its name; two servers that share a prefix both take
+  their names. A tool in a reserved namespace moves out of it (`impostor__lmgw__status`). Repeated
+  until nothing collides or nothing can move; what still collides (two server names that spell
+  alike) goes to the strongest hold, then the first by server name, and the other is skipped and
+  surfaced, as a name past 64 characters is. A server offers each name once: one it lists twice,
+  or a rename onto another of its tools, keeps the first and skips the rest (surfaced), before any
+  name is settled. **A device row's tools never leave its label:** they have only `<label>__<own>`,
+  so a name two of its own tools share is skipped and surfaced, never moved to
+  `device_<key>__…` outside the namespace its reach is decided by (§5.6).
+- **Stable.** Only colliding tools change name; every other keeps its own. Which tools collide is
+  read from every enabled server's tools: the connected ones' as listed now, every other's as it
+  last listed them — **`mcp_known_tools`** (migration 0078: the upstream names per server,
+  replaced whenever a connected server's listing differs, gone with the server; renames and the
+  prefix apply when the aggregate is built). So a name does not change when a server is reaped,
+  sleeps, goes offline or the gateway restarts, nor with the order servers connect in. A disabled
+  server claims nothing. A new tool that collides moves the existing one with it — the price of
+  never routing a name to a server it was not listed from.
+- **Routing.** The aggregate's reverse map routes the prefixed name to its server, which receives
+  its own tool name, as for every tool. A call of the bare name answers `-32601` (`tool_moved`)
+  naming where the tools went. A run that listed the bare name before the collision (a realtime
+  session, a `/v1/responses` continuation, a Chat turn's listing) calls the tool of the server it
+  listed it from under its new name (`call_listed`): that is the tool the client was shown.
+- **The owner's switch** holds for a tool under every name it has or would have
+  (`Aggregate::spellings`: its own, then under its server's name): switched off under the name it
+  had before a collision, it stays off under its new one; switched off under the name a collision
+  gave it, it stays off when the collision ends and it has its own name again. The inventory shows
+  it off, saying which switch (the now stale record of the other name) turns it on, and
+  `tool_set` switching the tool's current name on says it is still off and which switch holds it.
+  Every tool entry a collision moved carries `moved_from` and `moved_reason`: who else claims the
+  name — another server's tool, or one of lmgw's own namespaces — and, for a server not connected
+  now, that its claim is the tools it listed when it was last connected.
+- **A key's tool scope** (and a device's) holds the same way, failing closed: a **deny** list
+  refuses a tool when it denies any of its names, so denying `delete` keeps out `alpha__delete`
+  and `beta__delete`, a pattern `gh__*` keeps out the twins `gh_work__search` and
+  `gh-home__search`, and denying `alpha__delete` keeps alpha's tool out once it is `delete` again.
+  An **allow** list admits the names it names and no other: allowing `delete` admits no tool a
+  collision moved away from it. Read wherever the scope is (`ToolScope::admits`: `/mcp`'s list and
+  call, `/v1/responses` and realtime runs, a device's Chat turn, resource reach).
+- **Approvals.** `require_approval` names match either spelling as before (the exposed name, the
+  tool's own), so a rule written `read` or `alpha__read` gates `alpha__read`; a turn gates a tool a
+  rule gates under any of its names, so a rule written `alpha__read` while the collision lasted
+  still gates alpha's `read` after it. A label's spellings (`exec/target.rs`) gain
+  `<server name>__<own>` for the server's tools a collision moved now (and only those: a server's
+  own literal `alpha__x` is a tool of that name, not `x`), so the floor (`effective.rs`) and the
+  write check (`chat_tool_write/approval.rs`) compare a rule written in the prefixed spelling with
+  one in the tool's own as one tool. An approval request's `name` stays the tool's own.
+- **Wire names** (realtime's `mcp_list_tools`, `/v1/mcp/servers/{label}`) of a moved tool are its
+  own name, as every other tool's are.
+- **MCP Apps.** A tool's `_meta.ui.resourceUri`, the resource links in its results and the
+  resources `/mcp` lists stay in the server's namespace (its tool prefix; a bare server's URIs
+  unchanged): a collision moves a tool's name, never its resources.
+- **Whose a listed tool is** (added 2026-10-09). A view calls its server's tools by the server's
+  own names; a host that maps such a call onto `/mcp` by the server's prefix cannot find a tool a
+  collision moved to `<server name>__<tool>` (or one the owner renamed): nothing in the listing
+  said which server the moved name belongs to. So `/mcp`'s `tools/list` stamps **every** tool of
+  a registered server, moved or not, with `_meta["lmgw/server"]`: `{label, name, tool}` — the
+  server's label (its tool prefix, else its name: the Chat frames' `server_label`), its name
+  (unique; two servers that share a prefix share a label), and the tool's name as the server
+  itself lists it. Every tool, not only moved ones, so a host needs one lookup — the listed tool
+  whose stamp has the view's server and the called name — and the answer does not change when a
+  collision starts or ends. lmgw sets the key, replacing anything a server put under it; lmgw's
+  own toolsets (`docs__`, `kb__`) carry none; only `_meta` is added (MCP leaves it to the
+  server). Built in `mcp/ingress/server_meta.rs`, typed as
+  `lmgw_api_types::mcp_apps::{SERVER_META, ToolServer}` (re-exported by `lmgw-client`).
+- **What is still refused:** a hosting label or a tool prefix whose *namespace* runs into another
+  (§5.6: a device's reach is decided by its namespace, so that stays a config-time refusal, not a
+  naming rule) — and so is a server's **name** whose spelling as a prefix runs into a device's
+  label (`phone.` and `phone_` are `phone_`, whose moved names `phone___…` would fall among
+  `phone__…`), both when the server is written and when the label is granted — a tool prefix of
+  lmgw's own namespaces, and in a realtime session a client function named like a listed MCP tool
+  (the client's own name; it renames it) or two labels of one server.
+
+**`structuredContent` stays out of the model's context when `content` is not empty** (MCP: content
+is for the model, structured content for the host and its views). `mcp::exec::blocks_from_result`
+— the one conversion from an MCP result to model input — gives the model the content blocks, and
+the structured content (as JSON) only when the content is empty, as before. It covers every path:
+a Chat turn, `/v1/responses` (its `mcp_call.output` too), a realtime session, in-process agents
+(a batch step reads the host's copy, `ToolOutcome::structured`, as data first) and an MCP task's
+result (`mcp::tasks::ending_blocks`). The host still gets it: the Chat frame's
+`structured_content`, and for a late task result the result row's `task.structured_content`
+(stored beside the blocks in `mcp_tasks.result` as `{blocks, structured_content}`; a row of an
+earlier build, the bare block array, still reads).
+
+**The Chat's `tool` frames carry what a client that shows a call's view needs** (Kai shows a
+call's view by itself). Fields are only added; every existing one stays.
+- `ready`: `{index, name, arguments, call_id, server_label, needs_approval, ui_resource}` —
+  `needs_approval` from `LoopEvent::CallReady` (a gated call is followed by its `approval` frame;
+  a resumed turn's decided calls say `false`), `server_label` `null` for a client function.
+- `result`: adds `call_id` and `content`, the MCP result's content blocks as the server sent them
+  (annotations kept, resource URIs namespaced as `/mcp` sends them); a tool lmgw runs itself or a
+  call that never reached a server says its result in the same shape. With `structured_content`
+  and `is_error` that is MCP's `CallToolResult` for the view. `output` stays the flattened text.
+- **Size:** no bound of lmgw's own. A result is as large as its server sent it, images in full; a
+  device's is bounded on its link by `mcp.host_max_message_mb`, which closes the link naming the
+  setting. The SSE stream has no frame limit; a bound realtime session's `lmgw.chat.frame` is as
+  large as the frame, and a client sets its WebSocket's message limit to what it accepts.
+- Typed as `lmgw_api_types::mcp_apps::{ToolReadyFrame, ToolResultFrame}` (re-exported by
+  `lmgw-client`); the API docs' tool frame and `lmgw.chat.frame` say the fields.
+
+**Also decided (recorded; the code already agrees):**
+- **A resource read is not a request:** it writes no `request_logs` row (none ever did — the
+  routing above). Should a client show one, it shows it as a tool call in the thread, never in the
+  request log.
+- **Screenshots stay in the request log by default:** the call of a tool that takes one (a
+  device's `see_screen`) writes its tool-call row like every call, and nothing hides it unless a
+  later setting does. The row holds the call (tool, server, caller, timing, error), not the image:
+  `request_logs` stores no bodies.
+- **MCP UI support is announced to every connected server**: lmgw's client capabilities carry
+  `io.modelcontextprotocol/ui` on every southbound `initialize`, device links included
+  (`mcp/handler.rs`), whatever its views will be used for.
+- **Calls a view makes under Kai's (a device's) key are acceptable**: a view's `tools/call` on
+  `/mcp` runs as the device, within its key's reach (§5.6), as the device's own calls do.
+- **A folder with no profile (`profile_id: null`) means inherit**: its new threads take Settings →
+  Chat's `chat_profile`, else none (personality-profiles design §3.1); a folder default never
+  clears a thread's profile.
 
 ## 8. `ring.js` takes a transparent flag (H) [Desktop 1, optional]
 
@@ -2336,6 +2812,10 @@ flag and opaque without it, the ribbon's opaque with it (`scripts/drive/chat-voi
   - the bound session's items, and `lmgw.approval.decided` for a decision made elsewhere.
 - **Resources:** list and read routing, rewrite consistency between `tools/list`, results and
   `resources/read`, scope, the extension capability, `visibility` filtering in model runs.
+  *As built (WP8):* also the claim order (tool, listing, template), a long URI against a deep
+  template, a narrowed key reading an idle-reaped server, an unreachable caller's read starting
+  nothing, a listing asking no unreached device, app-only tools only for an apps-host session, an
+  upstream's own `resources/list_changed`, and a device read's timeout, cancel and link close.
 - **H:** the visualisation harness's corner pixels transparent with the flag, unchanged without.
 
 Live checks run on a dev instance (`scripts/dev-instance.sh`), never the real data directory.

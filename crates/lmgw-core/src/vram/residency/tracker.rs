@@ -23,6 +23,8 @@ pub(in crate::vram) struct Residency {
     pub(super) at_rest_done: AtomicU64,
     /// Sampler stretches finished, whatever they saw.
     pub(super) stretches: AtomicU64,
+    /// Sampler reads finished, whatever they found.
+    pub(super) samples: AtomicU64,
     /// Held across "is this reading still current" and its store, and across
     /// the owner's reset — so a reading that began before a reset cannot
     /// write its figure back after it (WP7 review, low).
@@ -53,10 +55,15 @@ struct Gen {
     at_rest: AtRest,
     /// A sampler is watching its requests ([`super::sample`]).
     sampling: bool,
-    /// The sampler's stretch saw an answer, and whether one of its figures
-    /// raised the row's.
+    /// The sampler's stretch saw an answer.
     stretch_answered: bool,
-    stretch_raised: bool,
+    /// How many times a figure of this generation raised the row's
+    /// ([`Residency::raised`]); how many the last stretch to check had seen
+    /// ([`Residency::raised_since`]); and the latter when its sampler began:
+    /// the stretch raised it when the count moved past that.
+    raises: u64,
+    raises_checked: u64,
+    raises_at_begin: u64,
     /// The largest figure the sampler saw, and the reset epoch it saw it in.
     sampled: Option<(u64, u64)>,
 }
@@ -108,8 +115,9 @@ pub(in crate::vram) struct Stretch {
     pub(in crate::vram) max: Option<u64>,
     /// A request answered while it watched — only then do its figures count.
     pub(in crate::vram) answered: bool,
-    /// A reading during the stretch raised the row's figure.
-    pub(in crate::vram) raised: bool,
+    /// The generation's raises it counts from: those the last stretch to
+    /// check had seen when it began ([`Residency::raised_since`]).
+    pub(in crate::vram) raises_at_begin: u64,
 }
 
 impl Residency {
@@ -258,7 +266,10 @@ impl Residency {
         }
         g.sampling = true;
         g.stretch_answered = false;
-        g.stretch_raised = false;
+        // Not the raises so far: one that landed after the last stretch
+        // checked was that stretch's to see and it missed it, so this one
+        // counts it — settling one stretch later rather than never seeing it.
+        g.raises_at_begin = g.raises_checked;
         true
     }
 
@@ -282,13 +293,33 @@ impl Residency {
             .map(|(_, b)| b)
     }
 
-    /// A reading raised the row's figure while a sampler watched.
+    /// A figure of `generation` raised the row's: counted under the store
+    /// lock ([`super::learn`]'s `store_resident`): a stretch that checks
+    /// after it sees it then, and one that checked before it leaves it to
+    /// the next stretch ([`Residency::raised_since`]). A raise by the
+    /// reading after an answer — which folds the stretch's samples in — used
+    /// to be credited to the stretch only while it still watched; one that
+    /// landed after the stretch's end was lost, and the stretch counted
+    /// towards settling though its samples had raised the figure.
     pub(in crate::vram) fn raised(&self, generation: u64) {
         if let Some(g) = self.lock().gens.get_mut(&generation) {
-            if g.sampling {
-                g.stretch_raised = true;
-            }
+            g.raises += 1;
         }
+    }
+
+    /// Whether a figure of `generation` raised the row's since `at`
+    /// ([`Stretch::raises_at_begin`]), asked once by a stretch after its own
+    /// store: what it saw is checked, and the next stretch counts from
+    /// there ([`Residency::begin_sampling`]). A raise by the reading after
+    /// an answer can still land after this check — when the sampler's own
+    /// store kept the figure — and is then the next stretch's.
+    pub(in crate::vram) fn raised_since(&self, generation: u64, at: u64) -> bool {
+        let mut inner = self.lock();
+        let Some(g) = inner.gens.get_mut(&generation) else {
+            return false;
+        };
+        g.raises_checked = g.raises;
+        g.raises > at
     }
 
     /// The sampler of `generation` stopped.
@@ -298,14 +329,14 @@ impl Residency {
             return Stretch {
                 max: None,
                 answered: false,
-                raised: false,
+                raises_at_begin: 0,
             };
         };
         g.sampling = false;
         Stretch {
             max: g.sampled.filter(|(e, _)| *e == epoch).map(|(_, b)| b),
             answered: std::mem::take(&mut g.stretch_answered),
-            raised: std::mem::take(&mut g.stretch_raised),
+            raises_at_begin: g.raises_at_begin,
         }
     }
 

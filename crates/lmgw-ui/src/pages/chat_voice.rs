@@ -216,6 +216,8 @@ pub(super) fn source_label(source: Option<&str>) -> &'static str {
         Some("row") => "the model's own description",
         // A reply language that follows the spoken one.
         Some("speech_in") => "the language you speak",
+        // The thread's personality profile supplies it.
+        Some("profile") => "the personality profile",
         _ => "not set",
     }
 }

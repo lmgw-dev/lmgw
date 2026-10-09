@@ -238,7 +238,7 @@ impl VramScheduler {
         let headroom = snap.settings.vram.headroom_mb.saturating_mul(MIB);
         let needs = fp.total_bytes.saturating_add(headroom);
 
-        let _gate = self.gate.lock().await;
+        let _gate = self.ask_gate().await;
         let l = self.ledger(state, snap).await;
         // Again, after the last await before the claim: `snap` is the one
         // this start began with, and the lease (or the hold) may have come on
@@ -533,7 +533,7 @@ impl VramScheduler {
         budget: Option<Duration>,
         fallback: &mut Option<&mut ExternalFallback<'_>>,
     ) -> Gated<'g> {
-        let lock = self.gate.lock();
+        let lock = self.ask_gate();
         tokio::pin!(lock);
         loop {
             let slice = fallback.as_ref().is_some_and(|f| f.live()).then_some(POLL);

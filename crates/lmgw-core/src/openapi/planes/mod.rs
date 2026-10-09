@@ -8,6 +8,11 @@
 
 pub(crate) mod agents;
 pub(crate) mod chat;
+pub(crate) mod chat_approvals;
+/// Merged into [`chat`]'s list, not read by `all_routes` on its own.
+pub(crate) mod chat_profiles;
+/// Merged into [`chat`]'s list, not read by `all_routes` on its own.
+pub(crate) mod chat_tasks;
 pub(crate) mod dashboard;
 pub(crate) mod docs;
 pub(crate) mod inference;

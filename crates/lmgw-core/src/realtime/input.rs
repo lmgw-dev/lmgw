@@ -315,6 +315,12 @@ impl Core {
         let (upload, heard) = self.commit_upload(&item_id, samples);
         self.transcriber
             .push_timed(item_id.clone(), alias, (upload, seconds), language, again);
+        // A turn no automatic response is owed to is the next
+        // `response.create`'s: that create is no continuation (MCP Tasks
+        // design §3.4, `lifecycle::bound`).
+        if let Some(b) = self.bound.as_mut().filter(|_| !auto) {
+            b.committed = true;
+        }
         self.pending_commit(&item_id, auto, heard);
     }
 

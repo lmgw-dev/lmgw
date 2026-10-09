@@ -48,6 +48,13 @@ pub async fn update_key_policy(
     ),
 ) -> DbResult<u64> {
     let mut tx = super::begin_write(pool).await?;
+    // The grant as stored: a write that changes it must get its row.
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT hosts_label FROM api_keys WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
     let res = sqlx::query(
         "UPDATE api_keys
             SET enabled = ?2, scope_mode = ?3, scope_patterns = ?4, budget_micro = ?5,
@@ -76,15 +83,43 @@ pub async fn update_key_policy(
     if let Some(was) = was.filter(|_| res.rows_affected() > 0) {
         super::feed::record_device_reach(&mut tx, id, self_admin, was).await?;
     }
+    // A device's hosted-tools row follows its grant, in this transaction
+    // (client-apps design §5.2). Only a device row carries a label.
+    if res.rows_affected() > 0 {
+        let device: Option<String> =
+            sqlx::query_scalar("SELECT name FROM api_keys WHERE id = ?1 AND kind = 'device'")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(name) = device {
+            let granting = stored.as_deref() != hosts_label;
+            super::sync_device_server(&mut tx, id, &name, (hosts_label, granting)).await?;
+        }
+    }
     tx.commit().await?;
     Ok(res.rows_affected())
 }
 
 pub async fn delete_api_key(pool: &SqlitePool, id: i64) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
+    // A device's hosted-tools row goes with it (client-apps design §5.2).
+    super::sync_device_server(&mut tx, id, "", (None, false)).await?;
+    // A device is gone for good: the feed says so to the clients it showed
+    // the device to, and to the hosts of the tasks it started (MCP Tasks
+    // design §4.1). Only the owner deletes keys.
+    let device: Option<String> =
+        sqlx::query_scalar("SELECT name FROM api_keys WHERE id = ?1 AND kind = 'device'")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(name) = device {
+        super::feed::record_device_revoked(&mut tx, id, &name, Some(super::feed::BY_OWNER)).await?;
+    }
     sqlx::query("DELETE FROM api_keys WHERE id = ?1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -265,6 +300,7 @@ pub async fn insert_device_key(
     (hosts_label, self_admin): (Option<&str>, crate::config::DeviceAdmin),
     note: &str,
 ) -> DbResult<i64> {
+    let mut tx = super::begin_write(pool).await?;
     let row = sqlx::query(
         "INSERT INTO api_keys
               (name, key_hash, enabled, kind, scope_mode, scope_patterns, budget_micro,
@@ -288,9 +324,15 @@ pub async fn insert_device_key(
     .bind(&policy.tool_scope_patterns)
     .bind(hosts_label)
     .bind(self_admin.column())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(row.get("id"))
+    let id: i64 = row.get("id");
+    // Born with its hosted-tools row when it is born with a grant (§5.2).
+    if hosts_label.is_some() {
+        super::sync_device_server(&mut tx, id, name, (hosts_label, true)).await?;
+    }
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// Replace a device key's hash — Rotate on a hash-only row (L1), which is a
@@ -336,11 +378,20 @@ pub async fn key_last_seen(pool: &SqlitePool, id: i64) -> DbResult<Option<String
 /// call is checked against as well, so a key write that committed is in
 /// force before its snapshot is reloaded.
 pub async fn device_admin_now(pool: &SqlitePool, id: i64) -> DbResult<crate::config::DeviceAdmin> {
+    let mut conn = pool.acquire().await?;
+    device_admin_in(&mut conn, id).await
+}
+
+/// [`device_admin_now`] on `conn`, a transaction's.
+pub async fn device_admin_in(
+    conn: &mut SqliteConnection,
+    id: i64,
+) -> DbResult<crate::config::DeviceAdmin> {
     let row = sqlx::query(
         "SELECT self_admin, enabled, expires_at FROM api_keys WHERE id = ?1 AND kind = 'device'",
     )
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await?;
     Ok(row
         .filter(|r| {

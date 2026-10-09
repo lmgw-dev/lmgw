@@ -669,6 +669,7 @@ fn decided(id: &str, approved: bool) -> DecidedCall {
         },
         approved,
         denial: "the owner said no".into(),
+        by: None,
     }
 }
 

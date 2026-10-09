@@ -109,6 +109,9 @@ pub struct Limits {
     /// The frame limit is the message limit's: the frame setting is 0 (no
     /// bound of its own) or larger than the message setting.
     frame_by_message: bool,
+    /// The two settings' names, as a close reason says them:
+    /// `realtime.max_message_mb`, `realtime.max_frame_mb`.
+    names: (&'static str, &'static str),
 }
 
 impl Limits {
@@ -125,11 +128,34 @@ impl Limits {
     /// (`store::load_settings`), and the same fallback applies here for any
     /// caller that bypassed it.
     pub fn from_settings(s: &RealtimeSettings) -> Self {
-        let (message_mb, frame_mb) = match (s.max_message_mb, s.max_frame_mb) {
-            (0, 0) => {
-                let d = RealtimeSettings::default();
-                (d.max_message_mb, d.max_frame_mb)
-            }
+        let d = RealtimeSettings::default();
+        Self::from_mb(
+            (s.max_message_mb, s.max_frame_mb),
+            (d.max_message_mb, d.max_frame_mb),
+            ("realtime.max_message_mb", "realtime.max_frame_mb"),
+        )
+    }
+
+    /// The device MCP host link's (client-apps design §5.1): the same rules,
+    /// from `mcp.host_max_message_mb` and `mcp.host_max_frame_mb`.
+    pub fn of_host_link(s: &crate::config::McpSettings) -> Self {
+        let d = crate::config::McpSettings::default();
+        Self::from_mb(
+            (s.host_max_message_mb, s.host_max_frame_mb),
+            (d.host_max_message_mb, d.host_max_frame_mb),
+            ("mcp.host_max_message_mb", "mcp.host_max_frame_mb"),
+        )
+    }
+
+    /// From a `(message, frame)` pair of settings in MiB, `defaults` for the
+    /// pair both at 0, and the settings' `names`.
+    fn from_mb(
+        (message_mb, frame_mb): (u32, u32),
+        defaults: (u32, u32),
+        names: (&'static str, &'static str),
+    ) -> Self {
+        let (message_mb, frame_mb) = match (message_mb, frame_mb) {
+            (0, 0) => defaults,
             pair => pair,
         };
         let bytes = |mb: u32| match mb {
@@ -148,6 +174,7 @@ impl Limits {
             message_mb,
             frame_mb,
             frame_by_message,
+            names,
         }
     }
 
@@ -176,7 +203,8 @@ impl Limits {
 
     /// Which setting a `max_size` tungstenite reported is.
     fn setting_for(&self, max_size: usize) -> String {
-        let message = format!("realtime.max_message_mb ({} MiB)", self.message_mb);
+        let (message_name, frame_name) = self.names;
+        let message = format!("{message_name} ({} MiB)", self.message_mb);
         if self.frame_by_message || max_size != self.max_frame {
             // The frame limit is the message setting's, so that is the one
             // to raise.
@@ -185,11 +213,12 @@ impl Limits {
             // Equal limits cannot be told apart, and either one raised alone
             // would leave the other in the way — so both are named.
             format!(
-                "realtime.max_message_mb and max_frame_mb ({} MiB)",
+                "{message_name} and {} ({} MiB)",
+                frame_name.rsplit('.').next().unwrap_or(frame_name),
                 self.message_mb
             )
         } else {
-            format!("realtime.max_frame_mb ({} MiB)", self.frame_mb)
+            format!("{frame_name} ({} MiB)", self.frame_mb)
         }
     }
 }

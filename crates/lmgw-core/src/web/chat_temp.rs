@@ -20,6 +20,7 @@
 //!
 //! [`AppState`]: crate::state::AppState
 
+mod approvals;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -309,6 +310,25 @@ impl TempChats {
         self.with_thread(id, |t| t.thread.title = title.to_string());
     }
 
+    /// Profile `profile_id` was deleted (personality-profiles D16, review
+    /// fix 7): every temporary thread using it goes back to none, as the
+    /// delete's `ON DELETE SET NULL` takes the stored ones — with a bump of
+    /// `updated_at`, so a bound session sees the change. How many it
+    /// cleared. A thread out of the map for its Keep is inserted with the
+    /// id only while the row exists (`store::chat_keep`).
+    pub fn clear_profile(&self, profile_id: i64) -> usize {
+        let mut inner = self.lock();
+        let mut n = 0;
+        for t in inner.threads.values_mut() {
+            if t.thread.profile_id == Some(profile_id) {
+                t.thread.profile_id = None;
+                t.touch();
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Discard a thread with everything in it.
     pub fn delete(&self, id: i64) -> bool {
         self.lock().threads.remove(&id).is_some()
@@ -382,6 +402,7 @@ impl TempChats {
             answered_by: r.answered_by.clone(),
             images_note: r.images_note.clone(),
             voice: r.voice.clone(),
+            pending_approvals: r.pending_approvals.clone(),
             created_at: now(),
             ..Default::default()
         });
@@ -463,6 +484,7 @@ impl TempChats {
     /// knowledge bases it names for itself — the in-memory
     /// `store::append_user_message_with_kb_refs`. `None` when the thread is
     /// gone.
+    #[cfg(test)]
     pub fn append_user_message(
         &self,
         thread_id: i64,
@@ -470,6 +492,21 @@ impl TempChats {
         attachment_ids: &[i64],
         kb_refs: &[i64],
         voice: Option<&MessageVoice>,
+    ) -> Option<SendMessageOutcome> {
+        self.append_user_by(
+            thread_id,
+            (content, attachment_ids, kb_refs, voice),
+            &crate::store::Decider::gateway(),
+        )
+    }
+
+    /// [`Self::append_user_message`] written by `by`: what the last reply
+    /// still waits on is declined first (as a stored thread's user message does).
+    pub fn append_user_by(
+        &self,
+        thread_id: i64,
+        (content, attachment_ids, kb_refs, voice): (&str, &[i64], &[i64], Option<&MessageVoice>),
+        by: &crate::store::Decider,
     ) -> Option<SendMessageOutcome> {
         let mut inner = self.lock();
         let id = inner.next_id();
@@ -488,6 +525,7 @@ impl TempChats {
             }
             seen.push(*aid);
         }
+        approvals::decline_on_message(&mut t.messages, by);
         for (ord, aid) in attachment_ids.iter().enumerate() {
             if let Some(a) = t.attachments.iter_mut().find(|a| a.id == *aid) {
                 a.message_id = Some(id);
@@ -519,6 +557,7 @@ impl TempChats {
             row.completion_tokens = m.completion_tokens;
             row.ir_messages = m.ir_messages.clone();
             row.voice = m.voice.clone();
+            row.pending_approvals = None;
             t.touch();
             true
         })
@@ -973,6 +1012,7 @@ mod tests {
         attached.mcp_tools = vec![ThreadMcp {
             server_label: "lmgw".into(),
             allowed_tools: None,
+            require_approval: None,
         }];
         let w = c
             .update_settings(&attached, SeedWrite::Keep, AdminThreads::Shown)

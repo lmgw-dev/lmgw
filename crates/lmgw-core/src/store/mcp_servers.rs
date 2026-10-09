@@ -140,12 +140,29 @@ pub async fn update_mcp_server(pool: &SqlitePool, id: i64, s: &NewMcpServer) -> 
     Ok(())
 }
 
+/// Delete server row `id`. Its MCP tasks end first, in the same
+/// transaction (MCP Tasks design §1.6): an open one `abandoned`, its result
+/// saying the server was removed; an owed cancel goes, nobody being left to
+/// tell. The caller has the follower and the threads catch up once it
+/// committed (`web::chat_tasks::servers_gone`).
 pub async fn delete_mcp_server(pool: &SqlitePool, id: i64) -> DbResult<()> {
+    let mut tx = super::begin_write(pool).await?;
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(name) = name {
+        super::mcp_tasks::server_gone(&mut tx, id, |row| {
+            crate::mcp::tasks::removed_result(&row.task_id, &row.tool, &name, "it was deleted")
+        })
+        .await?;
+    }
     // mcp_tool_overrides rows cascade via the FK.
     sqlx::query("DELETE FROM mcp_servers WHERE id = ?1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

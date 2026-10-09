@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::super::super::protocol::{ErrorObject, ServerEvent};
 use super::super::super::transcribe::Facts;
-use super::{Task, UserTurn};
+use super::{Task, UserAnswer, UserTurn, Written};
 use crate::store::{MessageVoice, VIA_REALTIME};
 use crate::web::chat_voice::bound;
 
@@ -17,7 +17,7 @@ impl Task {
     /// kept and lead the next user entry — this session's next response, or
     /// the turns written as it ends — and the drain's end logs any still
     /// unwritten, so the words are never lost silently.
-    pub(super) async fn user(&mut self, turns: Vec<UserTurn>) -> Result<Option<i64>, ErrorObject> {
+    pub(super) async fn user(&mut self, turns: Vec<UserTurn>) -> UserAnswer {
         let new: Vec<UserTurn> = std::mem::take(&mut self.unwritten)
             .into_iter()
             .chain(turns)
@@ -45,17 +45,17 @@ impl Task {
             .collect::<Vec<_>>()
             .join("\n");
         let voice = user_voice(&spoken);
-        let id = match bound::write_user(&self.state, &thread, &content, &voice, &self.caller).await
-        {
-            Ok(id) => id,
-            // The write checks a device's reach again under the thread's
-            // lock: a thread deleted or hidden from it since the read above
-            // is not there, as above, rather than a write the store refused.
-            Err(why) => match self.missing().await {
-                Some(cause) if device => return Err(self.dropped(cause, true)),
-                _ => return Err(self.not_written(new, &why)),
-            },
-        };
+        let (id, sent) =
+            match bound::write_user(&self.state, &thread, &content, &voice, &self.caller).await {
+                Ok(written) => written,
+                // The write checks a device's reach again under the thread's
+                // lock: a thread deleted or hidden from it since the read above
+                // is not there, as above, rather than a write the store refused.
+                Err(why) => match self.missing().await {
+                    Some(cause) if device => return Err(self.dropped(cause, true)),
+                    _ => return Err(self.not_written(new, &why)),
+                },
+            };
         for t in &new {
             self.written.insert(t.item_id.clone(), id);
         }
@@ -73,7 +73,7 @@ impl Task {
             voice: serde_json::to_value(&voice).unwrap_or(Value::Null),
             response_id: None,
         });
-        Ok(Some(id))
+        Ok(Some(Written { id, sent }))
     }
 
     /// Why the thread is not there for the session's binder now — gone, or

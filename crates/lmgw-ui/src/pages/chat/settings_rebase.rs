@@ -70,6 +70,7 @@ fn rebase_text(form: &SettingsText, held: &SettingsText, stored: &SettingsText) 
             seed: field(&f.seed, &h.seed, &s.seed, same_number::<i64>),
             stop: field(&f.stop, &h.stop, &s.stop, same_stops),
         },
+        profile: field(&form.profile, &held.profile, &stored.profile, exact),
     }
 }
 
@@ -95,6 +96,7 @@ impl SettingsDraft {
             set_if(self.think, next.think);
             set_if(self.effort, next.effort);
             set_if(self.budget, next.budget);
+            set_if(self.profile, next.profile);
             if self.sampling.text() != next.sampling {
                 self.sampling.seed(next.sampling);
             }
@@ -155,5 +157,17 @@ mod tests {
         assert_eq!(next.sampling.stop, "X");
         // Nothing edited: the stored row whole.
         assert_eq!(rebase_text(&held, &held, &stored), stored);
+    }
+
+    #[test]
+    fn the_profile_follows_the_stored_row_until_the_owner_picks() {
+        let with = |p: &str| SettingsText {
+            profile: p.into(),
+            ..Default::default()
+        };
+        // Untouched: another writer's pick shows.
+        assert_eq!(rebase_text(&with("1"), &with("1"), &with("2")).profile, "2");
+        // Picked here: the pick stays.
+        assert_eq!(rebase_text(&with("4"), &with("1"), &with("2")).profile, "4");
     }
 }

@@ -65,6 +65,14 @@ pub struct ToolEntry {
     pub description: Option<String>,
     /// The server's own name for it, when a prefix hides it.
     pub upstream_name: Option<String>,
+    /// The name it would have if no other source offered a tool of that
+    /// name: set when a collision gave it its server's prefix
+    /// ([`super::names`]).
+    pub moved_from: Option<String>,
+    /// Why it moved, with [`Self::moved_from`]: who else claims that name,
+    /// and whether that claim is only what a server listed when it was last
+    /// connected.
+    pub moved_reason: Option<String>,
     /// The owner's switch. `false` ⇒ a `tool_disabled` row exists.
     pub enabled: bool,
     /// Offered right now — `enabled` **and** the source condition holds.
@@ -277,7 +285,7 @@ pub async fn list(state: &SharedState) -> Inventory {
             .filter_map(|t| {
                 let (sid, upstream) = agg.reverse.get(t.name.as_ref())?;
                 (*sid == server.id).then(|| {
-                    build(
+                    let mut entry = build(
                         &snap,
                         t.name.to_string(),
                         &label,
@@ -288,7 +296,9 @@ pub async fn list(state: &SharedState) -> Inventory {
                         t.description.as_ref().map(|d| d.to_string()),
                         Some(upstream.clone()),
                         reason.clone(),
-                    )
+                    );
+                    moved_from(&snap, &agg, &mut entry);
+                    entry
                 })
             })
             .collect();
@@ -323,6 +333,8 @@ pub async fn list(state: &SharedState) -> Inventory {
             plane: String::new(),
             description: None,
             upstream_name: None,
+            moved_from: None,
+            moved_reason: None,
             enabled: false,
             available: false,
             reason: Some(format!(
@@ -376,11 +388,83 @@ fn build(
         plane: plane.to_string(),
         description,
         upstream_name,
+        moved_from: None,
+        moved_reason: None,
         enabled,
         available: reason.is_none(),
         reason,
         stale: false,
         disabled_at: record.map(|r| r.disabled_at.clone()),
+    }
+}
+
+/// A tool a collision gave its server's prefix ([`super::names`]) says so
+/// and who else claims its name, and a switch set under another name of the
+/// same tool holds for it — the name it had before the collision, or the one
+/// a collision gave it, once the collision ends: it is off, saying which
+/// switch turns it on (the stale record of that name).
+fn moved_from(snap: &Snapshot, agg: &super::Aggregate, entry: &mut ToolEntry) {
+    if let Some(before) = agg.qualified.get(&entry.name) {
+        entry.moved_from = Some(before.clone());
+        entry.moved_reason = Some(moved_reason(
+            before,
+            agg.moved_by.get(&entry.name).map_or(&[][..], Vec::as_slice),
+        ));
+    }
+    if !entry.enabled {
+        return;
+    }
+    let Some(by) = agg.disabled_by(snap, &entry.name) else {
+        return;
+    };
+    let why = if agg.qualified.get(&entry.name).is_some_and(|b| b == by) {
+        format!(
+            "switched off as '{by}', the name it had before another source offered a tool of \
+             that name and it took its server's prefix — switch '{by}' on to offer it"
+        )
+    } else {
+        format!(
+            "switched off as '{by}', a name it has while another source offers a tool of its \
+             own name — switch '{by}' on to offer it"
+        )
+    };
+    entry.enabled = false;
+    entry.available = false;
+    entry.reason = Some(match entry.reason.take() {
+        Some(s) => format!("{why} (and {s})"),
+        None => why,
+    });
+}
+
+/// Why a tool moved from `before`: who else claims it.
+fn moved_reason(before: &str, by: &[super::Claimant]) -> String {
+    use super::Claimant;
+    let claims: Vec<String> = by
+        .iter()
+        .map(|c| match c {
+            Claimant::Builtin(ns) => format!("'{ns}' is one of lmgw's own namespaces"),
+            Claimant::Server {
+                name,
+                connected: true,
+                ..
+            } => format!("server '{name}' offers a tool of that name"),
+            Claimant::Server {
+                name,
+                connected: false,
+                ..
+            } => format!(
+                "server '{name}' offered a tool of that name when it was last connected (it is \
+                 not connected now; its claim is that last listing)"
+            ),
+        })
+        .collect();
+    if claims.is_empty() {
+        format!("'{before}' is claimed by another tool, so this one took its server's name")
+    } else {
+        format!(
+            "'{before}': {} — so this one took its server's name",
+            claims.join("; ")
+        )
     }
 }
 
@@ -403,5 +487,34 @@ fn source_of(
         reason,
         tool_count: tools.len() as i64,
         disabled_count: tools.iter().filter(|t| !t.enabled).count() as i64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Claimant;
+    use super::moved_reason;
+
+    /// A moved tool's reason names who else claims its name, and says when
+    /// that claim is only a server's last listing.
+    #[test]
+    fn a_moved_reason_names_the_claimant_and_a_stale_listing() {
+        let server = |name: &str, connected| Claimant::Server {
+            id: 1,
+            name: name.into(),
+            connected,
+        };
+        let live = moved_reason("read", &[server("beta", true)]);
+        assert!(
+            live.contains("server 'beta' offers") && !live.contains("not connected"),
+            "{live}"
+        );
+        let stale = moved_reason("read", &[server("beta", false)]);
+        assert!(
+            stale.contains("'beta'") && stale.contains("not connected now"),
+            "{stale}"
+        );
+        let ns = moved_reason("kb__x", &[Claimant::Builtin("kb__")]);
+        assert!(ns.contains("lmgw's own namespaces"), "{ns}");
     }
 }

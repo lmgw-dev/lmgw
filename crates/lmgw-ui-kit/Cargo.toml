@@ -1,0 +1,26 @@
+[package]
+name = "lmgw-ui-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared Leptos (CSR/WASM) UI kit: HTTP client, design tokens, generic widgets and the model/voice pickers. Knows no router and no shell, so lmgw's dashboard and its client apps consume it alike"
+
+[dependencies]
+lmgw-api-types = { path = "../lmgw-api-types" }
+leptos = { version = "0.8", features = ["csr"] }
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+js-sys = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+  "CustomEvent", "HtmlDialogElement", "Navigator", "Clipboard", "Storage",
+  "MediaQueryList", "CssStyleDeclaration",
+  # Element sizes (a chart or pane follows its card, not the window).
+  "HtmlElement", "ResizeObserver", "ResizeObserverEntry", "DomRectReadOnly",
+  # Bringing a control into view; popovers placed from their anchor's rectangle.
+  "ScrollIntoViewOptions", "ScrollLogicalPosition", "DomRect", "EventInit",
+  "HtmlCollection", "FocusOptions", "KeyboardEvent", "MouseEvent", "Url",
+  # A spoken sample played from the bytes the gateway answered with.
+  "Blob", "BlobPropertyBag",
+] }

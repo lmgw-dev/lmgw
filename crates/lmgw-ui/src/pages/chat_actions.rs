@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::chat::{in_owner, new_msg, scroll_down, Msg, ThreadDetail};
+use super::chat_approvals::{self, Verdicts};
 use super::chat_knowledge::KbDraftChips;
 use super::chat_turn::{run_turn, Turn, TurnEnv};
 use crate::widgets::{use_toasts, ConfirmButton};
@@ -71,12 +72,12 @@ impl ActionEnv {
         k
     }
 
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         self.turn.streaming.get_untracked().is_some()
     }
 
     /// The open thread, and the position and stored id of the message `key`.
-    fn locate(&self, key: u64) -> Option<(i64, usize, i64, Msg)> {
+    pub(super) fn locate(&self, key: u64) -> Option<(i64, usize, i64, Msg)> {
         let tid = self.turn.current_id.get_untracked()?;
         let (idx, m) = self.turn.msgs.with_untracked(|v| {
             v.iter()
@@ -99,7 +100,7 @@ impl ActionEnv {
     }
 
     /// A fresh assistant bubble under the page's owner.
-    fn new_reply(&self) -> Option<Msg> {
+    pub(super) fn new_reply(&self) -> Option<Msg> {
         in_owner(self.owner, || {
             new_msg(self.alloc_key(), "assistant", String::new())
         })
@@ -156,6 +157,19 @@ impl ActionEnv {
                         }
                     }
                     if refresh_last && i == last {
+                        if r.role == "assistant" {
+                            // A resumed turn's calls, and the decisions made
+                            // on a gated reply, change its cards.
+                            let fresh = in_owner(env.owner, || {
+                                chat_approvals::cards_of(
+                                    r.ir_messages.as_deref().unwrap_or("[]"),
+                                    &r.pending_approvals,
+                                )
+                            });
+                            if let Some(fresh) = fresh {
+                                chat_approvals::merge_cards(m.tools, fresh);
+                            }
+                        }
                         m.content.set(r.content.clone());
                         m.reasoning.set(r.reasoning.clone());
                         m.tokens.set(match (r.prompt_tokens, r.completion_tokens) {
@@ -277,6 +291,7 @@ impl ActionEnv {
             target: reply,
             continuing: false,
             what: "edit",
+            inline: false,
         };
         let user_db = m.db_id;
         spawn_local(async move {
@@ -340,6 +355,7 @@ impl ActionEnv {
             target: reply,
             continuing: false,
             what: "regenerate",
+            inline: false,
         };
         let user_db = m.db_id;
         spawn_local(async move {
@@ -397,6 +413,7 @@ impl ActionEnv {
             target,
             continuing: true,
             what: "continue",
+            inline: false,
         };
         // The server prefills with the reply's trailing whitespace trimmed and
         // stores it that way; the bubble follows before the new text lands, so
@@ -442,6 +459,8 @@ pub(super) struct MsgOps {
     pub edit: Callback<EditReq>,
     pub resume: Callback<()>,
     pub delete: Callback<u64>,
+    /// Verdicts for the calls a reply waits on (`chat_approvals`).
+    pub decide: Callback<Verdicts>,
 }
 
 const ICON_COPY: &str = "M5.5 5.5h7v8h-7z M3.5 10.5v-8h7";
@@ -465,6 +484,10 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
     let toasts = use_toasts();
     let key = m.key;
     let is_user = m.role == "user";
+    // A late MCP task result (`chat_tasks`): the server's words, not a
+    // turn — it is copied or deleted, never edited, answered again or read
+    // aloud.
+    let is_result = m.role == "tool";
     let content = m.content;
     let db_id = m.db_id;
     let own_streaming = m.streaming;
@@ -492,7 +515,10 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
     });
     let is_last = Memo::new(move |_| ops.msgs.with(|v| v.last().is_some_and(|l| l.key == key)));
     let can_continue = Memo::new(move |_| {
-        !is_user && is_last.get() && ops.cont.with(|c| c.as_ref().is_some_and(|c| c.ok))
+        !is_user
+            && !is_result
+            && is_last.get()
+            && ops.cont.with(|c| c.as_ref().is_some_and(|c| c.ok))
     });
 
     view! {
@@ -516,9 +542,10 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
                 // A reply that was never stored has no row to edit, answer again,
                 // continue or delete: Copy is all it has.
                 <Show when=move || !unsaved.get()>
-                {(!is_user).then(|| view! {
+                {(!is_user && !is_result).then(|| view! {
                     <super::chat_voice::SpeakerButton key=key db_id=db_id editing=editing/>
                 })}
+                <Show when=move || !is_result>
                 <button
                     type="button"
                     class="msg-act"
@@ -535,6 +562,7 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
                 >
                     {icon(ICON_EDIT)}
                 </button>
+                </Show>
                 // On a reply and on a user message: the reply is deleted with
                 // everything after it, a user message keeps itself and loses
                 // everything after it, and the model answers it again.
@@ -557,7 +585,9 @@ pub(super) fn MsgActions(m: Msg, ops: MsgOps, editing: RwSignal<bool>) -> impl I
                                  — deletes this reply and everything after it"
                             }
                         });
-                        if n > 0 {
+                        if is_result {
+                            ().into_any()
+                        } else if n > 0 {
                             view! {
                                 <ConfirmButton
                                     label=""

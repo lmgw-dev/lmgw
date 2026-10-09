@@ -503,17 +503,38 @@ fn DeviceLine(
     // The hosting grant (§1.5), where the name is: the prefix its own
     // tools are named under.
     let hosts = move || {
-        row.get().and_then(|r| r.hosts_label).map(|l| {
-            view! {
-                " "
-                <span
-                    class="chip info key-kind mono-sm"
-                    title=format!("may host its own MCP tools, named {l}__…")
-                >
-                    {format!("{l}__")}
-                </span>
-            }
-        })
+        row.get()
+            .and_then(|r| r.hosts_label.map(|l| (l, r.reaches)))
+            .map(|(l, who)| {
+                view! {
+                    " "
+                    <span
+                        class="chip info key-kind mono-sm"
+                        title=format!(
+                            "may host its own MCP tools, named {l}__… — reached by: {}",
+                            who.join(", ")
+                        )
+                    >
+                        {format!("{l}__")}
+                    </span>
+                }
+            })
+    };
+    // Who reaches its hosted tools (§5.6): the owner, the device, and each
+    // key, device and agent whose tool scope or manifest names the label.
+    let reached_by = move || {
+        row.get()
+            .filter(|r| r.hosts_label.is_some() && !r.reaches.is_empty())
+            .map(|r| {
+                let who = r.reaches.join(", ");
+                let title = who.clone();
+                view! {
+                    <div class="mini-note dim clip" title=title>
+                        "its tools are reached by: "
+                        {who}
+                    </div>
+                }
+            })
     };
     // Its level of lmgw's admin tools, beside the name.
     let admin_flag = move || {
@@ -605,6 +626,7 @@ fn DeviceLine(
                 {hosts}
                 {admin_flag}
                 {open_flag}
+                {reached_by}
             </td>
             <td class="nowrap">{state}</td>
             <td class="clip dim" title=reaches>{reaches}</td>

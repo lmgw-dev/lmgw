@@ -148,9 +148,11 @@ pub(super) struct World {
     /// before it answers, the way audio.cpp frees compute buffers per
     /// request (the WP7 live gate).
     pub(super) transient: HashMap<String, Transient>,
-    /// How many times the fake driver listed processes: what a sampler
-    /// reads ([`Until::Sampled`]).
-    pub(super) process_reads: u64,
+    /// How many reads the scheduler's samplers have finished
+    /// (`VramScheduler::residency_samples`), asked live: what an
+    /// [`Until::Sampled`] transient waits for. Set by the fixture once its
+    /// state exists.
+    pub(super) samples: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     /// While set, every container's `/health` answers 503: a model still
     /// loading, for as long as a test needs a start to stay in flight after
     /// its `podman run`.
@@ -195,10 +197,12 @@ pub(super) struct Transient {
 /// How long a [`Transient`] lasts.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Until {
-    /// Until the driver has been read while it lasted — the sampler's read
-    /// — however long that takes: a test of what the sampler catches does
-    /// not race the wall clock on a loaded box (it failed 3 of 64 runs
-    /// with 32 copies at once while it lasted 150 ms).
+    /// Until a sampler has read the driver while it lasted, however long
+    /// that takes: a test of what the sampler catches does not race the
+    /// wall clock on a loaded box (it failed 3 of 64 runs with 32 copies at
+    /// once while it lasted 150 ms) — nor the other readers of the same
+    /// driver (the reading at rest, the dashboard's view), whose read once
+    /// ended it before the sampler's.
     Sampled,
     /// This long, on the wall clock: for a request nothing should sample.
     For(Duration),
@@ -269,8 +273,7 @@ impl GpuProbe for FakeGpu {
     }
 
     fn processes(&self, _own: &[u32], _retired: &[u32]) -> Result<Vec<ProcessMemory>, String> {
-        let mut w = self.world.lock().unwrap();
-        w.process_reads += 1;
+        let w = self.world.lock().unwrap();
         if !w.attribution {
             return Err("FakeGPU lists no processes".into());
         }

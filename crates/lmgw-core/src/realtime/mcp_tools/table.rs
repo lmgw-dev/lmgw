@@ -248,8 +248,8 @@ impl McpTable {
             } else {
                 format!(
                     "its tool '{name}' has the name of a tool this session listed for MCP \
-                     server_label '{}', another server: two servers without a tool prefix offer \
-                     it, and the gateway routes the name to one of them only — list '{}' again, \
+                     server_label '{}', another server: both offer a tool of that name, and the \
+                     gateway gives each its server's name as a prefix — list '{}' again, \
                      or leave the tool out of one label with allowed_tools",
                     o.label, o.label
                 )

@@ -92,6 +92,7 @@ fn everything_server(allow_sampling: bool, sampling_alias: Option<String>) -> Mc
         allow_sampling,
         sampling_alias,
         agent_id: None,
+        device_key_id: None,
     }
 }
 
@@ -164,7 +165,12 @@ async fn live_everything_connect_list_call() {
     args.insert("message".into(), serde_json::json!("lmgw-live"));
     let (result, server_name) = state
         .mcp
-        .call(&snap, &echo, Some(args))
+        .call(
+            &snap,
+            &echo,
+            Some(args),
+            &lmgw_core::mcp::host::CallFrom::gateway(),
+        )
         .await
         .expect("echo call must succeed");
     assert_eq!(server_name, "everything");
@@ -214,7 +220,12 @@ async fn maybe_sampling_leg(state: &SharedState) {
     args.insert("maxTokens".into(), serde_json::json!(16));
     let (result, _server) = state
         .mcp
-        .call(&snap, &sample_tool, Some(args))
+        .call(
+            &snap,
+            &sample_tool,
+            Some(args),
+            &lmgw_core::mcp::host::CallFrom::gateway(),
+        )
         .await
         .expect("sampleLLM (sampling) call must succeed");
     let text = serde_json::to_string(&result.content).unwrap_or_default();

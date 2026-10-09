@@ -122,6 +122,9 @@ impl VramScheduler {
                     self.residency.sample(generation, epoch, bytes);
                 }
             }
+            self.residency
+                .samples
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let in_flight = state.runtime().list().iter().any(|e| {
                 e.generation == generation && e.state == RuntimeState::Ready && e.in_flight > 0
             });
@@ -141,8 +144,16 @@ impl VramScheduler {
         if stored == Stored::Dropped {
             return;
         }
+        // Another's store since the last stretch checked — the reading after
+        // an answer folds these samples in and may have stored them first —
+        // or its own. Asked first, so the check is always recorded; its own
+        // store is still asked after it, for a generation forgotten
+        // meanwhile (its container left), whose raise nothing counts.
+        let raised = self
+            .residency
+            .raised_since(generation, stretch.raises_at_begin);
         self.residency
-            .stretch_done(model_id, key, stretch.raised || stored == Stored::Raised);
+            .stretch_done(model_id, key, raised || stored == Stored::Raised);
         if self.residency.calm(model_id, key) == SETTLE_AFTER {
             tracing::info!(
                 "audio/{model_id}: {SETTLE_AFTER} sampled requests in a row did not raise its \

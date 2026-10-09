@@ -164,6 +164,10 @@ pub struct Settings {
     /// design §12).
     #[serde(default)]
     pub realtime: RealtimeSettings,
+    /// The device MCP host link's limits (client-apps design §5.1),
+    /// Settings → MCP.
+    #[serde(default)]
+    pub mcp: super::McpSettings,
     /// Hugging Face access token for gated/private repos (empty = anonymous).
     pub hf_token: String,
     /// Poll the release feed for new app versions in the background (§12).
@@ -364,6 +368,19 @@ pub struct Settings {
     /// Read through [`Settings::default_chat_prompt`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_system_prompt: Option<String>,
+    /// The personality profile a new Chat thread starts with, by id
+    /// (personality-profiles design D9, §3.3); `None` = none ("Default"),
+    /// the default. Stored as a number; read tolerantly (a numeric text is
+    /// its number, anything else none), so one odd value never fails the
+    /// settings. A thread in a folder whose defaults name a profile takes
+    /// that one instead. Deleting the profile removes the key in the same
+    /// transaction (`store::chat_profiles::delete_in`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "profile_id_lenient"
+    )]
+    pub chat_profile: Option<i64>,
     /// Room reserved for one extraction reply, in tokens (quickdoc §8).
     ///
     /// Ingestion sizes each extraction window as `ingest model's real context −
@@ -495,6 +512,7 @@ impl Default for Settings {
             audio: AudioSettings::default(),
             image: ImageSettings::default(),
             realtime: RealtimeSettings::default(),
+            mcp: super::McpSettings::default(),
             hf_token: String::new(),
             update_check_enabled: true,
             update_token: String::new(),
@@ -514,6 +532,7 @@ impl Default for Settings {
             chat_feed_page_size: default_chat_feed_page_size(),
             chat_feed_live_buffer: default_chat_feed_live_buffer(),
             chat_system_prompt: None,
+            chat_profile: None,
             chat_pdf_mode: default_chat_pdf_mode(),
             chat_stt_alias: String::new(),
             chat_tts_alias: String::new(),
@@ -608,6 +627,17 @@ fn default_chat_voice_audio_input() -> String {
 }
 /// Enough for a few well-matched excerpts on any context window a chat model
 /// is run with; a thread that needs more overrides it.
+/// `chat_profile` as stored: a number, or a numeric text; anything else
+/// (`null`, `""`, a text that is no number) is none.
+fn profile_id_lenient<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<i64>, D::Error> {
+    let v = <serde_json::Value as serde::Deserialize>::deserialize(de)?;
+    Ok(match v {
+        serde_json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    })
+}
+
 fn default_chat_kb_budget_tokens() -> u32 {
     4000
 }

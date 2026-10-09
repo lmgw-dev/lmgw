@@ -48,6 +48,12 @@ pub struct ToolEntryView {
     pub plane: String,
     pub description: Option<String>,
     pub upstream_name: Option<String>,
+    /// The name it would have if no other source offered a tool of that
+    /// name: set when a collision gave it its server's name as a prefix.
+    pub moved_from: Option<String>,
+    /// Why it moved: who else claims [`Self::moved_from`], and whether that
+    /// claim is only a server's last listing (it is not connected now).
+    pub moved_reason: Option<String>,
     /// The per-tool switch (`POST /api/op/tool_set`).
     pub enabled: bool,
     /// Offered right now: `enabled` **and** its source's condition holds.

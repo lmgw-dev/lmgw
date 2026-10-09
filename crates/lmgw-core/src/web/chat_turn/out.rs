@@ -165,6 +165,16 @@ pub(crate) struct TurnOpts {
     /// the turn ends. The SSE routes take it; a bound session's turns run in
     /// the slot the session holds.
     pub slot: Option<crate::policy::ConcurrencyGuard>,
+    /// A turn resumed after its calls were decided (client-apps design
+    /// §6.3): the reply it continues and what the loop settles first
+    /// ([`super::TurnMode::Resume`]).
+    pub resume: Option<super::resume::Resume>,
+    /// The user message this turn answers was written for it, and what
+    /// waited entered before it (a send, a bound session's spoken turn; MCP
+    /// Tasks design §3.1): held until the turn has begun, and the turn's
+    /// start delivers nothing — a result that ended after the message waits
+    /// for the turn's end.
+    pub sent: Option<super::super::chat_tasks::deliver::Sent>,
 }
 
 /// What makes a turn a voice turn (chat-voice design §8.5): its system

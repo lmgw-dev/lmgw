@@ -16,6 +16,10 @@ pub enum McpTransport {
     Stdio,
     Http,
     Sse,
+    /// A paired device's hosted tools (client-apps design §5.2): the device
+    /// dials lmgw (`GET /mcp/host`) and lmgw is the MCP client on its link.
+    /// The row's URL and command fields are unused.
+    Device,
 }
 
 impl McpTransport {
@@ -24,6 +28,7 @@ impl McpTransport {
             Self::Stdio => "stdio",
             Self::Http => "http",
             Self::Sse => "sse",
+            Self::Device => "device",
         }
     }
 
@@ -32,6 +37,7 @@ impl McpTransport {
             "stdio" => Some(Self::Stdio),
             "http" => Some(Self::Http),
             "sse" => Some(Self::Sse),
+            "device" => Some(Self::Device),
             _ => None,
         }
     }
@@ -84,9 +90,20 @@ pub struct McpServer {
     /// it in step with the manifest and deletes it with the agent. `None` for
     /// every row an owner created, which is every row that existed before.
     pub agent_id: Option<String>,
+    /// Set when this row is a **paired device's** hosted tools (client-apps
+    /// design §5.2): the `api_keys.id` of the device whose hosting grant
+    /// created it. lmgw keeps it in step with the grant (prefix = the
+    /// device's `hosts_label`, name = the device key's name) and deletes it
+    /// with the grant or the key. `None` for every other row.
+    pub device_key_id: Option<i64>,
 }
 
 impl McpServer {
+    /// Whether this row is a paired device's hosted tools (§5.2).
+    pub fn is_device(&self) -> bool {
+        self.transport == McpTransport::Device || self.device_key_id.is_some()
+    }
+
     /// Whether this (stdio) server runs Podman-isolated vs. a bare subprocess.
     pub fn is_isolated(&self) -> bool {
         self.container_image
@@ -298,4 +315,50 @@ pub fn run_only_refusal(extra_run_args: &[String]) -> Option<String> {
          extra_run_args.",
         refused.join("; ")
     ))
+}
+
+/// The device MCP host link's limits (client-apps design §5.1), Settings →
+/// MCP: set explicitly on the link's WebSocket, defaulting to realtime's
+/// (realtime design §10.4), each named by the close an overrun causes; and
+/// the MCP Tasks poll interval (MCP Tasks design §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpSettings {
+    /// The largest message a device may send over its host link, in MiB.
+    /// **0 = no bound of its own**: a frame is then bounded by
+    /// `host_max_frame_mb`. Not 0 together with it (refused by a save, and
+    /// at load the defaults are used instead). A full-desktop screenshot is
+    /// the expected large message.
+    pub host_max_message_mb: u32,
+    /// The largest single frame, in MiB. **0 = bounded by
+    /// `host_max_message_mb`**: a frame is never unbounded, because
+    /// tungstenite reserves a frame's declared length before reading it.
+    pub host_max_frame_mb: u32,
+    /// Seconds between the link's pings. A ping with no pong for a whole
+    /// interval closes the link with a reason naming this setting. **0 = no
+    /// pings**: a device that vanished without a FIN keeps its link (and its
+    /// tools listed) until TCP gives up.
+    pub host_ping_interval_s: u32,
+    /// Seconds between two `tasks/get` of a task whose server suggests no
+    /// `pollInterval` of its own (MCP Tasks design T8): a task's own
+    /// `pollInterval` wins, and a status notification acts at once. At
+    /// least 1 (a save refuses 0; at load a stored 0 reads as the default).
+    /// Applies from each task's next poll.
+    pub task_poll_interval_s: u32,
+}
+
+/// [`McpSettings::task_poll_interval_s`]'s default.
+pub const TASK_POLL_INTERVAL_DEFAULT_S: u32 = 5;
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        // Realtime's (§10.4): tungstenite's own defaults, made explicit, and
+        // twice what a browser allows a pong.
+        Self {
+            host_max_message_mb: 64,
+            host_max_frame_mb: 16,
+            host_ping_interval_s: 20,
+            task_poll_interval_s: TASK_POLL_INTERVAL_DEFAULT_S,
+        }
+    }
 }

@@ -526,3 +526,49 @@ async fn an_asr_call_still_running_when_the_session_ends_is_stopped_and_writes_i
     );
     assert_eq!(state.telemetry.stats().active_requests, 0);
 }
+
+/// Billable units (billable-units design §4.2, §10): a turn's ASR row
+/// records the length of the WAV lmgw built for the turn and sent up,
+/// measured to the millisecond (whole frames × 1000 / rate) — the engine
+/// reports nothing — and the chat request that answers it records no
+/// audio.
+#[tokio::test]
+async fn a_voice_turns_asr_row_records_the_length_of_the_audio_it_sent() {
+    let (state, addr, chat, asr) = voice_gateway(false, None).await;
+    asr.push(Asr::Text(QUESTION));
+    chat.push(Turn::text(&["Near."]));
+    let (mut ws, _) = voice_session(&addr, &[], json!({})).await;
+    stream(&mut ws, &fixture("en_complete_short.wav")).await;
+    events_until(&mut ws, "response.done").await;
+
+    let (rate, channels, samples) = asr.seen.wav(0);
+    assert_eq!((rate, channels), (16_000, 1));
+    let sent_ms = i64::try_from(samples as u64 * 1000 / u64::from(rate)).unwrap();
+    // The question's 1.4 s of speech, its pre-roll and the closing window.
+    assert!(sent_ms > 1_500, "{sent_ms} ms went up");
+    let rows = |alias: &'static str| {
+        let db = state.db.clone();
+        async move {
+            lmgw_core::store::query_logs(
+                &db,
+                &lmgw_core::store::LogFilter {
+                    alias: Some(alias.into()),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    crate::common::patience::until_async("the turn's ASR row and the answer's row", || async {
+        !rows(ASR_ALIAS).await.is_empty() && !rows("chatty").await.is_empty()
+    })
+    .await;
+    let heard = rows(ASR_ALIAS).await;
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard[0].ingress_proto, "realtime");
+    assert_eq!(heard[0].audio_in_ms, Some(sent_ms), "{:?}", heard[0]);
+    let answered = rows("chatty").await;
+    assert_eq!(answered[0].audio_in_ms, None, "{:?}", answered[0]);
+}

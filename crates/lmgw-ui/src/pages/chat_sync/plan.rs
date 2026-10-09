@@ -11,7 +11,18 @@
 //! - **a reply whose id the page never heard** (a Stop aborts the stream
 //!   before its `done`, though the gateway saved what it had) takes the
 //!   stored row at its place when the roles agree — adopted, not added a
-//!   second time.
+//!   second time;
+//! - **results let in before the page's own turn**: a send lets the MCP
+//!   task results that waited in before its message (MCP Tasks design
+//!   §3.1), so the rows can be `[result…, message, reply]` where the page
+//!   shows `[message, reply]` — its user turn known by the `turn` frame's
+//!   id, or still a bubble (a send stopped before it), its reply by
+//!   `done`'s or not; an answer, an edit or a regenerate lets them in at
+//!   its start, before its reply. The results (rows of role `tool`) go in
+//!   front of the message they were stored before, and the page's bubbles
+//!   adopt the rows after them ([`in_front`]), rather than the transcript
+//!   being loaded afresh. Any other row the page lacks in front of one it
+//!   shows still reloads.
 
 /// One message of the page, as the plan reads it.
 #[derive(Debug, Clone, Copy)]
@@ -27,12 +38,14 @@ pub(super) struct Shown<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Plan {
     /// In place: `pairs` (page index, row index) take the row's fields,
-    /// `adopt` do too and take its id, `drop` (page indices) go, `append`
-    /// (row indices) are added at the end.
+    /// `adopt` do too and take its id, `drop` (page indices) go, `insert`
+    /// (page index, row index) are added in front of that page message, in
+    /// order, and `append` (row indices) are added at the end.
     Patch {
         pairs: Vec<(usize, usize)>,
         adopt: Vec<(usize, usize)>,
         drop: Vec<usize>,
+        insert: Vec<(usize, usize)>,
         append: Vec<usize>,
     },
     /// The history was rewritten in another order: load the rows afresh.
@@ -43,14 +56,16 @@ impl Plan {
     /// Nothing is added, dropped or adopted: at most fields change.
     #[cfg(test)]
     fn same_list(&self) -> bool {
-        matches!(self, Plan::Patch { adopt, drop, append, .. }
-            if adopt.is_empty() && drop.is_empty() && append.is_empty())
+        matches!(self, Plan::Patch { adopt, drop, insert, append, .. }
+            if adopt.is_empty() && drop.is_empty() && insert.is_empty() && append.is_empty())
     }
 }
 
 /// Match `page` to `rows` (`(id, role)`), both in conversation order.
 pub(super) fn plan(page: &[Shown<'_>], rows: &[(i64, &str)]) -> Plan {
     let mut pairs = Vec::new();
+    let mut adopt = Vec::new();
+    let mut insert = Vec::new();
     let mut drop = Vec::new();
     let mut next = 0usize;
     let mut tail = 0usize;
@@ -64,10 +79,19 @@ pub(super) fn plan(page: &[Shown<'_>], rows: &[(i64, &str)]) -> Plan {
             drop.push(pi);
             continue;
         };
-        // Before one already matched, another role, or a row the page lacks
-        // in front of it: the history moved in a way a patch cannot follow.
-        if ri != next || rows[ri].1 != m.role {
+        // Before one already matched, or another role: the history moved
+        // in a way a patch cannot follow.
+        if ri < next || rows[ri].1 != m.role {
             return Plan::Reload;
+        }
+        // Rows the page lacks in front of it: only results let in before
+        // the page's own turn are followed in place.
+        if ri > next {
+            let Some(front) = in_front(page, tail..pi, pi, rows, next..ri) else {
+                return Plan::Reload;
+            };
+            insert.extend(front.insert);
+            adopt.extend(front.adopt);
         }
         pairs.push((pi, ri));
         next = ri + 1;
@@ -77,9 +101,22 @@ pub(super) fn plan(page: &[Shown<'_>], rows: &[(i64, &str)]) -> Plan {
         // Nothing shown is stored any more: the thread is another one now.
         return Plan::Reload;
     }
+    // The page's own send after the last matched message, its user turn
+    // unconfirmed, with results stored in front of it: they go in front.
+    let first = page
+        .iter()
+        .enumerate()
+        .skip(tail)
+        .find(|(_, m)| m.id.is_none());
+    if let Some((pi, m)) = first.filter(|(_, m)| !m.unsaved && m.role == USER) {
+        let results = results_from(rows, next);
+        if results > 0 && rows.get(next + results).is_some_and(|r| r.1 == m.role) {
+            insert.extend((next..next + results).map(|ri| (pi, ri)));
+            next += results;
+        }
+    }
     // The bubbles after the last matched message whose id the page never
     // heard take the rows at their place, while the roles agree.
-    let mut adopt = Vec::new();
     for (pi, m) in page.iter().enumerate().skip(tail) {
         if m.id.is_some() {
             // Dropped above.
@@ -95,8 +132,72 @@ pub(super) fn plan(page: &[Shown<'_>], rows: &[(i64, &str)]) -> Plan {
         pairs,
         adopt,
         drop,
+        insert,
         append: (next..rows.len()).collect(),
     }
+}
+
+/// A user turn's role.
+const USER: &str = "user";
+
+/// A late MCP task result's role (MCP Tasks design §2.2).
+const RESULT: &str = "tool";
+
+/// How many results are stored from row `at` on.
+fn results_from(rows: &[(i64, &str)], at: usize) -> usize {
+    rows.iter().skip(at).take_while(|r| r.1 == RESULT).count()
+}
+
+/// What the page does with stored rows it lacks in front of a message it
+/// shows ([`in_front`]).
+#[derive(Debug, PartialEq, Eq)]
+struct Front {
+    insert: Vec<(usize, usize)>,
+    adopt: Vec<(usize, usize)>,
+}
+
+/// The rows `gap` the page lacks in front of the message it shows at
+/// `at`, its own bubbles `bubbles` (page indices) between the last matched
+/// message and that one: `Some` when the bubbles not refused take the
+/// gap's last rows, role by role, and every row before those is a result,
+/// which goes in front of the first of those bubbles — a send's user turn,
+/// the only bubble a result is let in before — or, with none, in front of
+/// the message at `at` (results are never moved, so a row the page lacks
+/// before one it shows entered there). `None` (load afresh) for anything
+/// else.
+fn in_front(
+    page: &[Shown<'_>],
+    bubbles: std::ops::Range<usize>,
+    at: usize,
+    rows: &[(i64, &str)],
+    gap: std::ops::Range<usize>,
+) -> Option<Front> {
+    let waiting: Vec<usize> = bubbles
+        .filter(|&pi| page[pi].id.is_none() && !page[pi].unsaved)
+        .collect();
+    let results = results_from(rows, gap.start).min(gap.len());
+    let taken = gap.start + results..gap.end;
+    if taken.len() != waiting.len()
+        || waiting
+            .iter()
+            .zip(taken.clone())
+            .any(|(&pi, ri)| page[pi].role != rows[ri].1)
+    {
+        return None;
+    }
+    let front = match waiting.first() {
+        // A bubble takes a row by its role alone: only a send's user turn
+        // has results in front of it.
+        Some(&first) if results > 0 && page[first].role != USER => return None,
+        Some(&first) => first,
+        None => at,
+    };
+    Some(Front {
+        insert: (gap.start..gap.start + results)
+            .map(|ri| (front, ri))
+            .collect(),
+        adopt: waiting.into_iter().zip(taken).collect(),
+    })
 }
 
 #[cfg(test)]
@@ -129,6 +230,23 @@ mod tests {
             pairs: pairs.to_vec(),
             adopt: adopt.to_vec(),
             drop: drop.to_vec(),
+            insert: Vec::new(),
+            append: append.to_vec(),
+        }
+    }
+
+    /// A patch that drops nothing and inserts `insert`.
+    fn inserting(
+        pairs: &[(usize, usize)],
+        adopt: &[(usize, usize)],
+        insert: &[(usize, usize)],
+        append: &[usize],
+    ) -> Plan {
+        Plan::Patch {
+            pairs: pairs.to_vec(),
+            adopt: adopt.to_vec(),
+            drop: Vec::new(),
+            insert: insert.to_vec(),
             append: append.to_vec(),
         }
     }
@@ -225,5 +343,129 @@ mod tests {
         assert_eq!(plan(&[stored(1, "assistant")], &rows), Plan::Reload);
         // Nothing shown is stored any more.
         assert_eq!(plan(&[stored(7, "user")], &rows), Plan::Reload);
+    }
+
+    #[test]
+    fn a_send_s_waiting_results_go_in_front_of_its_user_turn() {
+        // The send let a result in before its message; the page shows the
+        // message (no id yet) and its reply (the id `done` said).
+        let page = [
+            stored(1, "user"),
+            stored(2, "assistant"),
+            bubble("user", false),
+            stored(5, "assistant"),
+        ];
+        let rows = [
+            (1, "user"),
+            (2, "assistant"),
+            (3, "tool"),
+            (4, "user"),
+            (5, "assistant"),
+        ];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0), (1, 1), (3, 4)], &[(2, 3)], &[(2, 2)], &[])
+        );
+        // Two results, in their order.
+        let rows = [
+            (1, "user"),
+            (2, "assistant"),
+            (3, "tool"),
+            (4, "tool"),
+            (6, "user"),
+            (5, "assistant"),
+        ];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0), (1, 1), (3, 5)], &[(2, 4)], &[(2, 2), (2, 3)], &[])
+        );
+        // No result: the user turn is adopted where it is.
+        let rows = [(1, "user"), (2, "assistant"), (4, "user"), (5, "assistant")];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0), (1, 1), (3, 3)], &[(2, 2)], &[], &[])
+        );
+    }
+
+    #[test]
+    fn a_send_whose_ids_are_known_takes_its_results_in_front() {
+        // The `turn` frame named the user row, `done` the reply.
+        let page = [
+            stored(1, "user"),
+            stored(2, "assistant"),
+            stored(6, "user"),
+            stored(7, "assistant"),
+        ];
+        let rows = [
+            (1, "user"),
+            (2, "assistant"),
+            (5, "tool"),
+            (6, "user"),
+            (7, "assistant"),
+        ];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0), (1, 1), (2, 3), (3, 4)], &[], &[(2, 2)], &[])
+        );
+        // An answer's or an edit's: let in at its start, before its reply.
+        let page = [stored(1, "user"), stored(7, "assistant")];
+        let rows = [(1, "user"), (5, "tool"), (7, "assistant")];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0), (1, 2)], &[], &[(1, 1)], &[])
+        );
+    }
+
+    #[test]
+    fn a_send_without_a_confirmed_reply_takes_its_results_in_front_too() {
+        // Stopped before `done`: neither id heard.
+        let page = [
+            stored(1, "user"),
+            bubble("user", false),
+            bubble("assistant", false),
+        ];
+        let rows = [(1, "user"), (3, "tool"), (4, "user"), (5, "assistant")];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0)], &[(1, 2), (2, 3)], &[(1, 1)], &[])
+        );
+        // A refused reply: the user turn is adopted, the reply stays.
+        let page = [
+            stored(1, "user"),
+            bubble("user", false),
+            bubble("assistant", true),
+        ];
+        let rows = [(1, "user"), (3, "tool"), (4, "user"), (6, "user")];
+        assert_eq!(
+            plan(&page, &rows),
+            inserting(&[(0, 0)], &[(1, 2)], &[(1, 1)], &[3])
+        );
+    }
+
+    #[test]
+    fn rows_in_front_that_are_no_send_s_results_still_load_afresh() {
+        // Another writer's turn stored before the page's message.
+        let page = [
+            stored(1, "user"),
+            bubble("user", false),
+            stored(7, "assistant"),
+        ];
+        let rows = [
+            (1, "user"),
+            (3, "user"),
+            (4, "assistant"),
+            (5, "user"),
+            (7, "assistant"),
+        ];
+        assert_eq!(plan(&page, &rows), Plan::Reload);
+        // A result in front of a reply bubble: a bubble takes rows by role
+        // alone, and only a user turn's has results in front of it.
+        let page = [
+            stored(1, "user"),
+            bubble("assistant", false),
+            stored(9, "user"),
+        ];
+        let rows = [(1, "user"), (3, "tool"), (4, "assistant"), (9, "user")];
+        assert_eq!(plan(&page, &rows), Plan::Reload);
     }
 }

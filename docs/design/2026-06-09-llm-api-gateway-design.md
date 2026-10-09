@@ -165,6 +165,140 @@ trait Egress {
 Upstream calls use `reqwest` streaming + `reqwest-eventsource`. Per-upstream
 timeout; client cancellation propagates (drop → abort upstream request).
 
+### 7.1 Gemini thought signatures (added 2026-10-09)
+
+Google's rules ("Thought signatures" for `generateContent`,
+<https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures>,
+read 2026-10-09):
+
+- A signature is an opaque `thoughtSignature` on a response part. Gemini 3
+  puts one on the **first `functionCall` of each step** (parallel calls: on
+  the first only), and on the last part of an answer without calls when it
+  thought. Gemini 2.5 puts one on the first part of a response with calls,
+  whatever its type. Streamed, a text answer's signature may come in a part
+  with empty text, so a client reads to `finishReason`.
+- Gemini 3 **validates** the first `functionCall` of each step of the
+  **current turn** — everything after the most recent user message with
+  standard content (text, not a `functionResponse`) — and answers 400
+  without its signature. Earlier turns are not checked. Text-part signatures
+  are recommended back but never checked. For Gemini 2.5 returning any of
+  them is optional.
+- A call the API did not generate (injected by a client, or from a model
+  without signatures) may carry `skip_thought_signature_validator` (or
+  `context_engineering_is_the_way_to_go`) to skip the check.
+- Google's OpenAI-compatibility layer carries the signature in a
+  non-standard `extra_content.google.thought_signature` on each tool call.
+
+**Where lmgw keeps it: in the call's id.** Gemini has no call ids, so the
+egress mints them: `call_` + a 12-hex-digit random tag per answer + a hex
+counter, as the realtime session mints its own. Ids are unique across
+answers, not numbered per answer. A per-answer `call_0` would repeat across
+the steps of one history: an Anthropic upstream (a fallback, an alias
+switched mid-conversation) refuses duplicate `tool_use` ids, a result would
+pair with a newer step's call of the same id, and `@openai/agents` refuses a
+reused id. For a signed part the egress appends a marker, a CRC-32 of the
+signature (eight hex digits), and the signature as a payload
+(`ir::call_id_with_signature` and `split_call_id`):
+
+- Google's signatures are standard padded base64. lmgw decodes them to bytes
+  and writes those in unpadded URL-safe base64 after `__thoughtsig_`, a
+  quarter shorter than encoding the text again. A signature that is not
+  canonical standard base64 goes after `__thoughtsigtxt_` as its UTF-8 text
+  in unpadded URL-safe base64. Both are lossless.
+- The CRC guards against a client that truncated or rewrote the id. A tail
+  that does not decode or does not match its CRC reads as a call without a
+  signature (bare id before the marker, skip value on Gemini). A corrupt
+  signature would be a 400.
+
+Reasons for the id:
+
+- The id is the one value every client shape echoes verbatim: OpenAI chat
+  `tool_calls[].id` and `tool_call_id`, Anthropic `tool_use.id` and
+  `tool_use_id`, Responses and Realtime `call_id`. A client that drops
+  unknown fields still sends it back.
+- An OpenAI- or Anthropic-shaped answer gains no field its protocol lacks.
+  Google's own `extra_content` would be a visible extension, which
+  OpenAI-shaped routes do not add (stay true to the OpenAI API), and most
+  clients would drop it anyway.
+- The IR, its stream deltas, the tool loops and the Chat's stored records
+  carry ids untouched. A thread on Gemini therefore keeps its signatures in
+  storage, and no type, migration or encoder changes.
+- The encoding stays inside `[A-Za-z0-9_-]`, the alphabet Anthropic allows
+  in an id. The cost is length: a signed id runs to hundreds of characters.
+  The API docs tell clients to echo ids exactly and not to send lmgw's ids
+  to another provider themselves.
+
+The rejected alternative was a signature field on `ContentPart::ToolUse`,
+encoded into the id by each ingress's serializer and decoded by each
+parser. That touches every construction site and every stream encoder
+to land in the same place, the id.
+
+**Replay.** The Gemini egress puts a captured signature back on its own
+`functionCall` part, in every turn, as Google recommends. Then
+`egress::gemini::signatures::sign_unsigned_steps` gives the skip value to
+the first `functionCall` of **every** model step that has none (a call from
+another model or a fallback, a client that rewrote the id, lmgw's own
+synthetic `lmgw_task_` calls). Gemini 3 validates only the current turn,
+but lmgw does not depend on drawing that boundary exactly where Google
+does: the skip value is documented for any call the API did not generate,
+and an older step is not validated, so it is harmless there. Later calls of
+a parallel step get nothing. A result whose message carries no tool name
+pairs with the nearest call of its id before it
+(`ChatRequest::tool_name_for_result`), falling back to bare-id matching for
+a client that kept the signature on the call but not on its result.
+
+Every other egress (OpenAI wire, llama.cpp, Anthropic) sends the bare id
+(`ir::wire_call_id`). Those upstreams see the id the call was minted with,
+and no signature reaches a prompt template or another provider's id checks.
+The routes that forward the client's own body instead of one built from the
+IR strip it there: the native `/v1/responses` passthrough (every input
+item's `call_id`, `ir::wire_call_ids_in_responses_body`) and
+`/v1/messages/count_tokens` on an Anthropic upstream (`tool_use.id` and
+`tool_use_id`, `ir::wire_call_ids_in_messages_body`), where a signature
+would also be counted as prompt. The other body-forwarding routes carry no
+tool call ids: `/tokenize` forwards `{model, content}` text, `/v1/count_tokens`
+takes a string, the legacy `/v1/completions` a prompt, and the local
+counts send the body the egress built.
+
+**Not carried:** signatures on text parts (Gemini 3's last part, Gemini
+2.5's first part when it is text). No client-echoed slot exists for them,
+and the API never checks them. The skip value goes to every Gemini model.
+The docs do not say whether a pre-3 model, which checks nothing, accepts
+it; Gemini 2.5 could not be checked live (below), Gemma 4 accepts it.
+Tests: `tests/it/gemini_signatures`
+(capture, replay goldens across the three client shapes, damaged ids,
+unique ids across steps and on an Anthropic upstream, the passthrough
+routes, the Chat tool loop).
+
+**Verified against the live API, 2026-10-09** (build 4bae309e, a dev
+instance with a `gemini` upstream on `generativelanguage.googleapis.com`).
+One tool, `get_weather(city)`, and a prompt asking for Berlin, then Paris,
+one call per step: two tool steps and a final answer. Every client id was
+echoed exactly. Control, sent straight to the API: a `functionCall` without
+a signature in the current turn gets 400 from `gemini-3.1-flash-lite`
+("Function call is missing a thought_signature in functionCall parts") and
+200 from `gemma-4-26b-a4b-it`.
+
+| # | Route | Stream | Model | Ids sent back | Result |
+|---|-------|--------|-------|---------------|--------|
+| 1 | `/v1/chat/completions` | no | `gemini-3.1-flash-lite` | signed (195 chars) | 200, 200, 200 (call, call, answer) |
+| 1 | `/v1/chat/completions` | yes | `gemini-3.1-flash-lite` | signed (195 chars) | 200, 200, 200 |
+| 2 | `/v1/messages` | no | `gemini-3.1-flash-lite` | signed (195 chars) | 200, 200, 200 |
+| 2 | `/v1/messages` | yes | `gemini-3.1-flash-lite` | signed (195 chars) | 200, 200, 200 |
+| 3 | `/v1/chat/completions` | no | `gemini-3.1-flash-lite` | made-up `call_x` | 200 (skip value) |
+| 3 | `/v1/chat/completions` | no | `gemini-3.1-flash-lite` | signed id cut to its bare part | 200 (skip value) |
+| 4 | `/v1/chat/completions` | no | `gemini-3.1-flash-lite` | signed id clipped mid-payload (106 of 195) | 200 (CRC fails, skip value) |
+| 4 | `/v1/chat/completions` | no | `gemini-3.1-flash-lite` | intact signed id (control) | 200 |
+| 5 | `/v1/chat/completions` | no | `gemma-4-26b-a4b-it` | signed (93 chars) | 200, 200, 200 |
+| 5 | `/v1/chat/completions` | no | `gemma-4-26b-a4b-it` | made-up `call_x` | 200 (skip value accepted) |
+
+Every new tool call carried `__thoughtsig_`, streamed or not, Gemma 4
+included: it signs its calls but does not check them. The replays (3, 4)
+are one tool step in the current turn; each answer was a further signed
+call. Gemini 2.5 was not testable: `gemini-2.5-flash`, `-flash-lite` and
+`-pro` answer 404 "no longer available to new users" for the key used, so
+whether 2.5 accepts the skip value is still open.
+
 ## 8. llama-server router mode + Podman management
 
 The app owns the router's **model preset and container lifecycle**. llama-server

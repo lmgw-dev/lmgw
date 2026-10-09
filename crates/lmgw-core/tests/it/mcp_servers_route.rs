@@ -180,7 +180,8 @@ async fn a_label_the_caller_may_not_use_is_a_404_naming_the_available() {
 #[tokio::test]
 async fn a_server_that_cannot_be_listed_is_a_502() {
     let w = world().await;
-    register(&w.state, "dead", "d", &dead_url().await, true, None).await;
+    let (dead, _held) = dead_url();
+    register(&w.state, "dead", "d", &dead, true, None).await;
     let (status, body) = get(&w, Some(&w.owner), "/v1/mcp/servers/d").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert_eq!(body["error"]["code"], "mcp_list_tools_failed", "{body}");

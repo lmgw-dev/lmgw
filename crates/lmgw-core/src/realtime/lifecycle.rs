@@ -133,6 +133,10 @@ pub(crate) struct Active {
     /// The automatic response that started first after server-side calls'
     /// results were in: it answers with them (`refusal`).
     answers_tools: bool,
+    /// A bound session's client asked for it with no commit of its own
+    /// since its last `response.create`: with no new words and no owed
+    /// turn it is a continuation (`bound`, [`Create::continuation`]).
+    continuation: bool,
 }
 
 /// Why a response failed: what the client is told, and what the log says.
@@ -186,6 +190,13 @@ struct Create {
     answers: Vec<String>,
     /// The automatic response, owed to `answers` — not a client's.
     auto: bool,
+    /// A bound session's client's own `response.create`, sent with no turn
+    /// committed by the client since its last one (`bound`): with no new
+    /// words and no owed turn it answers the thread's job results (a
+    /// continuation). Decided when the client sends it, and kept through
+    /// the turns it then picks up — a cough it is carried over, the cough a
+    /// barge-in that cut it — so neither turns it into `empty_turn`.
+    continuation: bool,
 }
 
 impl Core {
@@ -207,6 +218,7 @@ impl Core {
             params,
             answers: Vec::new(),
             auto: false,
+            continuation: self.bound_create_continues(),
         };
         // The voice as the settings say now (B2 review 5): the create is
         // judged against it.
@@ -227,8 +239,10 @@ impl Core {
                 if let Err(e) = self.snapshot(create.params.as_ref()) {
                     return self.error(e.for_event(create.event_id.as_deref()));
                 }
+                self.bound_create_taken();
                 return self.pending_carry(create);
             }
+            self.bound_create_taken();
             return self.start_response(create);
         };
         if matches!(active.phase, Phase::Closing | Phase::Playing) && active.queued.is_none() {
@@ -239,6 +253,7 @@ impl Core {
             if let Err(e) = self.snapshot(create.params.as_ref()) {
                 return self.error(e.for_event(create.event_id.as_deref()));
             }
+            self.bound_create_taken();
             if let Some(active) = self.active.as_mut() {
                 active.queued = Some(create);
             }
@@ -254,7 +269,7 @@ impl Core {
             Err(e) => return self.error(e.for_event(create.event_id.as_deref())),
         };
         // A bound response that would answer nothing (chat-voice §8.2).
-        if let Some(e) = self.bound_refusal(&create.answers) {
+        if let Some(e) = self.bound_refusal(&create.answers, create.continuation) {
             return self.error(e.for_event(create.event_id.as_deref()));
         }
         self.generation += 1;
@@ -321,6 +336,7 @@ impl Core {
             held: None,
             spoken: false,
             answers_tools,
+            continuation: create.continuation,
         });
         if self.mcp.table.listing() {
             self.timing_tools_waiting();

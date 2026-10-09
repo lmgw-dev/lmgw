@@ -1,0 +1,71 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "build it"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {},
+            "name": "desktop__build"
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "desktop__build",
+            "response": {
+              "result": "started, job t1"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "Started."
+        },
+        {
+          "functionCall": {
+            "args": {
+              "job": "t1",
+              "tool": "desktop__build"
+            },
+            "name": "lmgw__job_result"
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "lmgw__job_result",
+            "response": {
+              "result": "job t1 (desktop__build) completed\n42 files"
+            }
+          }
+        },
+        {
+          "text": "and?"
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

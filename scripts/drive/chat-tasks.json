@@ -1,0 +1,486 @@
+[
+ {
+  "js": "'Run: scripts/chat-tasks-drive.sh (dev instance on :8918, the model scripted by mock-openai TOOL_SCRIPT, scripts/mock-mcp.py --tasks as the `builder` server)'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "script": "scripts/drive/chat-tasks.js"
+ },
+ {
+  "js": "(async()=>{const id=await __tk.mk();location.href='/chat?t='+id;return id})()"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-tasks.js"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "build the project"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.job-row.working')",
+  "timeout": 30
+ },
+ {
+  "until": "__tk.text().includes('started, job t1')",
+  "timeout": 30
+ },
+ {
+  "expect": "!document.querySelector('[data-answer]')",
+  "label": "nothing to answer while the job runs"
+ },
+ {
+  "expect": "document.querySelector('.job-row .job-tool').textContent === 'builder__build' && !!document.querySelector('.job-row .confirm button')",
+  "label": "the strip names the tool and offers Cancel"
+ },
+ {
+  "until": "/step \\d+ of/.test(document.querySelector('.job-row .job-msg')?.textContent || '')",
+  "timeout": 20
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "shot": "01-running-strip"
+ },
+ {
+  "until": "!!document.querySelector('.msg-job .job-card.completed')",
+  "timeout": 40
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!document.querySelector('.job-row')",
+  "label": "the strip is gone once the result entered"
+ },
+ {
+  "expect": "document.querySelector('.msg-job summary').textContent.replace(/\\s+/g,' ').includes('Job t1 · builder__build · completed')",
+  "label": "the card says job, tool and status"
+ },
+ {
+  "expect": "!!document.querySelector('.job-unanswered') && !!document.querySelector('[data-answer]')",
+  "label": "an unanswered result: the note and Answer"
+ },
+ {
+  "js": "__tk.open('.msg-job .job-card')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.msg-job .tool-io pre').textContent === 'built 42 files in 8 s'",
+  "label": "the result, without the summary's line"
+ },
+ {
+  "shot": "02-result-card"
+ },
+ {
+  "js": "document.querySelector('[data-answer]').scrollIntoView({block:'end'}); 'ok'"
+ },
+ {
+  "shot": "03-answer-ready"
+ },
+ {
+  "click": "[data-answer]"
+ },
+ {
+  "until": "__tk.text().includes('Tool result: job t1 (builder__build) completed')",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "expect": "!document.querySelector('[data-answer]') && !document.querySelector('.job-unanswered')",
+  "label": "answered: Answer and the note are gone"
+ },
+ {
+  "expect": "(async()=>{const t=await __tk.thread();const r=t.messages.map(m=>m.role).join(',');return r==='user,assistant,tool,assistant'})()",
+  "label": "stored: the answer after the result"
+ },
+ {
+  "expect": "__tk.answerStatus().then(s => s === '409 nothing_to_answer')",
+  "label": "the route refuses with nothing left"
+ },
+ {
+  "shot": "04-answered"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "deploy it"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.job-row.working')",
+  "timeout": 30
+ },
+ {
+  "until": "!!document.querySelector('.msg-job .job-card.failed')",
+  "timeout": 40
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "__tk.open('.msg-job .job-card.failed')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.job-card.failed .tool-io pre').textContent.includes('403')",
+  "label": "the failure's own words"
+ },
+ {
+  "shot": "05-failed-result"
+ },
+ {
+  "expect": "!!document.querySelector('[data-answer]')",
+  "label": "the failed result waits for an answer too"
+ },
+ {
+  "click": "[data-answer]"
+ },
+ {
+  "until": "__tk.text().includes('Tool result: job t2 (builder__deploy) failed')",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!document.querySelector('[data-answer]')",
+  "label": "answered"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "index the archive"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.job-row.working')",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".job-row .confirm button"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "[...document.querySelectorAll('.job-row .confirm button')].some(b => b.textContent.includes('Cancel builder__index?'))",
+  "label": "the confirmation names the tool"
+ },
+ {
+  "expect": "(async()=>{return (await __tk.tasks()).some(t => t.status === 'working')})()",
+  "label": "nothing cancelled before the confirmation"
+ },
+ {
+  "shot": "06-cancel-confirm"
+ },
+ {
+  "click": ".job-row .confirm button.danger"
+ },
+ {
+  "until": "!!document.querySelector('.msg-job .job-card.cancelled')",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "__tk.open('.msg-job .job-card.cancelled')"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "expect": "document.querySelector('.job-card.cancelled .tool-io pre').textContent.includes('cancelled by')",
+  "label": "who cancelled it"
+ },
+ {
+  "shot": "07-cancelled-result"
+ },
+ {
+  "expect": "!!document.querySelector('[data-answer]')",
+  "label": "the cancelled result waits for an answer"
+ },
+ {
+  "js": "(async()=>{const s=await __tk.answerElsewhere();document.querySelector('[data-answer]')?.click();return s})()"
+ },
+ {
+  "until": "!!document.querySelector('.job-said')",
+  "timeout": 20
+ },
+ {
+  "expect": "/being written elsewhere|Nothing to answer/.test(document.querySelector('.job-said').textContent)",
+  "label": "the refusal in words"
+ },
+ {
+  "expect": "(async()=>{await window.__tkElsewhere;return true})()",
+  "label": "the other answer ended"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "shot": "08-answer-refused"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "index the archive again"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.job-row.working')",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "nav": "/settings/agents"
+ },
+ {
+  "until": "!!document.getElementById('f-mcp-task-poll-interval-s')",
+  "timeout": 20
+ },
+ {
+  "js": "document.getElementById('f-mcp-task-poll-interval-s').scrollIntoView({block:'center'}); 'ok'"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "(()=>{const e=document.getElementById('f-mcp-task-poll-interval-s');const i=e.matches('input')?e:e.querySelector('input');return i.value==='5'})()",
+  "label": "the field shows the default 5"
+ },
+ {
+  "shot": "09-settings-mcp"
+ },
+ {
+  "go": "/mcp-servers"
+ },
+ {
+  "until": "!!document.querySelector('.open-tasks')",
+  "timeout": 20
+ },
+ {
+  "expect": "document.querySelector('.open-tasks').textContent.trim() === '1 open task'",
+  "label": "the server's open job is counted"
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "shot": "10-mcp-count"
+ },
+ {
+  "js": "(async()=>{const r=await fetch('/api/op/settings_set_full',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mcp:{task_poll_interval_s:2}})});return r.status+' '+(await r.text())})()"
+ },
+ {
+  "expect": "fetch('/api/settings-full').then(r=>r.json()).then(s=>s.mcp.task_poll_interval_s===2)",
+  "label": "the poll interval is 2 s for the last phase (a poll lands inside Cancel's armed window)"
+ },
+ {
+  "js": "localStorage.setItem('lmgw-theme','light'); location.href='/chat?t='+localStorage.getItem('tkT'); 'light'"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-tasks.js"
+ },
+ {
+  "until": "document.documentElement.dataset.theme==='light' && !!document.querySelector('.job-row.working')",
+  "timeout": 30
+ },
+ {
+  "until": "/step \\d+ of/.test(document.querySelector('.job-row .job-msg')?.textContent || '')",
+  "timeout": 20
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "shot": "11-light-strip"
+ },
+ {
+  "js": "(()=>{const r=document.querySelector('.job-row');window.__row=r;window.__msg=r.querySelector('.job-msg')?.textContent;return window.__msg})()"
+ },
+ {
+  "click": ".job-row .confirm button"
+ },
+ {
+  "until": "!!document.querySelector('.job-row .confirm button.danger')",
+  "timeout": 3
+ },
+ {
+  "until": "document.querySelector('.job-row .job-msg')?.textContent !== window.__msg",
+  "timeout": 5
+ },
+ {
+  "expect": "document.querySelector('.job-row') === window.__row && !!document.querySelector('.job-row .confirm button.danger')",
+  "label": "a poll that changed the job's message kept its row and the armed Cancel"
+ },
+ {
+  "click": ".job-row .confirm button.danger"
+ },
+ {
+  "until": "document.querySelectorAll('.msg-job .job-card.cancelled').length >= 2",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "js": "(()=>{const c=[...document.querySelectorAll('.msg-job .job-card.cancelled')].pop();c.open=true;c.scrollIntoView({block:'center'});return 'ok'})()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "12-light-result"
+ },
+ {
+  "js": "localStorage.removeItem('lmgw-theme'); 'dark again'"
+ },
+ {
+  "js": "'The send race: a result held off by a gated reply enters in front of the next send\\'s message'"
+ },
+ {
+  "js": "(async()=>{const id=await __tk.mk('deploy');location.href='/chat?t='+id;return id})()"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-tasks.js"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "build it quickly"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "__tk.text().includes('started, job')",
+  "timeout": 30
+ },
+ {
+  "until": "!document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "and deploy it"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.tool-ask [data-approve]')",
+  "timeout": 30
+ },
+ {
+  "until": "(async()=>(await __tk.tasks()).some(t => t.status === 'completed'))()",
+  "timeout": 30
+ },
+ {
+  "expect": "__tk.stored().then(s => /^user:\\d+,assistant:\\d+,user:\\d+,assistant:\\d+$/.test(s))",
+  "label": "the build's result waits: the gated reply holds it off"
+ },
+ {
+  "js": "(()=>{const e=document.querySelector('.msg-item-user');e.dataset.keep='1';return e.dataset.mid})()"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "never mind"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "until": "__tk.stored().then(s => s === __tk.shown())",
+  "timeout": 15
+ },
+ {
+  "expect": "__tk.stored().then(s => /^user:\\d+,assistant:\\d+,user:\\d+,assistant:\\d+,tool:\\d+,user:\\d+,assistant:\\d+$/.test(s))",
+  "label": "stored: the result entered before the send's message"
+ },
+ {
+  "expect": "__tk.stored().then(s => s === __tk.shown())",
+  "label": "shown as stored: the result in front of the page's own message, every id known"
+ },
+ {
+  "expect": "!!document.querySelector('.msg-item-user[data-keep]')",
+  "label": "followed in place: the transcript was not loaded afresh"
+ },
+ {
+  "js": "(()=>{const c=document.querySelectorAll('.msg-job');c[c.length-1].scrollIntoView({block:'center'});return 'ok'})()"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "13-send-race"
+ }
+]

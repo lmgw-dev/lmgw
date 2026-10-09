@@ -19,6 +19,13 @@
 //!   the core, what was heard ([`In::Cut`], at drain or cancel, with the
 //!   response's timing and served models).
 //!
+//! **A continuation** (MCP Tasks design §3.4): a response with no new words
+//! that answers the thread's job results queues the same two entries; its
+//! user entry has no words, writes nothing and answers the barrier with no
+//! id once every earlier entry is done, so its turn reads the history after
+//! the previous reply was finalized, and its slot finalizes as any reply's
+//! does. A reply nobody heard is deleted, and its results are owed again.
+//!
 //! **A response that hears the user's audio** (voice-audio-input design
 //! §3.3, `row`) has no user message before its turn: its turns are not
 //! transcribed yet. Its user entry answers the barrier with no id once
@@ -58,7 +65,7 @@ use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::{mpsc, oneshot};
 
-use super::super::protocol::{ErrorObject, ServerEvent};
+use super::super::protocol::ServerEvent;
 use super::reply::Heard;
 use crate::proxy::StopSignal;
 use crate::state::SharedState;
@@ -69,7 +76,7 @@ mod input;
 mod row;
 mod user;
 
-pub(crate) use input::{Ended, In, RowTx, UserTurn};
+pub(crate) use input::{Ended, In, RowTx, UserAnswer, UserTurn, Written};
 
 /// The journal's input: the core's and the responders'.
 pub(crate) type Tx = mpsc::UnboundedSender<In>;
@@ -150,7 +157,7 @@ enum Op {
         turns: Vec<UserTurn>,
         /// The responder's barrier; `None` for the turns written as the
         /// session ends.
-        reply: Option<oneshot::Sender<Result<Option<i64>, ErrorObject>>>,
+        reply: Option<oneshot::Sender<UserAnswer>>,
         /// A heard response's: an empty barrier, its row deferred to its
         /// slot (module doc).
         deferred: bool,

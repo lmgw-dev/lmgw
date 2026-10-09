@@ -5,9 +5,10 @@
 //! server→client notification stream, `DELETE` to end a session.
 //!
 //! What is documented is the *envelope* — JSON-RPC 2.0's own shape — not each
-//! method's own `params`/`result`: `initialize`, `tools/list`, `tools/call`
-//! and `ping` all go through the one request schema, same as a hand client
-//! reads the wire. `POST /mcp/admin` carries exactly the same envelope for
+//! method's own `params`/`result`: `initialize`, `tools/list`, `tools/call`,
+//! `resources/list`, `resources/templates/list`, `resources/read` and `ping`
+//! all go through the one request schema, same as a hand client reads the
+//! wire. `POST /mcp/admin` carries exactly the same envelope for
 //! the `lmgw__*` self-admin tools (`mcp/selfadmin/catalog.rs`).
 
 use schemars::generate::SchemaGenerator;
@@ -32,7 +33,8 @@ pub(crate) fn jsonrpc_request(g: &mut SchemaGenerator) -> Schema {
                 "id": {"description": "Absent on a notification (e.g. \
                     notifications/initialized); string or number otherwise."},
                 "method": {"type": "string", "description": "e.g. initialize, ping, \
-                    tools/list, tools/call, notifications/initialized."},
+                    tools/list, tools/call, resources/list, resources/templates/list, \
+                    resources/read, notifications/initialized."},
                 "params": {"type": "object", "additionalProperties": true}
             }
         }),
@@ -59,8 +61,8 @@ pub(crate) fn jsonrpc_response(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-/// `GET /mcp`'s push stream: `notifications/tools/list_changed` today
-/// (`mcp/ingress.rs`'s aggregate composition change), SSE-framed as a bare
+/// `GET /mcp`'s push stream: `notifications/tools/list_changed` and
+/// `notifications/resources/list_changed` (`mcp/ingress.rs`), SSE-framed as a bare
 /// JSON-RPC notification — the same envelope as [`jsonrpc_request`] with no
 /// `id`.
 pub(crate) fn notification_event(g: &mut SchemaGenerator) -> Schema {

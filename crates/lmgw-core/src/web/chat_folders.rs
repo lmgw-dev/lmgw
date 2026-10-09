@@ -15,6 +15,7 @@
 
 mod apply;
 mod current;
+pub(super) use current::thread_start;
 pub(crate) mod retention;
 
 pub use current::current;
@@ -237,6 +238,14 @@ pub(super) fn internal(e: impl std::fmt::Display) -> Response {
     err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())
 }
 
+/// A folder write's error as the route answers it: a refusal made on the
+/// write's transaction keeps its status and code (`400 unknown_profile`
+/// for a profile deleted since the route's check); anything else is the
+/// store's 500.
+fn store_refusal(e: &crate::error::GatewayError) -> Response {
+    err_json(e.http_status(), e.code(), e.to_string())
+}
+
 /// Folder `id` as `caller` may reach it (client-apps design L3, review
 /// W3-1): for a device, a folder whose defaults attach the self-admin
 /// toolset is not found, exactly as one that is not there. The refusal is
@@ -314,6 +323,7 @@ pub async fn create_folder(
     if let Err(r) = retention_is_owners(&caller, &written)
         .and_then(|()| check_ongoing(opts.ongoing_idle_minutes, &defaults))
         .and_then(|()| check_retention(opts.archive_days, opts.purge_days))
+        .and_then(|()| super::chat_profiles::check_profile(&state, defaults.profile_id))
     {
         return r;
     }
@@ -327,10 +337,17 @@ pub async fn create_folder(
         return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
     }
     if let Some(written) = &defaults.mcp_tools {
-        if let Err(refused) = chat_tool_write::check(&state, &caller, written, &[]).await {
+        if let Err(refused) = chat_tool_write::check(&state, &caller, written, &[], &[], None).await
+        {
             return refused;
         }
     }
+    // The owner's defaults are the new folder's approval floor; a device's
+    // folder has none (client-apps design §6.6).
+    let floor = match &defaults.mcp_tools {
+        Some(written) if !caller.is_device() => written.clone(),
+        _ => Vec::new(),
+    };
     if let Err(refused) = chat_tool_write::check_aliases(
         &state,
         &caller,
@@ -349,12 +366,13 @@ pub async fn create_folder(
         &name,
         &defaults,
         &opts,
+        &floor,
         Some(&caller.named()),
     )
     .await
     {
         Ok(id) => id,
-        Err(e) => return internal(e),
+        Err(e) => return store_refusal(&e),
     };
     state.chat_feed.wake();
     match folder_json(&state, &caller, id).await {
@@ -523,6 +541,13 @@ pub async fn update_folder(
         }
     }
     if let Some(d) = &patch.defaults {
+        // The profile, when it changed (a delete strips a gone one from
+        // every folder's defaults).
+        if d.profile_id != stored.profile_id {
+            if let Err(r) = super::chat_profiles::check_profile(&state, d.profile_id) {
+                return r;
+            }
+        }
         // Bases the folder already named are not checked again (a base
         // deleted since must not block renaming the folder).
         let already = stored.kb_ids.clone().unwrap_or_default();
@@ -535,11 +560,30 @@ pub async fn update_folder(
         if let Err(msg) = chat_knowledge::check_default_kbs(&state, d, &already).await {
             return err_json(StatusCode::BAD_REQUEST, "bad_request", msg);
         }
+        let before = stored.mcp_tools.as_deref().unwrap_or_default();
         if let Some(written) = &d.mcp_tools {
-            let before = stored.mcp_tools.as_deref().unwrap_or_default();
-            if let Err(refused) = chat_tool_write::check(&state, &caller, written, before).await {
+            if let Err(refused) = chat_tool_write::check(
+                &state,
+                &caller,
+                written,
+                before,
+                &folder.approval_floor,
+                None,
+            )
+            .await
+            {
                 return refused;
             }
+        }
+        // The owner's defaults are the folder's approval floor from now on
+        // (client-apps design §6.6); a device's never move it.
+        if !caller.is_device() {
+            patch.approval_floor = Some(chat_tool_write::owner_floor(
+                &state,
+                d.mcp_tools.as_deref().unwrap_or_default(),
+                before,
+                &folder.approval_floor,
+            ));
         }
         if let Err(refused) = chat_tool_write::check_aliases(
             &state,
@@ -642,7 +686,7 @@ pub async fn update_folder(
     let written = match written {
         Ok(w) if w.found => w,
         Ok(_) => return not_found(),
-        Err(e) => return internal(e),
+        Err(e) => return store_refusal(&e),
     };
     if show_to_devices {
         tracing::info!("chat: folder {id} is shown to devices again");
@@ -728,6 +772,9 @@ pub async fn delete_folder(
             }
         }
         state.chat_feed.threads_deleted(&taken);
+        if !taken.is_empty() {
+            super::chat_tasks::threads_gone(&state);
+        }
         let unlocked: Vec<i64> = taken
             .into_iter()
             .filter(|t| !going.iter().any(|(g, _)| g == t))

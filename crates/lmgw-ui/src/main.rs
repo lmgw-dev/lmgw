@@ -19,5 +19,10 @@ mod widgets;
 
 fn main() {
     console_error_panic_hook::set_once();
+    // Served from the gateway's root: no base; a `401 session_required` raises the login gate.
+    lmgw_ui_kit::http::configure(lmgw_ui_kit::http::Config {
+        base: String::new(),
+        on_unauthorized: Some(session::lock),
+    });
     leptos::mount::mount_to_body(app::App);
 }

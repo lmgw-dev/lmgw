@@ -67,6 +67,9 @@ pub struct SettingsFull {
     pub chat_voice_audio_input: String,
     /// Tokens of knowledge-base excerpts one Chat turn may carry (> 0).
     pub chat_kb_budget_tokens: u32,
+    /// The personality profile new Chat threads start with
+    /// (`GET /chat/api/profiles`); `null` for none ("Default").
+    pub chat_profile: Option<i64>,
     /// Days the Chat change feed keeps its records; `0` = all.
     pub chat_feed_retention_days: i64,
     /// Seconds between the Chat feed's keep-alive comments (≥ 1).
@@ -144,6 +147,8 @@ pub struct SettingsFull {
     pub image: ImageSettings,
     /// `GET /v1/realtime`, spoken conversations.
     pub realtime: crate::realtime::RealtimeSettings,
+    /// The device MCP host link's limits (client-apps design §5.1).
+    pub mcp: crate::mcp_host::HostSettings,
     pub api_keys: Vec<ApiKeyRow>,
     pub data_dir: String,
     pub version: String,

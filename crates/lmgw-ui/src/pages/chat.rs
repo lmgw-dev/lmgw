@@ -12,11 +12,14 @@ use std::cell::Cell;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
+use lmgw_api_types::chat::{MessageTask, ThreadTask};
+use lmgw_api_types::chat_approvals::ApprovalRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen::{JsCast, JsValue};
 
 use super::chat_actions::{ActionEnv, ContinueState, EditReq, MsgActions, MsgEditor, MsgOps};
+use super::chat_approvals::{self, Approval, ApprovalBatch, ToolCardView};
 use super::chat_attach::{
     draft_blockers, draft_from_attachment, draft_hints, new_draft, refresh_drafts, BlockerNote,
     DraftChip, DraftChips, HintNote, SentChip, ViewerMeta,
@@ -34,6 +37,7 @@ use super::chat_sampling::{self, SamplingDraft, SamplingText};
 use super::chat_search::{install_reveal, MessageHits};
 use super::chat_settings::{draft_patch, DraftErrors, SettingsFields};
 use super::chat_sync::{self, Follow, ListRead, ModelPicks, OwnEdits, Rescue};
+use super::chat_tasks::{self, TaskEnv};
 use super::chat_temp::{self, TempBanner};
 use super::chat_turn::{run_turn, Turn, TurnEnv};
 use super::chat_voice::{self, MsgVoice, ThreadVoice, VoiceDraft, VoiceResolved};
@@ -106,6 +110,9 @@ pub struct ChatThread {
     /// (chat-voice §2.2, §2.3).
     pub voice: ThreadVoice,
     pub voice_resolved: Option<VoiceResolved>,
+    /// The personality profile the thread talks with (`None` = none, the
+    /// "Default" of the picker).
+    pub profile_id: Option<i64>,
 }
 
 /// A file dropped, pasted or picked into a message — either uploaded and
@@ -167,6 +174,8 @@ pub(super) struct SettingsDraft {
     pub(super) picked: RwSignal<Vec<ThreadMcp>>,
     pub(super) kb: KbDraft,
     pub(super) voice: VoiceDraft,
+    /// The personality profile: `""` none, else its id.
+    pub(super) profile: RwSignal<String>,
 }
 
 impl SettingsDraft {
@@ -182,6 +191,7 @@ impl SettingsDraft {
             picked: RwSignal::new(Vec::new()),
             kb: KbDraft::new(),
             voice: VoiceDraft::new(),
+            profile: RwSignal::new(String::new()),
         }
     }
 
@@ -194,6 +204,7 @@ impl SettingsDraft {
         self.effort.set(text.effort);
         self.budget.set(text.budget);
         self.sampling.seed(text.sampling);
+        self.profile.set(text.profile);
         self.picked.set(t.mcp_tools.clone());
         self.kb.seed(t);
         self.voice.load(&t.voice);
@@ -209,6 +220,7 @@ impl SettingsDraft {
             effort: self.effort.get(),
             budget: self.budget.get(),
             sampling: self.sampling.text(),
+            profile: self.profile.get(),
         }
     }
 
@@ -248,6 +260,9 @@ fn apply_settings(t: &mut ChatThread, body: &Value) {
     if let Some(v) = body.get("reasoning_budget") {
         t.reasoning_budget = v.as_i64();
     }
+    if let Some(v) = body.get("profile_id") {
+        t.profile_id = v.as_i64();
+    }
     chat_sampling::apply(t, body);
     apply_kb(t, body);
 }
@@ -263,6 +278,8 @@ struct SettingsText {
     effort: String,
     budget: String,
     sampling: SamplingText,
+    /// The profile's id, `""` for none.
+    profile: String,
 }
 
 impl SettingsText {
@@ -282,6 +299,7 @@ impl SettingsText {
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
             sampling: SamplingText::of(t),
+            profile: t.profile_id.map(|p| p.to_string()).unwrap_or_default(),
         }
     }
 
@@ -296,6 +314,7 @@ impl SettingsText {
             || self.think.trim() != b.think.trim()
             || self.effort.trim() != b.effort.trim()
             || self.sampling.differs(&b.sampling)
+            || self.profile != b.profile
     }
 }
 
@@ -332,6 +351,13 @@ pub(super) struct MsgRow {
     /// How the turn was spoken (chat-voice §3); `None`: typed.
     #[serde(deserialize_with = "chat_voice::tolerant_voice")]
     pub(super) voice: Option<MsgVoice>,
+    /// The calls a gated reply still waits on (client-apps design §6.2).
+    pub(super) pending_approvals: Vec<ApprovalRequest>,
+    /// A late MCP task result's facts, on a row of role `tool` (MCP Tasks
+    /// design §2.2; `chat_tasks`).
+    pub(super) task: Option<MessageTask>,
+    /// When the row was stored (UTC, `YYYY-MM-DD HH:MM:SS`).
+    pub(super) created_at: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -341,6 +367,8 @@ pub(super) struct ThreadDetail {
     pub(super) messages: Vec<MsgRow>,
     /// Uploaded, not yet sent — the composer's chips on a reopened thread.
     pub(super) draft_attachments: Vec<Attachment>,
+    /// Its MCP tasks still running or on their way in (`chat_tasks`).
+    pub(super) tasks: Vec<ThreadTask>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -352,6 +380,9 @@ pub(super) struct ToolCard {
     pub(super) is_error: RwSignal<bool>,
     pub(super) ms: RwSignal<Option<i64>>,
     pub(super) done: RwSignal<bool>,
+    /// Whether the call waits for a decision, and the controls' state
+    /// (client-apps design §6; `chat_approvals`).
+    pub(super) approval: Approval,
 }
 
 #[derive(Clone)]
@@ -385,6 +416,10 @@ pub(super) struct Msg {
     pub(super) unsaved: RwSignal<bool>,
     /// How the turn was spoken (chat-voice §3).
     pub(super) voice: RwSignal<Option<MsgVoice>>,
+    /// A late MCP task result's facts (a message of role `tool`).
+    pub(super) task: RwSignal<Option<MessageTask>>,
+    /// When the row was stored, once known (UTC as stored).
+    pub(super) created_at: RwSignal<Option<String>>,
 }
 
 pub(super) fn new_msg(key: u64, role: &str, content: String) -> Msg {
@@ -405,17 +440,19 @@ pub(super) fn new_msg(key: u64, role: &str, content: String) -> Msg {
         images_note: RwSignal::new(None),
         unsaved: RwSignal::new(false),
         voice: RwSignal::new(None),
+        task: RwSignal::new(None),
+        created_at: RwSignal::new(None),
     }
 }
 
 /// One stored tool interaction recovered from a turn's IR — the pure half of
 /// the replay, so the pairing is unit-testable off the DOM.
 #[derive(Debug, Clone, PartialEq)]
-struct IrTool {
-    name: String,
-    args: String,
-    output: Option<String>,
-    is_error: bool,
+pub(super) struct IrTool {
+    pub(super) name: String,
+    pub(super) args: String,
+    pub(super) output: Option<String>,
+    pub(super) is_error: bool,
 }
 
 /// A stored agentic turn is IR messages (assistant `tool_use` parts + their
@@ -423,7 +460,7 @@ struct IrTool {
 /// renders, pairing each call with its result by id — so a reopened Admin Chat
 /// thread shows what it did, not just what it concluded. Port of the old app's
 /// `toolsFromIr` (chat-app.js:269-307).
-fn tools_from_ir(raw: &str) -> Vec<IrTool> {
+pub(super) fn tools_from_ir(raw: &str) -> Vec<IrTool> {
     let Ok(turn) = serde_json::from_str::<Vec<Value>>(raw) else {
         return Vec::new();
     };
@@ -653,6 +690,10 @@ pub fn Chat() -> impl IntoView {
     let threads = RwSignal::new(Vec::<ChatThread>::new());
     let current = RwSignal::new(None::<ChatThread>);
     let msgs = RwSignal::new(Vec::<Msg>::new());
+    // The open thread's MCP tasks (`chat_tasks`), and a refused Answer's
+    // words.
+    let thread_tasks: chat_tasks::Tasks = RwSignal::new(None);
+    let answer_said = RwSignal::new(None::<String>);
     let next_key = StoredValue::new(0u64);
     let catalog = crate::catalog::use_model_catalog();
     let model_sel = RwSignal::new(String::new());
@@ -662,6 +703,8 @@ pub fn Chat() -> impl IntoView {
     let kbui = KbUi::provide(Scope::new());
     // This window's audio devices and echo mode (chat-voice §2.4).
     chat_voice::provide_voice_devices();
+    // The personality profiles the pickers and the header chip name.
+    let profile_dir = super::chat_profiles::ProfileDir::provide();
     let draft_kbs = RwSignal::new(Vec::<i64>::new());
     // A new chat the composer's draft waits in, its conversation deleted
     // elsewhere: made only when the owner presses Send, and that Send under
@@ -789,6 +832,9 @@ pub fn Chat() -> impl IntoView {
                     m.model.set(r.model);
                     m.answered_by.set(r.answered_by);
                     m.images_note.set(r.images_note);
+                    m.task.set(r.task);
+                    m.created_at
+                        .set(Some(r.created_at).filter(|a| !a.is_empty()));
                     if !r.attachments.is_empty() {
                         m.attachments.set(r.attachments);
                     }
@@ -796,23 +842,10 @@ pub fn Chat() -> impl IntoView {
                         m.tokens.set(Some((p, c)));
                     }
                     // Replay a stored agentic turn's tool calls as full cards,
-                    // identical to the live ones.
-                    if let Some(ir) = &r.ir_messages {
-                        let cards: Vec<ToolCard> = tools_from_ir(ir)
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, t)| ToolCard {
-                                index: i as i64,
-                                name: RwSignal::new(t.name),
-                                args: RwSignal::new(t.args),
-                                output: RwSignal::new(t.output.unwrap_or_default()),
-                                is_error: RwSignal::new(t.is_error),
-                                // Durations are not stored with the IR; the card
-                                // shows "done" instead of a made-up number.
-                                ms: RwSignal::new(None),
-                                done: RwSignal::new(true),
-                            })
-                            .collect();
+                    // identical to the live ones. A late result's record is
+                    // its synthetic call, which its own card stands for.
+                    if let Some(ir) = r.ir_messages.as_ref().filter(|_| r.role != "tool") {
+                        let cards = chat_approvals::cards_of(ir, &r.pending_approvals);
                         if !cards.is_empty() {
                             m.tools.set(cards);
                         }
@@ -845,6 +878,7 @@ pub fn Chat() -> impl IntoView {
             temp_threads.update(|v| v.retain(|t| t.id != left));
         }
         model_sel.set(d.thread.model_alias.clone());
+        chat_tasks::take(thread_tasks, id, d.tasks);
         current.set(Some(d.thread));
         own.bump();
         // A settled reply's numbers belong to the visit; a reply still
@@ -1081,6 +1115,14 @@ pub fn Chat() -> impl IntoView {
     // the picker following the stored model another writer set
     // (`chat_sync`), which `ModelPicks` is told of.
     let current_id = Memo::new(move |_| current.with(|c| c.as_ref().map(|t| t.id)));
+    // A profile edited elsewhere shows when another thread opens (the feed
+    // carries no profile change; the directory also reads on focus).
+    Effect::new(move |prev: Option<()>| {
+        current_id.track();
+        if prev.is_some() {
+            profile_dir.refresh();
+        }
+    });
     let settings = SettingsDraft::new();
     Effect::new(move |prev: Option<Option<i64>>| {
         let id = current_id.get();
@@ -1316,6 +1358,7 @@ pub fn Chat() -> impl IntoView {
         }),
         resume: Callback::new(move |()| actions.resume()),
         delete: Callback::new(move |key| actions.delete(key)),
+        decide: Callback::new(move |v| actions.decide(v)),
     };
 
     // Leaving the Chat page discards the open temporary chat too.
@@ -1480,6 +1523,7 @@ pub fn Chat() -> impl IntoView {
             target: reply,
             continuing: false,
             what: "send",
+            inline: false,
         };
         spawn_local(async move {
             let end = run_turn(turn_env, turn, move |id| user_db.set(Some(id)), || {}).await;
@@ -1530,12 +1574,22 @@ pub fn Chat() -> impl IntoView {
             streaming,
             model_sel,
             draft: settings.voice,
+            profile: settings.profile,
             refresh: Callback::new(move |()| refresh_threads()),
             load: Callback::new(load_msgs),
             make: Callback::new(msgs_of_rows),
         },
     );
     let voice_mode = page_voice.voice_mode;
+    let task_env = TaskEnv {
+        tasks: thread_tasks,
+        current_id,
+        msgs,
+        busy: Signal::derive(move || streaming.get().is_some()),
+        scope,
+        toasts,
+        actions,
+    };
     // What other writers change shows here without leaving the page.
     chat_sync::follow(Follow {
         list,
@@ -1551,6 +1605,7 @@ pub fn Chat() -> impl IntoView {
         model_sel,
         picks,
         drafts: draft_attachments,
+        tasks: thread_tasks,
         make: Callback::new(msgs_of_rows),
         load: Callback::new(load_msgs),
         gone: Callback::new(move |id| gone.run(id)),
@@ -1853,6 +1908,7 @@ pub fn Chat() -> impl IntoView {
                                             }
                                         })
                                 }}
+                                <super::chat_profiles::ProfileBadge current=current/>
                                 <Show when=move || current_id.get().is_some()>
                                     <super::chat_export::ExportMenu thread=current_id/>
                                 </Show>
@@ -1921,6 +1977,7 @@ pub fn Chat() -> impl IntoView {
                                     })
                             }}
                             <chat_sync::NewChatStrip rescue=rescue folders=folder_list held=held/>
+                            <chat_tasks::TaskStrip env=task_env said=answer_said/>
                             // The composer and what belongs to it, hidden (never
                             // dropped: its text, chips and dictation mark wait)
                             // while voice mode has its place.
@@ -2003,6 +2060,7 @@ pub fn Chat() -> impl IntoView {
                                     draft=settings.voice
                                     on_saved=Callback::new(move |()| refresh_threads())
                                 />
+                                <chat_tasks::AnswerButton env=task_env said=answer_said/>
                                 {move || {
                                     if streaming_here.get() {
                                         view! {
@@ -2155,7 +2213,7 @@ fn today_local() -> String {
 /// since the epoch — the same parsing [`crate::fmt::log_time`] does, needed
 /// here as a number rather than a rendered string so [`crate::fmt::rel_time_at`]
 /// can turn a future `purge_at` into "in 12d".
-fn parse_utc_ts(ts: &str) -> Option<f64> {
+pub(super) fn parse_utc_ts(ts: &str) -> Option<f64> {
     let zoned = ts.ends_with('Z') || ts.get(10..).is_some_and(|t| t.contains('+'));
     let iso = if zoned {
         ts.replacen(' ', "T", 1)
@@ -2751,6 +2809,7 @@ fn ThreadSettings(
                 voice_resolved=Signal::derive(move || {
                     thread.with(|t| t.as_ref().and_then(|t| t.voice_resolved.clone()))
                 })
+                thread_id=Signal::derive(move || thread.with(|t| t.as_ref().map(|t| t.id)))
                 model=Signal::derive(move || {
                     thread.with(|t| t.as_ref().map(|t| t.model_alias.clone()).unwrap_or_default())
                 })
@@ -2819,6 +2878,7 @@ fn MsgView(
     let db_id = m.db_id;
     let m_actions = m.clone();
     let m_editor = m.clone();
+    let msg_key = m.key;
     let content = m.content;
     let reasoning = m.reasoning;
     let tools = m.tools;
@@ -2831,6 +2891,10 @@ fn MsgView(
     let images_note = m.images_note;
     let voice = m.voice;
     let role = m.role.clone();
+    // A late MCP task result has a card of its own (`chat_tasks`).
+    if role == "tool" {
+        return view! { <chat_tasks::TaskResultView m=m ops=ops/> }.into_any();
+    }
     let kbui = KbUi::use_ui();
     // The rendered markdown is written from an effect rather than through
     // `inner_html`, so highlighting and the toolbar always run on the DOM this
@@ -2901,8 +2965,9 @@ fn MsgView(
                     </details>
                 </Show>
                 <For each=move || tools.get() key=|c| c.index let:card>
-                    <ToolCardView card=card/>
+                    <ToolCardView card=card tools=tools key=msg_key ops=ops/>
                 </For>
+                <ApprovalBatch tools=tools key=msg_key ops=ops/>
                 <div
                     class="md"
                     node_ref=md_ref
@@ -2955,37 +3020,6 @@ fn open_citation(ev: &web_sys::Event, context: RwSignal<Option<KbContext>>, ui: 
     if let Some(target) = context.with_untracked(|c| c.as_ref().and_then(|c| c.source(n))) {
         ev.prevent_default();
         ui.source.set(Some(target));
-    }
-}
-
-#[component]
-fn ToolCardView(card: ToolCard) -> impl IntoView {
-    view! {
-        <details class="tool-card" class:err=move || card.is_error.get()>
-            <summary>
-                <span class="mono-sm">{move || card.name.get()}</span>
-                {move || {
-                    if card.done.get() {
-                        // Replayed IR cards carry no duration — say "done"
-                        // rather than nothing at all.
-                        card.ms
-                            .get()
-                            .map(|ms| format!(" · {ms} ms"))
-                            .unwrap_or_else(|| " · done".to_string())
-                    } else {
-                        " · running…".to_string()
-                    }
-                }}
-            </summary>
-            <div class="tool-io">
-                <div class="dim mini-note">"arguments"</div>
-                <pre class="preset">{move || card.args.get()}</pre>
-                <Show when=move || !card.output.get().is_empty()>
-                    <div class="dim mini-note">"output"</div>
-                    <pre class="preset">{move || card.output.get()}</pre>
-                </Show>
-            </div>
-        </details>
     }
 }
 
@@ -3164,6 +3198,28 @@ mod tests {
             ..stored.clone()
         };
         assert!(!spelled.differs(&stored));
+    }
+
+    #[test]
+    fn the_profile_is_a_setting_that_saves_and_applies_like_the_rest() {
+        let mut t = ChatThread {
+            profile_id: Some(3),
+            ..Default::default()
+        };
+        let stored = SettingsText::of(&t);
+        assert_eq!(stored.profile, "3");
+        let none = SettingsText {
+            profile: String::new(),
+            ..stored.clone()
+        };
+        assert!(none.differs(&stored));
+        apply_settings(&mut t, &json!({ "profile_id": null }));
+        assert_eq!(t.profile_id, None);
+        apply_settings(&mut t, &json!({ "profile_id": 5 }));
+        assert_eq!(t.profile_id, Some(5));
+        // A patch without the key leaves it alone.
+        apply_settings(&mut t, &json!({ "max_tokens": 5 }));
+        assert_eq!(t.profile_id, Some(5));
     }
 
     #[test]

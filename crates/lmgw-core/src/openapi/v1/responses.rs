@@ -13,7 +13,9 @@ use super::super::schemas;
 fn input_item() -> Value {
     json!({
         "description": "A message ({type:message,role,content}), a prior turn's \
-            {type:function_call,call_id,name,arguments} or \
+            {type:function_call,call_id,name,arguments} (call_id as lmgw gave it: a Gemini \
+            model's carries its thought signature and runs to hundreds of characters; echo \
+            it exactly, and do not send it to another provider directly) or \
             {type:function_call_output,call_id,output} (output a string, or an array of \
             {type:input_text,text} and {type:input_image,image_url} items: a base64 data: \
             image goes on as an image where the upstream's tool results take one and as a \

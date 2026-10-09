@@ -569,7 +569,7 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
         });
     }
 
-    let (tools, builtin) = resolve_tools(state, &agent.manifest).await?;
+    let (tools, builtin, offered) = resolve_tools(state, &agent.manifest).await?;
     // Every half of the tool plane logs under the same proto: a tool call made
     // by a run is an agent's tool call whether it landed on a registered MCP
     // server, on `lmgw` or on `docs` (§4.3). Without this the built-in labels
@@ -581,7 +581,10 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
             .with_client(format!("agent {}", agent.manifest.id))
             .with_proto(AGENT_TOOL_PROTO),
         builtin,
-        McpExecutor::new(state.clone(), RequestCtx::default()).with_proto(AGENT_TOOL_PROTO),
+        McpExecutor::new(state.clone(), RequestCtx::default())
+            .with_proto(AGENT_TOOL_PROTO)
+            .with_caller(crate::mcp::host::CallFrom::gateway())
+            .with_listed(offered),
     );
     let settings = state.snapshot().settings.clone();
     let mut run = Run {
@@ -646,12 +649,11 @@ fn run_caller(state: &SharedState, started_by: Option<i64>) -> RequestCtx {
 /// A label that does not resolve **fails the run**, naming it and the available
 /// ones: a batch step calls a tool by name, so a missing server is not a
 /// degraded run, it is a run that cannot take its first step.
-async fn resolve_tools(
-    state: &SharedState,
-    m: &Manifest,
-) -> Result<(Vec<ResolvedTool>, Vec<String>), String> {
+/// With the tools: the built-in names, and the server each other name was
+/// listed from — the only names the run's executor calls.
+async fn resolve_tools(state: &SharedState, m: &Manifest) -> Result<ResolvedTools, String> {
     if m.tools.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), HashMap::new()));
     }
     let specs: Vec<McpToolSpec> = m
         .tools
@@ -673,8 +675,11 @@ async fn resolve_tools(
     if let Some((label, why)) = resolved.failed.first() {
         return Err(format!("MCP server '{label}': {why}"));
     }
-    Ok((resolved.tools, resolved.builtin))
+    Ok((resolved.tools, resolved.builtin, resolved.servers))
 }
+
+/// [`resolve_tools`]' answer.
+type ResolvedTools = (Vec<ResolvedTool>, Vec<String>, HashMap<String, i64>);
 
 // ---------------------------------------------------------------------------
 // One step: a direct call or a turn (§2.2)
@@ -969,15 +974,16 @@ impl Run<'_> {
                 StepOut::data(Value::Null, meter),
             ));
         }
-        // Last, not first: `blocks_from_result` appends `structuredContent`
-        // after the content blocks, so the last JSON block is the structured
-        // one whenever a tool returned both.
-        if let Some(ToolResultBlock::Json { value }) = outcome
-            .blocks
-            .iter()
-            .rev()
-            .find(|b| matches!(b, ToolResultBlock::Json { .. }))
-        {
+        // The host's copy of `structuredContent` first: the model's blocks
+        // carry it only when the result's `content` was empty
+        // (`blocks_from_result`). Then a JSON block — a tool lmgw runs
+        // itself answers in one.
+        if let Some(value) = outcome.structured.as_ref().or_else(|| {
+            outcome.blocks.iter().rev().find_map(|b| match b {
+                ToolResultBlock::Json { value } => Some(value),
+                _ => None,
+            })
+        }) {
             return Ok(StepOut::data(value.clone(), meter));
         }
         let first_text = outcome.blocks.iter().find_map(|b| match b {
@@ -2876,6 +2882,15 @@ mod tests {
         let run = h.run(&agent, None, &exec);
         let out = run.direct_call("gws__search", json!({})).await.unwrap();
         assert_eq!(out.value, json!({"messages": [{"id": "m1"}]}));
+
+        // A server that sent both: the model's blocks hold the text alone,
+        // the step reads the host's copy of `structuredContent`.
+        let mut both = text_result("ignored prose");
+        both.structured = Some(json!({"messages": [{"id": "m3"}]}));
+        let exec = FakeExec::with(vec![("gws__search", both)]);
+        let run = h.run(&agent, None, &exec);
+        let out = run.direct_call("gws__search", json!({})).await.unwrap();
+        assert_eq!(out.value, json!({"messages": [{"id": "m3"}]}));
 
         let exec = FakeExec::with(vec![(
             "gws__search",

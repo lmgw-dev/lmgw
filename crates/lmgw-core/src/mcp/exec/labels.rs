@@ -9,8 +9,10 @@
 //!
 //! **Wire names** (§1.3) are the exposed names minus their namespace: a
 //! built-in toolset's label, or the registered server's own tool prefix, read
-//! from the server's record. Never by splitting on `__`: a bare server may
-//! expose a literal `x__y`, and its exposed name is already the server's own.
+//! from the server's record — or, for a tool a collision gave its server's
+//! prefix (`mcp::names`), the tool's own name. Never by splitting on `__`: a
+//! bare server may expose a literal `x__y`, and its exposed name is already
+//! the server's own.
 //!
 //! [`labels`] says what a caller could name **without connecting anything**
 //! (§1.4): the built-in toolsets [`resolve`] would answer for it, and the
@@ -121,10 +123,15 @@ pub async fn list_label(
             .map(|s| s.tool_prefix.trim().to_string())
             .filter(|p| !p.is_empty()),
     };
+    // A tool a collision gave its server's prefix goes by its own name on
+    // the wire, as every other does.
     let tools = defs
         .into_iter()
         .map(|def| LabelTool {
-            wire: wire_name(namespace.as_deref(), &def.name).to_string(),
+            wire: match resolved.moved.get(&def.name) {
+                Some(own) => own.clone(),
+                None => wire_name(namespace.as_deref(), &def.name).to_string(),
+            },
             def,
         })
         .collect();
@@ -213,14 +220,15 @@ pub fn labels(snap: &Snapshot, agg: &Aggregate, scope: &ToolScope) -> Vec<LabelE
 
 /// Whether `scope` may be told about the server `s`, as far as `agg` shows
 /// (realtime-server-tools §1.4, final review #3): any server, for a caller
-/// with no list of its own; else one the aggregate shows a tool of that the
+/// with no list of its own — unless `s` is a device row it does not reach
+/// whole (`ToolScope::narrows_for`); else one the aggregate shows a tool of that the
 /// list admits — or, with nothing of it listed now, one whose namespace the
 /// list can reach. Never a bare server with nothing listed: it has no
 /// namespace to read (`ToolScope::may_reach` calls it only worth asking
 /// about), so a scoped caller is not told of it until a tool of it is one
 /// the caller may use.
 pub(crate) fn shown_to(s: &McpServer, agg: &Aggregate, scope: &ToolScope) -> bool {
-    if !scope.narrows() {
+    if !scope.narrows_for(s) {
         return true;
     }
     let exposed: Vec<&String> = agg

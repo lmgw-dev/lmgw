@@ -9,6 +9,7 @@
 //! headers refuse are refused here, when the thread is saved rather than at
 //! every send.
 
+use crate::config::chat_profile::Reasoning;
 use crate::config::Route;
 use crate::ir::{ChatRequest, ReasoningControl};
 use crate::store::ChatThread;
@@ -21,6 +22,21 @@ pub(super) fn control(t: &ChatThread) -> Option<ReasoningControl> {
         budget_tokens: t.reasoning_budget,
     };
     (!c.is_empty()).then_some(c)
+}
+
+/// The control a turn of `t` asks for before a voice turn's default
+/// (personality-profiles design D7): the thread's own fields when it sets
+/// any (an effort or a budget alone counts), else its profile's on/off as
+/// `enabled`, else none — the route's default. The profile's value goes
+/// through the same control as the thread's, so it reaches every protocol
+/// the way a thread's "on" or "off" does.
+pub(super) fn control_with(t: &ChatThread, profile: Option<Reasoning>) -> Option<ReasoningControl> {
+    control(t).or_else(|| {
+        profile.map(|r| ReasoningControl {
+            enabled: Some(r == Reasoning::On),
+            ..Default::default()
+        })
+    })
 }
 
 /// Normalise and check a thread's three values before they are stored: an
@@ -131,6 +147,28 @@ mod tests {
         assert_eq!(control(&thread(None, None, None)), None);
         let c = control(&thread(Some(false), None, None)).unwrap();
         assert_eq!(c.enabled, Some(false));
+    }
+
+    #[test]
+    fn the_thread_s_own_fields_win_over_the_profile_s() {
+        // Nothing on the thread: the profile's on/off, as `enabled` alone.
+        let c = control_with(&thread(None, None, None), Some(Reasoning::Off)).unwrap();
+        assert_eq!(
+            (c.enabled, c.effort, c.budget_tokens),
+            (Some(false), None, None)
+        );
+        let c = control_with(&thread(None, None, None), Some(Reasoning::On)).unwrap();
+        assert_eq!(c.enabled, Some(true));
+        // Neither: the route's default.
+        assert_eq!(control_with(&thread(None, None, None), None), None);
+        // Any thread field wins whole, an effort or a budget alone too.
+        for t in [
+            thread(Some(true), None, None),
+            thread(None, Some("low"), None),
+            thread(None, None, Some(256)),
+        ] {
+            assert_eq!(control_with(&t, Some(Reasoning::Off)), control(&t));
+        }
     }
 
     #[test]

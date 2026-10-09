@@ -580,6 +580,12 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
     if reach_moved && published.is_err() {
         state.key_written(key.id, crate::state::KeyWritten::SelfAdmin(self_admin));
     }
+    // A cleared hosting grant removed the device's row, and its MCP tasks
+    // ended with it (MCP Tasks design §1.6): the results enter their
+    // threads.
+    if changed.contains(&"hosts_label") && hosts_label.is_none() {
+        crate::web::chat_tasks::servers_gone(state).await;
+    }
     let published = published.map_err(|e| e.to_string())?;
     state.mcp.reconcile(&published).await;
     // A session this key holds on `/mcp` has its own copy of `tools/list`;

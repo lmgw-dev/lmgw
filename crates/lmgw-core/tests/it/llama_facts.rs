@@ -255,11 +255,10 @@ async fn an_edit_drops_the_rows_facts() {
 async fn a_transport_failure_drops_the_rows_facts() {
     let w = External::llama().await;
     w.known().await;
-    // Point the row at a port that was just closed, keeping what the cache
+    // Point the row at a port nothing answers on, keeping what the cache
     // knows (an edit would drop it on its own).
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let dead = format!("http://{}/v1", closed.local_addr().unwrap());
-    drop(closed);
+    let (port, _held) = crate::common::refusing_port();
+    let dead = format!("http://127.0.0.1:{port}/v1");
     sqlx::query("UPDATE upstreams SET base_url = ? WHERE id = ?")
         .bind(&dead)
         .bind(w.id)

@@ -8,6 +8,7 @@
 use leptos::prelude::*;
 
 use super::chat::{has_tools, Msg, MsgRow};
+use super::chat_approvals::merge_cards;
 
 /// Message `m` takes stored row `rows[ri]`'s fields where they differ, and
 /// says whether any did (review CL-7: a field the row has none of is
@@ -18,8 +19,10 @@ use super::chat::{has_tools, Msg, MsgRow};
 /// - a user message's knowledge picks, and an answer's retrieval, which is
 ///   the stored one of the user message before it;
 /// - the tool record: cleared when the row has none, made (by `make`, under
-///   the page's owner) when the message shows none. Cards both have stay as
-///   shown: the live ones of the page's own turn carry their durations.
+///   the page's owner) when the message shows none. Cards both have are
+///   brought to the stored ones where they differ (a decision made
+///   elsewhere), in place; the live ones of the page's own turn keep their
+///   durations.
 pub(super) fn patch(
     m: &Msg,
     rows: &[MsgRow],
@@ -60,6 +63,13 @@ pub(super) fn patch(
         m.attachments.with_untracked(|a| *a != r.attachments),
         &|| m.attachments.set(r.attachments.clone()),
     );
+    take(m.task.with_untracked(|t| *t != r.task), &|| {
+        m.task.set(r.task.clone())
+    });
+    let at = Some(r.created_at.clone()).filter(|a| !a.is_empty());
+    take(m.created_at.with_untracked(|a| *a != at), &|| {
+        m.created_at.set(at.clone())
+    });
     if r.role == "user" {
         take(m.kb_refs.with_untracked(|k| *k != r.kb_refs), &|| {
             m.kb_refs.set(r.kb_refs.clone())
@@ -74,7 +84,8 @@ pub(super) fn patch(
             m.context.set(answering.clone())
         });
     }
-    let stored_tools = r.ir_messages.as_deref().is_some_and(has_tools);
+    // A late result's record is its synthetic call: its card stands for it.
+    let stored_tools = r.role != "tool" && r.ir_messages.as_deref().is_some_and(has_tools);
     let shown_tools = m.tools.with_untracked(|t| !t.is_empty());
     if shown_tools && !stored_tools {
         m.tools.set(Vec::new());
@@ -87,6 +98,16 @@ pub(super) fn patch(
             .unwrap_or_default();
         m.tools.set(cards);
         changed = true;
+    } else if stored_tools && shown_tools && m.role != "user" {
+        // Both show calls: a decision made elsewhere, or the turn it
+        // resumed, changes their results and what waits.
+        let fresh = make
+            .run(vec![r.clone()])
+            .first()
+            .map(|made| made.tools.get_untracked());
+        if let Some(fresh) = fresh {
+            changed |= merge_cards(m.tools, fresh);
+        }
     }
     if m.streaming.get_untracked() {
         m.streaming.set(false);
@@ -149,6 +170,7 @@ mod tests {
             is_error: RwSignal::new(false),
             ms: RwSignal::new(Some(12)),
             done: RwSignal::new(true),
+            approval: crate::pages::chat_approvals::Approval::new(),
         }]);
         m
     }
@@ -244,6 +266,7 @@ mod tests {
                         is_error: RwSignal::new(false),
                         ms: RwSignal::new(None),
                         done: RwSignal::new(true),
+                        approval: crate::pages::chat_approvals::Approval::new(),
                     }]);
                     made
                 })
@@ -252,5 +275,49 @@ mod tests {
         assert!(patch(&m, &rows, 1, make));
         assert_eq!(m.tools.with_untracked(Vec::len), 1);
         assert_eq!(m.context.get_untracked(), Some(retrieved));
+    }
+
+    /// A late MCP task result (MCP Tasks design §6): its task facts and its
+    /// time are taken, and its record (the synthetic call) makes no tool
+    /// cards — its own card stands for it.
+    #[test]
+    fn a_result_row_takes_its_task_and_makes_no_cards() {
+        let m = new_msg(1, "tool", String::new());
+        let ir = serde_json::json!([
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "lmgw_task_4", "name": "lmgw__job_result",
+                 "args": {"job": "t1", "tool": "desk__build"}}
+            ]},
+            {"role": "tool", "content": [
+                {"type": "tool_result", "id": "lmgw_task_4", "is_error": false,
+                 "content": [{"type": "text", "text": "job t1 (desk__build) completed"}]}
+            ]}
+        ])
+        .to_string();
+        let task = lmgw_api_types::chat::MessageTask {
+            task_id: "t1".into(),
+            server_label: "desk".into(),
+            tool: "desk__build".into(),
+            status: "completed".into(),
+            ended_by: None,
+            structured_content: None,
+        };
+        let rows = vec![MsgRow {
+            id: 9,
+            role: "tool".into(),
+            content: "job t1 (desk__build) completed".into(),
+            ir_messages: Some(ir),
+            task: Some(task.clone()),
+            created_at: "2026-10-09 11:00:00".into(),
+            ..Default::default()
+        }];
+        assert!(patch(&m, &rows, 0, no_make()));
+        assert_eq!(m.task.get_untracked(), Some(task));
+        assert_eq!(
+            m.created_at.get_untracked().as_deref(),
+            Some("2026-10-09 11:00:00")
+        );
+        assert!(m.tools.with_untracked(Vec::is_empty));
+        assert!(!patch(&m, &rows, 0, no_make()), "read again: nothing moves");
     }
 }

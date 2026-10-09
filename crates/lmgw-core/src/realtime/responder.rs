@@ -111,11 +111,14 @@ pub(crate) enum Msg {
     },
     /// What a bound response answers and speaks with, once its turn is
     /// planned: the thread's chat model and TTS as re-read — and the thread
-    /// as the session says it (`session.lmgw.resolved.chat_thread`).
+    /// as the session says it (`session.lmgw.resolved.chat_thread`), and the
+    /// session's own voice as the thread resolves it now
+    /// (personality-profiles design D21, `thread::reshape`).
     Planned {
         chat: String,
         tts: Option<String>,
         thread: super::protocol::ChatThreadRef,
+        voice: Box<super::thread::reshape::Reshape>,
     },
     /// A bound response goes to its model as its transcript after all
     /// (voice-audio-input design §3.5): its audio attempt was refused, or a

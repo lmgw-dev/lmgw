@@ -44,6 +44,7 @@ use crate::widgets::{
 mod realtime;
 use realtime::{BudgetPanel, SpeechStyleField, TagHintField, VoiceField, WordsField};
 /// The Chat's Voice group (chat-voice design §2.1).
+mod chat_profile;
 mod chat_voice;
 
 // ---------------------------------------------------------------------------
@@ -291,6 +292,9 @@ enum Ctl {
     Scale,
     /// A pointer to where the thing is really managed.
     Link(&'static str),
+    /// The personality profile new Chat threads start with: one of the
+    /// gateway's profiles, or none (`chat_profile`).
+    Profile,
 }
 
 impl Ctl {
@@ -316,6 +320,7 @@ impl Ctl {
             Ctl::Float(..) => Kind::Float,
             Ctl::Vad(col) => realtime::vad_kind(col),
             Ctl::Money => Kind::OptFloat,
+            Ctl::Profile => Kind::OptInt,
             Ctl::Bool | Ctl::TagHint => Kind::Flag,
             Ctl::Hold
             | Ctl::Apply(_)
@@ -1013,6 +1018,18 @@ const REST: &[Def] = &[
     .terms("chat default system prompt instructions persona new thread conversation"),
     f(
         "chat",
+        "prompt",
+        "chat_profile",
+        "Profile for new threads",
+        Ctl::Profile,
+    )
+    .hint(
+        "the personality profile a new chat thread starts with, unless its folder names one; \
+         Default is none. Edit profiles on the Chat profiles page",
+    )
+    .terms("chat personality profile persona concise voice new thread default"),
+    f(
+        "chat",
         "attachments",
         "chat_pdf_mode",
         "PDF attachments start as",
@@ -1131,6 +1148,52 @@ const REST: &[Def] = &[
         Ctl::Model(&["chat"], None, "none configured"),
     )
     .hint("answers sampling/createMessage for a server with no alias of its own"),
+    // The device MCP host link (client-apps design §5.1).
+    f(
+        "agents",
+        "mcp",
+        "mcp.host_max_message_mb",
+        "Device link: largest message",
+        Ctl::Int(0),
+    )
+    .s()
+    .unit("MiB")
+    .hint("0 = no bound of its own; a full-desktop screenshot is the large one")
+    .terms("device host link websocket size"),
+    f(
+        "agents",
+        "mcp",
+        "mcp.host_max_frame_mb",
+        "Device link: largest frame",
+        Ctl::Int(0),
+    )
+    .s()
+    .unit("MiB")
+    .hint("0 = bounded by the message limit; not both 0")
+    .terms("device host link websocket size"),
+    f(
+        "agents",
+        "mcp",
+        "mcp.host_ping_interval_s",
+        "Device link: ping every",
+        Ctl::Int(0),
+    )
+    .s()
+    .unit("s")
+    .hint("a missed pong closes the link; 0 = no pings")
+    .terms("device host link liveness"),
+    // MCP Tasks (MCP Tasks design §5.2): how often a job is asked about.
+    f(
+        "agents",
+        "mcp",
+        "mcp.task_poll_interval_s",
+        "Task poll interval",
+        Ctl::Int(1),
+    )
+    .s()
+    .unit("s")
+    .hint("used when a server suggests none; a server's status notifications act at once")
+    .terms("mcp tasks job poll tasks/get status interval"),
     // Docs
     f(
         "docs",
@@ -2330,6 +2393,16 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             view! {
                 <Field label=d.label unit=d.unit hint=d.hint dirty=dirty id=id hidden=hidden>
                     <Select value=value options=options/>
+                </Field>
+            }
+            .into_any()
+        }
+        Ctl::Profile => {
+            let value = bridge(form, k);
+            let options = chat_profile::options();
+            view! {
+                <Field label=d.label unit=d.unit hint=d.hint dirty=dirty id=id hidden=hidden>
+                    <Select value=value options=options placeholder="Default"/>
                 </Field>
             }
             .into_any()

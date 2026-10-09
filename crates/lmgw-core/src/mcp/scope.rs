@@ -26,7 +26,13 @@
 //! "No credential" sees everything because that is what *Require API key* off
 //! means; the scope binds a key that is presented, and switching auth on is
 //! what makes presenting one mandatory.
+//!
+//! **Except a device-hosted label** (client-apps design §5.6, L16): only the
+//! owner, the gateway's own runs, the device that hosts it, and a key, device
+//! or agent whose list names the label explicitly reach it — never an
+//! anonymous caller, an `all` or a `deny` scope ([`hosted`]).
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -39,6 +45,10 @@ use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 
 use super::selfadmin;
+
+mod hosted;
+pub use hosted::reachers;
+use hosted::Hosted;
 
 /// One caller's reach into the tool plane.
 #[derive(Debug, Clone)]
@@ -55,6 +65,14 @@ pub struct ToolScope {
     /// review's P-3), `Full` for every other caller.
     cap: SelfAdmin,
     list: List,
+    /// The device-hosted labels and how far this caller reaches into them
+    /// (L16).
+    hosted: Hosted,
+    /// For a deny list, every name each tool has or would have when it has
+    /// more than one (`Aggregate::spellings`): a tool is refused when its
+    /// list denies any of them ([`ToolScope::admits`]). Empty for every
+    /// other list.
+    spellings: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +100,8 @@ impl ToolScope {
             self_admin: true,
             cap: SelfAdmin::Full,
             list: List::All,
+            hosted: Hosted::every(),
+            spellings: HashMap::new(),
         }
     }
 
@@ -91,6 +111,8 @@ impl ToolScope {
             self_admin: false,
             cap: SelfAdmin::Off,
             list: List::Nothing { who: who.into() },
+            hosted: Hosted::default(),
+            spellings: HashMap::new(),
         }
     }
 
@@ -104,17 +126,39 @@ impl ToolScope {
         let self_admin = self_admin_of(&ctx.principal, &snap);
         let cap = crate::devices::admin_cap(&snap, &ctx.principal);
         // An agent token, whether or not `auth_enabled` is on (§3.1).
-        if let Some(agent) = &ctx.agent {
-            return Self {
-                self_admin,
-                cap,
-                list: agent_list(state, &agent.agent_id).await,
-            };
-        }
+        let list = match &ctx.agent {
+            Some(agent) => agent_list(state, &agent.agent_id).await,
+            None => principal_list(&ctx.principal, &snap),
+        };
+        // The surface, read only when there is something to read it for:
+        // whose each name is, by the server that serves it, when there is a
+        // device row to tell apart (`hosted`); every name of each tool, for
+        // a deny list.
+        let hosts = Hosted::any_in(&snap);
+        let mut agg = if hosts || denies(&list) {
+            Some(state.mcp.aggregate(&snap).await)
+        } else {
+            None
+        };
+        let spellings = spellings_for(&list, agg.as_mut());
+        let routes = match agg {
+            Some(agg) if hosts => agg
+                .reverse
+                .into_iter()
+                .map(|(name, (server, _))| (name, server))
+                .collect(),
+            _ => Default::default(),
+        };
+        let hosted = match &ctx.agent {
+            Some(_) => Hosted::of(&snap, None, routes),
+            None => hosted_of(&ctx.principal, &snap, routes),
+        };
         Self {
             self_admin,
             cap,
-            list: principal_list(&ctx.principal, &snap),
+            list,
+            hosted,
+            spellings,
         }
     }
 
@@ -127,6 +171,8 @@ impl ToolScope {
                 self_admin: self.self_admin,
                 cap: self.cap,
                 list: agent_list(state, agent_id).await,
+                hosted: self.hosted.clone(),
+                spellings: HashMap::new(),
             },
             _ => self.clone(),
         }
@@ -142,7 +188,31 @@ impl ToolScope {
     /// allow pattern that begins with `lmgw__`, or a deny pattern that can
     /// match such a name. A list that says nothing about it leaves the
     /// label whole. The self-admin level bounds which of them exist.
+    ///
+    /// A deny list refuses a tool under any name it has or would have
+    /// (`Aggregate::spellings`; client-apps design §7.6): denying `delete`
+    /// keeps out the `alpha__delete` a collision moved it to, and denying
+    /// `alpha__delete` keeps it out once the collision ends. An allow list
+    /// admits the name it names only — allowing `delete` admits no tool a
+    /// collision moved away from it.
     pub fn admits(&self, name: &str) -> bool {
+        self.admits_as(name) && !self.denies_spelling(name)
+    }
+
+    /// Whether this caller's deny list denies another name of `name`'s tool.
+    fn denies_spelling(&self, name: &str) -> bool {
+        let List::Key { policy, .. } = &self.list else {
+            return false;
+        };
+        policy.tool_scope_mode == ScopeMode::Deny
+            && self
+                .spellings
+                .get(name)
+                .is_some_and(|all| all.iter().any(|n| !policy.admits_tool(n)))
+    }
+
+    /// [`Self::admits`] by the name as spelt.
+    fn admits_as(&self, name: &str) -> bool {
         if selfadmin::owns(name) {
             return self.self_admin
                 && match &self.list {
@@ -151,6 +221,24 @@ impl ToolScope {
                     }
                     _ => true,
                 };
+        }
+        // A device-hosted label (L16): reached whole by the owner, the
+        // gateway and the hosting device; otherwise only through a list
+        // that names it.
+        if let Some(h) = self.hosted.of_name(name) {
+            if self.hosted.whole(h) {
+                return true;
+            }
+            return match &self.list {
+                List::Key { policy, .. } => hosted::admits_named(policy, h, name),
+                List::Agent {
+                    labels, allowed, ..
+                } => {
+                    labels.iter().any(|l| l.eq_ignore_ascii_case(&h.label))
+                        && allowed.iter().any(|a| a == name)
+                }
+                List::All | List::Nothing { .. } => false,
+            };
         }
         match &self.list {
             List::All => true,
@@ -174,6 +262,18 @@ impl ToolScope {
     /// question without the tool list. A bare server has no namespace to read,
     /// so it is always worth asking about.
     pub fn may_reach(&self, server: &McpServer) -> bool {
+        if let Some(h) = self.hosted.of_server(server) {
+            if self.hosted.whole(h) {
+                return true;
+            }
+            return match &self.list {
+                List::Key { policy, .. } => hosted::names_label(policy, h),
+                List::Agent { labels, .. } => labels
+                    .iter()
+                    .any(|l| l.eq_ignore_ascii_case(&h.label) || *l == server.name),
+                List::All | List::Nothing { .. } => false,
+            };
+        }
         match &self.list {
             List::All => true,
             List::Nothing { .. } => false,
@@ -194,6 +294,15 @@ impl ToolScope {
     /// through a pattern `<head>*` whose head the namespace starts with; a
     /// deny list only when none of its patterns can match a name in it.
     pub fn admits_namespace(&self, prefix: &str) -> bool {
+        if let Some(h) = self.hosted.of_prefix(prefix) {
+            if self.hosted.whole(h) {
+                return true;
+            }
+            return match &self.list {
+                List::Key { policy, .. } => hosted::admits_whole(policy, h),
+                _ => false,
+            };
+        }
         match &self.list {
             List::All => true,
             List::Nothing { .. } | List::Agent { .. } => false,
@@ -221,6 +330,28 @@ impl ToolScope {
     /// Does this caller have a list of its own, beyond the owner's switch?
     pub fn narrows(&self) -> bool {
         !matches!(self.list, List::All)
+    }
+
+    /// Does this caller's reach into `server` need checking, tool by tool?
+    /// When its list narrows, or `server` is a device row it does not reach
+    /// whole (L16, review W3-9): an `All` holds another device's label back
+    /// and nothing else, so its other servers — a bare one not connected
+    /// included — stay as an `All` has them.
+    pub fn narrows_for(&self, server: &McpServer) -> bool {
+        self.narrows()
+            || self
+                .hosted
+                .of_server(server)
+                .is_some_and(|h| !self.hosted.whole(h))
+    }
+
+    /// The server `name` routed to when this scope was read, when there are
+    /// device rows to tell apart (else `None`): a call this scope admitted
+    /// is held to it (`McpManager::call_listed`), so a name that changes
+    /// hands between the check and the call — to a device the caller does
+    /// not reach — is refused rather than run there.
+    pub fn routed(&self, name: &str) -> Option<i64> {
+        self.hosted.routed_to(name)
     }
 
     /// Who is asking, and what their list says — the half of a refusal that
@@ -258,6 +389,20 @@ impl ToolScope {
 
     /// Why `name` is refused, for a caller [`admits`](Self::admits) said no to.
     pub fn refusal(&self, name: &str) -> String {
+        if let Some(h) = self.hosted.of_name(name).filter(|h| !self.hosted.whole(h)) {
+            let named = matches!(&self.list, List::Key { policy, .. }
+                if hosted::names_label(policy, h));
+            if !named {
+                return format!(
+                    "{name} — '{}' is a paired device's hosted tools: only the owner, that \
+                     device, and a key, device or agent whose tool scope names '{}__' \
+                     explicitly reach them; {} does not",
+                    h.label,
+                    h.label,
+                    self.describe()
+                );
+            }
+        }
         if selfadmin::owns(name) && !self.self_admin {
             return format!(
                 "{name} — the lmgw__* self-admin tools need an owner credential or a device \
@@ -284,6 +429,19 @@ impl ToolScope {
     }
 }
 
+/// Whether `list` is a deny list, which reads every name of a tool.
+fn denies(list: &List) -> bool {
+    matches!(list, List::Key { policy, .. } if policy.tool_scope_mode == ScopeMode::Deny)
+}
+
+/// What [`ToolScope::spellings`] holds for `list`, from the surface `agg`.
+fn spellings_for(list: &List, agg: Option<&mut super::Aggregate>) -> HashMap<String, Vec<String>> {
+    match agg {
+        Some(agg) if denies(list) => std::mem::take(&mut agg.spellings),
+        _ => HashMap::new(),
+    }
+}
+
 /// An agent token's list, read from its manifest now.
 async fn agent_list(state: &SharedState, agent_id: &str) -> List {
     let grant = match crate::agents::tool_grant(state, agent_id).await {
@@ -300,6 +458,28 @@ async fn agent_list(state: &SharedState, agent_id: &str) -> List {
         agent_id: agent_id.to_string(),
         labels: grant.labels,
         allowed: grant.names,
+    }
+}
+
+/// How far `principal` reaches into the device-hosted labels (L16): every
+/// one for an owner credential, its own for a device, otherwise none but
+/// what its list names.
+fn hosted_of(
+    principal: &Principal,
+    snap: &Snapshot,
+    routes: std::collections::HashMap<String, i64>,
+) -> Hosted {
+    match principal {
+        Principal::Key {
+            kind: ApiKeyKind::Owner,
+            ..
+        } => Hosted::every(),
+        Principal::Key {
+            id,
+            kind: ApiKeyKind::Device,
+            ..
+        } => Hosted::of(snap, Some(*id), routes),
+        _ => Hosted::of(snap, None, routes),
     }
 }
 
@@ -608,6 +788,8 @@ mod tests {
             self_admin: self_admin_of(&p, snap),
             cap: crate::devices::admin_cap(snap, &p),
             list: principal_list(&p, snap),
+            hosted: hosted_of(&p, snap, Default::default()),
+            spellings: HashMap::new(),
         }
     }
 
@@ -661,6 +843,88 @@ mod tests {
         );
     }
 
+    /// A client key's scope over a surface where `servers` (id, name,
+    /// prefix, tools) offer their tools, as `of_request` reads it.
+    fn scope_over(
+        mode: ScopeMode,
+        patterns: &str,
+        servers: &[(i64, &str, &str, &[&str])],
+    ) -> ToolScope {
+        use rmcp::model::Tool;
+        let snap = snap_with(ApiKeyKind::Key, mode, patterns);
+        let lists: Vec<Vec<Tool>> = servers
+            .iter()
+            .map(|(_, _, _, names)| {
+                names
+                    .iter()
+                    .map(|n| Tool::new(n.to_string(), "t", rmcp::model::JsonObject::new()))
+                    .collect()
+            })
+            .collect();
+        let ov = HashMap::new();
+        let mut inputs: Vec<super::super::AggServerInput<'_>> = servers
+            .iter()
+            .zip(&lists)
+            .map(
+                |((id, name, prefix, _), tools)| super::super::AggServerInput {
+                    server_id: *id,
+                    server_name: name,
+                    tool_prefix: prefix,
+                    tools,
+                    overrides: &ov,
+                    device: false,
+                },
+            )
+            .collect();
+        let mut agg = super::super::build_aggregate(&mut inputs);
+        let mut s = scope_in(&snap, ApiKeyKind::Key);
+        s.spellings = spellings_for(&s.list, Some(&mut agg));
+        s
+    }
+
+    /// A deny list holds for a tool under every name it has or would have
+    /// (client-apps design §7.6, review 1): denying `delete` keeps out both
+    /// tools a collision moved from it, a pattern over one prefix keeps out
+    /// its twins' moved names, and a name denied in its moved spelling keeps
+    /// the tool out once nothing collides. An allow list is not carried.
+    #[test]
+    fn a_deny_list_holds_for_every_name_of_a_tool_and_an_allow_list_for_its_own() {
+        let both: &[(i64, &str, &str, &[&str])] = &[
+            (1, "alpha", "", &["delete", "read"]),
+            (2, "beta", "", &["delete"]),
+        ];
+        let deny = scope_over(ScopeMode::Deny, "delete", both);
+        assert!(!deny.admits("alpha__delete") && !deny.admits("beta__delete"));
+        assert!(deny.admits("read"));
+        assert!(
+            deny.refusal("alpha__delete").contains("a deny list"),
+            "{}",
+            deny.refusal("alpha__delete")
+        );
+
+        let alone: &[(i64, &str, &str, &[&str])] = &[(1, "alpha", "", &["delete", "read"])];
+        let moved = scope_over(ScopeMode::Deny, "alpha__delete", alone);
+        assert!(
+            !moved.admits("delete"),
+            "denied as it was called while moved"
+        );
+        assert!(moved.admits("read"));
+
+        let twins: &[(i64, &str, &str, &[&str])] = &[
+            (1, "gh work", "gh", &["search"]),
+            (2, "gh-home", "gh", &["search"]),
+        ];
+        let pattern = scope_over(ScopeMode::Deny, "gh__*", twins);
+        assert!(!pattern.admits("gh_work__search") && !pattern.admits("gh-home__search"));
+
+        let allow = scope_over(ScopeMode::Allow, "delete", both);
+        assert!(!allow.admits("alpha__delete") && !allow.admits("beta__delete"));
+        let allow = scope_over(ScopeMode::Allow, "alpha__delete", both);
+        assert!(allow.admits("alpha__delete") && !allow.admits("beta__delete"));
+        let allow = scope_over(ScopeMode::Allow, "delete", alone);
+        assert!(allow.admits("delete"));
+    }
+
     fn scope(kind: ApiKeyKind, mode: ScopeMode, patterns: &str) -> ToolScope {
         scope_in(&snap_with(kind, mode, patterns), kind)
     }
@@ -686,6 +950,7 @@ mod tests {
             allow_sampling: false,
             sampling_alias: None,
             agent_id: None,
+            device_key_id: None,
         }
     }
 
@@ -755,6 +1020,8 @@ mod tests {
             self_admin: Principal::Anonymous.holds(Cap::Admin, &snap),
             cap: SelfAdmin::Full,
             list: principal_list(&Principal::Anonymous, &snap),
+            hosted: hosted_of(&Principal::Anonymous, &snap, Default::default()),
+            spellings: HashMap::new(),
         };
         assert!(s.admits("github__search"));
         assert!(!s.admits("lmgw__status"));

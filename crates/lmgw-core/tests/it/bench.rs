@@ -129,27 +129,24 @@ impl World {
 
     /// Wait until the job is no longer live.
     async fn finished(&self, job_id: i64) {
-        for _ in 0..3000 {
-            if self.state().jobs.live_one(job_id).is_none() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("benchmark job {job_id} did not finish");
+        common::patience::until(&format!("benchmark job {job_id} finishes"), || {
+            self.state().jobs.live_one(job_id).is_none()
+        })
+        .await;
     }
 
     /// Wait until the job's stage satisfies `pred`; the stage.
     async fn stage(&self, job_id: i64, pred: impl Fn(&str) -> bool) -> String {
         let mut last = String::new();
-        for _ in 0..3000 {
+        let mut wait = common::patience::Wait::new(format!("job {job_id} reaches the stage"));
+        loop {
             match self.state().jobs.live_one(job_id) {
                 Some(j) if pred(&j.stage) => return j.stage,
                 Some(j) => last = j.stage,
                 None => panic!("job {job_id} ended while waiting (last stage '{last}')"),
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            wait.again(Some(&last)).await;
         }
-        panic!("job {job_id} never reached the stage (last '{last}')");
     }
 
     async fn run(&self, id: i64) -> Value {
@@ -464,9 +461,8 @@ async fn during_a_run_the_card_is_the_benchmarks_and_cancel_keeps_what_it_measur
     assert_eq!(header(&resp, "x-lmgw-fallback-reason"), Some("benchmark"));
     let v: Value = resp.json().await.unwrap();
     assert_eq!(v["choices"][0]["message"]["content"], "from the cloud");
-    let mut logged = None;
-    for _ in 0..200 {
-        let rows = store::query_logs(
+    let logged = || async {
+        store::query_logs(
             &w.state().db,
             &store::LogFilter {
                 alias: Some("fb".into()),
@@ -475,15 +471,14 @@ async fn during_a_run_the_card_is_the_benchmarks_and_cancel_keeps_what_it_measur
             },
         )
         .await
-        .unwrap();
-        if let Some(r) = rows.into_iter().next() {
-            logged = Some(r);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+        .unwrap()
+    };
+    common::patience::until_async("the fallback's row", || async {
+        !logged().await.is_empty()
+    })
+    .await;
     assert_eq!(
-        logged.unwrap().fallback_reason.as_deref(),
+        logged().await[0].fallback_reason.as_deref(),
         Some("benchmark")
     );
 
@@ -562,13 +557,10 @@ async fn the_hold_switching_on_aborts_the_run_and_removes_its_container() {
         .start(json!({"model_id": "qwen", "repetitions": 1, "phases": ["prefill"]}))
         .await;
     w.stage(job, |s| s.starts_with("prefill")).await;
-    for _ in 0..500 {
-        if w.llama.seen.hanging.load(Ordering::SeqCst) > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(w.llama.seen.hanging.load(Ordering::SeqCst) > 0);
+    common::patience::until("the measured prefill hangs", || {
+        w.llama.seen.hanging.load(Ordering::SeqCst) > 0
+    })
+    .await;
     let v = w.ok("hold_set", json!({"active": true})).await;
     assert_eq!(v["benchmark_aborted"], run_id, "{v}");
     let name = format!("{}-bench-{run_id}", w.prefix());
@@ -601,14 +593,14 @@ async fn until_vram(w: &World, what: &str, ready: impl Fn(&Value) -> bool) -> Va
             .await
             .unwrap()
     };
-    for _ in 0..300 {
+    let mut wait = common::patience::Wait::new(what);
+    loop {
         let v = get().await;
         if ready(&v) {
             return v;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        wait.again(Some(&v)).await;
     }
-    panic!("{what}: {}", get().await);
 }
 
 /// The bench container's processes are lmgw's share of the card (§3.4), like
@@ -752,13 +744,7 @@ async fn a_request_queued_for_room_is_refused_once_the_lease_is_taken() {
     let state = w.state().clone();
     let route = w.g.route("qwen");
     let queued = tokio::spawn(async move { lmgw_core::vram::admit(&state, &route, "qwen").await });
-    for _ in 0..500 {
-        if w.state().vram.waits_begun() > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(w.state().vram.waits_begun() > 0, "the request queued");
+    common::patience::until("the request queues", || w.state().vram.waits_begun() > 0).await;
 
     let (run_id, job) = w
         .start(json!({"model_id": "qwen", "repetitions": 1, "phases": ["probes"]}))
@@ -833,9 +819,7 @@ async fn a_load_that_dies_fails_the_run_with_the_classifiers_hint() {
     let w = World::new(quick()).await;
     // Nothing answers on the port the container gets, and podman says it
     // exited: the load phase reads the log tail.
-    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = dead.local_addr().unwrap().port();
-    drop(dead);
+    let (port, _held) = common::refusing_port();
     let launcher = Arc::new(FakeLauncher {
         port,
         ..Default::default()

@@ -3,7 +3,8 @@
 //! prefill, a heard turn's audio on a route whose model cannot take it) — writes its
 //! request row as the plain path does (`chat::relay`, voice-audio-input
 //! WP2 review #8): the refusal is model traffic that did not happen, and
-//! the Requests page says why.
+//! the Requests page says why. The profile editor's Test
+//! (`chat_profiles::try`) records its refusal at admission the same way.
 
 use std::time::Instant;
 
@@ -17,7 +18,7 @@ use crate::state::SharedState;
 /// The refusal `e` of the turn for `alias` on `route`, under the loop's
 /// `proto`, as its request row — charged to `key`, the turn's caller
 /// (`Turn::key`).
-pub(super) async fn record(
+pub(in crate::web) async fn record(
     state: &SharedState,
     (key, alias): (proxy::KeyRef, &str),
     proto: &str,

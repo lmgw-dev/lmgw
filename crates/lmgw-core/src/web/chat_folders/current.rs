@@ -70,28 +70,62 @@ enum Decision {
 }
 
 /// The thread a new conversation in `folder` starts as: the default system
-/// prompt with the folder's defaults over it, the folder's model, a chat
-/// thread in the folder.
+/// prompt and profile with the folder's defaults over them, the folder's
+/// model, a chat thread in the folder.
 pub(super) fn thread_from(
     state: &AppState,
     folder: &ChatFolder,
     model_alias: &str,
     kind: &str,
 ) -> ChatThread {
-    let prompt = if kind == "chat" {
-        state.snapshot().settings.default_chat_prompt().to_string()
+    let mut t = new_thread(&state.snapshot(), &folder.defaults, kind, model_alias);
+    t.folder_id = Some(folder.id);
+    // The owner's floor for the folder's tools is the thread's to start
+    // with (client-apps design §6.6), whoever makes it.
+    t.approval_floor = folder.approval_floor.clone();
+    t
+}
+
+/// What a new thread of `kind` starts with before any folder: a chat
+/// thread Settings → Chat's default prompt and profile (`chat_profile`),
+/// an Admin Chat thread neither (personality-profiles design §3.1: a
+/// profile as the prompt). The create route, a folder's new thread and the
+/// comparison a folder's change is applied to its current thread by
+/// (`apply::delta`) all start here, so the three agree (profiles review
+/// fix 3).
+pub(in crate::web) fn thread_start(
+    snap: &crate::config::Snapshot,
+    kind: &str,
+) -> (String, Option<i64>) {
+    if kind == "chat" {
+        (
+            snap.settings.default_chat_prompt().to_string(),
+            super::super::chat_profiles::default_profile(snap),
+        )
     } else {
-        String::new()
-    };
+        (String::new(), None)
+    }
+}
+
+/// A new thread of `kind` on `model_alias` in a folder with defaults `d`:
+/// [`thread_start`], then the defaults over it (the folder's model wins) —
+/// a chat thread's only; an Admin Chat thread takes none of them.
+pub(super) fn new_thread(
+    snap: &crate::config::Snapshot,
+    d: &crate::store::ThreadDefaults,
+    kind: &str,
+    model_alias: &str,
+) -> ChatThread {
+    let (system_prompt, profile_id) = thread_start(snap, kind);
     let mut t = ChatThread {
         model_alias: model_alias.to_string(),
-        system_prompt: prompt,
+        system_prompt,
+        profile_id,
         kind: kind.to_string(),
-        folder_id: Some(folder.id),
         ..Default::default()
     };
     if kind == "chat" {
-        folder.defaults.apply(&mut t);
+        d.apply(&mut t);
     }
     t
 }

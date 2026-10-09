@@ -10,7 +10,8 @@
 //! ## Native passthrough
 //!
 //! An upstream flagged [`supports_responses`](crate::config::Upstream::supports_responses)
-//! gets the body forwarded verbatim. Synthesizing the API on top of a provider
+//! gets the body forwarded verbatim (bar the model name and the bare call ids
+//! of gateway design §7.1). Synthesizing the API on top of a provider
 //! that already implements it would be strictly *worse* than proxying: the
 //! provider round-trips its own reasoning items between tool calls, and
 //! down-translating through `/v1/chat/completions` discards them. Everything
@@ -162,7 +163,10 @@ pub async fn handle_responses(state: SharedState, ctx: RequestCtx, body: Value) 
     let mut prior: Option<StoredResponse> = None;
     let mut resume: Vec<DecidedCall> = Vec::new();
     if let Some(prev_id) = req.previous_response_id.clone() {
-        match load_chain(&state, &prev_id, &mut req).await {
+        // Whoever continues the response decides its pending calls: the
+        // request's own principal.
+        let by = crate::mcp::host::CallFrom::of(&ctx).caller;
+        match load_chain(&state, &prev_id, &mut req, &by).await {
             Ok((stored, decided)) => {
                 prior = Some(stored);
                 resume = decided;
@@ -328,6 +332,7 @@ async fn load_chain(
     state: &SharedState,
     prev_id: &str,
     req: &mut ResponsesRequest,
+    by: &crate::agent::approval::Approver,
 ) -> Result<(StoredResponse, Vec<DecidedCall>), GatewayError> {
     if !state.snapshot().settings.responses_store {
         return Err(GatewayError::Unsupported(
@@ -359,7 +364,7 @@ async fn load_chain(
             GatewayError::Internal(format!("stored response {prev_id} is unreadable: {e}"))
         })?,
     };
-    let decided = decide(&pending, req)?;
+    let decided = decide(&pending, req, by)?;
 
     // OpenAI does not carry `instructions` across a chained call, so that a
     // client can swap the system prompt. Honored when the client *says*
@@ -404,6 +409,7 @@ async fn load_chain(
 fn decide(
     pending: &[PendingCall],
     req: &ResponsesRequest,
+    by: &crate::agent::approval::Approver,
 ) -> Result<Vec<DecidedCall>, GatewayError> {
     if pending.is_empty() {
         if let Some(a) = req.approvals.first() {
@@ -431,10 +437,14 @@ fn decide(
             Some(r) => format!("The user declined this tool call: {r}"),
             None => "The user declined this tool call.".to_string(),
         };
+        // A verdict on a gated call is a decision, by whoever sent it; a
+        // sibling held beside one carries nobody (client-apps design §6.3).
+        let by = (p.needs_approval && verdict.is_some()).then(|| by.clone());
         out.push(DecidedCall {
             call: p.clone(),
             approved,
             denial,
+            by,
         });
     }
     if !unanswered.is_empty() {
@@ -456,7 +466,8 @@ fn decide(
 // ---------------------------------------------------------------------------
 
 /// Forward the body to an upstream that implements `/v1/responses` itself,
-/// rewriting only the model name. Streams the response through untouched, so
+/// rewriting only the model name, the reasoning effort and any input item's
+/// `call_id` that carries a Gemini thought signature (to its bare id). Streams the response through untouched, so
 /// reasoning items, hosted-tool events and anything the provider adds later
 /// reach the client intact — the whole reason for not synthesizing here.
 /// `degraded`: what the body's content lost to a fallback that cannot see,
@@ -479,6 +490,10 @@ async fn native_passthrough(
 
     let mut upstream_body = body.clone();
     upstream_body["model"] = Value::String(route.upstream_model.clone());
+    // An earlier step answered by Gemini (a fallback, an alias switched
+    // mid-conversation) left its thought signatures in the call ids; they
+    // stay with Gemini, as on every synthesized send (gateway design §7.1).
+    crate::ir::wire_call_ids_in_responses_body(&mut upstream_body);
     // The resolved control — headers over body over alias defaults (§5.2).
     // `reasoning.effort` is the only control this API can carry, so it is the
     // only one written in; the rest are named in the response's

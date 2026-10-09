@@ -163,6 +163,9 @@ async fn count_messages_route(
     match route.upstream.protocol {
         Protocol::Anthropic => {
             let mut body = body.clone();
+            // A Gemini step's thought signatures in the call ids stay with
+            // Gemini, and out of the count (gateway design §7.1).
+            crate::ir::wire_call_ids_in_messages_body(&mut body);
             with_lmgw_reasoning(&mut body, ctx, route);
             let requested = body
                 .get("model")

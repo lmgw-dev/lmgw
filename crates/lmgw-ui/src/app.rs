@@ -56,6 +56,7 @@ pub fn App() -> impl IntoView {
                                 <Routes fallback=pages::NotFound>
                                     <Route path=path!("") view=pages::Overview/>
                                     <Route path=path!("chat") view=pages::Chat/>
+                                    <Route path=path!("chat/profiles") view=pages::ChatProfiles/>
                                     <Route path=path!("audio-lab") view=pages::AudioLab/>
                                     <Route path=path!("image-lab") view=pages::ImageLab/>
                                     <Route path=path!("agents") view=pages::Agents/>

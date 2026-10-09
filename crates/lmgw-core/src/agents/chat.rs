@@ -169,6 +169,7 @@ pub async fn open(
         .map(|t| ThreadMcp {
             server_label: t.label.clone(),
             allowed_tools: t.allowed.clone(),
+            require_approval: None,
         })
         .collect();
 

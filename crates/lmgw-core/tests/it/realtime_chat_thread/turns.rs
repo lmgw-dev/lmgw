@@ -264,6 +264,19 @@ async fn mcp_tool_frames_are_relayed_and_never_a_function_call() {
         tools.contains(&"start") && tools.contains(&"result"),
         "{tools:?}"
     );
+    // The result frame is relayed whole, with what an MCP Apps host needs
+    // (client-apps design §7.3): the label, and no UI resource or
+    // structured content for a tool that has none.
+    let result = of_type(&events, "lmgw.chat.frame")
+        .into_iter()
+        .find(|e| e["event"] == "tool" && e["data"]["event"] == "result")
+        .unwrap();
+    assert_eq!(result["data"]["server_label"], "stub", "{result}");
+    let data = result["data"].as_object().unwrap();
+    assert!(
+        data["ui_resource"].is_null() && data["structured_content"].is_null(),
+        "{result}"
+    );
     for e in &events {
         assert_ne!(e["item"]["type"], "function_call", "{e}");
         assert!(

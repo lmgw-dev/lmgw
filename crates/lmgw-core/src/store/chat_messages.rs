@@ -52,6 +52,9 @@ pub struct ChatReply {
     /// writes it: the continued row keeps its own, less the unheard rest
     /// ([`continue_chat_reply`]).
     pub voice: Option<MessageVoice>,
+    /// A gated turn's calls (client-apps design §6.2): `Some` when the turn
+    /// stopped on one, and on a reply a resumed turn saves.
+    pub pending_approvals: Option<super::PendingApprovals>,
 }
 
 /// What [`continue_chat_reply`] did.
@@ -68,12 +71,23 @@ pub enum ContinueSave {
 /// Append a turn's reply as a new assistant row and bump the thread's
 /// `updated_at`; its id.
 pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply) -> DbResult<i64> {
+    append_chat_reply_by(pool, thread_id, r, None).await
+}
+
+/// [`append_chat_reply`], `by` naming the turn's starter in the feed's
+/// `approval.requested` records of a gated turn's calls.
+pub async fn append_chat_reply_by(
+    pool: &SqlitePool,
+    thread_id: i64,
+    r: &ChatReply,
+    by: Option<&str>,
+) -> DbResult<i64> {
     let mut tx = super::begin_write(pool).await?;
     let id = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages,
-            model, answered_by, voice, images_note)
-         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            model, answered_by, voice, images_note, pending_approvals)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .bind(thread_id)
     .bind(&r.content)
@@ -85,9 +99,22 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
     .bind(&r.answered_by)
     .bind(super::chat_voice::message_voice_json(r.voice.as_ref()))
     .bind(&r.images_note)
+    .bind(
+        r.pending_approvals
+            .as_ref()
+            .map(super::PendingApprovals::to_json),
+    )
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
+    super::chat_approvals::record_requested(
+        &mut tx,
+        thread_id,
+        id,
+        r.pending_approvals.as_ref(),
+        by,
+    )
+    .await?;
     touch_thread(&mut tx, thread_id).await?;
     tx.commit().await?;
     Ok(id)
@@ -150,7 +177,8 @@ pub async fn continue_chat_reply(
 /// Rewrite user message `id` for a resend, in one transaction (review R1
 /// finding 9): its text becomes `content`, its knowledge picks `kb_refs`, its
 /// stored retrieval goes (it described the old text), and every later message
-/// is deleted with its attachments. Its own attachments stay bound. A
+/// is deleted with its attachments — but a late MCP task result (role
+/// `tool`), which stays and is answered again (MCP Tasks design T13). Its own attachments stay bound. A
 /// dictated message whose text changed loses its `voice`: the text is no
 /// longer what was spoken (chat-voice design §3). `false` — and nothing
 /// written — when no such user message is in this thread.
@@ -177,7 +205,7 @@ pub async fn rewrite_chat_user_message(
     if n == 0 {
         return Ok(false);
     }
-    sqlx::query("DELETE FROM chat_messages WHERE thread_id = ?1 AND id > ?2")
+    sqlx::query("DELETE FROM chat_messages WHERE thread_id = ?1 AND id > ?2 AND role <> 'tool'")
         .bind(thread_id)
         .bind(id)
         .execute(&mut *tx)
@@ -216,7 +244,8 @@ pub async fn last_chat_message(
 }
 
 /// Rewrite one message's columns in place — the row, its id, its position
-/// and its attachments stay (an edited user message keeps its files).
+/// and its attachments stay (an edited user message keeps its files). An
+/// edited reply's tool record goes, and so does what it waited on.
 /// `false` when no such message is in this thread.
 pub async fn update_chat_message(
     pool: &SqlitePool,
@@ -227,7 +256,7 @@ pub async fn update_chat_message(
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content=?3, reasoning=?4, prompt_tokens=?5,
-           completion_tokens=?6, ir_messages=?7, voice=?8
+           completion_tokens=?6, ir_messages=?7, voice=?8, pending_approvals=NULL
          WHERE id=?1 AND thread_id=?2",
     )
     .bind(id)
@@ -269,7 +298,10 @@ pub async fn delete_chat_message(pool: &SqlitePool, thread_id: i64, id: i64) -> 
 /// Cut the thread back to message `id`: delete every message after it, and
 /// `id` itself too when `inclusive`. Their attachments cascade. Returns how
 /// many messages went. "After" is id order, which is the order
-/// [`list_chat_messages`] reads a thread in.
+/// [`list_chat_messages`] reads a thread in. A late MCP task result (role
+/// `tool`) is no reply and stays: the work happened, and the turn that
+/// follows answers it again (MCP Tasks design T13). Deleting one by itself
+/// is [`delete_chat_message`]'s.
 pub async fn truncate_chat_messages(
     pool: &SqlitePool,
     thread_id: i64,
@@ -277,9 +309,9 @@ pub async fn truncate_chat_messages(
     inclusive: bool,
 ) -> DbResult<u64> {
     let sql = if inclusive {
-        "DELETE FROM chat_messages WHERE thread_id=?1 AND id >= ?2"
+        "DELETE FROM chat_messages WHERE thread_id=?1 AND id >= ?2 AND role <> 'tool'"
     } else {
-        "DELETE FROM chat_messages WHERE thread_id=?1 AND id > ?2"
+        "DELETE FROM chat_messages WHERE thread_id=?1 AND id > ?2 AND role <> 'tool'"
     };
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(sql)

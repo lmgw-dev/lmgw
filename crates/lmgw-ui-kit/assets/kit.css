@@ -1,0 +1,381 @@
+/* lmgw-ui-kit: design tokens and the shared widgets' rules.
+   Linked before the host's own stylesheet, so a host can override anything here.
+   It names no asset path of any host: the fonts the --sans/--mono tokens name
+   are the host's @font-face (or the desktop's own families). */
+
+/* ---------- tokens: dark (default) ---------- */
+:root {
+  /* native controls (checkboxes, file buttons, a <select>'s popup, form
+     scrollbars) drawn for the theme, not white on graphite */
+  color-scheme: dark;
+  --bg0: #16191C;          /* window base / sidebar */
+  --bg1: #1C2024;          /* content background */
+  --surface: #23272C;      /* cards, inputs */
+  --surface-hi: #2B3036;   /* hover / raised */
+  --border: #333940;
+  --border-strong: #454D56;
+  --text: #E2E6EA;
+  --text-2: #98A2AC;
+  --text-3: #6A737D;
+  --accent: #3DAEE9;       /* interactive accent — links, primary, focus, active nav */
+  --accent-hi: #5CBDF2;
+  --accent-ink: #10161C;   /* text on accent fills */
+  --accent-bg: rgba(61,174,233,.13);
+  --amber: #E8A33D;        /* liveness — streaming, downloads, pulse, dirty state */
+  --amber-bg: rgba(232,163,61,.13);
+  --ok: #41B25D;
+  --ok-bg: rgba(65,178,93,.13);
+  --err: #E5534B;
+  --err-bg: rgba(229,83,75,.12);
+  --shadow: 0 1px 2px rgba(0,0,0,.25), 0 4px 16px rgba(0,0,0,.18);
+  --sans: "Plex Sans", system-ui, sans-serif;
+  --mono: "Plex Mono", monospace;
+  /* syntax tokens (highlight.js), tuned to the palette above */
+  --code-cmt: #6A737D; --code-key: #6CBCF2; --code-tag: #E5786E;
+  --code-attr: #94BEE8; --code-str: #94C87E; --code-num: #E8A33D;
+  --code-fn: #94BEE8; --code-type: #58C4BE; --code-meta: #98A2AC;
+  /* chart tokens (usage-analytics design §6.3). Six categorical slots in a
+     fixed order, assigned per entity and never by rank; validated against
+     --surface in both themes. `hue_for()` is for chips, never for a chart. */
+  --c1: #0486D3; --c2: #D57700; --c3: #009D9E;
+  --c4: #875CC6; --c5: #5B9D2C; --c6: #CF5291;
+  --c-other: #6A737D;      /* the folded tail — a real series, not a 7th hue */
+  --seq0: #262C33;         /* an empty ordinal cell: one step off surface */
+  --seq1: #375F80; --seq2: #3674A5; --seq3: #3089CB;
+  --seq4: #3F9FE8; --seq5: #60B6FA;
+  --grid: #2E343A;         /* hairline, SOLID, recessive — dashing means projection */
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --bg0: #E8EAEC;
+  --bg1: #F3F4F5;
+  --surface: #FBFCFC;
+  --surface-hi: #FFFFFF;
+  --border: #D3D8DC;
+  --border-strong: #B4BCC2;
+  --text: #21262B;
+  --text-2: #5A646D;
+  --text-3: #87919A;
+  --accent: #1F6DAD;
+  --accent-hi: #185A91;
+  --accent-ink: #FFFFFF;
+  --accent-bg: rgba(31,109,173,.10);
+  --amber: #B45309;
+  --amber-bg: rgba(180,83,9,.10);
+  --ok: #1E7E3E;
+  --ok-bg: rgba(30,126,62,.12);
+  --err: #C03B32;
+  --err-bg: rgba(192,59,50,.10);
+  --shadow: 0 1px 2px rgba(25,30,36,.08), 0 4px 14px rgba(25,30,36,.07);
+  --code-cmt: #87919A; --code-key: #1F6DAD; --code-tag: #C03B32;
+  --code-attr: #33608D; --code-str: #3E7A35; --code-num: #935108;
+  --code-fn: #33608D; --code-type: #0E6F74; --code-meta: #5A646D;
+  /* light is *selected*, not flipped: its own validated steps */
+  --c1: #0077C7; --c2: #CF7100; --c3: #009192;
+  --c4: #7541B8; --c5: #4A8B10; --c6: #C43783;
+  --c-other: #87919A;
+  --seq0: #EFF2F4;
+  --seq1: #CFE3F4; --seq2: #A9CDEC; --seq3: #78B0DF;
+  --seq4: #4590CE; --seq5: #1F6DAD;
+  --grid: #E4E8EB;
+}
+
+/* ---------- density ---------- */
+.density-dense { --ctl-h: 28px; --fs: 13px; --fs-sm: 12px; --pad: 10px; --gap: 8px;
+                 --card-r: 10px; --row-h: 32px; }
+.density-airy  { --ctl-h: 36px; --fs: 14px; --fs-sm: 13px; --pad: 18px; --gap: 14px;
+                 --card-r: 14px; --row-h: 44px; }
+
+
+/* A two-step destructive action (ConfirmButton). The armed pair replaces the
+   button in place, so a nowrap actions cell simply grows by it. */
+.confirm { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
+
+/* ---------- forms (widgets/form.rs) ----------
+   A field says it is changed (the amber rule of the dirty state, drawn in the
+   gap so nothing shifts) and why it is wrong, inline. */
+.field-unit { color: var(--text-3); font-weight: 400; }
+.field-unit::before { content: " · "; }
+.field.dirty, .check-line.dirty { position: relative; }
+:is(.field, .check-line).dirty::before { content: ""; position: absolute; left: -7px;
+  top: 1px; bottom: 1px; width: 2px; border-radius: 2px; background: var(--amber); }
+.field.invalid :is(.input, .select-btn) { border-color: var(--err); }
+.field-err { margin-top: 4px; font-size: 11.5px; color: var(--err); }
+/* A stored value nothing judges (Settings): amber, dashed — not the dirty
+   rule, and it blocks nothing. */
+.field.warned :is(.input, .select-btn) { border-color: var(--amber); border-style: dashed; }
+/* The save foot: always there, quiet when clean. */
+.save-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+  font-size: var(--fs-sm); min-height: var(--ctl-h); }
+.save-bar .spacer { flex: 1; }
+.save-bar.dirty .save-state b { color: var(--amber); font-weight: 600; }
+.save-bar .save-state { color: var(--text-2); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; min-width: 0; }
+.save-invalid, .save-err { color: var(--err); }
+.save-err { min-width: 0; max-width: 60ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+/* An explanation folded to its first sentence. */
+.explain { font-size: 12px; color: var(--text-2); margin-top: 6px; }
+.explain > summary { cursor: pointer; list-style: none; line-height: 1.45; }
+.explain > summary::-webkit-details-marker { display: none; }
+.explain > summary::before { content: "▸ "; color: var(--text-3); font-size: 10px; }
+.explain[open] > summary::before { content: "▾ "; }
+.explain > summary:hover { color: var(--text); }
+.explain-body { margin: 4px 0 0 14px; line-height: 1.45; }
+.dirty-q { margin: 0; }
+
+/* ---------- section (widgets/section.rs) ----------
+   The eyebrow heading a long page is made of, folding to one line: caret,
+   title, count, the folded summary, actions on the right. */
+.sec + .sec { margin-top: 22px; }
+.sec-head { display: flex; align-items: center; gap: 8px; min-height: 24px;
+  margin-bottom: 8px; min-width: 0; }
+.sec.closed > .sec-head { margin-bottom: 0; }
+.sec-toggle { display: inline-flex; align-items: center; gap: 6px; border: 0;
+  background: none; padding: 0; cursor: pointer; color: var(--text-3);
+  font: 600 11px var(--sans); letter-spacing: .09em; text-transform: uppercase;
+  white-space: nowrap; flex: none; }
+.sec-toggle:hover:not(:disabled) { color: var(--text); }
+.sec-toggle:disabled { cursor: default; }
+.sec-toggle:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+/* ▸ pointing down when open */
+.caret-icon { display: inline-block; font-size: 9px; color: var(--text-3); }
+.sec:not(.closed) > .sec-head .caret-icon { transform: rotate(90deg); }
+.sec-head .count { margin-left: 0; }
+.sec-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text-3); font-size: var(--fs-sm); }
+.sec-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px;
+  align-items: center; justify-content: flex-end; }
+
+/* toasts */
+/* Errors stay until dismissed, so the stack can grow: it keeps inside the
+   window and scrolls, and past a few toasts offers to clear itself. */
+.toast-host { position: fixed; right: 16px; bottom: 16px; z-index: 100;
+  display: flex; flex-direction: column; gap: 8px; max-width: 380px;
+  max-height: calc(100vh - 72px); overflow-y: auto; }
+/* Above a page's save foot, not over its Save: the "saved" toast of one save
+   must not stand on the button of the next. */
+body:has(.page-foot) .toast-host { bottom: 64px; }
+.toast-clear { align-self: flex-end; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--surface-hi); color: var(--text-2); font: 500 12px var(--sans);
+  padding: 3px 10px; cursor: pointer; box-shadow: var(--shadow); }
+.toast-clear:hover { color: var(--text); }
+.toast { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border-radius: 12px; background: var(--surface-hi); border: 1px solid var(--border);
+  box-shadow: var(--shadow); font-size: 13px; }
+/* A message wraps inside the host's width, however long its words: a 64-hex
+   ID or a path must not widen the toast past the host, which would then
+   scroll sideways and cut the message's start off. `anywhere` (unlike
+   `break-word`) also lowers the text's min-content width, which is what lets
+   the flex item shrink at all. */
+.toast { overflow-wrap: anywhere; }
+.toast.ok { border-color: var(--ok); }
+.toast.warn { border-color: var(--amber); }
+.toast.err { border-color: var(--err); }
+.toast-x { border: 0; background: none; color: var(--text-3); cursor: pointer;
+  margin-left: auto; font-size: 12px; flex-shrink: 0; }
+.toast-x:hover { color: var(--text); }
+
+.copy-btn { border: 0; background: none; color: var(--text-3); cursor: pointer;
+  font-size: 12px; padding: 2px 4px; border-radius: 5px; }
+.copy-btn:hover { color: var(--accent); background: var(--accent-bg); }
+
+/* ---------- modal (widgets/modal.rs) ----------
+   A column: head and foot stay put, the body is the one scroller. The UA caps
+   a modal dialog a few px short of the window and lets it scroll; the panel
+   sets its own bounds, so the dialog must not add a second scroller. */
+dialog.modal { border: 0; padding: 0; background: none; max-width: none;
+  max-height: none; overflow: visible; }
+dialog.modal::backdrop { background: rgba(0,0,0,.45); }
+.modal-panel { display: flex; flex-direction: column; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+  min-width: min(420px, 94vw); max-width: min(820px, 94vw);
+  max-height: calc(100vh - 32px); color: var(--text); }
+/* A wide editor is as tall as its content, up to the window (a short one is
+   not half empty panel). A frame whose body is one flexing pane — a file
+   browser, a log — stays window-tall: the list loading into it must not make
+   it jump. */
+.modal-panel.wide { width: min(1280px, 94vw); max-width: none; }
+.modal-panel.full { width: 94vw; max-width: none; }
+.modal-panel.wide:has(> .modal-body.fill), .modal-panel.full { height: calc(100vh - 32px); }
+.modal-head { flex: none; display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 14px 18px 10px; }
+.modal-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.modal-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px 18px 16px; }
+/* fill: the body holds one flexing pane (a fill-pane, a preview frame) */
+.modal-body.fill { overflow: hidden; display: flex; flex-direction: column; }
+.modal-body.fill > :not(.fill-pane) { flex: none; }
+.modal-foot { flex: none; display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--border); }
+/* destructive actions sit apart, at the far left */
+.modal-foot .foot-danger { margin-right: auto; display: inline-flex; gap: 8px; }
+/* a ModalFooter rendered outside any modal: a plain right-aligned row */
+.modal-foot.inline { border-top: 0; padding: 14px 0 0; }
+/* Unsaved input and a close request: asked in place, under the title. */
+.modal-ask { flex: none; display: flex; align-items: center; gap: 8px; margin: 0 18px 8px;
+  padding: 6px 8px 6px 12px; border: 1px solid var(--amber); border-radius: 10px;
+  background: var(--amber-bg); color: var(--amber); font-size: var(--fs-sm, 12px);
+  font-weight: 500; }
+.modal-ask .spacer { flex: 1; }
+/* Errors raised while the modal is up, repeated above its foot: the toast
+   host is under the backdrop, where they could be read but not dismissed. */
+.modal-errs { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 8px 18px 0; }
+.modal-err { display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border: 1px solid var(--err); border-radius: 10px; background: var(--err-bg);
+  color: var(--err); font-size: 13px; }
+.modal-err .toast-x { margin-left: auto; }
+.preview-frame { flex: 1; width: 100%; border: 1px solid var(--border);
+  border-radius: 8px; background: #fff; }
+.preview-lang { align-self: flex-start; font-size: 10px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-3); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 8px; margin: 0 0 8px; }
+
+/* ---------- popover (widgets/popover.rs) ----------
+   A panel in the top layer, placed from its anchor's rectangle by the widget
+   (top/bottom/left/max-height inline). The top layer is above every card,
+   table scroller and modal, so nothing clips it. The UA gives [popover] an
+   inset and margin that would centre it; both are cleared here. */
+.pop { position: fixed; inset: auto; margin: 0; padding: 4px; overflow: hidden;
+  display: flex; flex-direction: column; background: var(--surface-hi);
+  color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px;
+  box-shadow: var(--shadow); font: 400 var(--fs, 13px) var(--sans);
+  /* It inherits from where it sits in the DOM (an actions cell is right-
+     aligned, an eyebrow uppercase), not from where it is drawn. */
+  text-align: left; text-transform: none; letter-spacing: normal;
+  white-space: normal; line-height: normal; }
+.pop[popover]:not(:popover-open) { display: none; }
+.pop-inner { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+/* the scrolling part; the filter row above it stays put */
+.pop-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; outline: none;
+  display: flex; flex-direction: column; }
+.pop-filter { flex: none; display: flex; align-items: center; gap: 8px; padding: 2px 2px 6px; }
+.pop-filter .input { flex: 1; height: 26px; }
+.pop-count { font: 500 11px var(--mono); color: var(--text-3); white-space: nowrap; }
+.pop-empty { padding: 8px 10px; color: var(--text-3); font-size: var(--fs-sm, 12px); }
+
+/* custom select (WebKitGTK can't style native popups) */
+.select { position: relative; display: inline-block; }
+.select-btn { display: inline-flex; align-items: center; justify-content: space-between;
+  gap: 8px; cursor: pointer; text-align: left; }
+.select-btn > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.select-arrow { color: var(--text-3); font-size: 10px; }
+/* One highlight for the pointer and the keyboard alike: `.active` follows
+   whichever moved last. */
+.select-opt { flex: none; color: var(--text); padding: 6px 10px; border-radius: 6px;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.select-opt.active { background: var(--surface); }
+.select-opt.sel { color: var(--accent); background: var(--accent-bg); }
+.select-opt.sel.active { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* ---------- model picker (widgets/model_picker.rs) ----------
+   A Select-shaped button that says where the model is served from, and a
+   pop with a filter, chips with counts, a count line and grouped rows. */
+.mp-btn { max-width: 100%; }
+.mp-val { display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: var(--fs-sm); }
+.mp-src { flex: none; font: 500 10.5px var(--mono); color: var(--text-3); white-space: nowrap; }
+/* The alias wins the room (a long alias was clipped
+   beside its source label in a narrow Settings column): the source label gives way first,
+   ellipsized to nothing in a narrow box, and the name is cut only when it
+   alone is longer than the box. The label is in the title, and in the pop. */
+.mp-btn > .mp-val:has(+ .mp-src) { flex: 0 0 auto; max-width: calc(100% - 18px); }
+.mp-btn > .mp-src { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mp-src.warn { color: var(--amber); }
+/* the source's identity swatch, the model-chip convention */
+.mp-dot { flex: none; width: 8px; height: 8px; border-radius: 3px;
+  background: oklch(0.68 0.14 var(--hue)); }
+.mp-pfx { color: var(--text-3); }
+.mp-pop { width: min(560px, 92vw); padding: 0; }
+.mp { gap: 0; }
+.mp-top { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--border); }
+.mp-q { width: 100%; height: 28px; }
+.mp-facets { display: flex; flex-wrap: wrap; gap: 4px; }
+.mp-facets .facet { height: 22px; padding: 0 8px; }
+.mp-count { font: 500 11px var(--mono); color: var(--text-3); }
+.mp-count .mp-err { color: var(--err); }
+.mp-count .link-btn { font: 500 11px var(--mono); color: var(--accent); }
+.mp-list { padding: 4px; }
+/* group heads stay at the top of the list while their rows scroll under */
+.mp-head { flex: none; position: sticky; top: -4px; z-index: 1; display: flex;
+  align-items: center; gap: 6px; padding: 6px 8px 4px; margin: 0 -4px; cursor: pointer;
+  background: var(--surface-hi); color: var(--text-3); font: 600 10.5px var(--sans);
+  letter-spacing: .08em; text-transform: uppercase; }
+.mp-head:hover, .mp-head.active { color: var(--text); }
+.mp-head[aria-expanded="true"] .caret-icon { transform: rotate(90deg); }
+.mp-head .count { margin-left: 0; letter-spacing: 0; text-transform: none; }
+.mp-note { font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-3); }
+.mp-row { flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+  border-radius: 6px; cursor: pointer; min-width: 0; }
+.mp-row.active { background: var(--surface); }
+.mp-row.sel { background: var(--accent-bg); }
+.mp-row.sel .mp-id { color: var(--accent); }
+.mp-row.sel.active { box-shadow: inset 0 0 0 1px var(--accent); }
+.mp-row.off { opacity: .5; cursor: default; }
+.mp-id { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: var(--fs-sm); color: var(--text); }
+.mp-meta { flex: none; display: inline-flex; align-items: center; gap: 6px;
+  font: 400 11px var(--mono); color: var(--text-3); }
+.mp-badge { padding: 0 4px; border: 1px solid var(--border-strong); border-radius: 4px;
+  font-size: 10px; line-height: 14px; }
+.mp-ctx { min-width: 4ch; text-align: right; }
+.mp-price { color: var(--text-2); }
+.mp-custom { color: var(--text-2); }
+/* the typed text sits between its quotes, not pushed to the far edge */
+.mp-custom .mp-id { flex: 0 1 auto; }
+
+/* ---------- split pane (widgets/split.rs) ----------
+   A side panel beside a main pane. Its width is a share of the split held
+   between a floor and a ceiling (the widget writes --side-w from the split's
+   measured width; the fallback is the same clamp for the first frame).
+   Folded, it is a 28px rail with its label on end and its count. Below the
+   caller's floor for the main pane the panel folds whatever was stored, and
+   the rail lays it over the main pane (.peek) instead of squeezing it. Each
+   pane scrolls itself. */
+.dock { display: flex; height: 100%; min-width: 0; min-height: 0; position: relative;
+  container: dock / inline-size; }
+.dock-main { flex: 1 1 0; min-width: 0; min-height: 0; display: flex;
+  flex-direction: column; overflow: hidden; }
+.dock-main > * { flex: 1 1 auto; min-height: 0; }
+.dock-side { flex: none; width: var(--side-w, clamp(220px, 24cqi, 360px)); min-height: 0;
+  display: flex; flex-direction: column; background: var(--bg0); }
+.dock.left > .dock-side, .dock.left > .dock-rail { border-right: 1px solid var(--border); }
+.dock.right > .dock-side, .dock.right > .dock-rail { border-left: 1px solid var(--border); }
+.dock-head { flex: none; display: flex; align-items: center; gap: 6px; height: 34px;
+  padding: 0 4px 0 12px; border-bottom: 1px solid var(--border); }
+.dock-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 600 10.5px var(--sans); letter-spacing: .09em; text-transform: uppercase;
+  color: var(--text-3); }
+.dock-head .count { margin-left: 0; }
+.dock-fold { margin-left: auto; flex: none; width: 26px; height: 26px; border: 0;
+  border-radius: 6px; background: none; color: var(--text-3); cursor: pointer;
+  font-size: 13px; }
+.dock-fold:hover { color: var(--text); background: var(--surface); }
+.dock-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.dock-rail { flex: none; width: 28px; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; padding: 8px 0; border: 0; background: var(--bg0);
+  color: var(--text-2); cursor: pointer; font: 600 10.5px var(--sans);
+  letter-spacing: .09em; text-transform: uppercase; }
+.dock-rail:hover, .dock-rail[aria-expanded="true"] { color: var(--text); background: var(--surface); }
+.dock-glyph { font-size: 13px; letter-spacing: 0; color: var(--text-3); }
+.dock-rail-label, .dock-rail .count { writing-mode: vertical-rl; white-space: nowrap; }
+.dock-rail .count { margin: 0; padding: 7px 0; letter-spacing: 0; text-transform: none; }
+/* the look over a main pane that has no room for the panel beside it */
+.dock.peek > .dock-side { position: absolute; top: 0; bottom: 0; z-index: 4;
+  box-shadow: var(--shadow); }
+.dock.left.peek > .dock-side { left: 28px; }
+.dock.right.peek > .dock-side { right: 28px; }
+
+
+/* Running text folded to its first --lines lines (widgets/clamp.rs). The
+   "more" sits beside the last line, so a folded text costs no extra row; it
+   is only there when the fold actually hides something. */
+.clamp-box { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.clamp { flex: 0 1 auto; min-width: 0; overflow: hidden; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: var(--lines, 3); }
+.clamp.open { display: block; -webkit-line-clamp: none; overflow: visible; }
+.clamp-more { flex: none; padding: 0; font-size: var(--fs-sm); color: var(--accent); }
+.clamp-more:hover { color: var(--accent); text-decoration: underline; }

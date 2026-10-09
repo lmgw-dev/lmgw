@@ -148,6 +148,9 @@ fn today() -> String {
 struct Bundle {
     thread: ChatThread,
     folder: Option<ChatFolder>,
+    /// The thread's personality profile, `(id, name)`, when it names one
+    /// that exists (personality-profiles design §1.2).
+    profile: Option<(i64, String)>,
     messages: Vec<ChatMessageRow>,
     /// Every attachment of the thread, bytes included; drafts (no message)
     /// too.
@@ -182,9 +185,15 @@ async fn load(s: &AppState, thread: ChatThread) -> DbResult<Bundle> {
         Some(id) if !repo.is_temp() => store::get_chat_folder(&s.db, id).await?,
         _ => None,
     };
+    let profile = thread.profile_id.and_then(|id| {
+        s.snapshot()
+            .chat_profile(id)
+            .map(|p| (p.id, p.name.clone()))
+    });
     Ok(Bundle {
         thread,
         folder,
+        profile,
         messages,
         attachments,
     })
@@ -523,6 +532,8 @@ struct JsonExport<'a> {
     thread: ThreadOut<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     folder: Option<Value>,
+    /// `{id, name}`, or `null` for none.
+    profile: Option<Value>,
     messages: Vec<MessageOut<'a>>,
     draft_attachments: Vec<AttachmentOut<'a>>,
 }
@@ -607,6 +618,10 @@ impl<'a> JsonExport<'a> {
                 .folder
                 .as_ref()
                 .map(|f| json!({"id": f.id, "name": f.name})),
+            profile: b
+                .profile
+                .as_ref()
+                .map(|(id, name)| json!({"id": id, "name": name})),
             messages,
             draft_attachments: b
                 .attachments
@@ -675,6 +690,9 @@ fn markdown(b: &Bundle) -> String {
     ];
     if let Some(f) = &b.folder {
         meta.push(format!("- **Folder:** {}", one_line(&f.name)));
+    }
+    if let Some((_, name)) = &b.profile {
+        meta.push(format!("- **Profile:** {}", one_line(name)));
     }
     if t.id < 0 {
         meta.push("- **Temporary chat** (was never stored)".into());
@@ -764,7 +782,17 @@ fn markdown(b: &Bundle) -> String {
                 None => format!("Assistant · {}", one_line(model)),
             },
             ("assistant", None) => "Assistant".to_string(),
-            (other, _) => other.to_string(),
+            // A late MCP task result (MCP Tasks design §2.2): the job, its
+            // tool and how it ended; its text is the result.
+            (other, _) => match &m.task {
+                Some(t) => format!(
+                    "Job {} · {} · {}",
+                    one_line(&t.task_id),
+                    one_line(&t.tool),
+                    one_line(&t.status)
+                ),
+                None => other.to_string(),
+            },
         };
         // A spoken reply says so too (chat-voice design §3).
         let who = if m.role == "assistant" && m.voice.is_some() {
@@ -806,7 +834,9 @@ fn markdown(b: &Bundle) -> String {
                 m.reasoning.trim()
             ));
         }
-        if let Some(ir) = m.ir_messages.as_deref().filter(|s| !s.trim().is_empty()) {
+        // A task result's record is its synthetic call: its text says it.
+        let record = m.ir_messages.as_deref().filter(|_| !m.is_task_result());
+        if let Some(ir) = record.filter(|s| !s.trim().is_empty()) {
             let pretty = serde_json::from_str::<Value>(ir)
                 .and_then(|v| serde_json::to_string_pretty(&v))
                 .unwrap_or_else(|_| ir.to_string());

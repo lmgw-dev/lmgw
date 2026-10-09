@@ -12,7 +12,10 @@
 //! - `device`: L3 — a device's feed never carries an Admin Chat thread,
 //!   live, in its catch-up, in `hello` or in a folder's counts;
 //! - `revoke`: Disable, Rotate, Delete and expiry end a device's feed with
-//!   `revoked`.
+//!   `revoked`;
+//! - `profiles`: the `profile.*` events (personality-profiles design §3.2);
+//! - `deleted_device`: `device.revoked` and who hears it (MCP Tasks design
+//!   §4.1, client-apps design §2.2).
 
 use std::time::Duration;
 
@@ -20,11 +23,14 @@ use serde_json::Value;
 
 use crate::realtime_chat_thread::{settings, World};
 
+mod deleted_device;
 mod device;
 mod gaps;
 mod live;
+mod profiles;
 mod revoke;
 mod stored;
+mod tasks;
 
 /// One SSE record: its `id:`, its `event:` (`":"` for a comment) and its
 /// JSON `data:`.
@@ -153,9 +159,13 @@ impl Feed {
     }
 }
 
-/// The thread or folder a stored event is about.
+/// The thread or folder a stored event is about; `-1` for one about
+/// neither (a `profile.*` event, whose `id` is the profile's).
 pub(crate) fn subject(f: &Frame) -> i64 {
     let d = &f.data;
+    if f.event.starts_with("profile.") {
+        return -1;
+    }
     if f.event.starts_with("thread.") {
         d.get("thread_id")
             .or_else(|| d.get("id"))

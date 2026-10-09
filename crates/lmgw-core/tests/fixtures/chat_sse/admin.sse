@@ -8,10 +8,10 @@ event: tool
 data: {"event":"args","fragment":"{}","index":0}
 
 event: tool
-data: {"arguments":{},"event":"ready","index":0,"name":"lmgw__mcp_servers"}
+data: {"arguments":{},"call_id":"c1","event":"ready","index":0,"name":"lmgw__mcp_servers","needs_approval":false,"server_label":"lmgw","ui_resource":null}
 
 event: tool
-data: {"event":"result","index":0,"is_error":false,"ms":0,"name":"lmgw__mcp_servers","output":"{\n  \"mcp_servers\": []\n}"}
+data: {"call_id":"c1","content":[{"text":"{\n  \"mcp_servers\": []\n}","type":"text"}],"event":"result","index":0,"is_error":false,"ms":0,"name":"lmgw__mcp_servers","output":"{\n  \"mcp_servers\": []\n}","server_label":"lmgw","structured_content":null,"ui_resource":null}
 
 event: delta
 data: {"text":"no serv"}

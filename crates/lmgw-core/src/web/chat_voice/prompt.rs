@@ -5,13 +5,17 @@
 //! text-output session's turns and a `speak: true` text turn do not get it.
 //!
 //! In order:
-//! 1. the thread's prompt, expanded as in a text turn;
-//! 2. the voice block — opened, when the thread's prompt is not empty, by
-//!    the bridge ([`BRIDGE`]), then the voice instructions:
-//!    - `realtime.default_instructions` unset: the built-in text without
-//!      its persona sentence (the thread's prompt says who the model is),
-//!      and with its "no date" sentence only while the thread's prompt has
-//!      no `{{date}}`;
+//! 1. the thread's prompt, expanded as in a text turn — with a personality
+//!    profile, the static part instead (`chat_profile`, personality-profiles
+//!    design §2.1): the persona in the prompt's place when it has one, then
+//!    the length rule and the examples;
+//! 2. the voice block — opened, when the part before it is not empty, by
+//!    the bridge ([`BRIDGE`]), then the voice instructions: the profile's
+//!    voice block when it sets one (D6), else `realtime.default_instructions`:
+//!    - unset: the built-in text without its persona sentence (the prompt
+//!      says who the model is), and with its "no date" sentence only while
+//!      the base — the persona, else the thread's prompt — has no
+//!      `{{date}}`;
 //!    - set: that text, verbatim — the owner's words;
 //!    - `""`: no voice block, and no bridge either;
 //! 3. the language sentence ([`language_sentence`]), when the thread has a
@@ -35,8 +39,8 @@
 
 use crate::config::{RealtimeSettings, CHAT_PROMPT_DATE, VOICE_FORM, VOICE_NO_DATE, VOICE_STYLE};
 use crate::ir::ReasoningControl;
-use crate::store::ChatThread;
 
+use super::super::chat_profile::Prompt;
 use super::super::chat_turn::{TurnLanguage, VoiceTurn};
 
 /// What opens the voice block after a thread prompt (module doc).
@@ -48,14 +52,17 @@ pub(crate) const BRIDGE: &str = "This reply is spoken aloud. For it, the instruc
 mod sentence;
 pub(crate) use sentence::language_sentence;
 
-/// What follows the thread's prompt (`raw`, as stored — its `{{date}}`
-/// decides the "no date" sentence) in a voice turn's system message: the
+/// What follows the static part in a voice turn's system message: the
 /// voice block, the turn's `language` (its reply heard: a voice turn's
 /// reply is spoken) and the hint, as paragraphs; empty when there is none
-/// of them.
+/// of them. `base` is who the model is, as written (its `{{date}}` decides
+/// the "no date" sentence); `opened`, whether anything comes before the
+/// block (the bridge opens it then); `instructions`, the voice text that
+/// applies (`None`: the built-in one, `""`: none).
 pub(crate) fn voice_block(
-    raw: &str,
-    settings: &RealtimeSettings,
+    base: &str,
+    opened: bool,
+    instructions: Option<&str>,
     hint: Option<&str>,
     language: Option<&TurnLanguage>,
 ) -> String {
@@ -63,13 +70,13 @@ pub(crate) fn voice_block(
         .filter(|l| !l.reply.trim().is_empty())
         .map(|l| language_sentence(l.speaks.as_deref(), &l.reply, true));
     let mut own_paragraph = language.clone();
-    let voice = match settings.default_instructions.as_deref() {
+    let voice = match instructions {
         None => {
             let style = match own_paragraph.take() {
                 Some(l) => format!("{VOICE_FORM} {l}"),
                 None => VOICE_STYLE.to_string(),
             };
-            Some(if raw.contains(CHAT_PROMPT_DATE) {
+            Some(if base.contains(CHAT_PROMPT_DATE) {
                 style
             } else {
                 format!("{style} {VOICE_NO_DATE}")
@@ -80,11 +87,7 @@ pub(crate) fn voice_block(
     };
     let mut paragraphs = Vec::new();
     if let Some(v) = voice {
-        paragraphs.push(if raw.trim().is_empty() {
-            v
-        } else {
-            format!("{BRIDGE} {v}")
-        });
+        paragraphs.push(if opened { format!("{BRIDGE} {v}") } else { v });
     }
     paragraphs.extend(own_paragraph);
     paragraphs.extend(
@@ -95,49 +98,55 @@ pub(crate) fn voice_block(
     paragraphs.join("\n\n")
 }
 
-/// What a voice turn adds to `thread`'s request (§8.5): the block after
-/// its prompt ([`voice_block`], `hint` the speaking TTS's, `language` the
-/// thread's languages), and the reasoning it asks for — the thread's own when it sets
-/// any reasoning field (an effort or a budget alone counts), otherwise off,
-/// through the existing control: thinking delays the first word, and is
-/// never spoken.
+/// What a voice turn adds to `prompt`'s request (§8.5): the block after
+/// its static part ([`voice_block`], `hint` the speaking TTS's, `language`
+/// the thread's languages), and the reasoning it asks for — the thread's
+/// own when it sets any reasoning field (an effort or a budget alone
+/// counts), else its profile's on/off, otherwise off, through the existing
+/// control: thinking delays the first word, and is never spoken.
 pub(crate) fn voice_request(
-    thread: &ChatThread,
+    prompt: &Prompt<'_>,
     settings: &RealtimeSettings,
     hint: Option<&str>,
     language: Option<&TurnLanguage>,
 ) -> (String, Option<ReasoningControl>) {
-    let block = voice_block(&thread.system_prompt, settings, hint, language);
-    let reasoning = super::super::chat_reasoning::control(thread).or(Some(ReasoningControl {
+    let block = voice_block(
+        prompt.base(),
+        !prompt.static_part().is_empty(),
+        prompt.voice_instructions(settings).as_deref(),
+        hint,
+        language,
+    );
+    let reasoning = prompt.reasoning().or(Some(ReasoningControl {
         enabled: Some(false),
         ..Default::default()
     }));
     (block, reasoning)
 }
 
-/// What a turn adds after `thread`'s prompt, and its reasoning: a voice
-/// turn's block ([`voice_request`]); for any other turn with a reply
+/// What a turn adds after `prompt`'s static part, and its reasoning: a
+/// voice turn's block ([`voice_request`]); for any other turn with a reply
 /// `language`, its sentence alone (module doc), with the thread's own
-/// reasoning; otherwise nothing.
+/// reasoning, else its profile's; otherwise nothing.
 pub(crate) fn turn_block(
-    thread: &ChatThread,
+    prompt: &Prompt<'_>,
     settings: &RealtimeSettings,
     voice: Option<&VoiceTurn>,
     language: Option<&TurnLanguage>,
 ) -> (Option<String>, Option<ReasoningControl>) {
     match voice {
         Some(v) => {
-            let (block, reasoning) = voice_request(thread, settings, v.hint.as_deref(), language);
+            let (block, reasoning) = voice_request(prompt, settings, v.hint.as_deref(), language);
             (Some(block), reasoning)
         }
         None => (
             language.map(|l| language_sentence(l.speaks.as_deref(), &l.reply, l.spoken)),
-            super::super::chat_reasoning::control(thread),
+            prompt.reasoning(),
         ),
     }
 }
 
-/// The thread's system message (`sys`, expanded) with `block` after it.
+/// The static part (`sys`, expanded) with `block` after it.
 pub(crate) fn with_block(sys: String, block: &str) -> String {
     match (sys.is_empty(), block.is_empty()) {
         (_, true) => sys,

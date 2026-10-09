@@ -31,7 +31,7 @@ pub type By<'a> = Option<&'a str>;
 pub const BY_OWNER: &str = lmgw_api_types::chat_feed::BY_ADMIN;
 
 /// The record types this build writes (§2.2). `message.*` are written once
-/// the message writes record them (WP10); `approval.*` with approvals (WP9).
+/// the message writes record them (WP10).
 pub mod kind {
     pub const THREAD_CREATED: &str = "thread.created";
     pub const THREAD_UPDATED: &str = "thread.updated";
@@ -55,7 +55,35 @@ pub mod kind {
     /// admin tools may do moved to or from `off`, and the level where it
     /// moved at all. No reader renders it.
     pub const GATEWAY_REACH: &str = "gateway.reach";
+    /// A personality profile was created, changed or deleted
+    /// (personality-profiles design §3.2; [`record_profile`](super::record_profile)):
+    /// every reader hears of it, devices included, with the profile's id
+    /// and name in `detail`.
+    pub const PROFILE_CREATED: &str = "profile.created";
+    pub const PROFILE_UPDATED: &str = "profile.updated";
+    pub const PROFILE_DELETED: &str = "profile.deleted";
+    /// A turn stopped on a call that waits for an approval, and a waiting
+    /// call was decided (§6.5; `store::chat_approvals`): `detail` holds
+    /// the reply's `message_id` and the call's `approval_request_id`, and
+    /// the rest is rendered from the reply's pending state.
+    pub const APPROVAL_REQUESTED: &str = "approval.requested";
+    pub const APPROVAL_DECIDED: &str = "approval.decided";
+    /// A turn's tool call became an MCP task, and its result entered the
+    /// thread (MCP Tasks design §4.1; [`record_task`](super::feed::record_task)):
+    /// the facts are in `detail`, so they render after the task is gone.
+    pub const TASK_STARTED: &str = "task.started";
+    pub const TASK_DONE: &str = "task.done";
+    /// A paired device's key was deleted (MCP Tasks design §4.1;
+    /// [`record_device_revoked`](super::feed::record_device_revoked)): the
+    /// device's name and the hosts of its open tasks in `detail`, at the
+    /// level its changes were shown at.
+    pub const DEVICE_REVOKED: &str = "device.revoked";
 }
+
+mod devices;
+mod tasks;
+pub use devices::{record_device_revoked, DeviceRevoked};
+pub use tasks::{record_task, TaskFacts};
 
 /// One change, as [`record`] writes it.
 #[derive(Debug, Clone, Default)]
@@ -287,7 +315,7 @@ pub async fn record_device_reach(
         conn,
         Change {
             kind: kind::DEVICE_REACH,
-            admin: 2,
+            admin: super::OWNER_ONLY,
             by: Some(BY_OWNER),
             detail: Some(
                 serde_json::json!({
@@ -318,7 +346,7 @@ pub async fn record_gateway_reach(
         conn,
         Change {
             kind: kind::GATEWAY_REACH,
-            admin: 2,
+            admin: super::OWNER_ONLY,
             by: Some(BY_OWNER),
             detail: Some(
                 serde_json::json!({
@@ -327,6 +355,31 @@ pub async fn record_gateway_reach(
                 })
                 .to_string(),
             ),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Record `kind` (one of the `profile.*` kinds) for profile `id`, named
+/// `name` as the write leaves it, in the transaction of that write
+/// (personality-profiles design §3.2). A profile is no thread or folder:
+/// the record names neither, every reader sees it (level 0), and its id
+/// and name are in `detail`, so a `profile.deleted` still names what went.
+pub async fn record_profile(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    id: i64,
+    name: &str,
+    by: By<'_>,
+) -> DbResult<()> {
+    record(
+        conn,
+        Change {
+            kind,
+            admin: 0,
+            by,
+            detail: Some(serde_json::json!({ "id": id, "name": name }).to_string()),
             ..Default::default()
         },
     )
@@ -430,6 +483,16 @@ impl Record {
         let was = v.get("admin_was")?;
         was.as_i64()
             .or_else(|| was.as_bool().map(|b| if b { 2 } else { 0 }))
+    }
+
+    /// A `profile.*` record's profile: its id and its name as the write
+    /// left it ([`record_profile`]); `None` for any other record.
+    pub fn profile(&self) -> Option<(i64, String)> {
+        if !self.kind.starts_with("profile.") {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(self.detail.as_deref()?).ok()?;
+        Some((v.get("id")?.as_i64()?, v.get("name")?.as_str()?.to_string()))
     }
 
     /// A [`kind::GATEWAY_REACH`] record's new level.

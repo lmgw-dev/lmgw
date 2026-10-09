@@ -14,10 +14,10 @@ event: tool
 data: {"event":"args","fragment":"{\"text\":\"b\"}","index":1}
 
 event: tool
-data: {"arguments":{"text":"a"},"event":"ready","index":0,"name":"stub__echo"}
+data: {"arguments":{"text":"a"},"call_id":"c1","event":"ready","index":0,"name":"stub__echo","needs_approval":false,"server_label":"stub","ui_resource":null}
 
 event: tool
-data: {"arguments":{"text":"b"},"event":"ready","index":1,"name":"stub__echo"}
+data: {"arguments":{"text":"b"},"call_id":"c2","event":"ready","index":1,"name":"stub__echo","needs_approval":false,"server_label":"stub","ui_resource":null}
 
 event: error
 data: {"message":"the run stopped early: max_tool_calls (raise it under Settings → Agents & tools if this was too tight)"}

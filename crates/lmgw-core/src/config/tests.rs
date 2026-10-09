@@ -42,6 +42,7 @@ fn stdio(image: Option<&str>) -> McpServer {
         allow_sampling: true,
         sampling_alias: None,
         agent_id: None,
+        device_key_id: None,
     }
 }
 

@@ -200,9 +200,11 @@ impl Task {
             // The history moved, or no turn began: a history write, as
             // today.
             Ok(None) => {
+                // No turn follows this write: its hold drops here, and
+                // what waits enters once no turn runs.
                 match bound::write_user(&self.state, &thread, &content, &voice, &self.caller).await
                 {
-                    Ok(id) => id,
+                    Ok((id, _sent)) => id,
                     Err(why) => {
                         self.not_written(new, &why);
                         return UserRow::Unwritten;

@@ -49,6 +49,8 @@ impl ToolExecutor for SlowRow {
         ToolOutcome {
             blocks: ToolResultBlock::one("done".to_string()),
             is_error: false,
+            structured: None,
+            content: None,
         }
     }
 }
@@ -110,4 +112,49 @@ async fn a_stop_while_the_executor_writes_its_row_leaves_one_row() {
         (logged[0].status, logged[0].error_kind.as_deref()),
         (200, None)
     );
+}
+
+/// An executor that answers with the call id it runs under.
+struct CallIdEcho;
+
+#[async_trait]
+impl ToolExecutor for CallIdEcho {
+    async fn call(&self, _name: &str, _args: &Value) -> ToolOutcome {
+        let id = crate::agent::current_call_id().unwrap_or_else(|| "(none)".into());
+        ToolOutcome {
+            blocks: ToolResultBlock::one(id),
+            is_error: false,
+            structured: None,
+            content: None,
+        }
+    }
+}
+
+/// A call runs under its own id, as the agent loop's do: an MCP task it
+/// starts records the call that started it (MCP Tasks design §2.1).
+#[tokio::test]
+async fn a_call_runs_under_its_call_id() {
+    let state = AppState::init_for_tests().await.unwrap();
+    let ctx = RequestCtx::default();
+    let call = Call {
+        index: 0,
+        id: "call_r7".into(),
+        name: "a__echo".into(),
+        args: "{}".into(),
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let report = Report::direct(1, &tx);
+    let rows = dropped::Rows {
+        state: &state,
+        ctx: &ctx,
+        builtin: &[],
+    };
+    one(&CallIdEcho, &call, None, &report, &rows).await;
+    let mut seen = None;
+    while let Ok((_, msg)) = rx.try_recv() {
+        if let Msg::ToolDone { outcome, .. } = msg {
+            seen = Some(crate::ir::flatten_tool_result(&outcome.blocks).0);
+        }
+    }
+    assert_eq!(seen.as_deref(), Some("call_r7"));
 }

@@ -47,6 +47,7 @@ use crate::ir::{
     ToolResultBlock, Usage,
 };
 
+pub mod approval;
 mod cancel;
 mod record;
 mod relay;
@@ -140,6 +141,12 @@ pub struct DecidedCall {
     /// *told* the call was refused — leaving the result out would strand it
     /// waiting for an answer that never comes.
     pub denial: String,
+    /// Who decided it (client-apps design §6.3): `Some` only for a gated
+    /// call a caller gave a verdict on — never for a sibling held beside
+    /// one, which nobody approved. An approved call with `by` runs inside
+    /// [`approval::scope`], so the call's row names the approver and a
+    /// device-hosted server gets `_meta["lmgw/approval"]`.
+    pub by: Option<approval::Approver>,
 }
 
 /// Hard bounds on one run. Both are supplied by the caller from a request field
@@ -185,6 +192,17 @@ pub const REASON_CANCELED: &str = "canceled";
 pub struct ToolOutcome {
     pub blocks: Vec<ToolResultBlock>,
     pub is_error: bool,
+    /// An MCP result's `structuredContent`, kept apart for a client that
+    /// renders it — an MCP Apps view (client-apps design §7.3). The model
+    /// has it among `blocks` only when the result's `content` was empty
+    /// (`mcp::exec::blocks_from_result`).
+    pub structured: Option<Value>,
+    /// An MCP result's `content` blocks as the server sent them (their
+    /// resource URIs namespaced as `/mcp` sends them), for a client that
+    /// hands the result to an MCP Apps view (client-apps design §7.5).
+    /// `None` for a tool lmgw ran in-process and for a call that never
+    /// reached a server: [`Self::mcp_content`] says those in MCP's shape.
+    pub content: Option<Vec<Value>>,
 }
 
 impl ToolOutcome {
@@ -192,6 +210,8 @@ impl ToolOutcome {
         Self {
             blocks,
             is_error: false,
+            structured: None,
+            content: None,
         }
     }
 
@@ -202,6 +222,17 @@ impl ToolOutcome {
         Self {
             blocks: ToolResultBlock::one(msg.into()),
             is_error: true,
+            structured: None,
+            content: None,
+        }
+    }
+
+    /// The result's MCP `content` blocks: the server's own when it sent
+    /// them ([`Self::content`]), else `blocks` said in MCP's shape.
+    pub fn mcp_content(&self) -> Vec<Value> {
+        match &self.content {
+            Some(c) => c.clone(),
+            None => crate::mcp::exec::content::of_blocks(&self.blocks),
         }
     }
 }
@@ -267,6 +298,10 @@ pub enum LoopEvent {
         blocks: Vec<ToolResultBlock>,
         is_error: bool,
         ms: u64,
+        /// The result's `structuredContent` ([`ToolOutcome::structured`]).
+        structured: Option<Value>,
+        /// The result's MCP `content` blocks ([`ToolOutcome::mcp_content`]).
+        content: Vec<Value>,
     },
     /// Terminal event; exactly one is emitted per run.
     Done { reason: StopReason, usage: Usage },
@@ -607,6 +642,15 @@ pub async fn run(
                 )
             })
             .collect();
+        // Who approved each of them, in the same order: a sibling held
+        // beside a gated call ran because its turn was decided, not because
+        // anyone approved it, and carries nobody.
+        let approvers: Vec<Option<approval::Approver>> = cfg
+            .resume
+            .iter()
+            .filter(|d| d.approved)
+            .map(|d| d.by.clone())
+            .collect();
         for (i, d) in cfg.resume.iter().enumerate() {
             emit!(LoopEvent::CallReady {
                 index: i,
@@ -642,7 +686,12 @@ pub async fn run(
         }
         let Some(outcomes) = cfg
             .cancel
-            .guard(execute(exec, &approved, cfg.parallel_tool_calls))
+            .guard(execute_approved(
+                exec,
+                &approved,
+                &approvers,
+                cfg.parallel_tool_calls,
+            ))
             .await
         else {
             canceled!(cut(ABANDONED_CALL))
@@ -667,6 +716,8 @@ pub async fn run(
                 blocks: outcome.blocks.clone(),
                 is_error: outcome.is_error,
                 ms,
+                structured: outcome.structured.clone(),
+                content: outcome.mcp_content(),
             });
             results.push(ContentPart::ToolResult {
                 id: d.call.call_id.clone(),
@@ -918,6 +969,8 @@ pub async fn run(
                 blocks: outcome.blocks.clone(),
                 is_error: outcome.is_error,
                 ms,
+                structured: outcome.structured.clone(),
+                content: outcome.mcp_content(),
             });
             results.push(ContentPart::ToolResult {
                 id: id.clone(),
@@ -941,34 +994,80 @@ pub async fn run(
     }
 }
 
+/// [`execute`] for a resume's approved calls: each runs inside
+/// [`approval::scope`] with the approver it has (none for a sibling, nor
+/// past the end of `approvers`).
+async fn execute_approved(
+    exec: &dyn ToolExecutor,
+    calls: &[(String, String, Value)],
+    approvers: &[Option<approval::Approver>],
+    parallel: bool,
+) -> Vec<(ToolOutcome, u64)> {
+    // Each with its call id too, as [`execute`] runs one: an approved call
+    // that becomes an MCP task records it (`_meta` then carries both
+    // `lmgw/approval` and `lmgw/task`).
+    let run_one = |id: &String, name: &String, args: &Value, by: Option<approval::Approver>| {
+        let (id, name, args) = (id.clone(), name.clone(), args.clone());
+        approval::scope(by, async move {
+            let t0 = Instant::now();
+            let outcome = with_call_id(id, exec.call(&name, &args)).await;
+            (outcome, t0.elapsed().as_millis() as u64)
+        })
+    };
+    let by = |i: usize| approvers.get(i).cloned().flatten();
+    if parallel {
+        futures::future::join_all(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(i, (id, n, a))| run_one(id, n, a, by(i))),
+        )
+        .await
+    } else {
+        let mut seq = Vec::with_capacity(calls.len());
+        for (i, (id, n, a)) in calls.iter().enumerate() {
+            seq.push(run_one(id, n, a, by(i)).await);
+        }
+        seq
+    }
+}
+
 /// Run a batch of `(call_id, name, args)` through the executor, returning each
 /// outcome with its latency **in call order**.
 ///
 /// Concurrent when the caller allows it — a turn asking for three independent
 /// lookups should cost one lookup's latency — but the results are always
 /// ordered as the model asked, so the transcript is deterministic.
+///
+/// Each call runs inside [`approval::scope`] with nobody as its approver,
+/// whatever scope the run itself sits in: only a resume's approved calls
+/// ([`execute_approved`]) carry one, and a run started inside another
+/// call's scope (an agent a tool runs) cannot inherit it.
 async fn execute(
     exec: &dyn ToolExecutor,
     calls: &[(String, String, Value)],
     parallel: bool,
 ) -> Vec<(ToolOutcome, u64)> {
-    let run_one = |name: &String, args: &Value| {
-        let (name, args) = (name.clone(), args.clone());
-        async move {
-            let t0 = Instant::now();
-            let outcome = exec.call(&name, &args).await;
-            (outcome, t0.elapsed().as_millis() as u64)
-        }
-    };
-    if parallel {
-        futures::future::join_all(calls.iter().map(|(_, n, a)| run_one(n, a))).await
-    } else {
-        let mut seq = Vec::with_capacity(calls.len());
-        for (_, n, a) in calls {
-            seq.push(run_one(n, a).await);
-        }
-        seq
-    }
+    execute_approved(exec, calls, &[], parallel).await
+}
+
+tokio::task_local! {
+    /// The id of the call an executor runs, inside [`execute`].
+    static CALL_ID: String;
+}
+
+/// The model's id of the tool call the executor is running now, when it was
+/// called from a run's loop: what an MCP task the call starts records as
+/// the call that started it (MCP Tasks design §2.1).
+pub fn current_call_id() -> Option<String> {
+    CALL_ID.try_with(Clone::clone).ok()
+}
+
+/// Run `call`, an executor's call of the model's tool call `id`, with `id`
+/// as its [`current_call_id`]: every loop that runs a model's calls (this
+/// module's, realtime's responder) wraps each call in it.
+pub async fn with_call_id<F: std::future::Future>(id: String, call: F) -> F::Output {
+    CALL_ID.scope(id, call).await
 }
 
 #[cfg(test)]
@@ -1571,5 +1670,64 @@ mod tests {
             &c.content[0],
             ContentPart::ToolUse { args, .. } if args == &json!("{not json")
         ));
+    }
+
+    /// Records who each call's approval scope names.
+    struct ApproverExec(Mutex<Vec<(String, Option<approval::Approver>)>>);
+
+    #[async_trait]
+    impl ToolExecutor for ApproverExec {
+        async fn call(&self, name: &str, _args: &Value) -> ToolOutcome {
+            tokio::task::yield_now().await;
+            self.0
+                .lock()
+                .unwrap()
+                .push((name.to_string(), approval::approved_by()));
+            ToolOutcome::ok(ToolResultBlock::one("ok"))
+        }
+    }
+
+    /// A call outside a resume's approved ones carries nobody, even when
+    /// the run sits inside another call's approval scope (review finding 4:
+    /// the stamp is never inherited); a resume's carries its own.
+    #[tokio::test]
+    async fn only_an_approved_call_carries_its_approver() {
+        let by = |n: &str| approval::Approver {
+            kind: lmgw_api_types::mcp_host::CallerKind::Device,
+            name: n.into(),
+        };
+        let calls = vec![
+            ("c1".to_string(), "a".to_string(), json!({})),
+            ("c2".to_string(), "b".to_string(), json!({})),
+        ];
+        for parallel in [false, true] {
+            let exec = ApproverExec(Mutex::new(Vec::new()));
+            approval::scope(Some(by("outer")), execute(&exec, &calls, parallel)).await;
+            let mut seen = exec.0.into_inner().unwrap();
+            seen.sort_by(|x, y| x.0.cmp(&y.0));
+            assert_eq!(
+                seen,
+                vec![("a".to_string(), None), ("b".to_string(), None)],
+                "parallel {parallel}"
+            );
+
+            let exec = ApproverExec(Mutex::new(Vec::new()));
+            let approvers = [Some(by("phone")), None];
+            approval::scope(
+                Some(by("outer")),
+                execute_approved(&exec, &calls, &approvers, parallel),
+            )
+            .await;
+            let mut seen = exec.0.into_inner().unwrap();
+            seen.sort_by(|x, y| x.0.cmp(&y.0));
+            assert_eq!(
+                seen,
+                vec![
+                    ("a".to_string(), Some(by("phone"))),
+                    ("b".to_string(), None)
+                ],
+                "parallel {parallel}"
+            );
+        }
     }
 }

@@ -45,6 +45,7 @@ impl Core {
             None => self.pending_refuse(create),
             Some(Err(e)) => self.error(e.for_event(create.event_id.as_deref())),
             Some(Ok(params)) => {
+                self.bound_create_taken();
                 tracing::debug!(
                     "realtime {}: the client's response.create joins the cut response's own, \
                      held for the turn — it answers the same turn (an abandoned call's \

@@ -1,7 +1,8 @@
 //! Background updater (§12): poll the update feed's manifest and, on
 //! a newer build, prompt with a native dialog → download the RPM → `pkexec dnf
 //! install` it → offer to restart. Self-install is RPM-only (how this app
-//! ships); the fetch/compare/download lives in `lmgw_core::update`.
+//! ships); the fetch/compare/download is `lmgw_core::update` over the
+//! `lmgw-update` crate, which also has the install step and its host check.
 //!
 //! **Non-RPM hosts.** The same binary built and run on Arch (or from the
 //! AppImage) has no `dnf` to hand the package to, so [`can_self_install`]
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 use lmgw_core::state::SharedState;
 use lmgw_core::update::{self, UpdateInfo};
+use lmgw_update::can_self_install;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -84,24 +86,6 @@ pub fn check_now(app: AppHandle) {
             }
         }
     });
-}
-
-/// Whether this host can install the RPM the manifest points at: both halves
-/// of `pkexec dnf install` have to exist.
-///
-/// Checked at prompt time rather than at build time — the same binary is built
-/// on Fedora and run from source on other distributions, so the package
-/// manager is a property of the host, not of the build.
-fn can_self_install() -> bool {
-    ["pkexec", "dnf"].iter().all(|cmd| on_path(cmd))
-}
-
-/// `cmd` resolves to an executable somewhere on `PATH`.
-fn on_path(cmd: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
 }
 
 /// Prompt the user about an available update; install on confirmation. Uses the
@@ -180,21 +164,19 @@ fn do_install(app: AppHandle, info: UpdateInfo) {
         }
 
         // Privileged install via polkit; `dnf install` of a newer RPM upgrades
-        // the package in place.
+        // the package in place. `InstallError` words its own two cases
+        // ("dnf exited with …", "could not run pkexec/dnf: …").
         let install_dest = dest.clone();
-        let status = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("pkexec")
-                .arg("dnf")
-                .arg("install")
-                .arg("-y")
-                .arg(&install_dest)
-                .status()
-        })
-        .await;
+        let install = move || lmgw_update::install_rpm(&install_dest);
+        let installed = match tokio::task::spawn_blocking(install).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(format!("install task error: {e}")),
+        };
         let _ = tokio::fs::remove_file(&dest).await;
 
-        match status {
-            Ok(Ok(s)) if s.success() => {
+        match installed {
+            Ok(()) => {
                 let app2 = app.clone();
                 let v = info.manifest.version.clone();
                 app.dialog()
@@ -229,12 +211,7 @@ fn do_install(app: AppHandle, info: UpdateInfo) {
                         }
                     });
             }
-            other => {
-                let detail = match other {
-                    Ok(Ok(s)) => format!("dnf exited with {s}"),
-                    Ok(Err(e)) => format!("could not run pkexec/dnf: {e}"),
-                    Err(e) => format!("install task error: {e}"),
-                };
+            Err(detail) => {
                 tracing::error!("update install failed: {detail}");
                 app.dialog()
                     .message(format!("Install failed:\n{detail}"))

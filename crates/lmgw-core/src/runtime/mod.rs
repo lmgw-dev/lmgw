@@ -145,7 +145,7 @@ pub fn slug(model_id: &str) -> String {
 /// First 6 hex chars of a stable hash of the raw `model_id` (§3.3): the part
 /// of [`container_name`] that makes it injective even where [`slug`] is
 /// lossy. `sha2` is already a workspace dependency (`config::hash_api_key`,
-/// `update.rs`); reused here rather than pulling in a lighter hash crate for
+/// `lmgw-update`); reused here rather than pulling in a lighter hash crate for
 /// a property this size does not need.
 pub fn hash6(model_id: &str) -> String {
     use sha2::{Digest, Sha256};

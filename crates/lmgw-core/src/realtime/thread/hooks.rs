@@ -95,7 +95,8 @@ impl Core {
     }
 
     /// A bound turn's frame (§8.2): relayed as `lmgw.chat.frame`, whatever
-    /// became of its response, and read for the response's models.
+    /// became of its response, and read for the response's models and, at
+    /// `done`, for the job results its saved reply answered.
     pub(in crate::realtime) fn bound_frame(&mut self, gen: u64, event: &'static str, data: Value) {
         let Some(b) = self.bound.as_mut() else {
             return;
@@ -112,10 +113,22 @@ impl Core {
                 _ => {}
             }
         }
+        // A reply saved answers every job result stored before it (MCP
+        // Tasks design §3.4): it was in its request.
+        if event == "done" && data["saved"] == true {
+            if let Some(id) = data["message_id"].as_i64().filter(|id| *id > 0) {
+                b.tasks.answered_through(id);
+            }
+        }
         let response_id = b.response_ids.get(&gen).cloned().unwrap_or_default();
         if event == "state" {
             // A model loading is the session's model state too (§4.3).
             self.ob.send(state_event(&data));
+        }
+        // A gated call: OpenAI's item too (client-apps design §6.4).
+        let approval = event == "tool" && data["event"] == "approval";
+        if approval {
+            self.approval_requested(&data);
         }
         self.ob.send(ServerEvent::LmgwChatFrame {
             response_id,
@@ -132,15 +145,16 @@ impl Core {
     pub(in crate::realtime) fn bound_planned(
         &mut self,
         gen: u64,
-        chat: String,
-        tts: Option<String>,
+        (chat, tts): (String, Option<String>),
         thread: ChatThreadRef,
+        voice: super::reshape::Reshape,
     ) {
         if let Some(served) = self.bound.as_mut().and_then(|b| b.responses.get_mut(&gen)) {
             served.chat = Some(chat);
             served.tts = tts;
         }
         self.thread_seen(thread);
+        self.reshape(voice);
     }
 
     /// The thread as it was re-read: when that differs from what the

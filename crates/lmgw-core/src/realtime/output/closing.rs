@@ -184,7 +184,11 @@ impl Output {
             }),
             // A response announces no listing, and its server-side calls
             // close by their own rules (`mcp`, realtime-server-tools §2.2).
-            Item::FunctionCallOutput(_) | Item::McpCall(_) | Item::McpListTools(_) => {}
+            Item::FunctionCallOutput(_)
+            | Item::McpCall(_)
+            | Item::McpListTools(_)
+            | Item::McpApprovalRequest(_)
+            | Item::McpApprovalResponse(_) => {}
         }
         ob.send(ServerEvent::OutputItemDone {
             response_id: self.id.clone(),
@@ -232,6 +236,9 @@ fn set_status(item: &mut Item, status: ItemStatus) {
         Item::FunctionCall(c) => c.status = Some(status),
         Item::FunctionCallOutput(o) => o.status = Some(status),
         // No `status` on these (realtime-server-tools §2.2).
-        Item::McpCall(_) | Item::McpListTools(_) => {}
+        Item::McpCall(_)
+        | Item::McpListTools(_)
+        | Item::McpApprovalRequest(_)
+        | Item::McpApprovalResponse(_) => {}
     }
 }

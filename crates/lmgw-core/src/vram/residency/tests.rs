@@ -524,6 +524,46 @@ fn the_reading_at_rest_is_taken_once_and_only_at_rest() {
     assert!(r.loaded(3), "taken as loaded");
 }
 
+/// A raise is credited to the stretch it happened in, also when it landed
+/// after the stretch stopped watching and before its own store — the
+/// reading after an answer, which folds the stretch's samples in, storing
+/// first (it once counted that stretch towards settling: "a rise starts the
+/// count" failed under load). One a stretch has checked is not the next
+/// one's.
+#[test]
+fn a_raise_after_the_stretch_stopped_watching_is_still_its_own() {
+    let r = Residency::default();
+    r.note(7);
+    assert!(r.begin_sampling(7));
+    let stretch = r.end_sampling(7, 0);
+    r.raised(7);
+    assert!(r.raised_since(7, stretch.raises_at_begin));
+    assert!(r.begin_sampling(7));
+    let next = r.end_sampling(7, 0);
+    assert!(
+        !r.raised_since(7, next.raises_at_begin),
+        "checked by the stretch before"
+    );
+}
+
+/// The mirror image: the reading after an answer stores its raise after
+/// the stretch checked (the sampler's own store kept the figure). It was
+/// no stretch's — the next one began counting after it, and counted as calm
+/// — and is now the next stretch's: settling one stretch later, never
+/// missing a raise.
+#[test]
+fn a_raise_after_the_stretch_checked_is_the_next_ones() {
+    let r = Residency::default();
+    r.note(7);
+    assert!(r.begin_sampling(7));
+    let stretch = r.end_sampling(7, 0);
+    assert!(!r.raised_since(7, stretch.raises_at_begin), "nothing yet");
+    r.raised(7);
+    assert!(r.begin_sampling(7));
+    let next = r.end_sampling(7, 0);
+    assert!(r.raised_since(7, next.raises_at_begin));
+}
+
 /// The sampler's bookkeeping: one per generation, its maximum per reset
 /// epoch, a stretch counts only with an answer, and a figure settles after
 /// `SETTLE_AFTER` calm stretches — counted again from zero after a rise or a
@@ -542,7 +582,7 @@ fn the_sampler_settles_and_a_reset_drops_what_it_saw() {
         Stretch {
             max: Some(30),
             answered: false,
-            raised: false
+            raises_at_begin: 0
         },
         "no answer: nothing counts"
     );

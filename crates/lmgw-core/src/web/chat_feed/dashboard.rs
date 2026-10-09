@@ -172,7 +172,13 @@ impl Changes {
             for r in &page {
                 after = r.seq;
                 match r.kind.as_str() {
-                    kind::THREAD_CREATED | kind::THREAD_UPDATED | kind::THREAD_DELETED => {
+                    // A task's start changes the thread's task list, its
+                    // end adds a message (MCP Tasks design §4.1).
+                    kind::THREAD_CREATED
+                    | kind::THREAD_UPDATED
+                    | kind::THREAD_DELETED
+                    | kind::TASK_STARTED
+                    | kind::TASK_DONE => {
                         threads.extend(r.thread_id);
                     }
                     kind::FOLDER_CREATED
@@ -182,7 +188,11 @@ impl Changes {
                         folders.extend(r.folder_id);
                     }
                     // A device's or the gateway's admin level: what a
-                    // device reaches moved, nothing the owner sees.
+                    // device reaches moved, nothing the owner sees. A
+                    // `profile.*` record names no thread or folder (the
+                    // threads and folders a profile's delete cleared have
+                    // records of their own), and this frame has no field
+                    // for profiles.
                     _ => {}
                 }
             }

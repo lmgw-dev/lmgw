@@ -21,6 +21,8 @@ use leptos::prelude::*;
 use lmgw_api_types::{McpServerView, McpServersResponse, ToolInventory};
 use serde::{Deserialize, Serialize};
 
+use super::approval_rule::Rule;
+
 /// One attached source. `allowed_tools: None` is its whole surface — the
 /// picker only writes a list when the owner unticks something, so a server
 /// that later gains a tool offers it without the thread being edited again.
@@ -29,6 +31,13 @@ use serde::{Deserialize, Serialize};
 pub struct ThreadMcp {
     pub server_label: String,
     pub allowed_tools: Option<Vec<String>>,
+    /// Which tools wait for an approval (client-apps design §6.1), in
+    /// OpenAI's shapes as the thread stores it. The Chat's picker edits it
+    /// ([`Rule`]); the key editor never sets it. A value the picker cannot
+    /// show is kept as read, so saving the tools does not drop what a client
+    /// wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_approval: Option<serde_json::Value>,
 }
 
 /// The selection a picker edits: read it, and be told the new list.
@@ -179,6 +188,7 @@ pub fn from_patterns(patterns: &str, groups: &[ScopeGroup]) -> (Vec<ThreadMcp>, 
                 return Some(ThreadMcp {
                     server_label: g.label.clone(),
                     allowed_tools: None,
+                    require_approval: None,
                 });
             }
             if picked[i].is_empty() {
@@ -193,6 +203,7 @@ pub fn from_patterns(patterns: &str, groups: &[ScopeGroup]) -> (Vec<ThreadMcp>, 
             Some(ThreadMcp {
                 server_label: g.label.clone(),
                 allowed_tools: Some(allowed),
+                require_approval: None,
             })
         })
         .collect();
@@ -263,6 +274,9 @@ pub fn ToolGroupPick(
     tools: Signal<GroupTools>,
     selection: Selection,
     #[prop(default = true)] collapse: bool,
+    /// Offer the approval rule (the Chat's picker; not the key editor's).
+    #[prop(default = false)]
+    approval: bool,
     #[prop(into, default = false.into())] disabled: Signal<bool>,
 ) -> impl IntoView {
     let attached = {
@@ -278,6 +292,7 @@ pub fn ToolGroupPick(
                 list.push(ThreadMcp {
                     server_label: label.clone(),
                     allowed_tools: None,
+                    require_approval: None,
                 });
             }
             selection.set.run(list);
@@ -304,45 +319,143 @@ pub fn ToolGroupPick(
                 {
                     let label = label_for_tools.clone();
                     let note = Some(note.clone()).filter(|n| !n.is_empty());
-                    move || match tools.get() {
-                        GroupTools::List(rows) if !rows.is_empty() => {
-                            let all: Vec<String> = rows.iter().map(|t| t.name.clone()).collect();
-                            let label = label.clone();
-                            view! {
-                                <div class="mcp-tools">
-                                    <For each=move || rows.clone() key=|t| t.name.clone() let:tool>
-                                        <ToolPick
-                                            name=tool.name.clone()
-                                            description=tool.description.clone()
-                                            all=all.clone()
-                                            label=label.clone()
-                                            selection=selection
-                                            collapse=collapse
-                                            disabled=disabled
-                                        />
-                                    </For>
-                                </div>
-                                {note.clone().map(|n| view! { <div class="mcp-tools dim">{n}</div> })}
-                            }
-                                .into_any()
-                        }
-                        GroupTools::List(_) => {
-                            view! { <div class="mcp-tools dim">"No tools are offered right now."</div> }
-                                .into_any()
-                        }
-                        GroupTools::Empty(why) => {
-                            view! { <div class="mcp-tools dim">{why}</div> }.into_any()
-                        }
-                        GroupTools::Failed(e) => {
-                            view! { <div class="mcp-tools dim">"Tools unavailable: " {e}</div> }
-                                .into_any()
-                        }
-                        GroupTools::Loading => {
-                            view! { <div class="mcp-tools dim">"Loading tools…"</div> }.into_any()
+                    move || {
+                        let rule = approval
+                            .then(|| {
+                                view! {
+                                    <ApprovalRow
+                                        label=label.clone()
+                                        selection=selection
+                                        disabled=disabled
+                                    />
+                                }
+                            });
+                        view! {
+                            {rule}
+                            {tools_view(
+                                tools.get(),
+                                label.clone(),
+                                note.clone(),
+                                (selection, collapse, approval, disabled),
+                            )}
                         }
                     }
                 }
             </Show>
+        </div>
+    }
+}
+
+/// The tick rows of one attached source, or why there are none.
+fn tools_view(
+    tools: GroupTools,
+    label: String,
+    note: Option<String>,
+    (selection, collapse, approval, disabled): (Selection, bool, bool, Signal<bool>),
+) -> AnyView {
+    match tools {
+        GroupTools::List(rows) if !rows.is_empty() => {
+            let all: Vec<String> = rows.iter().map(|t| t.name.clone()).collect();
+            view! {
+                <div class="mcp-tools">
+                    <For each=move || rows.clone() key=|t| t.name.clone() let:tool>
+                        <ToolPick
+                            name=tool.name.clone()
+                            description=tool.description.clone()
+                            all=all.clone()
+                            label=label.clone()
+                            selection=selection
+                            collapse=collapse
+                            approval=approval
+                            disabled=disabled
+                        />
+                    </For>
+                </div>
+                {note.map(|n| view! { <div class="mcp-tools dim">{n}</div> })}
+            }
+            .into_any()
+        }
+        GroupTools::List(_) => {
+            view! { <div class="mcp-tools dim">"No tools are offered right now."</div> }.into_any()
+        }
+        GroupTools::Empty(why) => view! { <div class="mcp-tools dim">{why}</div> }.into_any(),
+        GroupTools::Failed(e) => {
+            view! { <div class="mcp-tools dim">"Tools unavailable: " {e}</div> }.into_any()
+        }
+        GroupTools::Loading => {
+            view! { <div class="mcp-tools dim">"Loading tools…"</div> }.into_any()
+        }
+    }
+}
+
+/// A source's approval rule: ask before running none of its tools, all of
+/// them, or the ticked ones (the ticks are on the tool rows).
+#[component]
+fn ApprovalRow(label: String, selection: Selection, disabled: Signal<bool>) -> impl IntoView {
+    let label = StoredValue::new(label);
+    let rule = Memo::new(move |_| {
+        selection.list.with(|l| {
+            label.with_value(|label| {
+                l.iter()
+                    .find(|p| &p.server_label == label)
+                    .map(|p| Rule::read(p.require_approval.as_ref()))
+                    .unwrap_or(Rule::Never)
+            })
+        })
+    });
+    let set = move |to: fn(Rule) -> Rule| {
+        let mut list = selection.list.get_untracked();
+        let name = label.get_value();
+        if let Some(entry) = list.iter_mut().find(|p| p.server_label == name) {
+            entry.require_approval = to(rule.get_untracked()).write();
+            selection.set.run(list);
+        }
+    };
+    let seg = move |text: &'static str,
+                    title: &'static str,
+                    on: fn(&Rule) -> bool,
+                    to: fn(Rule) -> Rule| {
+        view! {
+            <button
+                type="button"
+                class="seg-btn"
+                class:on=move || rule.with(on)
+                title=title
+                disabled=move || disabled.get()
+                on:click=move |_| set(to)
+            >
+                {text}
+            </button>
+        }
+    };
+    view! {
+        <div class="mcp-approval">
+            <span class="dim">"Ask before running"</span>
+            <span class="seg-mini" role="group" data-approval-mode="">
+                {seg("never", "Every call runs without asking", |r| *r == Rule::Never, |_| Rule::Never)}
+                {seg(
+                    "always",
+                    "Every call waits for an approval before it runs",
+                    |r| *r == Rule::Always,
+                    |_| Rule::Always,
+                )}
+                {seg(
+                    "per tool",
+                    "Only the tools ticked 'ask' below wait for an approval",
+                    Rule::is_tools,
+                    Rule::into_tools,
+                )}
+            </span>
+            {move || {
+                matches!(rule.get(), Rule::Custom(_))
+                    .then(|| {
+                        view! {
+                            <span class="dim" title="Set outside the dashboard; kept until you pick a mode here">
+                                "custom rule, kept"
+                            </span>
+                        }
+                    })
+            }}
         </div>
     }
 }
@@ -356,8 +469,32 @@ fn ToolPick(
     label: String,
     selection: Selection,
     collapse: bool,
+    approval: bool,
     disabled: Signal<bool>,
 ) -> impl IntoView {
+    let asks = {
+        let (name, label) = (name.clone(), label.clone());
+        Memo::new(move |_| {
+            selection.list.with(|l| {
+                l.iter().find(|p| p.server_label == label).and_then(|p| {
+                    let r = Rule::read(p.require_approval.as_ref());
+                    r.is_tools().then(|| r.asks(&name))
+                })
+            })
+        })
+    };
+    let toggle_ask = {
+        let (name, label) = (name.clone(), label.clone());
+        move |on: bool| {
+            let mut list = selection.list.get_untracked();
+            if let Some(entry) = list.iter_mut().find(|p| p.server_label == label) {
+                let mut r = Rule::read(entry.require_approval.as_ref());
+                r.set_ask(&name, on);
+                entry.require_approval = r.write();
+                selection.set.run(list);
+            }
+        }
+    };
     let checked = {
         let (name, label) = (name.clone(), label.clone());
         Memo::new(move |_| {
@@ -400,15 +537,40 @@ fn ToolPick(
     };
     let title = description.unwrap_or_default();
     view! {
-        <label class="row dim" style="gap:6px" title=title>
-            <input
-                type="checkbox"
-                prop:checked=move || checked.get()
-                disabled=move || disabled.get()
-                on:change=move |ev| toggle(event_target_checked(&ev))
-            />
-            <span class="mono">{name}</span>
-        </label>
+        <span class="tool-pick">
+            <label class="row dim" style="gap:6px" title=title>
+                <input
+                    type="checkbox"
+                    prop:checked=move || checked.get()
+                    disabled=move || disabled.get()
+                    on:change=move |ev| toggle(event_target_checked(&ev))
+                />
+                <span class="mono">{name}</span>
+            </label>
+            {move || {
+                (approval && checked.get())
+                    .then(|| asks.get())
+                    .flatten()
+                    .map(|on| {
+                        let toggle_ask = toggle_ask.clone();
+                        view! {
+                            <label
+                                class="row dim ask-tick"
+                                style="gap:4px"
+                                title="Wait for an approval before this tool runs"
+                            >
+                                <input
+                                    type="checkbox"
+                                    prop:checked=on
+                                    disabled=move || disabled.get()
+                                    on:change=move |ev| toggle_ask(event_target_checked(&ev))
+                                />
+                                "ask"
+                            </label>
+                        }
+                    })
+            }}
+        </span>
     }
 }
 
@@ -541,6 +703,7 @@ pub fn McpPicker(picked: RwSignal<Vec<ThreadMcp>>) -> impl IntoView {
                                     move || GroupTools::List(rows.clone())
                                 })
                                 selection=selection
+                                approval=true
                             />
                         </For>
                     }
@@ -618,7 +781,7 @@ fn McpServerPick(s: McpServerView, selection: Selection) -> impl IntoView {
     } else {
         status
     };
-    view! { <ToolGroupPick label=label badge=badge tools=tools selection=selection/> }
+    view! { <ToolGroupPick label=label badge=badge tools=tools selection=selection approval=true/> }
 }
 
 #[cfg(test)]
@@ -659,6 +822,7 @@ mod tests {
         ThreadMcp {
             server_label: label.into(),
             allowed_tools: allowed.map(|a| a.iter().map(|s| s.to_string()).collect()),
+            require_approval: None,
         }
     }
 

@@ -4,7 +4,7 @@
 //! header colour, and the web UI's sidebar starts right below it. The shell
 //! reads that colour from kdeglobals and hands it to the page as the
 //! sidebar's background, with the other neutrals stepped off it (ramp.rs);
-//! app.css ("desktop palette") puts them in place of its own. The title bar
+//! app.css ("desktop palette"; the tokens it steps from are in the kit's kit.css) puts them in place of its own. The title bar
 //! runs on into the sidebar, and the panes are lighter greys of the same
 //! shade. A LAN browser, and any desktop but KDE, keeps the bundled palette.
 //!

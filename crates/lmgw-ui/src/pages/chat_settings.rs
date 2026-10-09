@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use super::chat::SettingsDraft;
 use super::chat_knowledge::KbSection;
+use super::chat_profiles::{use_profile_dir, ProfileField};
 use super::chat_reasoning::{reasoning_patch, ReasoningFields};
 use super::chat_sampling::{self, SamplingFields};
 use super::chat_voice::{VoiceResolved, VoiceSection};
@@ -88,6 +89,10 @@ pub(super) fn draft_patch(d: &SettingsDraft) -> Result<Value, String> {
         b.extend(k.clone());
     }
     body["voice"] = d.voice.patch()?;
+    body["profile_id"] = match d.profile.get_untracked().trim().parse::<i64>() {
+        Ok(id) => json!(id),
+        Err(_) => Value::Null,
+    };
     Ok(body)
 }
 
@@ -101,6 +106,9 @@ pub(super) fn SettingsFields(
     #[prop(into)] model: Signal<String>,
     prompt_label: &'static str,
     #[prop(optional, into)] voice_resolved: Option<Signal<Option<VoiceResolved>>>,
+    /// The open thread's id, for the profile editor's link (none for a folder).
+    #[prop(optional, into)]
+    thread_id: Option<Signal<Option<i64>>>,
 ) -> impl IntoView {
     let SettingsDraft {
         sys,
@@ -113,20 +121,49 @@ pub(super) fn SettingsFields(
         picked,
         kb,
         voice,
+        profile,
     } = draft;
+    let dir = use_profile_dir();
+    // The profile as the form picks it (not yet as saved): its persona takes
+    // the system prompt's place, its reasoning stands in for a blank one.
+    let prof = Memo::new(move |_| dir.and_then(|d| profile.with(|v| d.of_value(v))));
+    let replaced = Memo::new(move |_| {
+        prof.with(|p| {
+            p.as_ref()
+                .filter(|p| !p.persona.trim().is_empty())
+                .map(|p| p.name.clone())
+        })
+    });
     let voice_section = match voice_resolved {
         Some(r) => view! { <VoiceSection draft=voice resolved=r/> }.into_any(),
         None => view! { <VoiceSection draft=voice/> }.into_any(),
     };
     view! {
+        <ProfileField
+            value=profile
+            thread=thread_id.unwrap_or(Signal::stored(None))
+            folder=thread_id.is_none()
+        />
         <div class="field">
             <label>{prompt_label}</label>
             <textarea
                 class="input ta"
                 rows="6"
+                disabled=move || replaced.with(Option::is_some)
                 prop:value=move || sys.get()
                 on:input=move |ev| sys.set(event_target_value(&ev))
             ></textarea>
+            {move || {
+                replaced
+                    .get()
+                    .map(|n| {
+                        view! {
+                            <div class="field-hint" data-prompt-replaced="">
+                                {format!("Replaced by the profile '{n}' while it is picked")}
+                            </div>
+                        }
+                    })
+            }}
         </div>
         <div class="field-grid" style="--field-min:100px">
             <div class="field">
@@ -156,6 +193,22 @@ pub(super) fn SettingsFields(
             budget=budget
             error=errors.reasoning
         />
+        {move || {
+            prof
+                .get()
+                .and_then(|p| p.reasoning.map(|r| (p.name, r)))
+                .filter(|_| think.with(|t| t.trim().is_empty()))
+                .map(|(n, r)| {
+                    view! {
+                        <div class="field-hint" data-reasoning-source="profile">
+                            {format!(
+                                "Thinking left blank: the profile '{n}' sets it {} (source: profile)",
+                                r.as_str()
+                            )}
+                        </div>
+                    }
+                })
+        }}
         <McpPicker picked=picked/>
         <KbSection kb=kb/>
         {voice_section}

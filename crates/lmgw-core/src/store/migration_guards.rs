@@ -11,6 +11,9 @@ pub(super) use empty_run_args::empty_run_args_notice;
 mod llama_cpp;
 pub(super) use llama_cpp::llama_cpp_notice;
 
+mod device_rows;
+pub(super) use device_rows::device_rows_notice;
+
 mod billable_units;
 pub(super) use billable_units::{refuse_unmappable_price_rows, BILLABLE_UNITS_MIGRATION};
 

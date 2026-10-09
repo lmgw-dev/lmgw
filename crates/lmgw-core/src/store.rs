@@ -161,6 +161,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     refuse_unmappable_price_rows(pool).await?;
     empty_run_args_notice(pool).await?;
     llama_cpp_notice(pool).await?;
+    device_rows_notice(pool).await?;
     let migrator = sqlx::migrate!("./migrations");
     // A table rebuild runs with foreign keys off (0058), and that is the only
     // way a reference can come to point at a row that is gone: every pool
@@ -219,6 +220,15 @@ pub use keys::*;
 
 mod mcp_servers;
 pub use mcp_servers::*;
+
+mod device_servers;
+pub use device_servers::*;
+
+mod mcp_known_tools;
+pub use mcp_known_tools::*;
+
+/// MCP Tasks (MCP Tasks design §2.1): addressed as `store::mcp_tasks::…`.
+pub mod mcp_tasks;
 
 mod request_logs;
 pub use request_logs::*;
@@ -329,6 +339,8 @@ pub use chat_attachment_extra::*;
 mod chat_folders;
 pub use chat_folders::*;
 
+mod chat_approval_floor;
+
 mod chat_keep;
 pub use chat_keep::*;
 
@@ -341,6 +353,14 @@ pub use chat_search::*;
 mod chat_messages;
 pub use chat_messages::*;
 
+mod chat_approvals;
+pub use chat_approvals::{
+    claim_approvals, close_record, close_unrun, declined, mint_id as mint_approval_id, record_open,
+    request_of as approval_request_of, resume_chat_reply, unrun_record, wire_name, Claimed,
+    Decider, Decision, PendingApprovals, Refusal as ApprovalRefusal, Verdict, APPROVED_UNSAVED,
+    UNRUN,
+};
+
 mod chat_voice;
 pub use chat_voice::*;
 
@@ -348,6 +368,11 @@ pub use chat_voice::*;
 /// `store::feed::…`, not re-exported, since its names (`record`, `page`,
 /// `kind`) only make sense under it.
 pub mod feed;
+
+/// Personality profiles (personality-profiles design §1.2): addressed as
+/// `store::chat_profiles::…`, like [`feed`], since its write forms
+/// (`create_in`, `delete_in`) only make sense under it.
+pub mod chat_profiles;
 
 mod responses;
 pub use responses::*;

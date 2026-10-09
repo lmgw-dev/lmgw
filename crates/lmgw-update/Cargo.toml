@@ -1,0 +1,23 @@
+[package]
+name = "lmgw-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-update from a release feed: the manifest, the version order, the sha256-checked RPM download and the dnf install step"
+
+# Product-neutral: the feed URL, its token and every word shown to the user
+# are the caller's. lmgw-core builds lmgw's feed; a desktop client builds its
+# own. The caller also brings the `reqwest::Client`, and with it the TLS
+# backend, so none is chosen here.
+[dependencies]
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+sha2 = "0.11.0"
+hex = "0.4.3"
+tokio = { version = "1.52.3", features = ["fs", "io-util"] }
+
+[dev-dependencies]
+serde_json = "1.0.150"
+tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
+wiremock = "0.6.5"

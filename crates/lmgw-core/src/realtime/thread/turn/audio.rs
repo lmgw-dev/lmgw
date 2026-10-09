@@ -94,6 +94,19 @@ pub(super) struct Starter<'a> {
     /// Who the session's turns run as: its principal — a device's turns are
     /// checked against its key and charged to it (client-apps design §1.3).
     pub caller: bound::Caller,
+    /// A response that resumes the thread's gated reply with the
+    /// session's decisions (client-apps design §6.4); `None` for a turn
+    /// that answers the user.
+    pub resume: Option<bound::Resume>,
+    /// The concurrency slot of a resume's starter, when the session does
+    /// not hold that key's already: the first turn started holds it.
+    pub slot: std::sync::Mutex<Option<crate::policy::ConcurrencyGuard>>,
+    /// A continuation (MCP Tasks design §3.4): the response answers the
+    /// thread's job results, with no new words and no user message.
+    pub answer: bool,
+    /// The hold of the user message the journal wrote for the response
+    /// (`TurnOpts::sent`): the first turn started takes it.
+    pub sent: std::sync::Mutex<Option<bound::Sent>>,
 }
 
 /// A started turn: its frames, and the generation it began at.
@@ -124,12 +137,24 @@ impl Starter<'_> {
             user_row,
             degraded,
             caller: self.caller.clone(),
-            // The session's own slot holds its place (realtime §10.3).
-            slot: None,
+            // The session's own slot holds its place (realtime §10.3); a
+            // resume for another key holds that key's.
+            slot: self.slot.lock().ok().and_then(|mut s| s.take()),
+            resume: self.resume.clone(),
+            // The first turn's only: a transcript retry after the attempt
+            // began starts with none, so its start delivers what waits after
+            // the user's row, as an edit's does (MCP Tasks design §3.1).
+            sent: self.sent.lock().ok().and_then(|mut s| s.take()),
         };
-        bound::start_turn(self.state, self.thread, user_message_id, frames_tx, opts)
-            .await
-            .map_err(GatewayError::Internal)?;
+        bound::start_turn(
+            self.state,
+            self.thread,
+            user_message_id,
+            self.answer,
+            frames_tx,
+            opts,
+        )
+        .await?;
         // Said before `start_turn` returned, and after the history was read.
         Ok((frames, began.try_recv().ok()))
     }

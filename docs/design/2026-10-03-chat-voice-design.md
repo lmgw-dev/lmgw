@@ -217,7 +217,7 @@ Opening a chat loads nothing.
 - **The UI** is `pages/settings/chat_voice.rs`.
   - It uses realtime's task-filtered alias pickers.
     *Fixed in the WP9 fixes (a WP10 note):* in a column of Settings a picker's source label
-    ("audio.cpp") clipped the alias beside it ("audio/nemotron-as"), here and in Settings →
+    ("audio.cpp") clipped the alias beside it (a long alias), here and in Settings →
     Realtime alike. The alias now wins the room: the label gives way first, ellipsized to nothing
     in a narrow box (it is in its title, and in the pop), and the name is cut only when it alone is
     longer than the box. One rule for every model picker.

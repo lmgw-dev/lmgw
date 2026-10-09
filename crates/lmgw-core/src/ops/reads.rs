@@ -348,6 +348,14 @@ pub async fn mcp_servers(state: &SharedState) -> Result<Value, String> {
     // container is not running" is not what is going on and the page must not
     // say it (container-runtime §3.4).
     let dev = store::agent_dev_urls(&state.db).await.unwrap_or_default();
+    // The tasks each server runs for Chat threads now (MCP Tasks design §6);
+    // a failed read shows none rather than failing the list (logged).
+    let open_tasks = store::mcp_tasks::open_counts(&state.db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("mcp servers: counting the open tasks failed: {e}");
+            Default::default()
+        });
     let out: Vec<Value> = rows
         .iter()
         .map(|s| {
@@ -375,8 +383,14 @@ pub async fn mcp_servers(state: &SharedState) -> Result<Value, String> {
                 // §3.3), so the MCP page can say who owns a row it must not
                 // offer to edit rather than leaving it looking hand-made.
                 "agent_id": s.agent_id,
+                // A paired device's hosted tools (client-apps design §5.2):
+                // the page shows the row with its device and a "device"
+                // transport chip, and offers only what the grant leaves.
+                "device_key_id": s.device_key_id,
+                "device": s.device_key_id.map(|_| crate::devices::short_name(&s.name)),
                 "status": live.map(|v| v.status).unwrap_or("stopped"),
                 "tool_count": live.map(|v| v.tool_count).unwrap_or(0),
+                "open_tasks": open_tasks.get(&s.id).copied().unwrap_or(0),
                 // An agent's row whose app container is not running is
                 // **sleeping**, not failed (container-runtime §3.3): the
                 // aggregate deliberately does not connect it, because
@@ -420,7 +434,7 @@ pub async fn mcp_server_tools(state: &SharedState, id: i64) -> Result<Value, Str
         .iter()
         // A tool the owner switched off is not offered to anyone, so the picker
         // must not show a tick for it either.
-        .filter(|t| !snap.tool_disabled(t.name.as_ref()))
+        .filter(|t| !agg.tool_disabled(&snap, t.name.as_ref()))
         .filter_map(|t| {
             let (server_id, upstream) = agg.reverse.get(t.name.as_ref())?;
             (*server_id == id).then(|| {
@@ -459,8 +473,21 @@ pub async fn tool_set(state: &SharedState, name: &str, enabled: bool) -> Result<
         let cleared = store::enable_tool(&state.db, name)
             .await
             .map_err(|e| e.to_string())?;
-        state.reload_snapshot().await.map_err(|e| e.to_string())?;
+        let snap = state.reload_snapshot().await.map_err(|e| e.to_string())?;
         state.mcp.notify_tools_changed_now();
+        // A switch under another name of the same tool (the name it had
+        // before a collision, or the one a collision gave it) still holds
+        // it off: say which.
+        let agg = state.mcp.aggregate(&snap).await;
+        if let Some(by) = agg.disabled_by(&snap, name) {
+            return Ok(json!({
+                "ok": true,
+                "message": format!(
+                    "'{name}' is still off: it is switched off as '{by}', another name of the \
+                     same tool — switch '{by}' on to offer it"
+                ),
+            }));
+        }
         return Ok(json!({
             "ok": true,
             "message": if cleared > 0 {
@@ -633,6 +660,9 @@ pub async fn settings(state: &SharedState) -> Result<Value, String> {
     out["chat_feed_live_buffer"] = json!(s.chat_feed_live_buffer);
     out["chat_system_prompt"] = json!(s.default_chat_prompt());
     out["chat_system_prompt_is_builtin"] = json!(s.chat_system_prompt.is_none());
+    // The profile new threads start with, in the shape `lmgw__settings_set`
+    // takes back (a number, or null for none).
+    out["chat_profile"] = json!(s.chat_profile);
     out["chat_pdf_mode"] = json!(s.chat_pdf_mode);
     out["chat_stt_alias"] = json!(s.chat_stt_alias);
     // The Chat's Voice group (chat-voice design §2.1), in the shape

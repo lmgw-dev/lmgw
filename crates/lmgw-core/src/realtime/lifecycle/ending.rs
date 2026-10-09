@@ -49,9 +49,12 @@ impl Core {
             // A bound turn's (chat-voice §8.2): relayed whatever became of
             // its response.
             Msg::ChatFrame { event, data } => return self.bound_frame(gen, event, data),
-            Msg::Planned { chat, tts, thread } => {
-                return self.bound_planned(gen, chat, tts, thread)
-            }
+            Msg::Planned {
+                chat,
+                tts,
+                thread,
+                voice,
+            } => return self.bound_planned(gen, (chat, tts), thread, *voice),
             Msg::Input { input, why } => return self.bound_input(gen, input, why),
             Msg::Refused { refused, note } => return self.bound_refused(gen, refused, note),
             Msg::Carried(carried) => return self.carried(gen, carried),

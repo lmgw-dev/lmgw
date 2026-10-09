@@ -485,6 +485,16 @@ impl super::VramScheduler {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// How many reads the samplers have finished, whatever each found
+    /// ([`sample`]), the same kind of counter: a test's fake driver holds a
+    /// request's transient until a sampler has read it, rather than for a
+    /// time a loaded box can outlast.
+    pub fn residency_samples(&self) -> u64 {
+        self.residency
+            .samples
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// How many tombstones the PID cache keeps — processes of containers
     /// that left, until the driver stops listing them. A count for the tests
     /// that pin that they are settled.

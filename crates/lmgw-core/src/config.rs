@@ -23,6 +23,8 @@ mod semantic_vad;
 pub use semantic_vad::*;
 mod chat_prompt;
 pub use chat_prompt::*;
+pub mod chat_profile;
+pub use chat_profile::ChatProfile;
 mod prices;
 pub use prices::*;
 mod snapshot;

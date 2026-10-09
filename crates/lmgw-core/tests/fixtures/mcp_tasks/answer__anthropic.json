@@ -1,0 +1,75 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "build it",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "call_1",
+          "input": {},
+          "name": "desktop__build",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "started, job t1",
+              "type": "text"
+            }
+          ],
+          "tool_use_id": "call_1",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "Started.",
+          "type": "text"
+        },
+        {
+          "id": "lmgw_task_1",
+          "input": {
+            "job": "t1",
+            "tool": "desktop__build"
+          },
+          "name": "lmgw__job_result",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "job t1 (desktop__build) completed\n42 files",
+              "type": "text"
+            }
+          ],
+          "tool_use_id": "lmgw_task_1",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "tgt-model",
+  "stream": true
+}

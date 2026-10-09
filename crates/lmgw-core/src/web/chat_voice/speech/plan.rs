@@ -129,7 +129,7 @@ pub(crate) async fn voice_of(
 pub(crate) fn style_of(snap: &Snapshot, cfg: &VoiceConfig, facts: &SpeechFacts) -> Style {
     let owner = owner_style(&snap.settings);
     let session = match cfg.speech_style.source {
-        Source::Thread => Some(cfg.speech_style.text.as_str()),
+        Source::Thread | Source::Profile => Some(cfg.speech_style.text.as_str()),
         Source::Chat | Source::Realtime | Source::Row | Source::SpeechIn => None,
     };
     expressive::resolve_style(
@@ -184,6 +184,22 @@ pub(crate) async fn plan(
 ) -> Result<Plan, Refusal> {
     let snap = state.snapshot();
     let cfg = resolve(&snap, thread);
+    plan_with(state, &snap, thread, cfg, Some(repo)).await
+}
+
+/// [`plan`] with the thread's voice already resolved (`cfg`): the profile
+/// editor's Speak resolves it with its unsaved draft in place of the
+/// thread's profile (personality-profiles design D17). `repo`: where the
+/// thread's seed is drawn and stored on first use; `None` stores nothing —
+/// the thread's own seed when it has one, else one drawn for this speech
+/// alone.
+pub(crate) async fn plan_with(
+    state: &SharedState,
+    snap: &Snapshot,
+    thread: &ChatThread,
+    cfg: VoiceConfig,
+    repo: Option<ChatRepo>,
+) -> Result<Plan, Refusal> {
     let label = format!("chat thread {}", thread.id);
     let Some(alias) = cfg.tts.alias.clone() else {
         let message = cfg
@@ -194,7 +210,7 @@ pub(crate) async fn plan(
             .unwrap_or_else(|| "no text-to-speech model is set (Settings → Chat → Voice)".into());
         return Err(Refusal::new("tts_not_configured", message));
     };
-    let v = voice_of(state, &snap, &cfg, &alias, &label).await;
+    let v = voice_of(state, snap, &cfg, &alias, &label).await;
     let voice = match v.outcome {
         Ok(VoiceOutcome::Resolved(voice)) => voice,
         Ok(VoiceOutcome::Missing(why)) => return Err(Refusal::new("voice_not_configured", why)),
@@ -216,7 +232,7 @@ pub(crate) async fn plan(
             " (checked at the first clause)"
         }
     );
-    let style = style_of(&snap, &cfg, &v.expressive);
+    let style = style_of(snap, &cfg, &v.expressive);
     if v.expressive.designs() && style.text.is_none() {
         return Err(Refusal::new(
             "instructions_required",
@@ -228,7 +244,10 @@ pub(crate) async fn plan(
             ),
         ));
     }
-    let seed = thread_seed(state, repo, thread.id, &cfg, &label).await;
+    let seed = match repo {
+        Some(repo) => thread_seed(state, repo, thread.id, &cfg, &label).await,
+        None => cfg.seed.unwrap_or_else(rand::random::<u32>),
+    };
     // The reply language: the voice speaks what the model answers in
     // (chat-voice design §2.1, split 2026-10-05).
     let language = cfg.reply_language.value.clone();
@@ -236,8 +255,7 @@ pub(crate) async fn plan(
         // The voice the engine speaks: the one sent, else its own default —
         // what the page's note judges too (`language::tts_note`).
         if let Some(note) =
-            super::super::language::tts_note(state, &snap, &alias, code, voice.send.as_deref())
-                .await
+            super::super::language::tts_note(state, snap, &alias, code, voice.send.as_deref()).await
         {
             super::super::language::log_once(&label, &alias, code, &note);
         }

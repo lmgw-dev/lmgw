@@ -111,13 +111,9 @@ impl VramScheduler {
                     // what this answer cost: audio.cpp frees some compute
                     // buffers once it has answered (the WP7 live gate).
                     let sampled = st.vram.residency.sampled(generation, epoch).unwrap_or(0);
-                    let stored = st
-                        .vram
+                    st.vram
                         .store_resident(&st, generation, &model_id, bytes.max(sampled), epoch)
                         .await;
-                    if stored == Stored::Raised {
-                        st.vram.residency.raised(generation);
-                    }
                     Ok(true)
                 }
                 Ok(_) => Err("the driver lists none of its processes holding anything".into()),
@@ -215,6 +211,8 @@ impl VramScheduler {
                 None => String::new(),
             }
         );
+        // Still under the store lock (`Residency::raised`).
+        self.residency.raised(generation);
         broadcast(state);
         Stored::Raised
     }

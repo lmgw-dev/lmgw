@@ -50,6 +50,7 @@ fn test_server(id: i64, name: &str, prefix: &str) -> McpServer {
         allow_sampling: false,
         sampling_alias: None,
         agent_id: None,
+        device_key_id: None,
     }
 }
 

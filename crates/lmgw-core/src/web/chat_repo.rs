@@ -65,6 +65,18 @@ fn stored_only(what: &str) -> GatewayError {
     GatewayError::BadRequest(format!("a temporary chat cannot be {what}"))
 }
 
+/// Wakes the thread's bound sessions about its approvals when dropped,
+/// after the write it guards ([`LiveTurns::approvals_decided`]).
+///
+/// [`LiveTurns::approvals_decided`]: super::chat_live::LiveTurns::approvals_decided
+struct WakeApprovals<'a>(&'a AppState, i64);
+
+impl Drop for WakeApprovals<'_> {
+    fn drop(&mut self) {
+        self.0.chat_live.approvals_decided(self.1);
+    }
+}
+
 fn gone() -> GatewayError {
     GatewayError::NotFound("this temporary chat was discarded or kept meanwhile".into())
 }
@@ -97,27 +109,57 @@ impl ChatRepo {
 
     // -- threads ------------------------------------------------------------
 
-    /// A new thread, as created. A temporary one is always `chat` kind.
+    /// A new thread, as created, with `profile_id` as its personality
+    /// profile (personality-profiles design D9). A temporary one is always
+    /// `chat` kind.
     pub(super) async fn create_thread(
         self,
         s: &AppState,
         model_alias: &str,
         kind: &str,
         system_prompt: &str,
+        profile_id: Option<i64>,
         by: &Caller,
     ) -> DbResult<ChatThread> {
         match self {
-            Self::Temp => Ok(s.chat_temp.create(model_alias, kind, system_prompt)),
+            Self::Temp => {
+                let mut t = s.chat_temp.create(model_alias, kind, system_prompt);
+                if profile_id.is_some() {
+                    t.profile_id = profile_id;
+                    s.chat_temp.update_settings(
+                        &t,
+                        store::SeedWrite::Keep,
+                        store::AdminThreads::Shown,
+                    );
+                }
+                Ok(t)
+            }
             Self::Db => {
                 let by = by.named();
-                let id = store::create_chat_thread_with_prompt(
-                    &s.db,
-                    model_alias,
-                    kind,
-                    system_prompt,
-                    Some(&by),
-                )
-                .await?;
+                // With a profile, in the one insert a folder's thread takes,
+                // so the thread never exists without it.
+                let id = match profile_id {
+                    Some(_) => {
+                        let t = ChatThread {
+                            model_alias: model_alias.to_string(),
+                            system_prompt: system_prompt.to_string(),
+                            kind: kind.to_string(),
+                            profile_id,
+                            ..Default::default()
+                        };
+                        store::create_chat_thread_from(&s.db, &t, Some(&by)).await?
+                    }
+                    None => {
+                        store::create_chat_thread_with_prompt(
+                            &s.db,
+                            model_alias,
+                            kind,
+                            system_prompt,
+                            Some(&by),
+                        )
+                        .await?
+                    }
+                };
                 s.chat_feed.wake();
                 store::get_chat_thread(&s.db, id).await?.ok_or_else(|| {
                     GatewayError::Internal(
@@ -444,6 +486,7 @@ impl ChatRepo {
                     }
                     s.chat_feed.threads_deleted(&[id]);
                     s.chat_feed.wake();
+                    super::chat_tasks::threads_gone(&s);
                 }
             }
             s.chat_live.discarded(&mut held);
@@ -507,7 +550,10 @@ impl ChatRepo {
 
     /// A user turn with its drafts bound to it, all or nothing, naming the
     /// knowledge bases picked for it alone (`kb_refs`) and, for a spoken
-    /// turn, how it was spoken (`voice`, chat-voice design §3).
+    /// turn, how it was spoken (`voice`, chat-voice design §3). The MCP
+    /// task results that wait for the thread enter it in the same
+    /// transaction, before the message (MCP Tasks design §3.1; a turn
+    /// answers every message written here).
     // The message's own parts, and who writes it (review W4-3).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn append_user_message(
@@ -522,23 +568,33 @@ impl ChatRepo {
     ) -> DbResult<SendMessageOutcome> {
         let _write = s.chat_live.write(thread_id).await;
         self.still_reachable(s, caller, thread_id).await?;
+        // A new message declines what the last reply waits on: a session
+        // that showed one of its calls hears it (client-apps design §6.4).
+        let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => s
                 .chat_temp
-                .append_user_message(thread_id, content, attachment_ids, kb_refs, voice)
+                .append_user_by(
+                    thread_id,
+                    (content, attachment_ids, kb_refs, voice),
+                    &caller.decider(),
+                )
                 .ok_or_else(gone),
             Self::Db => marked(
                 s,
                 thread_id,
-                store::append_user_message_with_voice(
+                store::send_user_message_by(
                     &s.db,
                     thread_id,
-                    content,
-                    attachment_ids,
-                    kb_refs,
-                    voice,
+                    (content, attachment_ids, kb_refs, voice),
+                    &caller.decider(),
+                    Some(&super::chat_tasks::render::result_row),
                 )
-                .await,
+                .await
+                .map(|(outcome, delivered)| {
+                    super::chat_tasks::deliver::entered(s, thread_id, &delivered);
+                    outcome
+                }),
             ),
         }
     }
@@ -557,21 +613,24 @@ impl ChatRepo {
         caller: &Caller,
     ) -> DbResult<SendMessageOutcome> {
         self.still_reachable(s, caller, thread_id).await?;
+        let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => s
                 .chat_temp
-                .append_user_message(thread_id, content, &[], &[], Some(voice))
+                .append_user_by(
+                    thread_id,
+                    (content, &[], &[], Some(voice)),
+                    &caller.decider(),
+                )
                 .ok_or_else(gone),
             Self::Db => marked(
                 s,
                 thread_id,
-                store::append_user_message_with_voice(
+                store::append_user_message_by(
                     &s.db,
                     thread_id,
-                    content,
-                    &[],
-                    &[],
-                    Some(voice),
+                    (content, &[], &[], Some(voice)),
+                    &caller.decider(),
                 )
                 .await,
             ),
@@ -598,7 +657,74 @@ impl ChatRepo {
             Self::Db => marked(
                 s,
                 thread_id,
-                store::append_chat_reply(&s.db, thread_id, r).await,
+                store::append_chat_reply_by(&s.db, thread_id, r, Some(&caller.named())).await,
+            ),
+        }
+    }
+
+    /// Decide calls of the thread with `verdicts` as `by` (client-apps
+    /// design §6.3): one write, the first
+    /// decision wins. `Err(NotFound)` for a temporary thread that is gone.
+    pub(super) async fn decide_approvals(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        verdicts: &[store::Verdict],
+        by: &store::Decider,
+    ) -> DbResult<Result<store::Claimed, store::ApprovalRefusal>> {
+        match self {
+            Self::Temp => s
+                .chat_temp
+                .decide_approvals(thread_id, verdicts, by)
+                .ok_or_else(gone),
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::claim_approvals(&s.db, thread_id, verdicts, by).await,
+            ),
+        }
+    }
+
+    /// Close the approved calls `approved` of reply `id` whose turn never
+    /// started (client-apps design §6.6, `store::close_unrun`); the bound
+    /// sessions are woken.
+    pub(super) async fn close_never_run(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        id: i64,
+        approved: &[String],
+    ) -> DbResult<Vec<String>> {
+        let _wake = WakeApprovals(s, thread_id);
+        match self {
+            Self::Temp => Ok(s.chat_temp.close_never_run(thread_id, id, approved)),
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::close_unrun(&s.db, thread_id, id, approved).await,
+            ),
+        }
+    }
+
+    /// Save a resumed turn onto reply `id` (client-apps design §6.3): with
+    /// the turn's [`SaveGuard`], and for a device only while the thread is
+    /// in its reach ([`Self::save_reply`]). `false` when the reply is gone.
+    pub(super) async fn save_resume(
+        self,
+        s: &AppState,
+        _proof: &SaveGuard,
+        caller: &Caller,
+        thread_id: i64,
+        id: i64,
+        r: &ChatReply,
+    ) -> DbResult<bool> {
+        self.still_reachable(s, caller, thread_id).await?;
+        match self {
+            Self::Temp => Ok(s.chat_temp.resume_reply(thread_id, id, r)),
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::resume_chat_reply(&s.db, thread_id, id, r, Some(&caller.named())).await,
             ),
         }
     }
@@ -638,6 +764,9 @@ impl ChatRepo {
         m: &ChatMessageUpdate,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
+        // The gated reply may go or lose its calls with this: a session
+        // that showed one of them hears it (client-apps design §6.4).
+        let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.update_message(thread_id, id, m)),
             Self::Db => marked(
@@ -662,6 +791,9 @@ impl ChatRepo {
         caller: &Caller,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
+        // The gated reply may go or lose its calls with this: a session
+        // that showed one of them hears it (client-apps design §6.4).
+        let _wake = WakeApprovals(s, thread_id);
         self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => Ok(s
@@ -707,6 +839,9 @@ impl ChatRepo {
         id: i64,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
+        // The gated reply may go or lose its calls with this: a session
+        // that showed one of them hears it (client-apps design §6.4).
+        let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
             Self::Db => marked(
@@ -767,6 +902,7 @@ impl ChatRepo {
         thread_id: i64,
         id: i64,
     ) -> DbResult<bool> {
+        let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
             Self::Db => marked(
@@ -787,12 +923,42 @@ impl ChatRepo {
         inclusive: bool,
     ) -> DbResult<u64> {
         let _write = s.chat_live.write(thread_id).await;
+        // The gated reply may go or lose its calls with this: a session
+        // that showed one of them hears it (client-apps design §6.4).
+        let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.truncate(thread_id, id, inclusive)),
             Self::Db => marked(
                 s,
                 thread_id,
                 store::truncate_chat_messages(&s.db, thread_id, id, inclusive).await,
+            ),
+        }
+    }
+
+    /// Write task row `id`'s waiting result into stored thread `thread_id`
+    /// as a message of role `tool`, with its `task.done` (MCP Tasks design
+    /// §3.1). The caller holds the thread's lock with no other turn running,
+    /// or its own turn's save lock (`chat_tasks::deliver`). `None` when the
+    /// row no longer waits for the thread; a temporary thread has no tasks.
+    pub(super) async fn deliver_task(
+        self,
+        s: &AppState,
+        thread_id: i64,
+        id: i64,
+    ) -> DbResult<Option<store::mcp_tasks::Delivered>> {
+        match self {
+            Self::Temp => Ok(None),
+            Self::Db => marked(
+                s,
+                thread_id,
+                store::mcp_tasks::deliver_result(
+                    &s.db,
+                    id,
+                    thread_id,
+                    super::chat_tasks::render::result_row,
+                )
+                .await,
             ),
         }
     }

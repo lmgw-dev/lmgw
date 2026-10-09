@@ -163,6 +163,8 @@ pub fn render(input: &Input<'_>) -> ChatRequest {
             // A listing is never rendered: its tools go as tool definitions
             // (realtime-server-tools §1.2).
             Item::McpListTools(_) => {}
+            // Only a bound session holds them, and it renders the thread.
+            Item::McpApprovalRequest(_) | Item::McpApprovalResponse(_) => {}
         }
     }
     b.flush();

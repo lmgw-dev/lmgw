@@ -14,11 +14,13 @@
 //! `managed_off`; a turn handed to a fallback — the hold's, admission's —
 //! is `fallbacks`; what a llama-server's `/props` says of audio, `props`;
 //! a connection that drops under the audio, `drops`; a hold that comes on
-//! while a heard turn's tools wait, `tool_hold`.
+//! while a heard turn's tools wait, `tool_hold`; a heard turn's personality
+//! profile, `profile`.
 
 mod drops;
 mod fallbacks;
 mod managed_off;
+mod profile;
 mod props;
 mod session;
 mod tool_claim;

@@ -7,6 +7,7 @@ mod agents;
 mod audio;
 mod bench;
 mod builds;
+mod chat_profiles;
 mod docs;
 mod models;
 mod prices;
@@ -30,5 +31,6 @@ pub(super) fn catalog() -> Vec<Builtin> {
     all.extend(agents::tools());
     all.extend(builds::tools());
     all.extend(bench::tools());
+    all.extend(chat_profiles::tools());
     all
 }

@@ -19,6 +19,8 @@ use crate::chat_actions::{get_json, mount_openai_reply, post, sse_events};
 use crate::common::{serve, Gw};
 use crate::knowledge as kbfix;
 
+mod approval;
+
 const CITE: &str = "Use these excerpts where they are relevant and cite them as [n].";
 
 struct World {

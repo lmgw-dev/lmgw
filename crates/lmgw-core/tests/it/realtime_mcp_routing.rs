@@ -1,11 +1,11 @@
 //! Where a session's server-side call runs (realtime-server-tools design
 //! §1.2, §2.4; final review #2): on the server its label was listed from,
 //! or nowhere. Two servers without a tool prefix that offer a tool of one
-//! name share its exposed name, and the gateway routes it to the first by
-//! server name of those connected — so a name listed from `zeta` while
-//! `alpha` was not connected is `alpha`'s once `alpha` connects. The call is
-//! refused then, visibly, rather than run where the client was never shown
-//! it. A listed server that was let go since (idle-reaped) is connected
+//! name both expose it under their server's prefix (`mcp::names`) — so a
+//! name listed from `zeta` before `alpha` was ever connected is
+//! `zeta__echo` once `alpha` connects, and the call of the name the session
+//! listed runs on `zeta`'s tool under its new name: the tool the client was
+//! shown. A listed server that was let go since (idle-reaped) is connected
 //! again for the call.
 
 use lmgw_core::state::SharedState;
@@ -43,11 +43,11 @@ async fn ask_for_call(ws: &mut Ws, text: &str) -> Value {
         .unwrap_or_else(|| panic!("no mcp_call in {done}"))
 }
 
-/// `echo` listed from `zeta`, then `alpha` connects and owns the name: the
-/// model's call of it is refused with a `tool_execution_error` that says
-/// so, and neither server sees a call.
+/// `echo` listed from `zeta`, then `alpha` connects and offers it too: both
+/// take their server's prefix, and the model's call of the listed `echo`
+/// runs on `zeta`'s, which receives its own name; `alpha` sees none.
 #[tokio::test]
-async fn a_name_another_bare_server_took_since_the_listing_is_refused_not_rerouted() {
+async fn a_name_another_bare_server_also_offers_since_the_listing_runs_where_it_was_listed() {
     let fake = chat_fake().await;
     fake.push(calls(
         &[(0, "call_z1", "echo", r#"{"text":"which"}"#)],
@@ -62,27 +62,31 @@ async fn a_name_another_bare_server_took_since_the_listing_is_refused_not_rerout
     let mut ws = tools_session(&addr, None, tools, 1).await;
     assert_eq!(alpha.hits(), 0);
 
-    // `alpha` connects (another caller lists it): first by server name, it
-    // owns `echo` now.
+    // `alpha` connects (another caller lists it): both are under their
+    // server's prefix now, and each goes by its own name on the wire.
     let (status, body) = get(&addr, "/v1/mcp/servers/alpha").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["tools"][0]["name"], "echo", "{body}");
+    let agg = state.mcp.aggregate(&state.snapshot()).await;
+    assert!(
+        agg.reverse.contains_key("alpha__echo") && agg.reverse.contains_key("zeta__echo"),
+        "{:?}",
+        agg.reverse
+    );
+    assert!(!agg.reverse.contains_key("echo"));
 
     let call = ask_for_call(&mut ws, "which one?").await;
     assert_eq!(call["server_label"], "zeta", "{call}");
-    assert_eq!(call["output"], Value::Null, "{call}");
-    assert_eq!(call["error"]["type"], "tool_execution_error", "{call}");
-    let message = call["error"]["message"].as_str().unwrap();
-    assert!(
-        message.contains("was listed from server 'zeta'")
-            && message.contains("List the label again"),
-        "{message}"
-    );
+    assert_eq!(call["error"], Value::Null, "{call}");
+    assert_eq!(call["output"], "echo: which", "{call}");
     assert!(
         alpha.calls().is_empty(),
         "ran on a server it was not listed from"
     );
-    assert!(zeta.calls().is_empty());
+    assert_eq!(
+        zeta.calls(),
+        [("echo".to_string(), json!({"text": "which"}))]
+    );
 }
 
 /// The listed server's connection went (as the idle reaper ends it), and

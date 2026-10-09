@@ -56,6 +56,7 @@ pub(super) fn Chips(rt: Realtime) -> impl IntoView {
             <InputChip rt=rt/>
             <StageChip rt=rt which="asr"/>
             <VoiceChip rt=rt/>
+            <super::profile_chip::ProfileChip rt=rt/>
             <EchoPick rt=rt/>
             <ToolsChips rt=rt/>
         </div>

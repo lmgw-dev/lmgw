@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{watch, OwnedMutexGuard};
 
+mod results;
 mod speech;
 mod voice;
 
@@ -70,6 +71,24 @@ struct Inner {
     /// The change feed's live half (client-apps design §2.3): the turns and
     /// bound sessions it reports, registered here as they start.
     feed: super::chat_feed::LiveFeed,
+    /// Which thread's approvals were just decided ([`ApprovalWake`]).
+    approvals: ApprovalWake,
+    /// Which thread's MCP task results may have moved ([`results`]).
+    results: results::ResultWake,
+}
+
+/// A wake for the bound sessions when a thread's approvals were decided
+/// (client-apps design §6.4): the thread's id, nothing else — a session
+/// reads the decisions from the reply itself. A session that lagged behind
+/// the channel reads its own thread's then, so a missed wake loses nothing.
+pub(crate) struct ApprovalWake(tokio::sync::broadcast::Sender<i64>);
+
+impl Default for ApprovalWake {
+    fn default() -> Self {
+        // A wake is a thread id: a lag is read as a wake for every thread
+        // (above), so the ring's size bounds nothing a session needs.
+        Self(tokio::sync::broadcast::channel(256).0)
+    }
 }
 
 struct Slot {
@@ -86,6 +105,9 @@ struct SlotState {
     /// The thread's bound realtime session ([`voice`]): its binding's id,
     /// the stop that tells it another window took over, and its fence.
     voice: Option<voice::Held>,
+    /// User messages written for a turn that has not begun yet
+    /// ([`LiveTurns::sending`]): the thread counts as answered until it has.
+    sending: usize,
 }
 
 /// The turn currently answering: its ticket id, and the switch that cancels
@@ -148,6 +170,7 @@ impl Inner {
                         live: None,
                         speech: Vec::new(),
                         voice: None,
+                        sending: 0,
                     }),
                 })
             })
@@ -184,6 +207,16 @@ impl LiveTurns {
         &self.inner.feed
     }
 
+    /// `thread_id`'s approvals were decided ([`ApprovalWake`]).
+    pub(crate) fn approvals_decided(&self, thread_id: i64) {
+        let _ = self.inner.approvals.0.send(thread_id);
+    }
+
+    /// The wakes of [`Self::approvals_decided`], from now on.
+    pub(crate) fn approval_wakes(&self) -> tokio::sync::broadcast::Receiver<i64> {
+        self.inner.approvals.0.subscribe()
+    }
+
     /// A write that rewrites `thread_id`'s history: waits for the thread's
     /// lock (a reply being saved finishes first), moves its generation, so
     /// no turn that started before it saves its reply, and cancels the live
@@ -210,11 +243,33 @@ impl LiveTurns {
     }
 
     /// Whether a turn answers thread `thread_id` now (a send, an edit, a
-    /// regenerate, a continue, a bound session's voice turn).
+    /// regenerate, a continue, a bound session's voice turn), or a user
+    /// message was written for one that has not begun yet
+    /// ([`Self::sending`]).
     pub(crate) fn running(&self, thread_id: i64) -> bool {
-        lock(&self.inner.threads)
-            .get(&thread_id)
-            .is_some_and(|s| lock(&s.state).live.is_some())
+        lock(&self.inner.threads).get(&thread_id).is_some_and(|s| {
+            let st = lock(&s.state);
+            st.live.is_some() || st.sending > 0
+        })
+    }
+
+    /// A user message is about to be written into `thread_id` for a turn
+    /// that answers it (a send, a bound session's spoken turn; MCP Tasks
+    /// design §3.1): until the [`Sending`] drops — the caller holds it until
+    /// that turn has begun, or was refused — the thread counts as
+    /// [`running`](Self::running), so a task result that ends meanwhile
+    /// waits for that turn's end rather than entering after the message and
+    /// before its turn, and a turn that starts only on an idle thread
+    /// ([`Self::begin_idle_as`]) is refused. Nothing moves and nothing is
+    /// cancelled.
+    pub(crate) fn sending(&self, thread_id: i64) -> Sending {
+        let slot = self.inner.slot(thread_id);
+        lock(&slot.state).sending += 1;
+        Sending {
+            inner: self.inner.clone(),
+            thread_id,
+            slot: Some(slot),
+        }
     }
 
     /// The thread's lock alone: no generation moves and no turn is
@@ -328,6 +383,32 @@ impl LiveTurns {
     /// while it runs is cancelled ([`Self::self_admin_changed`],
     /// [`Self::reach_changed`]).
     pub(crate) async fn begin_as(&self, thread_id: i64, device: Option<i64>, level: u8) -> Ticket {
+        self.begin_where(thread_id, (device, level), true)
+            .await
+            .expect("a turn that may replace one always begins")
+    }
+
+    /// [`Self::begin_as`] only while no turn of `thread_id` is live and no
+    /// user message waits for its turn to begin ([`Self::sending`]),
+    /// decided under the lock a start takes: `None` when one is, and then
+    /// nothing moved and nothing was cancelled. What a turn that only makes
+    /// sense on an idle thread starts with (`POST …/answer`, MCP Tasks
+    /// design §3.3), so it never cancels the turn that is answering.
+    pub(crate) async fn begin_idle_as(
+        &self,
+        thread_id: i64,
+        device: Option<i64>,
+        level: u8,
+    ) -> Option<Ticket> {
+        self.begin_where(thread_id, (device, level), false).await
+    }
+
+    async fn begin_where(
+        &self,
+        thread_id: i64,
+        (device, level): (Option<i64>, u8),
+        replace: bool,
+    ) -> Option<Ticket> {
         let slot = self.inner.slot(thread_id);
         let (cancel, cancelled) = watch::channel(false);
         let id = self.inner.next();
@@ -335,26 +416,35 @@ impl LiveTurns {
             // The lock only orders this against a write or a save in flight.
             let _guard = slot.write.clone().lock_owned().await;
             let mut st = lock(&slot.state);
-            st.generation = self.inner.next();
-            let live = Live {
-                id,
-                cancel,
-                device,
-                level,
-            };
-            if let Some(previous) = st.live.replace(live) {
-                let _ = previous.cancel.send(true);
+            if !replace && (st.live.is_some() || st.sending > 0) {
+                None
+            } else {
+                st.generation = self.inner.next();
+                let live = Live {
+                    id,
+                    cancel,
+                    device,
+                    level,
+                };
+                if let Some(previous) = st.live.replace(live) {
+                    let _ = previous.cancel.send(true);
+                }
+                Some(st.generation)
             }
-            st.generation
         };
-        Ticket {
+        let Some(generation) = generation else {
+            drop(slot);
+            self.inner.release(thread_id);
+            return None;
+        };
+        Some(Ticket {
             inner: self.inner.clone(),
             thread_id,
             id,
             generation,
             slot: Some(slot),
             cancelled,
-        }
+        })
     }
 
     /// How many threads have a slot right now (tests: slots do not pile up).
@@ -421,6 +511,28 @@ impl Drop for Going {
     fn drop(&mut self) {
         if self.armed {
             self.inner.feed.thread_going(self.thread_id, false);
+        }
+    }
+}
+
+/// A user message written for a turn that has not begun yet
+/// ([`LiveTurns::sending`]); dropping it lets the thread count as idle
+/// again unless a turn is live.
+pub(crate) struct Sending {
+    inner: Arc<Inner>,
+    thread_id: i64,
+    slot: Option<Arc<Slot>>,
+}
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            {
+                let mut st = lock(&slot.state);
+                st.sending = st.sending.saturating_sub(1);
+            }
+            drop(slot);
+            self.inner.release(self.thread_id);
         }
     }
 }
@@ -673,6 +785,25 @@ mod tests {
         let g = t.generation();
         drop(t);
         assert!(live.write_if(6, g).await.is_none());
+    }
+
+    /// An answer's start (MCP Tasks design §3.3) never cancels the turn
+    /// that runs, and leaves nothing behind when it is refused.
+    #[tokio::test]
+    async fn an_idle_only_start_refuses_while_a_turn_runs() {
+        let live = LiveTurns::default();
+        let running = live.begin(4).await;
+        let g = running.generation();
+        assert!(live.begin_idle_as(4, None, 0).await.is_none());
+        assert!(!running.is_superseded(), "the running turn goes on");
+        assert!(running.save_lock().await.is_some(), "nothing moved");
+        assert_eq!(running.generation(), g);
+        drop(running);
+        assert_eq!(live.slots(), 0, "a refused start keeps no slot");
+        let t = live.begin_idle_as(4, None, 0).await.expect("idle now");
+        assert!(live.running(4));
+        drop(t);
+        assert_eq!(live.slots(), 0);
     }
 
     #[tokio::test]

@@ -2,18 +2,36 @@
 
 use super::*;
 
-/// Hold a request's transient ([`Until`]): until the driver was read after
-/// `reads` reads — bounded far above any sampler's interval, so a sampler
-/// that never comes fails the test's own assertion instead of hanging it —
-/// or for its time.
-fn hold(world: &Arc<Mutex<World>>, until: Until, reads: u64) {
+/// Hold a request's transient ([`Until`]): until a sampler has read the
+/// driver after it came on, or for its time.
+///
+/// Two more samplers' reads than when it came on: the first may have begun
+/// before the transient did and been counted after (a read and its count are
+/// not one step), while the second began after the first ended.
+///
+/// A sampler that never comes is waited for as long as the test may wait
+/// ([`common::patience`]): under nextest the harness's timeout ends the test
+/// first, and what the hold waited for is on its stderr; under plain `cargo
+/// test` the transient ends with the budget, and the test's own assertion
+/// fails.
+fn hold(world: &Arc<Mutex<World>>, until: Until) {
     match until {
         Until::For(lasts) => std::thread::sleep(lasts),
         Until::Sampled => {
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while world.lock().unwrap().process_reads == reads
-                && std::time::Instant::now() < deadline
-            {
+            let samples = world
+                .lock()
+                .unwrap()
+                .samples
+                .clone()
+                .expect("the fixture counts the samplers' reads");
+            let enough = samples() + 2;
+            let mut wait = common::patience::Wait::new("a sampler reads the transient");
+            loop {
+                let read = samples();
+                let seen = format_args!("{read} samplers' reads, {enough} needed");
+                if read >= enough || !wait.goes_on(Some(&seen)) {
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -128,9 +146,9 @@ pub(super) async fn container(world: Arc<Mutex<World>>) -> MockServer {
                     // nothing else needs meanwhile (the driver is read in
                     // process).
                     w.size.insert(model.clone(), t.bytes);
-                    let (back, reads) = (loaded.unwrap_or(t.bytes), w.process_reads);
+                    let back = loaded.unwrap_or(t.bytes);
                     drop(w);
-                    hold(&world, t.until, reads);
+                    hold(&world, t.until);
                     w = world.lock().unwrap();
                     w.size.insert(model.clone(), back);
                 }

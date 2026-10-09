@@ -4,7 +4,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::ir::{
-    flatten_tool_result, ChatRequest, ContentPart, ImageSource, Role, ToolResultBlock,
+    flatten_tool_result, wire_call_id, ChatRequest, ContentPart, ImageSource, Role, ToolResultBlock,
 };
 
 /// How a tool result becomes the `content` of its `role: "tool"` message.
@@ -52,8 +52,9 @@ pub fn messages_json(ir: &ChatRequest, tool_results: &dyn ToolResultRenderer) ->
                     if let ContentPart::ToolResult { id, content, .. } = p {
                         out.push(json!({
                             "role": "tool",
-                            "tool_call_id": id,
-                            "content": tool_results.render(id, content),
+                            // A Gemini signature stays with Gemini (§7.1).
+                            "tool_call_id": wire_call_id(id),
+                            "content": tool_results.render(wire_call_id(id), content),
                         }));
                     }
                 }
@@ -69,7 +70,7 @@ pub fn messages_json(ir: &ChatRequest, tool_results: &dyn ToolResultRenderer) ->
                     .iter()
                     .filter_map(|p| match p {
                         ContentPart::ToolUse { id, name, args } => Some(json!({
-                            "id": id,
+                            "id": wire_call_id(id),
                             "type": "function",
                             "function": {
                                 "name": name,

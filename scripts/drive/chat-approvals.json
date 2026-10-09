@@ -1,0 +1,405 @@
+[
+ {
+  "js": "'Run: scripts/chat-approvals-drive.sh (dev instance on :8917, the model scripted by mock-openai TOOL_SCRIPT, scripts/mock-mcp.py as the `notes` server)'"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "js": "(async()=>{const id=await __ap.mk();location.href='/chat?t='+id;return id})()"
+ },
+ {
+  "until": "!!document.querySelector('.dock-rail,.chat-settings')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "js": "(() => { const r = document.querySelector('.dock-rail'); if (r) r.click(); return r ? 'opened' : 'already open'; })()"
+ },
+ {
+  "until": "!![...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes'))",
+  "timeout": 20
+ },
+ {
+  "js": "[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelector(':scope > label input').click(); 'attached'"
+ },
+ {
+  "until": "!![...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelector('.mcp-approval')",
+  "timeout": 20
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelectorAll('.ask-tick').length === 0",
+  "label": "no ask ticks until the per-tool mode is picked"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelector('[data-approval-mode] .seg-btn:nth-child(3)').click(); 'per tool'"
+ },
+ {
+  "until": "[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelectorAll('.ask-tick').length === 3",
+  "timeout": 20
+ },
+ {
+  "js": "[...[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelectorAll('.tool-pick')].find(t => t.textContent.includes('delete_note')).querySelector('.ask-tick input').click(); 'ask on delete_note'"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelector('[data-approval-mode] .seg-btn.on').textContent === 'per tool'",
+  "label": "per-tool mode is shown as picked"
+ },
+ {
+  "js": "[...document.querySelectorAll('.mcp-pick')].find(p => p.textContent.startsWith('notes')).scrollIntoView({block:'center'}); 'scrolled'"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "01-editor-per-tool"
+ },
+ {
+  "click": ".chat-settings-save .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(async()=>{const t=(await __ap.thread()).thread;const r=t.mcp_tools[0].require_approval;return JSON.stringify(r.always.tool_names).includes('delete_note') && !r.never})()",
+  "label": "saved as the OpenAI object shape, only the ticked tool"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "delete note 7"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.tool-ask [data-approve]')",
+  "timeout": 30
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelectorAll('.tool-ask').length === 1 && document.querySelector('.tool-card.await').open",
+  "label": "one waiting card, open, with its bar"
+ },
+ {
+  "expect": "document.querySelector('.tool-card.await pre').textContent.includes('\"id\": \"7\"')",
+  "label": "the arguments are shown"
+ },
+ {
+  "shot": "02-waiting-one"
+ },
+ {
+  "click": "[data-approve]"
+ },
+ {
+  "until": "__ap.text().includes('ran: delete_note 7')",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "document.querySelectorAll('.tool-ask').length === 0",
+  "label": "the bar is gone once decided"
+ },
+ {
+  "expect": "document.querySelectorAll('.msg-assistant').length === 1",
+  "label": "the resumed reply streamed into the same message"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.tool-card .tool-io pre')].some(p => p.textContent.includes('ran: delete_note 7'))",
+  "label": "the call's output is on its card"
+ },
+ {
+  "shot": "03-approved-one"
+ },
+ {
+  "js": "(async()=>{const id=await __ap.mk({always:{tool_names:['delete_note']}});location.href='/chat?t='+id;return id})()"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "tidy my notes"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.tool-ask [data-approve]')",
+  "timeout": 30
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "document.querySelectorAll('[data-held]').length === 1 && document.querySelectorAll('.tool-ask').length === 1",
+  "label": "the read called beside it is held with it"
+ },
+ {
+  "shot": "04-waiting-with-sibling"
+ },
+ {
+  "click": "[data-decline]"
+ },
+ {
+  "until": "document.querySelectorAll('.tool-ask').length === 0 && !document.querySelector('.msg-assistant .caret')",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "[...document.querySelectorAll('.tool-note')].some(n => n.textContent.includes('declined'))",
+  "label": "a declined call says so"
+ },
+ {
+  "shot": "05-declined"
+ },
+ {
+  "js": "location.href='/chat?t='+localStorage.getItem('apT'); 'reload'"
+ },
+ {
+  "until": "!!document.querySelector('.tool-card')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "wait": 1.5
+ },
+ {
+  "wait": 2
+ },
+ {
+  "expect": "(async()=>{const t=await __ap.thread();return t.messages.at(-1).pending_approvals===undefined})()",
+  "label": "nothing waits in the stored reply"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.tool-note')].some(n => n.textContent.includes('declined'))",
+  "label": "the declined state survives a reload"
+ },
+ {
+  "shot": "06-declined-reloaded"
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "js": "(async()=>{const id=await __ap.mk('always');location.href='/chat?t='+id;return id})()"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "delete two notes"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "document.querySelectorAll('.tool-ask [data-approve]').length === 2",
+  "timeout": 30
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "expect": "!!document.querySelector('[data-approval-batch]') && [...document.querySelectorAll('[data-approval-batch] .btn')].pop().disabled",
+  "label": "with two waiting, the batch bar offers Send only once each has a verdict"
+ },
+ {
+  "shot": "07-waiting-two"
+ },
+ {
+  "click": ".tool-ask [data-approve]",
+  "nth": 0
+ },
+ {
+  "click": ".tool-ask [data-decline]",
+  "nth": 1
+ },
+ {
+  "expect": "![...document.querySelectorAll('[data-approval-batch] .btn')].pop().disabled",
+  "label": "both picked: Send decisions is enabled"
+ },
+ {
+  "shot": "08-picked-two"
+ },
+ {
+  "click": "[data-approval-batch] .btn.primary"
+ },
+ {
+  "until": "__ap.text().includes('ran: delete_note 1')",
+  "timeout": 30
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "!__ap.text().includes('ran: delete_note 2') && document.querySelectorAll('.tool-note').length >= 1",
+  "label": "the approved call ran, the declined one did not"
+ },
+ {
+  "shot": "09-decided-two"
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "js": "(async()=>{const id=await __ap.mk({always:{tool_names:['delete_note']}});location.href='/chat?t='+id;return id})()"
+ },
+ {
+  "until": "!!document.querySelector('.composer-input')",
+  "timeout": 20
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "click": ".composer-input"
+ },
+ {
+  "type": "delete note nine"
+ },
+ {
+  "key": "Enter"
+ },
+ {
+  "until": "!!document.querySelector('.tool-ask [data-approve]')",
+  "timeout": 30
+ },
+ {
+  "wait": 0.5
+ },
+ {
+  "js": "(async()=>{const s=await __ap.moveOnElsewhere();document.querySelector('[data-approve]')?.click();return s})()"
+ },
+ {
+  "until": "!!document.querySelector('.tool-said')",
+  "timeout": 20
+ },
+ {
+  "expect": "/no longer the last message|Already decided/.test(document.querySelector('.tool-said').textContent)",
+  "label": "approving a call a new message already declined is refused in words, on the card"
+ },
+ {
+  "shot": "10-moved-on-refused"
+ },
+ {
+  "js": "location.href='/chat?t='+localStorage.getItem('apT'); 'reload'"
+ },
+ {
+  "until": "!!document.querySelector('.tool-card')",
+  "timeout": 20
+ },
+ {
+  "wait": 1
+ },
+ {
+  "script": "scripts/drive/chat-approvals.js"
+ },
+ {
+  "expect": "document.querySelectorAll('.tool-ask').length === 0 && [...document.querySelectorAll('.tool-note')].some(n => n.textContent.includes('Not decided'))",
+  "label": "a call a new message overtook reads as not decided"
+ },
+ {
+  "shot": "11-moved-on"
+ },
+ {
+  "js": "(async()=>{const r=await fetch('/chat/api/folders',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Ops'})});return r.status})()"
+ },
+ {
+  "nav": "/chat"
+ },
+ {
+  "until": "!!document.querySelector('.thread-folder .row-menu-btn')",
+  "timeout": 20
+ },
+ {
+  "click": ".thread-folder .row-menu-btn"
+ },
+ {
+  "wait": 0.3
+ },
+ {
+  "click": ".thread-folder .menu-pop .menu-item",
+  "nth": 2
+ },
+ {
+  "until": "!!document.querySelector('dialog[open] .folder-settings')",
+  "timeout": 20
+ },
+ {
+  "until": "!![...document.querySelectorAll('dialog[open] .mcp-pick')].find(p => p.textContent.startsWith('notes'))",
+  "timeout": 20
+ },
+ {
+  "js": "[...document.querySelectorAll('dialog[open] .mcp-pick')].find(p => p.textContent.startsWith('notes')).querySelector(':scope > label input').click(); 'attached'"
+ },
+ {
+  "until": "!!document.querySelector('dialog[open] .mcp-approval')",
+  "timeout": 20
+ },
+ {
+  "js": "document.querySelector('dialog[open] .mcp-approval [data-approval-mode] .seg-btn:nth-child(2)').click(); 'all'"
+ },
+ {
+  "expect": "document.querySelector('dialog[open] .mcp-approval .seg-btn.on').textContent === 'always'",
+  "label": "the folder defaults offer the same rule editor"
+ },
+ {
+  "js": "[...document.querySelectorAll('dialog[open] .mcp-pick')].find(p => p.textContent.startsWith('notes')).scrollIntoView({block:'center'}); 'scrolled'"
+ },
+ {
+  "wait": 0.4
+ },
+ {
+  "shot": "12-folder-defaults"
+ },
+ {
+  "click": "dialog[open] .modal-foot .btn.primary"
+ },
+ {
+  "wait": 1
+ },
+ {
+  "expect": "(async()=>{const m=(await (await fetch('/chat/api/folders')).json()).folders[0].defaults.mcp_tools;return m.length===1&&m[0].server_label==='notes'&&m[0].allowed_tools===null&&m[0].require_approval==='always'})()",
+  "label": "saved with the folder's defaults as \"always\""
+ }
+]

@@ -87,6 +87,12 @@ pub fn label_refusal(
              tool name"
         ));
     }
+    if label.ends_with('_') {
+        return Some(format!(
+            "hosting label '{label}' cannot end in '_': its tools' names would run into the \
+             '__' separator ('{label}__…') and into another label's namespace"
+        ));
+    }
     let folded = label.to_ascii_lowercase();
     if crate::mcp::RESERVED_NAMESPACES
         .iter()
@@ -101,14 +107,22 @@ pub fn label_refusal(
                 .join(", ")
         ));
     }
+    // A device's own hosted-tools row carries its label (client-apps
+    // design §5.2): another device's is said by the key check below.
     if let Some(s) = snap
         .mcp_servers
         .values()
-        .find(|s| s.tool_prefix.eq_ignore_ascii_case(label) || s.name.eq_ignore_ascii_case(label))
+        .filter(|s| !s.is_device())
+        .find(|s| {
+            namespaces_overlap(&s.tool_prefix, label)
+                || s.name.eq_ignore_ascii_case(label)
+                // Its name as a prefix: what a collision gives its tools.
+                || namespaces_overlap(&crate::mcp::names::name_qualifier(&s.name), label)
+        })
     {
         return Some(format!(
-            "'{label}' is already the MCP server '{}' — its tools are named '{}__…' — pick \
-             another hosting label",
+            "'{label}' is already the MCP server '{}', or its namespace runs into it — its tools \
+             are named '{}__…' — pick another hosting label",
             s.name,
             if s.tool_prefix.is_empty() {
                 &s.name
@@ -121,14 +135,30 @@ pub fn label_refusal(
         Some(k.id) != own_id
             && k.hosts_label
                 .as_deref()
-                .is_some_and(|l| l.eq_ignore_ascii_case(label))
+                .is_some_and(|l| namespaces_overlap(l, label))
     }) {
         return Some(format!(
-            "device '{}' already hosts tools under '{label}' — one label, one device",
-            super::short_name(&k.name)
+            "device '{}' already hosts tools under '{}' — one label, one device, and no label's \
+             namespace inside another's",
+            super::short_name(&k.name),
+            k.hosts_label.as_deref().unwrap_or_default()
         ));
     }
     None
+}
+
+/// Whether the namespaces of two prefixes, `<a>__…` and `<b>__…`, share a
+/// name: one starts with the other (`desktop` and `desktop_`, whose names
+/// begin `desktop___`; `desktop` and `desktop__x`). Case-insensitive, as
+/// labels are compared. An empty prefix has no namespace.
+pub(crate) fn namespaces_overlap(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let a = format!("{}__", a.to_ascii_lowercase());
+    let b = format!("{}__", b.to_ascii_lowercase());
+    a.starts_with(&b) || b.starts_with(&a)
 }
 
 #[cfg(test)]
@@ -152,5 +182,72 @@ mod tests {
         );
         // A space is %20, never `+`.
         assert!(pairing_link("http://h:1", "my phone", "k").contains("name=my%20phone"));
+    }
+
+    /// A label ending in `_`, or whose namespace runs into a server's
+    /// prefix or another device's label, is refused (review finding 2).
+    #[test]
+    fn a_label_may_not_run_into_another_namespace() {
+        use crate::config::{ApiKey, ApiKeyKind, KeyPolicy, McpServer, McpTransport, Snapshot};
+        let mut snap = Snapshot::default();
+        let server = |id: i64, name: &str, prefix: &str| McpServer {
+            id,
+            name: name.into(),
+            enabled: true,
+            transport: McpTransport::Http,
+            command: None,
+            args: vec![],
+            env: vec![],
+            cwd: None,
+            container_image: None,
+            extra_run_args: vec![],
+            url: None,
+            headers: vec![],
+            tool_prefix: prefix.into(),
+            timeout_ms: 60_000,
+            autostart: false,
+            idle_seconds: 0,
+            allow_sampling: false,
+            sampling_alias: None,
+            agent_id: None,
+            device_key_id: None,
+        };
+        snap.mcp_servers.insert(1, server(1, "under", "web_"));
+        snap.mcp_servers.insert(2, server(2, "deep", "git__hub"));
+        snap.mcp_servers.insert(3, server(3, "phone.", ""));
+        snap.api_keys.push(ApiKey {
+            id: 7,
+            name: "device:desk".into(),
+            key_hash: String::new(),
+            enabled: true,
+            kind: ApiKeyKind::Device,
+            key_plain: None,
+            agent_id: None,
+            policy: KeyPolicy::default(),
+            note: String::new(),
+            hosts_label: Some("desk".into()),
+            self_admin: crate::config::DeviceAdmin::Off,
+        });
+        let refused = |l: &str| label_refusal(&snap, l, None);
+        assert!(refused("tablet_").is_some_and(|w| w.contains("cannot end in '_'")));
+        assert!(
+            refused("web").is_some_and(|w| w.contains("'under'")),
+            "web_ → web___…"
+        );
+        assert!(
+            refused("git").is_some_and(|w| w.contains("'deep'")),
+            "git__hub → git__hub__…"
+        );
+        assert!(refused("DESK").is_some_and(|w| w.contains("one label, one device")));
+        assert!(
+            refused("phone").is_some_and(|w| w.contains("'phone.'")),
+            "phone. → phone___…, a collision's names"
+        );
+        assert_eq!(refused("phon"), None);
+        assert_eq!(refused("webx"), None);
+        assert_eq!(refused("desktop"), None);
+        assert_eq!(label_refusal(&snap, "desk", Some(7)), None, "its own label");
+        assert!(namespaces_overlap("a", "a_") && namespaces_overlap("a_", "a"));
+        assert!(!namespaces_overlap("a", "ab") && !namespaces_overlap("", "a"));
     }
 }

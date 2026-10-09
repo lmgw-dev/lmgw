@@ -41,6 +41,7 @@ mod blind;
 pub(super) use blind::Blind;
 mod merge;
 mod out;
+pub(crate) mod resume;
 mod spoken;
 pub(crate) use out::{refuse, refuse_sent, SentAs, TurnFrame, TurnLanguage, TurnOpts, VoiceTurn};
 pub(crate) use spoken::{
@@ -68,6 +69,18 @@ pub(super) enum TurnMode {
     /// (assistant prefill): the stream's deltas are the continuation only,
     /// and the persist step appends them to that row.
     Continue { message_id: i64 },
+    /// The thread's trailing reply `message_id` stopped on calls that were
+    /// decided since (client-apps design §6.3): the tool loop settles them
+    /// first ([`TurnOpts::resume`]), and the persist step appends what the
+    /// turn adds to that row ([`resume`]).
+    Resume { message_id: i64 },
+    /// A fresh reply to MCP task results nothing answered yet, with no new
+    /// user message (`POST …/answer`, MCP Tasks design §3.3): it starts
+    /// only on an idle thread — never cancelling the turn that runs — and,
+    /// once its start delivered what waits, only on a history that still
+    /// ends in an unanswered result; refused otherwise, as the route
+    /// refuses it.
+    Answer,
 }
 
 /// Where a turn's reply goes when its stream ends — carried by the worker.
@@ -109,6 +122,9 @@ pub(super) struct Turn {
     /// A device's concurrency slot ([`TurnOpts::slot`]), released when the
     /// turn ends.
     _slot: Option<crate::policy::ConcurrencyGuard>,
+    /// A resumed turn's decided calls, taken by the tool loop
+    /// ([`Self::take_resume`]).
+    resume: Vec<crate::agent::DecidedCall>,
 }
 
 /// Why a turn gave up before its end.
@@ -127,6 +143,8 @@ pub(super) enum Stopped {
 enum Persist {
     /// A new assistant row.
     Insert,
+    /// Appended to a reply whose calls were decided ([`resume`]).
+    Resume(Box<resume::Prior>),
     /// Appended to the row being continued: `content` is its text as the
     /// model was shown it (trailing whitespace trimmed), `reasoning` its trace.
     Append {
@@ -155,6 +173,9 @@ pub(super) struct Reply<'a> {
     /// either: the empty row would be replayed, and would keep the next send
     /// from merging with the user message it leaves owed (§7.4).
     pub failed: bool,
+    /// The calls the turn stopped on for an approval (client-apps design
+    /// §6.2), `None` when it did not.
+    pub pending: Option<crate::store::PendingApprovals>,
 }
 
 /// What [`Turn::persist`] came to: the saved row's id (`0`: nothing was
@@ -246,12 +267,50 @@ impl Turn {
         matches!(self.persist, Persist::Append { .. })
     }
 
+    /// A turn resumed after its calls were decided.
+    pub(super) fn is_resume(&self) -> bool {
+        matches!(self.persist, Persist::Resume(_))
+    }
+
+    /// A resumed turn's decided calls, once (empty for any other turn).
+    pub(super) fn take_resume(&mut self) -> Vec<crate::agent::DecidedCall> {
+        std::mem::take(&mut self.resume)
+    }
+
+    /// A resumed turn that stopped before its tool loop took its decided
+    /// calls: they never ran, and are closed saying so
+    /// (`chat_approvals::unrun`). Nothing for any other turn.
+    pub(super) async fn unrun(&self, state: &AppState) {
+        let Persist::Resume(prior) = &self.persist else {
+            return;
+        };
+        if self.resume.is_empty() {
+            return;
+        }
+        let r = resume::Resume {
+            message_id: prior.message_id,
+            decided: self.resume.clone(),
+        };
+        super::chat_approvals::unrun(state, self.repo, self.thread_id, &r).await;
+    }
+
+    /// The key of the principal the turn runs as, and its name: what a
+    /// gated turn stores for the turn that resumes it (L13).
+    pub(super) fn starter(&self) -> (Option<i64>, Option<String>) {
+        if let Persist::Resume(prior) = &self.persist {
+            return (prior.pending.key_id, prior.pending.key_name.clone());
+        }
+        let ctx = self.caller.ctx();
+        let id = self.caller.key_id();
+        (id, id.and(ctx.client_key.clone()))
+    }
+
     /// The reply text a continue was shown (its prefill) — `None` for a
     /// fresh reply.
     pub(super) fn continued_text(&self) -> Option<&str> {
         match &self.persist {
             Persist::Append { content, .. } => Some(content),
-            Persist::Insert => None,
+            Persist::Insert | Persist::Resume(_) => None,
         }
     }
 
@@ -322,13 +381,14 @@ impl Turn {
 
     async fn persist_reply(&self, state: &AppState, r: Reply<'_>) -> Persisted {
         let nothing = r.text.is_empty() && r.reasoning.is_empty() && r.ir_messages.is_none();
-        if nothing && (r.stopped || r.failed || self.is_continue()) {
+        if nothing && (r.stopped || r.failed || self.is_continue() || self.is_resume()) {
             // Nothing came: a stopped or failed reply is not an empty
             // bubble, and a continue that added nothing leaves its row as it
             // was (and still names it: `done` says `saved` for that row,
             // which is unchanged, not a partial reply).
             let id = match &self.persist {
                 Persist::Append { message_id, .. } => *message_id,
+                Persist::Resume(prior) => prior.message_id,
                 Persist::Insert => 0,
             };
             return Persisted { id, refused: false };
@@ -365,12 +425,27 @@ impl Turn {
             // when one answered (`blind`).
             images_note: self.blind.note(),
             voice: None,
+            pending_approvals: r.pending.clone(),
         };
         let res = match &self.persist {
             Persist::Insert => {
                 self.repo
                     .save_reply(state, &proof, &self.caller, self.thread_id, &reply)
                     .await
+            }
+            Persist::Resume(prior) => {
+                let reply = prior.merged(reply, r.pending);
+                self.repo
+                    .save_resume(
+                        state,
+                        &proof,
+                        &self.caller,
+                        self.thread_id,
+                        prior.message_id,
+                        &reply,
+                    )
+                    .await
+                    .map(|saved| if saved { prior.message_id } else { 0 })
             }
             Persist::Append {
                 message_id,
@@ -463,6 +538,46 @@ pub(super) async fn start_turn(
     caps: Caps,
     speak: Option<ReadAloud>,
 ) -> Response {
+    let turn = TurnAs {
+        caller: caller.clone(),
+        resume: None,
+        slot: None,
+        sent: None,
+    };
+    start_turn_as(state, caller, turn, repo, thread, (mode, caps), speak).await
+}
+
+/// Who a turn runs as when that is not its request's caller, and what it
+/// resumes: a resumed turn runs as its starter (client-apps design L13),
+/// while its frames stream to the approver's request.
+pub(super) struct TurnAs {
+    pub caller: Caller,
+    pub resume: Option<resume::Resume>,
+    /// `Some`: the concurrency slot was settled before — a resume takes its
+    /// starter's before anything is decided (`chat_approvals::approve`) —
+    /// and is this (`None` inside: none to hold). `None`: taken here.
+    pub slot: Option<Option<crate::policy::ConcurrencyGuard>>,
+    /// A send's ([`TurnOpts::sent`]).
+    pub sent: Option<super::chat_tasks::deliver::Sent>,
+}
+
+/// [`start_turn`] for a turn that runs as `turn.caller`, its frames
+/// streamed to `caller`'s request (and a read-aloud charged to it).
+pub(super) async fn start_turn_as(
+    state: &SharedState,
+    caller: &Caller,
+    turn: TurnAs,
+    repo: ChatRepo,
+    thread: &ChatThread,
+    (mode, caps): (TurnMode, Caps),
+    speak: Option<ReadAloud>,
+) -> Response {
+    let TurnAs {
+        caller: runs_as,
+        resume,
+        slot: settled,
+        sent,
+    } = turn;
     let started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<TurnFrame>(64);
     // A reply read aloud as it streams is heard: in the thread's reply
@@ -482,22 +597,27 @@ pub(super) async fn start_turn(
     // A device's turn takes one of its key's concurrent-request slots for
     // its length (review W3-8); a refusal is the key's own, before anything
     // starts.
-    let slot = match caller
-        .turn_slot(
-            state,
-            crate::ingress::ClientProto::Chat,
-            &thread.model_alias,
-        )
-        .await
-    {
-        Ok(slot) => slot,
-        Err(e) => return err_json(e.http_status(), e.code(), e.to_string()),
+    let slot = match settled {
+        Some(slot) => slot,
+        None => match runs_as
+            .turn_slot(
+                state,
+                crate::ingress::ClientProto::Chat,
+                &thread.model_alias,
+            )
+            .await
+        {
+            Ok(slot) => slot,
+            Err(e) => return err_json(e.http_status(), e.code(), e.to_string()),
+        },
     };
     let opts = TurnOpts {
         language,
         heard,
-        caller: caller.clone(),
+        caller: runs_as,
         slot,
+        resume,
+        sent,
         ..TurnOpts::default()
     };
     match start_turn_into(state, repo, thread, mode, caps, tx, opts).await {
@@ -528,8 +648,57 @@ pub(super) async fn start_turn(
 /// [`thread_caps`](super::chat_attach_gate::thread_caps)'s, which the caller
 /// already needed for its own checks. `Err`: the turn was refused before it
 /// started (a continue whose reply is no longer the last message), as the
-/// response to give.
+/// response to give. A resumed turn refused so closes its decided calls as
+/// not run (`chat_approvals::unrun`): they never will.
 pub(crate) async fn start_turn_into(
+    state: &SharedState,
+    repo: ChatRepo,
+    thread: &ChatThread,
+    mode: TurnMode,
+    caps: Caps,
+    out: mpsc::Sender<TurnFrame>,
+    opts: TurnOpts,
+) -> Result<(), Response> {
+    let resumed = opts.resume.clone();
+    let started = start_turn_inner(state, repo, thread, mode, caps, out, opts).await;
+    if let (Err(_), Some(r)) = (&started, &resumed) {
+        super::chat_approvals::unrun(state, repo, thread.id, r).await;
+    }
+    started
+}
+
+/// `thread`'s approval floor as its turn reads it
+/// ([`crate::mcp::exec::ApprovalFloor`]): its own, and in a folder the
+/// folder's floor and defaults. A folder gone since is none.
+async fn approval_floor(
+    state: &SharedState,
+    thread: &ChatThread,
+) -> Result<crate::mcp::exec::ApprovalFloor, Response> {
+    let folder = match thread.folder_id {
+        Some(id) => crate::store::get_chat_folder(&state.db, id)
+            .await
+            .map_err(|e| {
+                err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    format!("the folder's approval rules could not be read: {e}"),
+                )
+            })?
+            .map(|f| {
+                let mut rules = f.approval_floor;
+                rules.extend(f.defaults.mcp_tools.unwrap_or_default());
+                rules
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok(crate::mcp::exec::ApprovalFloor {
+        thread: thread.approval_floor.clone(),
+        folder,
+    })
+}
+
+async fn start_turn_inner(
     state: &SharedState,
     repo: ChatRepo,
     thread: &ChatThread,
@@ -553,6 +722,17 @@ pub(crate) async fn start_turn_into(
             return Err(continue_gone());
         }
     }
+    if let TurnMode::Resume { message_id } = mode {
+        // The same for a resumed turn: its reply must still be the last.
+        let last = repo.last_message(state, thread.id).await.ok().flatten();
+        if !last.is_some_and(|m| m.id == message_id && m.role == "assistant") {
+            return Err(resume::moved_on());
+        }
+    }
+    // The owner's approval floor the turn's tools run under (client-apps
+    // design §6.6), read before the turn takes the thread: a read that
+    // fails refuses the turn rather than running it ungated.
+    let floor = approval_floor(state, thread).await?;
     // Room for the opening `turn` frame, before the turn takes the thread: a
     // refused call cancels no live turn and wakes no archived thread (WP11
     // server review n6). This caller is the channel's only writer so far.
@@ -583,10 +763,29 @@ pub(crate) async fn start_turn_into(
     if device.is_some() && !opts.caller.sees(&state.snapshot(), thread) {
         return Err(out_of_reach());
     }
-    let ticket = state
-        .chat_live
-        .begin_as(thread.id, device, thread.reach_level())
-        .await;
+    // Once the turn let the thread go — its worker's end, or a refusal from
+    // here on — MCP task results that ended while it held it enter the
+    // thread (MCP Tasks design §3.1). Taken before the ticket, so it drops
+    // after it.
+    let deliver = super::chat_tasks::deliver::after_turn(state, thread.id, !repo.is_temp());
+    let ticket = match mode {
+        TurnMode::Answer => {
+            let ticket = state
+                .chat_live
+                .begin_idle_as(thread.id, device, thread.reach_level())
+                .await;
+            let Some(ticket) = ticket else {
+                return Err(super::chat_tasks::turn_running());
+            };
+            ticket
+        }
+        _ => {
+            state
+                .chat_live
+                .begin_as(thread.id, device, thread.reach_level())
+                .await
+        }
+    };
     // ... and after: a level that moved between that check and this
     // registration found no turn to cancel, so it is asked again now that
     // one would be found (review G-6).
@@ -605,16 +804,50 @@ pub(crate) async fn start_turn_into(
         degraded,
         caller,
         slot,
+        resume,
+        sent,
     } = opts;
+    // Begun: the thread is this turn's now, and a result that ends from
+    // here on waits for its end (MCP Tasks design §3.1).
+    let sent = match sent {
+        Some(hold) => {
+            drop(hold);
+            true
+        }
+        None => false,
+    };
     if let Some(began) = began {
         let _ = began.send(ticket.generation());
     }
     // Turning an archived thread over restores it (chat-archive design §1).
     let _ = repo.wake(state, thread, &caller).await;
+    // MCP task results that ended before this turn enter the history it
+    // reads (MCP Tasks design §3.1). A continue or a resumed turn extends
+    // the last reply, which must stay last: what waits enters when it ends.
+    // A send's entered before its message, and one that ended after the
+    // message waits for this turn's end.
+    if matches!(mode, TurnMode::Fresh { .. } | TurnMode::Answer) && !repo.is_temp() && !sent {
+        // Boxed, as every await this deep in a turn: its future stays off
+        // the stack.
+        Box::pin(super::chat_tasks::deliver::at_start(
+            state, &ticket, thread.id,
+        ))
+        .await;
+    }
     let mut history = repo.messages(state, thread.id).await.unwrap_or_default();
 
     let (user_message_id, persist) = match mode {
         TurnMode::Fresh { user_message_id } => (user_message_id, Persist::Insert),
+        // Asked again under the ticket: a turn that ended between the
+        // route's check and this start may have answered the results.
+        TurnMode::Answer if !super::chat_tasks::render::unanswered(&history) => {
+            return Err(super::chat_tasks::nothing_to_answer());
+        }
+        TurnMode::Answer => (None, Persist::Insert),
+        TurnMode::Resume { message_id } => match resume::prior(&history, message_id) {
+            Some(prior) => (None, Persist::Resume(Box::new(prior))),
+            None => return Err(resume::moved_on()),
+        },
         TurnMode::Continue { message_id } => {
             let Some(last) = history
                 .last_mut()
@@ -664,6 +897,7 @@ pub(crate) async fn start_turn_into(
         admin: thread.kind == ADMIN_KIND,
         mcp: thread.mcp_tools.clone(),
         kb: kb.tools,
+        floor,
     };
     // Live in the change feed from here (client-apps design §2.2): who
     // started it, and whether it is a bound session's voice turn.
@@ -707,6 +941,7 @@ pub(crate) async fn start_turn_into(
         caller,
         feed,
         _slot: slot,
+        resume: resume.map(|r| r.decided).unwrap_or_default(),
     };
     let state = state.clone();
     let thread = thread.clone();
@@ -719,6 +954,9 @@ pub(crate) async fn start_turn_into(
         .running_at(state.stops.at_or_now(turn.caller.served_at()));
     tokio::spawn(async move {
         let _running = running;
+        // Bound before the turn, so it drops after the turn's ticket.
+        let _deliver = deliver;
+        let turn = turn;
         // The waits before the request goes out give way the moment the turn
         // is stopped or replaced (review R1 finding 1): nothing is saved and
         // nothing more is started for a reply nobody will read.
@@ -739,6 +977,7 @@ pub(crate) async fn start_turn_into(
                 .await;
             if let Err(why) = ran {
                 turn.report_stop(why, &tx).await;
+                turn.unrun(&state).await;
                 return;
             }
         }
@@ -760,6 +999,7 @@ pub(crate) async fn start_turn_into(
             Ok(r) => r,
             Err(why) => {
                 turn.report_stop(why, &tx).await;
+                turn.unrun(&state).await;
                 return;
             }
         };
@@ -768,6 +1008,7 @@ pub(crate) async fn start_turn_into(
             Ok(l) => l,
             Err(why) => {
                 turn.report_stop(why, &tx).await;
+                turn.unrun(&state).await;
                 return;
             }
         };
@@ -783,7 +1024,9 @@ pub(crate) async fn start_turn_into(
         // The request holds the spoken parts now; the turn keeps no copy
         // (voice-audio-input design §4).
         drop(spoken);
-        if plan.is_empty() {
+        // A resumed turn settles its decided calls in the tool loop, even
+        // if the thread's tools went meanwhile.
+        if plan.is_empty() && !turn.is_resume() {
             run_send(state, turn, ir, tx).await;
         } else {
             agentchat::run_send(state, turn, ir, plan, tx).await;
@@ -793,8 +1036,9 @@ pub(crate) async fn start_turn_into(
 }
 
 /// The turn's request: the history as IR with the thread's current settings
-/// — and, for a voice turn (chat-voice design §8.5), the spoken-style block
-/// after the thread's prompt and reasoning off unless the thread sets it;
+/// and its profile's prompt parts (`chat_profile::system_message`) — and,
+/// for a voice turn (chat-voice design §8.5), the spoken-style block after
+/// the prompt and reasoning off unless the thread or its profile sets it;
 /// for a turn with a reply language, the languages
 /// (`chat_voice::prompt::turn_block`). `spoken`: a heard response's new
 /// turns, after the history (voice-audio-input design §3.4).
@@ -810,19 +1054,17 @@ fn request(
     attachments: &HashMap<i64, Vec<chat_attach::Rendered>>,
     (voice, language): (Option<&VoiceTurn>, Option<&TurnLanguage>),
 ) -> (ChatRequest, Option<Vec<Message>>) {
-    // A voice turn's prompt block, a language, and the reasoning (§8.5).
-    let settings = &state.snapshot().settings.realtime;
-    let (block, reasoning) = super::chat_voice::turn_block(thread, settings, voice, language);
+    // The system message — the thread's profile's parts, a voice turn's
+    // block, a language — and the reasoning (§8.5; personality-profiles
+    // design §2.2).
+    let snap = state.snapshot();
     let answering = effective_alias(state, &thread.model_alias);
-    let messages = |text_form: bool| {
-        build_messages(
-            thread,
-            &answering,
-            (history, spoken),
-            (attachments, text_form),
-            block.as_deref(),
-        )
-    };
+    let today = chrono::Local::now().date_naive();
+    let prompt = super::chat_profile::Prompt::of(&snap, thread, &answering, today);
+    let (system, reasoning) =
+        super::chat_profile::system_message(&prompt, &snap.settings.realtime, voice, language);
+    let messages =
+        |text_form: bool| build_messages(&system, (history, spoken), (attachments, text_form));
     let paged = attachments
         .values()
         .flatten()
@@ -935,7 +1177,7 @@ pub(super) async fn model_caps(state: &SharedState, alias: &str) -> Caps {
 /// when the hold re-routes it (decided at resolve time, as `run_send`'s own
 /// resolve decides it), else `alias` itself — also when it does not resolve,
 /// since that send fails with its own error either way.
-fn effective_alias(state: &SharedState, alias: &str) -> String {
+pub(super) fn effective_alias(state: &SharedState, alias: &str) -> String {
     match state.snapshot().resolve_for_request(alias) {
         Ok(resolved) => resolved.fallback.unwrap_or_else(|| alias.to_string()),
         Err(_) => alias.to_string(),
@@ -968,8 +1210,11 @@ pub(super) fn continue_state(
     thread: &ChatThread,
     last: Option<&ChatMessageRow>,
 ) -> ContinueState {
+    // The reasoning a text turn asks for: the thread's, else its profile's
+    // (personality-profiles design D7).
+    let profile = thread.profile_id.and_then(|id| snap.chat_profile(id));
     let own = Params {
-        reasoning: chat_reasoning::control(thread),
+        reasoning: chat_reasoning::control_with(thread, profile.and_then(|p| p.reasoning)),
         ..Default::default()
     };
     let refusal = |route: &Route| {
@@ -1169,38 +1414,31 @@ fn group_by_message(atts: Vec<ChatAttachmentFull>) -> HashMap<i64, Vec<ChatAttac
 /// model cannot take that reaches here is already in history, and came out of
 /// the render as a note rather than a refusal.
 ///
-/// Adjacent user messages go out as one ([`merge`]). A voice turn's
-/// `voice_block` follows the thread's prompt in the system message. A heard
+/// Adjacent user messages go out as one ([`merge`]); a late MCP task
+/// result goes as its synthetic call and result where it is stored, its
+/// call joined to a directly preceding assistant message
+/// (`chat_tasks::render`). `system` is the whole system message (`chat_profile::system_message`: the prompt, a voice
+/// turn's block, the admin wrapper), none when empty. A heard
 /// response's `spoken` parts follow the history as a user message, and a
 /// spoken row with no words says so ([`spoken`]). With `text_form`, a PDF
 /// rendered as page images goes as its text form instead
 /// (`Rendered::text_form`, [`blind`]).
-fn build_messages(
-    thread: &ChatThread,
-    answering: &str,
+pub(in crate::web) fn build_messages(
+    system: &str,
     (history, spoken): (&[ChatMessageRow], Option<&[ContentPart]>),
     (attachments, text_form): (&HashMap<i64, Vec<chat_attach::Rendered>>, bool),
-    voice_block: Option<&str>,
 ) -> Vec<Message> {
     let mut msgs = merge::Messages::with_capacity(history.len() + 2);
-    let sys = crate::config::expand_chat_prompt(
-        thread.system_prompt.trim(),
-        answering,
-        chrono::Local::now().date_naive(),
-    );
-    let sys = match voice_block {
-        Some(block) => super::chat_voice::with_block(sys, block),
-        None => sys,
-    };
-    if thread.kind == ADMIN_KIND {
-        msgs.push(
-            Message::text(Role::System, agentchat::system_prompt(&sys)),
-            None,
-        );
-    } else if !sys.is_empty() {
-        msgs.push(Message::text(Role::System, sys), None);
+    if !system.is_empty() {
+        msgs.push(Message::text(Role::System, system.to_string()), None);
     }
+    // Late MCP task results where they are stored, in chronological order
+    // (MCP Tasks design §3.2).
     for m in history {
+        if m.is_task_result() {
+            msgs.extend_joined(super::chat_tasks::render::pair_of(m).unwrap_or_default());
+            continue;
+        }
         if let Some(raw) = &m.ir_messages {
             if let Ok(turn) = serde_json::from_str::<Vec<Message>>(raw) {
                 // The record stops short of the final answer — the tool loop

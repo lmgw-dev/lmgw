@@ -332,6 +332,9 @@ async fn respond_until(
             user_row,
         }),
         degraded: None,
+        resume: None,
+        verdicts: None,
+        answer: false,
     };
     let running = tokio::spawn(super::super::run(job));
     tokio::time::sleep(Duration::from_millis(150)).await;

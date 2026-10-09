@@ -51,6 +51,8 @@ use crate::mcp::{selfadmin, CallError};
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 
+mod resources;
+mod server_meta;
 mod tool_row;
 
 pub(crate) use tool_row::{record_tool_call, record_tool_canceled, RowWatch};
@@ -67,13 +69,44 @@ const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 /// comments and never bounds or truncates the notification stream itself.
 const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
-/// Issued northbound session ids → the client name from `initialize`.
-///
-/// The name is kept because `docs__request` records who asked (quickdoc §7):
-/// a queue entry that says "claude-code wanted tower docs" is actionable in a
-/// way an anonymous one is not. `None` when the client sent no `clientInfo`.
-static SESSIONS: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+/// Issued northbound session ids → what their `initialize` said.
+static SESSIONS: LazyLock<Mutex<HashMap<String, Session>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What a northbound session's `initialize` said that lmgw keeps.
+#[derive(Clone, Default)]
+struct Session {
+    /// `clientInfo.name`, kept because `docs__request` records who asked
+    /// (quickdoc §7): a queue entry that says "claude-code wanted tower
+    /// docs" is actionable in a way an anonymous one is not. `None` when
+    /// the client sent no `clientInfo`.
+    client_name: Option<String>,
+    /// Whether the client declared the MCP Apps extension
+    /// (`capabilities.extensions["io.modelcontextprotocol/ui"]`): an apps
+    /// host, which renders views and calls their app-only tools for them.
+    /// A client that did not is offered no tool whose `_meta.ui.visibility`
+    /// leaves `"model"` out (client-apps design §7.2).
+    apps_host: bool,
+}
+
+impl Session {
+    /// The session `initialize`'s `params` open.
+    fn of_initialize(params: &Value) -> Self {
+        Self {
+            client_name: params
+                .get("clientInfo")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            apps_host: params
+                .get("capabilities")
+                .and_then(|c| c.get("extensions"))
+                .and_then(|e| e.get(crate::mcp::resources::UI_EXTENSION))
+                .is_some_and(|v| !v.is_null()),
+        }
+    }
+}
 
 /// The `/mcp` routes, each declaring the capability it needs (principals
 /// §3.2): `Inference` for the aggregate plane and its session handlers, so an
@@ -139,6 +172,17 @@ pub trait ToolPlane: Send + Sync {
         name: &str,
         args: Option<Map<String, Value>>,
     ) -> Result<Value, CallError>;
+
+    /// `resources/*` (client-apps design §7.2): `None` for a plane that
+    /// serves no resources, whose dispatch answers `-32601` as for any
+    /// method it does not know; else the result or the JSON-RPC error.
+    async fn resources(
+        &self,
+        _method: &str,
+        _params: &Value,
+    ) -> Option<Result<Value, (i64, String)>> {
+        None
+    }
 }
 
 /// Server name recorded on the log row for a built-in `lmgw__*` call, so the
@@ -239,8 +283,9 @@ impl ToolPlane for AdminPlane {
 struct AggregatePlane {
     state: SharedState,
     ctx: RequestCtx,
-    /// `initialize`'s client name for this session, recorded by `docs__request`.
-    client_name: Option<String>,
+    /// What this session's `initialize` said: its client name, recorded by
+    /// `docs__request`, and whether it is an MCP Apps host.
+    session: Session,
 }
 
 #[async_trait]
@@ -251,10 +296,20 @@ impl ToolPlane for AggregatePlane {
         // rmcp `Tool` serializes camelCase (`inputSchema` etc.) — pass through.
         let mut tools: Vec<Value> = super::docs::list();
         tools.extend(super::kb::list());
+        // An app-only tool is for an MCP Apps host's views; a client that
+        // declared no such host is offered only what a model may see.
         tools.extend(
             agg.tools
                 .iter()
-                .filter_map(|t| serde_json::to_value(t).ok()),
+                .filter(|t| self.session.apps_host || super::resources::model_visible(t))
+                // A switch set under the name a collision moved it from.
+                .filter(|t| !agg.tool_disabled(&snap, t.name.as_ref()))
+                .filter_map(super::tasks::meta::listed)
+                // Whose it is, so a host can route a view's call of it.
+                .map(|mut t| {
+                    server_meta::stamp(&mut t, &agg, &snap);
+                    t
+                }),
         );
         retain_enabled(&snap, &mut tools);
         // The caller's own reach — an agent's manifest, a client key's tool
@@ -286,8 +341,14 @@ impl ToolPlane for AggregatePlane {
         // reserved namespace is off this plane for every caller, and no list
         // can put it back — a scoped caller gets the same refusal everyone
         // else does, with the one sentence that explains it.
+        //
+        // The server the name routed to as the scope admitted it is the one
+        // it runs on (`ToolScope::routed`): a name that changed hands since
+        // — to a device this caller does not reach — is refused, not run.
+        let mut routed = None;
         if !selfadmin::owns(name) {
             let scope = ToolScope::of_request(&self.state, &self.ctx).await;
+            routed = scope.routed(name);
             if !scope.admits(name) {
                 let e = CallError::ToolNotFound(scope.refusal(name));
                 record_mcp_call(
@@ -347,7 +408,7 @@ impl ToolPlane for AggregatePlane {
                 &self.state,
                 name,
                 args,
-                self.client_name.as_deref(),
+                self.session.client_name.as_deref(),
                 charged.as_ref(),
             )
             .await;
@@ -388,10 +449,20 @@ impl ToolPlane for AggregatePlane {
         // `call` resolves the owning server while routing and hands its name back
         // (errors carry it too) — so the log path labels the row without a second
         // O(tools) aggregate rebuild (§10).
+        let from = super::host::CallFrom::of(&self.ctx);
+        let routed = match routed {
+            Some(server) => {
+                self.state
+                    .mcp
+                    .call_listed(&snap, name, server, args, &from)
+                    .await
+            }
+            None => self.state.mcp.call(&snap, name, args, &from).await,
+        };
         let (server_name, result): (
             Option<String>,
             Result<rmcp::model::CallToolResult, CallError>,
-        ) = match self.state.mcp.call(&snap, name, args).await {
+        ) = match routed {
             Ok((r, sname)) => (Some(sname), Ok(r)),
             Err(e) => (e.server().map(str::to_string), Err(e)),
         };
@@ -404,6 +475,14 @@ impl ToolPlane for AggregatePlane {
         };
         record_mcp_call(&self.state, &self.ctx, name, server_name, started, outcome).await;
         result.map(|r| serde_json::to_value(r).unwrap_or_else(|_| json!({})))
+    }
+
+    async fn resources(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, (i64, String)>> {
+        resources::serve(&self.state, &self.ctx, method, params).await
     }
 }
 
@@ -526,11 +605,11 @@ async fn mcp_post(
     if !origin_allowed(&state, &headers, Plane::Aggregate).await {
         return refuse_origin();
     }
-    let client_name = session_client_name(&headers);
+    let session = session_of(&headers);
     let plane = AggregatePlane {
         state,
         ctx,
-        client_name,
+        session,
     };
     dispatch(&plane, &headers, &body, Plane::Aggregate).await
 }
@@ -634,13 +713,7 @@ async fn dispatch(
             } else {
                 PROTOCOL_VERSION
             };
-            let client_name = params
-                .get("clientInfo")
-                .and_then(|c| c.get("name"))
-                .and_then(Value::as_str)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let sid = new_session(client_name);
+            let sid = new_session(Session::of_initialize(&params));
             let instructions = match which {
                 Plane::Aggregate => {
                     "lmgw MCP gateway: aggregates the tools of every connected upstream MCP \
@@ -648,7 +721,10 @@ async fn dispatch(
                      `kb__*` toolsets. \
                      Open the GET /mcp stream to receive notifications/tools/list_changed when \
                      a server connects/disconnects (newly lazy-connected servers' tools then \
-                     appear after you re-list).\n\n\
+                     appear after you re-list). The servers' resources pass through as well \
+                     (resources/list, resources/templates/list, resources/read), a prefixed \
+                     server's URIs namespaced before the authority (ui://weather/card from \
+                     prefix p is ui://p__weather/card), MCP Apps UI resources included.\n\n\
                      `docs__*` serves this gateway's ingested library documentation. When you \
                      need a library's real API surface rather than what you remember of it: \
                      `docs__resolve` to find the corpus (ids are `library@version`), then \
@@ -764,9 +840,15 @@ async fn dispatch(
                      one."
                 }
             };
+            // The aggregate passes resources and the MCP Apps metadata
+            // through (client-apps design §7.2); the admin plane has tools.
+            let capabilities = match which {
+                Plane::Aggregate => resources::aggregate_capabilities(),
+                Plane::Admin => json!({ "tools": { "listChanged": true } }),
+            };
             let result = json!({
                 "protocolVersion": agreed,
-                "capabilities": { "tools": { "listChanged": true } },
+                "capabilities": capabilities,
                 "serverInfo": { "name": "lmgw", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": instructions,
             });
@@ -825,11 +907,17 @@ async fn dispatch(
                 }
             }
         }
-        other => json_rpc(
-            StatusCode::OK,
-            None,
-            rpc_err(id, -32601, &format!("method not found: {other}")),
-        ),
+        other => match plane.resources(other, &params).await {
+            Some(Ok(result)) => json_rpc(StatusCode::OK, None, rpc_ok(id, result)),
+            Some(Err((code, message))) => {
+                json_rpc(StatusCode::OK, None, rpc_err(id, code, &message))
+            }
+            None => json_rpc(
+                StatusCode::OK,
+                None,
+                rpc_err(id, -32601, &format!("method not found: {other}")),
+            ),
+        },
     }
 }
 
@@ -886,21 +974,24 @@ async fn mcp_get(
     // Subscribe this session to the northbound `tools/list_changed` broadcast.
     // The receiver is owned by the stream below; dropping the stream (client
     // disconnect / DELETE) drops the receiver — no leak.
+    //
+    // Each nudge, and a lag alike (a burst outran a slow client: one
+    // catch-up is correct, a list_changed is idempotent and the client
+    // re-lists the current aggregate), is one JSON-RPC notification with no
+    // id. A change of the aggregate's composition — a server connecting or
+    // going — changes whose resources are listed too, so it says both; an
+    // upstream's own `resources/list_changed` says that alone.
     let rx = state.mcp.subscribe_tools_changed();
-    let live = BroadcastStream::new(rx).filter_map(|item| async move {
-        match item {
-            // Each nudge → one JSON-RPC `notifications/tools/list_changed` (no id).
-            Ok(()) => Some(Ok::<SseFrame, Infallible>(
-                SseFrame::default().data(tools_list_changed_notification()),
-            )),
-            // Lagged (a burst outran a slow client): a single catch-up
-            // notification is correct — list_changed is idempotent, the client
-            // re-lists and sees the current aggregate. Never silently swallow it.
-            Err(_) => Some(Ok(
-                SseFrame::default().data(tools_list_changed_notification())
-            )),
-        }
+    let tools = BroadcastStream::new(rx).flat_map(|_| {
+        stream::iter([
+            Ok::<SseFrame, Infallible>(SseFrame::default().data(tools_list_changed_notification())),
+            Ok(SseFrame::default().data(resources::resources_list_changed_notification())),
+        ])
     });
+    let rx = state.mcp.subscribe_resources_changed();
+    let resources = BroadcastStream::new(rx)
+        .map(|_| Ok(SseFrame::default().data(resources::resources_list_changed_notification())));
+    let live = stream::select(tools, resources);
     // Nothing is emitted on open (the spec's "starting with nothing"); the first
     // frame is the first change. `stream::empty()` chained keeps the type a plain
     // notification stream.
@@ -1069,18 +1160,20 @@ fn session_exists(sid: &str) -> bool {
     SESSIONS.lock().unwrap().contains_key(sid)
 }
 
-fn new_session(client_name: Option<String>) -> String {
+fn new_session(session: Session) -> String {
     let sid = crate::web::rand_hex32();
-    SESSIONS.lock().unwrap().insert(sid.clone(), client_name);
+    SESSIONS.lock().unwrap().insert(sid.clone(), session);
     sid
 }
 
-/// The `initialize` `clientInfo.name` of the session this request carries, if
-/// any. Read from the header rather than threaded through [`ToolPlane`]: the
-/// session id is on every request that has one, and only one tool cares.
-fn session_client_name(headers: &HeaderMap) -> Option<String> {
-    let sid = hget(headers, "mcp-session-id")?;
-    SESSIONS.lock().unwrap().get(sid).cloned().flatten()
+/// What the `initialize` of the session this request carries said; the
+/// default (no name, no apps host) without one. Read from the header rather
+/// than threaded through [`ToolPlane`]: the session id is on every request
+/// that has one.
+fn session_of(headers: &HeaderMap) -> Session {
+    hget(headers, "mcp-session-id")
+        .and_then(|sid| SESSIONS.lock().unwrap().get(sid).cloned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1153,6 +1246,43 @@ mod tests {
         assert!(v["result"]["capabilities"]["tools"]["listChanged"]
             .as_bool()
             .unwrap());
+    }
+
+    /// Resources and the MCP Apps extension are the aggregate plane's
+    /// (client-apps design §7.2); the admin plane offers tools only, and a
+    /// plane that serves no resources answers `resources/*` as unknown.
+    #[tokio::test]
+    async fn only_the_aggregate_plane_offers_resources() {
+        let plane = FakePlane;
+        for (which, offers) in [(Plane::Aggregate, true), (Plane::Admin, false)] {
+            let resp = dispatch(
+                &plane,
+                &json_headers(),
+                &body(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": { "protocolVersion": "2025-06-18" } })),
+                which,
+            )
+            .await;
+            let v = body_json(resp).await;
+            let caps = &v["result"]["capabilities"];
+            assert_eq!(caps["tools"]["listChanged"], true, "{v}");
+            assert_eq!(caps["resources"].is_object(), offers, "{v}");
+            assert_eq!(
+                caps["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"]
+                    == json!(["text/html;profile=mcp-app"]),
+                offers,
+                "{v}"
+            );
+        }
+        let h = session_headers(&plane).await;
+        let resp = dispatch(
+            &plane,
+            &h,
+            &body(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" })),
+            Plane::Admin,
+        )
+        .await;
+        assert_eq!(body_json(resp).await["error"]["code"], -32601);
     }
 
     #[tokio::test]

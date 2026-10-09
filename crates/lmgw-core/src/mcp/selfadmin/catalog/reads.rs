@@ -88,7 +88,8 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "List the MCP servers lmgw aggregates southbound, each with its transport, \
-                 endpoint, live connection status and discovered tool count. Secrets in env \
+                 endpoint, live connection status, discovered tool count and open_tasks (the MCP \
+                 tasks it runs that have not ended). Secrets in env \
                  and headers are redacted.",
             props: vec![],
             required: &[],

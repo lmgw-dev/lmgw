@@ -209,12 +209,11 @@ pub async fn answering(tools: Value, held: bool, answer: Answer) -> McpStub {
     }
 }
 
-/// A URL nothing answers on: a server that cannot be connected.
-pub async fn dead_url() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}/mcp")
+/// A URL nothing answers on, for as long as the socket lives: a server that
+/// cannot be connected ([`crate::common::refusing_port`]).
+pub fn dead_url() -> (String, tokio::net::TcpSocket) {
+    let (port, held) = crate::common::refusing_port();
+    (format!("http://127.0.0.1:{port}/mcp"), held)
 }
 
 /// Register an HTTP MCP server `name` with tool prefix `prefix` at `url`,

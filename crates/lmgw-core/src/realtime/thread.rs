@@ -35,6 +35,11 @@
 //! goes to the chat model as audio; such a turn is in [`Bound::hearing`]
 //! until its transcript is in (`hearing`).
 //!
+//! **Late MCP task results** (MCP Tasks design §3.4, `tasks`): each result
+//! that enters the thread is said as `lmgw.task.done`, and a
+//! `response.create` with no new words answers the results no reply
+//! answered yet (a continuation) instead of being refused `empty_turn`.
+//!
 //! An unbound session behaves exactly as before: nothing here runs for it,
 //! and it never sends an `lmgw.*` event.
 
@@ -51,13 +56,19 @@ use crate::proxy::StopSignal;
 use crate::store::TurnDetection;
 use crate::web::chat_live::VoiceBinding;
 
+pub(crate) mod approvals;
 mod bind;
 pub(crate) mod hearing;
 mod hooks;
 pub(crate) mod journal;
 mod owned;
 pub(crate) mod reply;
+/// The session's own voice following its thread's (personality-profiles
+/// design D21).
+pub(crate) mod reshape;
 mod stages;
+/// Late MCP task results in the thread (MCP Tasks design §3.4, §4.2).
+pub(crate) mod tasks;
 pub(crate) mod turn;
 mod verdict;
 
@@ -184,6 +195,19 @@ pub(crate) struct Bound {
     /// cut nobody heard (`lifecycle::held`): what they still say is dropped,
     /// not relayed, until their responder's last word.
     pub unreleased: HashSet<u64>,
+    /// The approval items it showed and the client's answers
+    /// (client-apps design §6.4).
+    pub approvals: approvals::Approvals,
+    /// The thread's job results no reply answered, and the newest message
+    /// read: what a continuation answers, and what `lmgw.task.done` said
+    /// (MCP Tasks design §3.4).
+    pub tasks: tasks::Owed,
+    /// A turn was committed with no automatic response owed to it — the
+    /// client's `input_audio_buffer.commit`, or turn detection's with
+    /// `create_response` off — since the client's last `response.create`:
+    /// the next create answers it, and is no continuation (MCP Tasks design
+    /// §3.4, `lifecycle::bound`).
+    pub committed: bool,
     /// Holds the thread's one binding for the session's life.
     _binding: VoiceBinding,
 }
@@ -249,6 +273,9 @@ impl Bound {
             verdict_tx: None,
             hearing: Default::default(),
             unreleased: HashSet::new(),
+            approvals: Default::default(),
+            tasks: std::mem::take(&mut b.tasks),
+            committed: false,
             _binding: b.guard.take().expect("a binding is taken once"),
         }
     }
@@ -266,7 +293,9 @@ pub(in crate::realtime) async fn taken(taken: Option<&StopSignal>) {
 /// (§8.1): its transcription model and language, its voice, its TTS and
 /// its own speech style, and its turn detection as the session's starting
 /// point (the client's to change). Through realtime's own merge, so it is
-/// checked and normalized as a client's `session.update` would be.
+/// checked and normalized as a client's `session.update` would be. The
+/// voice, the TTS and the style follow the thread from then on, each
+/// response's re-read taking a change (`reshape`).
 pub(in crate::realtime) fn shape_session(
     session: &mut Session,
     b: &Binding,
@@ -278,29 +307,22 @@ pub(in crate::realtime) fn shape_session(
         TurnDetection::ServerVad => json!({"type": "server_vad"}),
         TurnDetection::PushToTalk => Value::Null,
     };
-    let style = match cfg.speech_style.source {
-        crate::web::chat_voice::bound::Source::Thread => json!(cfg.speech_style.text),
-        _ => Value::Null,
-    };
-    let patch = json!({
-        "type": "realtime",
-        "audio": {
-            "input": {
-                "transcription": {
-                    "model": cfg.asr.alias,
-                    "language": cfg.language.value,
-                },
-                "turn_detection": turn_detection,
+    let mut patch = reshape::voice_patch(cfg);
+    let audio = patch
+        .entry("audio")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("the voice patch's audio is an object");
+    audio.insert(
+        "input".into(),
+        json!({
+            "transcription": {
+                "model": cfg.asr.alias,
+                "language": cfg.language.value,
             },
-            "output": {
-                "voice": cfg.voice.name.as_deref().unwrap_or(super::merge::DEFAULT_VOICE),
-            },
-        },
-        "lmgw": {"tts_model": cfg.tts.alias, "speech_instructions": style},
-    });
-    let Value::Object(patch) = patch else {
-        return;
-    };
+            "turn_detection": turn_detection,
+        }),
+    );
     match super::merge::apply_update(session, &patch, settings) {
         Ok(shaped) => *session = shaped,
         // Only a stored value out of range could: the session keeps

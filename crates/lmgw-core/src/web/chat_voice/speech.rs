@@ -10,9 +10,13 @@
 //!   the page takes it, a page that falls behind playback said.
 //! - [`lead`]: where a continued reply's read-aloud starts.
 //! - [`start`]: one read-aloud in its own task.
+//! - [`speak_planned`]: one speech of a plan made elsewhere, in its own
+//!   task, registered with no thread.
 //!
-//! The callers are the stored reply's `speak` route (`super::speak`) and
-//! the speech tee of a turn sent with `speak: true` (`super::tee`).
+//! The callers are the stored reply's `speak` route (`super::speak`), the
+//! speech tee of a turn sent with `speak: true` (`super::tee`), and the
+//! profile editor's Speak (`chat_profiles::try`), which plans with its
+//! unsaved draft.
 
 mod clip;
 mod lead;
@@ -22,7 +26,9 @@ mod run;
 
 pub(crate) use lead::lead;
 pub(crate) use out::SpeechRx;
-pub(crate) use plan::{plan, resolve_shown, style_of, thread_seed, voice_of, Plan, Refusal};
+pub(crate) use plan::{
+    plan, plan_with, resolve_shown, style_of, thread_seed, voice_of, Plan, Refusal,
+};
 pub(crate) use run::{cold, Feed};
 
 use std::time::Instant;
@@ -80,17 +86,12 @@ pub(crate) fn start(
         // A device's read-aloud warms and speaks only with a TTS its key may
         // use (client-apps design §1.3, review W2-3): scope and budget before
         // the warm below can load it; the speaker counts each call.
-        if let Some(ctx) = charged.as_ref() {
-            let alias = plan.speech.alias.as_str();
-            let checked =
-                crate::proxy::policy_checked(&state, plan.speech.proto, ctx, alias, Audio).await;
-            if let Err(e) = checked {
-                let data = serde_json::json!({ "code": e.code(), "message": e.to_string() });
-                return out.frame(super::super::chat_turn::TurnFrame::new(
-                    "speech_error",
-                    data.to_string(),
-                ));
-            }
+        if let Err(e) = device_check(&state, charged.as_ref(), &plan).await {
+            let data = serde_json::json!({ "code": e.code(), "message": e.to_string() });
+            return out.frame(super::super::chat_turn::TurnFrame::new(
+                "speech_error",
+                data.to_string(),
+            ));
         }
         let states = (warm && !stop.is_raised() && !out.is_closed()).then(|| {
             let (warmed, states) = mpsc::unbounded_channel();
@@ -108,6 +109,54 @@ pub(crate) fn start(
             ctx,
         };
         run::run(state, run, feed, states, out).await;
+    });
+    reader
+}
+
+/// A device's check of the TTS `plan` speaks with (`charged`: its context;
+/// `None` for the owner, who is not checked): its key's scope and budget,
+/// not counted — the speaker counts each call. A refusal has written its
+/// row.
+pub(crate) async fn device_check(
+    state: &SharedState,
+    charged: Option<&crate::proxy::RequestCtx>,
+    plan: &Plan,
+) -> Result<(), crate::error::GatewayError> {
+    let Some(ctx) = charged else {
+        return Ok(());
+    };
+    let alias = plan.speech.alias.as_str();
+    crate::proxy::policy_checked(state, plan.speech.proto, ctx, alias, Audio).await
+}
+
+/// Speak `text` with `plan` (the profile editor's Speak, personality-profiles
+/// design §3.1): the read-aloud's pipeline — clauses, the speakable pass,
+/// cues, the plan's TTS, voice, style and seed — in its own task, its frames
+/// out of the returned reader, as [`start`]'s. It is registered with no
+/// thread's speech, and nothing warms ahead of it; `stop` (or the reader
+/// going away) stops it. Its TTS calls are `caller`'s, charged to a device's
+/// key — which the caller has checked first ([`device_check`]); it writes
+/// one TTS row.
+pub(crate) fn speak_planned(
+    state: &SharedState,
+    caller: &Caller,
+    plan: Plan,
+    (started, stop): (Instant, crate::proxy::StopSignal),
+    text: String,
+) -> SpeechRx {
+    let (out, reader) = out::channel();
+    let (state, ctx) = (state.clone(), caller.ctx());
+    tokio::spawn(async move {
+        let (feed, fed) = mpsc::unbounded_channel();
+        let _ = feed.send(Feed::Text(text));
+        drop(feed);
+        let run = run::Run {
+            plan,
+            stop,
+            started,
+            ctx,
+        };
+        run::run(state, run, fed, None, out).await;
     });
     reader
 }

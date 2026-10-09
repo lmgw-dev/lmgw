@@ -1,7 +1,9 @@
 //! The client events: what a client owns in a bound session (chat-voice
 //! design §8.1) — its turn detection and half duplex in `session.update`,
-//! the input buffer, the response, the truncate. The thread owns the rest
-//! (model, voice, tools), so `response.create` carries no overrides.
+//! the input buffer, the response, the truncate, and the answer to a call
+//! that waits for an approval (client-apps design §6.4). The thread owns
+//! the rest (model, voice, tools), so `response.create` carries no
+//! overrides.
 
 use serde_json::{json, Value};
 
@@ -69,6 +71,14 @@ pub enum ClientEvent {
         content_index: u32,
         audio_end_ms: u64,
     },
+    /// `conversation.item.create` of an `mcp_approval_response`: the answer
+    /// to a call that waits ([`super::ServerEvent::ApprovalRequest`]); a
+    /// [`ClientEvent::ResponseCreate`] after it resumes the thread's turn.
+    ApprovalResponse {
+        approval_request_id: String,
+        approve: bool,
+        reason: Option<String>,
+    },
 }
 
 impl ClientEvent {
@@ -119,6 +129,21 @@ impl ClientEvent {
                 "content_index": content_index,
                 "audio_end_ms": audio_end_ms,
             }),
+            ClientEvent::ApprovalResponse {
+                approval_request_id,
+                approve,
+                reason,
+            } => {
+                let mut item = json!({
+                    "type": "mcp_approval_response",
+                    "approval_request_id": approval_request_id,
+                    "approve": approve,
+                });
+                if let Some(r) = reason {
+                    item["reason"] = json!(r);
+                }
+                json!({"type": "conversation.item.create", "item": item})
+            }
         }
         .to_string()
     }

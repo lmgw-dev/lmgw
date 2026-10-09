@@ -111,12 +111,15 @@ pub(crate) fn thread_row(
         pinned,
         archived_at,
         folder_id,
+        profile_id,
         kb_ids,
         kb_mode,
         kb_budget_tokens,
         voice,
         created_at,
         updated_at,
+        // Internal to the approval check (client-apps design §6.6).
+        approval_floor: _,
     } = t.clone();
     api::ThreadRow {
         id,
@@ -142,6 +145,7 @@ pub(crate) fn thread_row(
         pinned,
         archived_at,
         folder_id,
+        profile_id,
         kb_ids,
         kb_mode: kb_mode_of(kb_mode),
         kb_budget_tokens,
@@ -187,6 +191,8 @@ pub(crate) fn folder(f: &ChatFolderListed) -> api::Folder {
         // The owner's list says it (review F-7); a device never sees such a
         // folder.
         devices_hidden,
+        // Internal to the approval check (client-apps design §6.6).
+        approval_floor: _,
     } = folder.clone();
     api::Folder {
         id,
@@ -208,10 +214,12 @@ fn thread_mcp(m: &store::ThreadMcp) -> api::ThreadMcp {
     let store::ThreadMcp {
         server_label,
         allowed_tools,
+        require_approval,
     } = m.clone();
     api::ThreadMcp {
         server_label,
         allowed_tools,
+        require_approval,
     }
 }
 
@@ -286,6 +294,7 @@ fn thread_defaults(d: &store::ThreadDefaults) -> api::ThreadDefaults {
         kb_mode,
         kb_budget_tokens,
         voice,
+        profile_id,
     } = d.clone();
     api::ThreadDefaults {
         model_alias,
@@ -308,5 +317,6 @@ fn thread_defaults(d: &store::ThreadDefaults) -> api::ThreadDefaults {
         kb_mode: kb_mode.map(kb_mode_of),
         kb_budget_tokens,
         voice: voice.as_ref().map(thread_voice),
+        profile_id,
     }
 }

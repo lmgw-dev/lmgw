@@ -66,6 +66,10 @@ pub struct SettingsPatch {
     /// own copy). The built-in text returns to the built-in default; `""`
     /// starts new threads with none.
     pub chat_system_prompt: Option<String>,
+    /// The personality profile new Chat threads start with: a profile id
+    /// (`GET /chat/api/profiles`), as a number or a numeric text, or `""`
+    /// for none. An unknown id is refused.
+    pub chat_profile: Option<super::ProfileChoice>,
     /// How a text PDF attached in Chat starts out: `text` | `images` | `ask`.
     pub chat_pdf_mode: Option<String>,
     /// The Chat's speech-to-text alias — dictation, realtime mode and audio
@@ -233,6 +237,10 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
     if let Some(v) = p.chat_system_prompt.as_deref() {
         s.set_default_chat_prompt(v);
         changed.push("chat_system_prompt");
+    }
+    if let Some(v) = &p.chat_profile {
+        s.chat_profile = super::validate_chat_profile(&snap, v)?;
+        changed.push("chat_profile");
     }
     if let Some(v) = p.chat_pdf_mode.as_deref() {
         s.chat_pdf_mode = validate_chat_pdf_mode(v)?;
