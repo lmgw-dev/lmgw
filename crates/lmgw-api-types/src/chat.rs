@@ -27,6 +27,19 @@ pub fn wire_order<T: Serialize, S: Serializer>(value: &T, s: S) -> Result<S::Ok,
         .serialize(s)
 }
 
+/// `Some(value)` for a field that was sent, `null` included: a bare
+/// `Option<Option<T>>` would read `null` as absent, and a patch could never
+/// clear a setting. Pair it with `#[serde(default)]`.
+pub fn present<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(de).map(Some)
+}
+
+pub use crate::ack::Ack;
+
 /// A tool server attached to a thread: the label it is reached by, and
 /// optionally the tools of it the thread uses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +355,16 @@ pub struct ThreadList {
     pub temporary: Vec<ThreadRow>,
     /// Every folder, as `GET /chat/api/folders` lists them.
     pub folders: Vec<Folder>,
+}
+
+/// `GET /chat/api/threads/rows`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ThreadRows {
+    /// The rows found, each as `GET /chat/api/threads` lists it, in the
+    /// active list's order.
+    pub threads: Vec<ThreadRow>,
 }
 
 /// `GET /chat/api/folders`.

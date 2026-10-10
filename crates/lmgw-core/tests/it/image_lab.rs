@@ -29,7 +29,7 @@ use common::Gw;
 // files describe the same gateway.
 // ---------------------------------------------------------------------------
 
-fn image_row(model_id: &str, edit: bool) -> NewImageModel {
+pub(crate) fn image_row(model_id: &str, edit: bool) -> NewImageModel {
     let mut files = serde_json::Map::new();
     files.insert(
         "diffusion_model".into(),
@@ -74,7 +74,7 @@ impl lmgw_core::runtime::registry::CommandRunner for FakePodman {
 
 /// sd-server's readiness route, which doubles as its capabilities probe (§3) —
 /// and is where the lab's sampler and scheduler selects come from.
-async fn mount_ready(mock: &MockServer) {
+pub(crate) async fn mount_ready(mock: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/sdcpp/v1/capabilities"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -109,7 +109,7 @@ fn models_dir(state: &SharedState) -> String {
     dir.display().to_string()
 }
 
-async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState, Gw) {
+pub(crate) async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState, Gw) {
     let state = AppState::init_for_tests().await.unwrap();
     let port = mock.address().port();
     state.set_runtime_for_tests(Arc::new(Registry::with_ports(
@@ -132,7 +132,7 @@ async fn setup_local(mock: &MockServer, rows: &[NewImageModel]) -> (SharedState,
 
 /// A gateway with one cloud upstream publishing an image generator, an edit
 /// model and a chat model, plus an alias onto each.
-async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
+pub(crate) async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
@@ -198,7 +198,7 @@ async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
     (state, base)
 }
 
-fn one_png() -> Value {
+pub(crate) fn one_png() -> Value {
     json!({"created": 1, "output_format": "png", "data": [{"b64_json": "aVZCT1J3MEs="}]})
 }
 

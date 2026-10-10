@@ -114,9 +114,11 @@ async fn a_request_that_fits_evicts_nothing_and_forwards_to_the_held_endpoint() 
 async fn the_local_model_test_tool_admits_and_calls_the_container_it_started() {
     let f = fixture(16 * GIB, 6 * GIB, 3 * GIB, 512).await;
 
-    let v = lmgw_core::modelinfo::local_model_test(&f.state, "chat-model", None)
-        .await
-        .unwrap();
+    let v = crate::common::model_test_wire(
+        lmgw_core::modelinfo::local_model_test(&f.state, "chat-model", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(v["ok"], serde_json::json!(true));
 
     assert_eq!(f.runs(), vec!["chat-model".to_string()]);

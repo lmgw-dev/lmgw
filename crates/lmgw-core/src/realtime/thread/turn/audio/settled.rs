@@ -75,7 +75,7 @@ pub(super) fn said(frames: Vec<TurnFrame>) -> Started {
 }
 
 fn aborted() -> TurnFrame {
-    TurnFrame::new("done", serde_json::json!({ "aborted": true }).to_string())
+    TurnFrame::of("done", &lmgw_api_types::chat_frames::DoneFrame::aborted())
 }
 
 /// A refused attempt whose turns all failed to transcribe: no words to send

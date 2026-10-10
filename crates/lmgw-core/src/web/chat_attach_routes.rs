@@ -6,8 +6,7 @@ use axum::extract::State;
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
-use serde_json::json;
+use lmgw_api_types::chat_attachments::{ModeRequest, ModeSet};
 
 use crate::state::SharedState;
 use crate::store::SetModeOutcome;
@@ -17,11 +16,6 @@ use super::chat_caller::Caller;
 use super::chat_extract::{ChatJson, ChatPath};
 use super::chat_repo::ChatRepo;
 
-#[derive(Deserialize)]
-pub struct ModeReq {
-    mode: String,
-}
-
 /// `POST /chat/api/attachments/{id}/mode {mode: "text" | "images"}` — how a
 /// PDF whose every page has text goes to the model. Drafts only (`409
 /// attachment_sent` once sent) and only for text-class PDFs (`422
@@ -30,7 +24,7 @@ pub async fn set_mode(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<ModeReq>,
+    ChatJson(req): ChatJson<ModeRequest>,
 ) -> Response {
     if let Some(refused) = unreachable_attachment(&state, &caller, id).await {
         return refused;
@@ -43,9 +37,12 @@ pub async fn set_mode(
         );
     }
     match ChatRepo::of(id).set_mode(&state, id, &req.mode).await {
-        Ok(SetModeOutcome::Set) => {
-            Json(json!({ "ok": true, "id": id, "mode": req.mode })).into_response()
-        }
+        Ok(SetModeOutcome::Set) => Json(ModeSet {
+            ok: true,
+            id,
+            mode: req.mode,
+        })
+        .into_response(),
         Ok(SetModeOutcome::NotFound) => {
             err_json(StatusCode::NOT_FOUND, "not_found", "attachment not found")
         }

@@ -17,6 +17,7 @@ use lmgw_api_types::builds::{
     ContainerImagesArgs, ContainerImagesResponse, ForgePr, ForgePrArgs, ForgePrPage, ForgePrsArgs,
     ForgeRefsArgs, PromoteResponse, RemoteRefsView, ResolvedPreview, RunLogChunk, VerifyReport,
 };
+use lmgw_api_types::ContainerAnswer;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -204,7 +205,7 @@ pub fn class_default_patch(class: &str, image: &str) -> Option<Value> {
 /// per-model `container` op with `action: "apply"`, exactly what a model
 /// editor's "Apply to container" sends (never the group apply). A busy
 /// refusal is a 200 with `ok: false`; see [`apply_outcome`].
-pub async fn model_apply(class: &str, model_id: &str) -> Result<Value> {
+pub async fn model_apply(class: &str, model_id: &str) -> Result<ContainerAnswer> {
     op(
         "container",
         &json!({ "target": class, "model": model_id, "action": "apply" }),
@@ -213,13 +214,9 @@ pub async fn model_apply(class: &str, model_id: &str) -> Result<Value> {
 }
 
 /// A `container` answer as success or the refusal it carries.
-pub fn apply_outcome(v: &Value) -> std::result::Result<String, String> {
-    let msg = v
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("applied")
-        .to_string();
-    if v.get("ok").and_then(Value::as_bool).unwrap_or(true) {
+pub fn apply_outcome(v: &ContainerAnswer) -> std::result::Result<String, String> {
+    let msg = v.message().unwrap_or("applied").to_string();
+    if v.ok() {
         Ok(msg)
     } else {
         Err(msg)
@@ -255,12 +252,18 @@ mod tests {
 
     #[test]
     fn a_busy_apply_is_a_refusal_even_on_http_200() {
+        let answer = |ok: bool, message: &str| {
+            serde_json::from_value::<ContainerAnswer>(
+                json!({"ok": ok, "class": "chat", "model_id": "m", "message": message}),
+            )
+            .unwrap()
+        };
         assert_eq!(
-            apply_outcome(&json!({"ok": false, "message": "busy"})),
+            apply_outcome(&answer(false, "busy")),
             Err("busy".to_string())
         );
         assert_eq!(
-            apply_outcome(&json!({"message": "recreated"})),
+            apply_outcome(&answer(true, "recreated")),
             Ok("recreated".to_string())
         );
     }

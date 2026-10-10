@@ -7,91 +7,27 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use lmgw_api_types::chat_threads::SettingsAck;
 
 use super::super::chat_caller::Caller;
 use super::super::chat_extract::{ChatJson, ChatPath};
 use super::super::chat_repo::ChatRepo;
 use super::super::chat_steer::{self, Change};
 use super::super::chat_turn;
+use super::super::chat_wire;
 use super::super::{chat_knowledge, chat_reasoning, chat_sampling, chat_tool_write, chat_voice};
 use super::err_json;
 use crate::error::GatewayError;
 use crate::state::SharedState;
-use crate::store::{ChatThread, SeedWrite, ThreadMcp};
+use crate::store::{ChatThread, SeedWrite};
 
-/// A **patch**: an absent field leaves that setting alone.
-///
-/// The page patches this endpoint from two places with different halves — the
-/// header's model picker sends only `model_alias`, the settings drawer sends
-/// everything but — so "absent" has to mean "unchanged" or each save blanks
-/// what the other owns. The sampling fields are doubly wrapped because `null`
-/// is meaningful for them: absent keeps the value, `null` clears it back to the
-/// upstream's own default.
-#[derive(Deserialize, Default, Clone)]
-pub(crate) struct SettingsReq {
-    model_alias: Option<String>,
-    system_prompt: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    temperature: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    max_tokens: Option<Option<i64>>,
-    /// Registered MCP servers this thread attaches.
-    mcp_tools: Option<Vec<ThreadMcp>>,
-    /// The reasoning overrides ([`super::chat_reasoning`]), wrapped like the
-    /// sampling fields: `null` clears one back to the route's default.
-    #[serde(default, deserialize_with = "present")]
-    reasoning_enabled: Option<Option<bool>>,
-    #[serde(default, deserialize_with = "present")]
-    reasoning_effort: Option<Option<String>>,
-    #[serde(default, deserialize_with = "present")]
-    reasoning_budget: Option<Option<i64>>,
-    /// The sampling overrides ([`super::chat_sampling`]), wrapped the same
-    /// way; `stop` is the whole list (`[]` clears it).
-    #[serde(default, deserialize_with = "present")]
-    top_p: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    top_k: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "present")]
-    min_p: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    repeat_penalty: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    presence_penalty: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    frequency_penalty: Option<Option<f64>>,
-    #[serde(default, deserialize_with = "present")]
-    seed: Option<Option<i64>>,
-    stop: Option<Vec<String>>,
-    /// Knowledge bases ([`super::chat_knowledge`]): the whole selection
-    /// (`[]` clears it), `"auto"` | `"tool"`, and the retrieval budget
-    /// (`null` = the `chat_kb_budget_tokens` setting).
-    kb_ids: Option<Vec<i64>>,
-    kb_mode: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    kb_budget_tokens: Option<Option<i64>>,
-    /// The voice overrides as a whole object (chat-voice design §2.2,
-    /// [`super::chat_voice::apply_thread_voice`]); `null` clears them.
-    #[serde(default, deserialize_with = "present")]
-    voice: Option<Value>,
-    /// The personality profile (personality-profiles design §3.1): an id
-    /// from `GET /chat/api/profiles`, or `null` for none ("Default"). An
-    /// unknown id is a 400 `unknown_profile`.
-    #[serde(default, deserialize_with = "present")]
-    profile_id: Option<Option<i64>>,
-}
-
-/// `Some(value)` for a field that was sent — including one sent as `null`,
-/// which a bare `Option<Option<T>>` would flatten into "absent" and so make
-/// clearing a sampling setting impossible.
-pub(crate) fn present<'de, T, D>(de: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    T::deserialize(de).map(Some)
-}
+/// The settings route's body: a **patch**, `lmgw-api-types`' type (the API
+/// document is written from it). The page patches this endpoint from two
+/// places with different halves — the header's model picker sends only
+/// `model_alias`, the settings drawer sends everything but — so "absent" has
+/// to mean "unchanged" or each save blanks what the other owns, and `null`
+/// clears a setting.
+pub(crate) use lmgw_api_types::chat_threads::SettingsPatch as SettingsReq;
 
 /// `POST /chat/api/threads/{id}/settings` — patch model + sampling settings,
 /// the reasoning overrides, the thread's attached MCP servers, its
@@ -152,13 +88,14 @@ pub async fn update_thread(
             let last = repo.last_message(&state, id).await.ok().flatten();
             let snap = state.snapshot();
             let verdict = chat_turn::continue_state(&snap, &t, last.as_ref());
-            Json(json!({
-                "ok": true,
-                "continue": verdict,
-                "voice": t.voice,
-                "voice_resolved": chat_voice::resolve_shown(&state, &t).await,
-            }))
-            .into_response()
+            let ack = SettingsAck {
+                ok: true,
+                continue_state: verdict,
+                voice: chat_wire::thread_voice(&t.voice),
+                voice_resolved: serde_json::to_value(chat_voice::resolve_shown(&state, &t).await)
+                    .expect("a resolved voice always serializes"),
+            };
+            Json(chat_wire::wire(&ack)).into_response()
         }
         // The thread went away between the read above and this write (a
         // delete in another tab, a temporary chat discarded or kept): the
@@ -314,7 +251,11 @@ pub(crate) async fn apply_settings_patch(
         .iter()
         .map(|a| a.map(str::to_string))
         .collect();
-    if let Some(written) = &req.mcp_tools {
+    let mcp_tools: Option<Vec<crate::store::ThreadMcp>> = req
+        .mcp_tools
+        .clone()
+        .map(|v| v.into_iter().map(chat_wire::store_thread_mcp).collect());
+    if let Some(written) = &mcp_tools {
         chat_tool_write::check(
             state,
             caller,
@@ -348,7 +289,7 @@ pub(crate) async fn apply_settings_patch(
     if let Some(v) = req.max_tokens {
         t.max_tokens = v;
     }
-    if let Some(v) = req.mcp_tools {
+    if let Some(v) = mcp_tools {
         // The owner's write is the thread's approval floor from now on
         // (client-apps design §6.6); a device's never moves it.
         if !caller.is_device() {

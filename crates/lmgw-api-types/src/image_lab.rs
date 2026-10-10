@@ -248,6 +248,147 @@ impl ImageGenForm {
     }
 }
 
+/// One model the Image lab can generate with: a local `image/<id>` row, or a
+/// cloud alias whose upstream catalog says it draws. `C` is the shape of the
+/// probed capabilities: the gateway fills in its own, a reader (and the API
+/// document) uses [`ImageCapabilities`](crate::status::ImageCapabilities).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "ImageLabModel"))]
+pub struct ImageLabModel<C = crate::status::ImageCapabilities> {
+    /// The alias to send as `model`.
+    #[serde(default)]
+    pub name: String,
+    /// The upstream that serves it (`local` for the gateway's own rows).
+    #[serde(default)]
+    pub owner: String,
+    /// A local row of this gateway, not a cloud alias.
+    #[serde(default)]
+    pub local: bool,
+    /// The local row's model id; `null` for a cloud alias.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// The model's task, as `GET /v1/models` reports it.
+    #[serde(default)]
+    pub task: String,
+    /// The `/v1` routes the model serves.
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    /// Whether it serves `/v1/images/edits`.
+    #[serde(default)]
+    pub edit: bool,
+    /// A local row's pipelines (`img_gen`, `vid_gen`, ...), as the operator
+    /// declared them; `null` for a cloud alias.
+    #[serde(default)]
+    pub modes: Option<Vec<String>>,
+    /// The flags a local row's container is started with (`width`, `height`,
+    /// `steps`, `cfg_scale`, `sampling_method` are the form's defaults when
+    /// set); `null` for a cloud alias.
+    #[serde(default)]
+    pub args: Option<serde_json::Map<String, Value>>,
+    /// What the gateway noticed about the model, one sentence each.
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// A local row's container state (`starting`, `ready`, `stopping`);
+    /// `null` when it has none running, and for a cloud alias.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Non-fatal problems the running container's start found.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// What the running container reported about its loaded pipeline: the
+    /// samplers, schedulers, size bounds and LoRAs on disk. `null` until a
+    /// container has been probed.
+    #[serde(default)]
+    pub image_capabilities: Option<C>,
+}
+
+/// `GET /image-lab/api/models`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(rename = "ImageLabModels"))]
+pub struct ImageLabModels<C = crate::status::ImageCapabilities> {
+    #[serde(default)]
+    pub models: Vec<ImageLabModel<C>>,
+    /// The image models directory on the gateway's host.
+    #[serde(default)]
+    pub models_dir: String,
+    /// The GPU hold is on: local image models are paused.
+    #[serde(default)]
+    pub hold: bool,
+}
+
+/// What the lab answers for a generation that succeeded: what was sent next
+/// to what came back. A failure is not wrapped; it is the gateway's own error
+/// envelope with its status.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageGenerateResult {
+    /// The route the request was dispatched to: `/v1/images/generations`.
+    pub endpoint: String,
+    /// The exact JSON body sent to that route.
+    pub request: Value,
+    /// How long the dispatch took in the gateway, in milliseconds.
+    pub latency_ms: u64,
+    /// The `x-lmgw-*` headers the gateway stamped on the answer (which model
+    /// really served it, which upstream, ...), which the lab would otherwise
+    /// drop.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// The route's answer: the OpenAI images response.
+    pub response: Value,
+}
+
+/// One text field of an edit, as sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageEditField {
+    pub name: String,
+    pub value: String,
+}
+
+/// One file part of an edit, as sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageEditFile {
+    /// `image` or `mask`.
+    pub name: String,
+    pub filename: String,
+    /// The part's content type as the upload declared it; `null` if it
+    /// declared none.
+    #[serde(rename = "type")]
+    pub content_type: Option<String>,
+    /// The part's size in bytes.
+    pub bytes: usize,
+}
+
+/// What an edit sent, in place of a JSON body: its text fields and each file
+/// by name and size.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageEditSummary {
+    pub fields: Vec<ImageEditField>,
+    pub files: Vec<ImageEditFile>,
+}
+
+/// What the lab answers for an edit that succeeded; as
+/// [`ImageGenerateResult`], with a summary of the multipart in `request`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ImageEditResult {
+    /// The route the request was dispatched to: `/v1/images/edits`.
+    pub endpoint: String,
+    pub request: ImageEditSummary,
+    /// How long the dispatch took in the gateway, in milliseconds.
+    pub latency_ms: u64,
+    /// The `x-lmgw-*` headers the gateway stamped on the answer.
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// The route's answer: the OpenAI images response.
+    pub response: Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

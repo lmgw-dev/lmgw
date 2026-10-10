@@ -9,78 +9,14 @@ use lmgw_api_types::chat_voice::Dictation;
 
 use super::super::registry::{DocRoute, Req, Resp};
 use super::chat::chat_route;
-
-/// A `tool` frame of a turn: `{event: "approval", approval_request_id,
-/// server_label, name, arguments, call_id}` for a call that waits, or the
-/// start, args, ready and result frames of a call that runs.
-pub(super) fn tool_frame(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": "object",
-        "description": "A tool call of the turn, by `event`: start, args, ready ({index, \
-            name, arguments, call_id, server_label, needs_approval: the call waits for a \
-            decision and an approval frame follows, ui_resource: the namespaced MCP Apps UI \
-            resource the tool links to — what a client that shows the call's view at once \
-            needs) and result ({index, name, call_id, output, is_error, ms, server_label, \
-            ui_resource, structured_content: the MCP result's structuredContent, content: its \
-            content blocks as the server sent them — images in full, no bound of lmgw's own — \
-            and task {id, task_id, server_label} for a call that started an MCP task: its \
-            output is `started, job <task_id>`, and the result enters the thread later); the \
-            model is given a result's content, and its structured content only when the \
-            content is empty), or approval ({approval_request_id, server_label, name, \
-            arguments, call_id}: a call that waits for a decision; name is the tool's own, \
-            arguments a JSON string, call_id the call's id as its ready and result frames \
-            carry it, to match the approval to the call by).",
-        "required": ["event"],
-        "properties": { "event": { "type": "string" } }
-    })
-}
-
-/// `done`: what the turn saved, and the calls it waits on.
-pub(super) fn done_frame(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    let pending = g
-        .subschema_for::<Vec<approvals::ApprovalRequest>>()
-        .to_value();
-    schemars::json_schema!({
-        "type": "object",
-        "description": "The turn's end: message_id (the reply it saved or appended to; absent \
-            when nothing was saved), saved, model, answered_by, prompt_tokens, \
-            completion_tokens, aborted, and pending_approvals when it stopped on calls that \
-            wait for a decision again.",
-        "properties": {
-            "message_id": { "type": "integer" },
-            "saved": { "type": "boolean" },
-            "aborted": { "type": "boolean" },
-            "pending_approvals": pending
-        }
-    })
-}
-
-pub(super) fn text_frame(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": "object",
-        "properties": { "text": { "type": "string" } }
-    })
-}
-
-pub(super) fn error_frame(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "type": "object",
-        "properties": { "message": { "type": "string" }, "code": { "type": "string" } }
-    })
-}
+use super::chat_turns::turn_events;
 
 pub(crate) fn routes() -> Vec<DocRoute> {
     vec![
         DocRoute {
             path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<approvals::ApprovalsRequest>()),
-            response: Resp::Sse(&[
-                ("delta", text_frame),
-                ("reasoning", text_frame),
-                ("tool", tool_frame),
-                ("error", error_frame),
-                ("done", done_frame),
-            ]),
+            response: Resp::Sse(turn_events!(speech)),
             ..chat_route(
                 "POST",
                 approvals::PATH,
@@ -106,7 +42,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  approval.decided, and in _meta[\"lmgw/approval\"] {decision: approved, by: \
                  {kind, name}} of a call forwarded to a device-hosted server; a call nobody \
                  approved carries null there. The first decision wins: a call decided already \
-                 is 409 approval_decided, naming who decided. A waiting call without a verdict \
+                 is 409 approval_decided, naming who decided. A body that is not JSON is 400 bad_request, JSON of another shape 422 \
+                 bad_request. A waiting call without a verdict \
                  is 400 approval_missing, naming each; an id nothing waits under 404 \
                  approval_not_found; a starter whose key is gone or disabled 409 \
                  approval_starter_unavailable, naming it (nothing is decided then; nor when \

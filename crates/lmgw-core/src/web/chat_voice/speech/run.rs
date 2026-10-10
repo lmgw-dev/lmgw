@@ -40,7 +40,7 @@
 
 use std::time::Instant;
 
-use serde_json::json;
+use lmgw_api_types::chat_frames as frames;
 use tokio::sync::mpsc;
 
 use crate::agent::DeltaSink;
@@ -190,9 +190,12 @@ pub(crate) async fn run(
 
 /// A refusal before anything was spoken, as its `speech_error` frame.
 pub(crate) fn refused(r: &Refusal) -> TurnFrame {
-    TurnFrame::new(
+    TurnFrame::of(
         "speech_error",
-        json!({ "code": r.code, "message": r.message }).to_string(),
+        &frames::SpeechError {
+            code: r.code.clone(),
+            message: r.message.clone(),
+        },
     )
 }
 
@@ -260,9 +263,7 @@ impl<'a> Frames<'a> {
     }
 
     fn send(&self, event: &'static str, data: &impl serde::Serialize) {
-        if let Ok(data) = serde_json::to_string(data) {
-            self.out.frame(TurnFrame::new(event, data));
-        }
+        self.out.frame(TurnFrame::of(event, data));
     }
 
     /// A frame of the caller's warm (module doc). A `ready` with no time
@@ -323,10 +324,12 @@ impl<'a> Frames<'a> {
                     };
                     self.outcome(&outcome);
                 }
-                self.send(
-                    "voice",
-                    &json!({ "tts": self.alias, "voice": voice, "tts_answered_by": answered_by }),
-                );
+                let opened = frames::VoiceFrame {
+                    tts: self.alias.to_string(),
+                    voice,
+                    tts_answered_by: answered_by.clone(),
+                };
+                self.send("voice", &opened);
                 self.answered_by = answered_by;
             }
             Msg::Clause { text, pcm, .. } if !pcm.is_empty() => {
@@ -382,24 +385,23 @@ impl<'a> Frames<'a> {
                 if self.loading.take().is_some() {
                     self.outcome(&WarmOutcome::refused(&e));
                 }
-                self.send(
-                    "speech_error",
-                    &json!({ "code": e.kind(), "message": e.to_string() }),
-                );
+                let error = frames::SpeechError {
+                    code: e.kind().to_string(),
+                    message: e.to_string(),
+                };
+                self.send("speech_error", &error);
                 return;
             }
         };
-        self.send(
-            "speech_done",
-            &json!({
-                "chars": self.chars,
-                "audio_ms": self.samples * 1000 / u64::from(INPUT_RATE),
-                "first_audio_ms": self.first_audio_ms,
-                "tts": self.alias,
-                "tts_answered_by": self.answered_by,
-                "stopped": stopped,
-            }),
-        );
+        let done = frames::SpeechDone {
+            chars: self.chars as u64,
+            audio_ms: self.samples * 1000 / u64::from(INPUT_RATE),
+            first_audio_ms: self.first_audio_ms,
+            tts: self.alias.to_string(),
+            tts_answered_by: self.answered_by.clone(),
+            stopped,
+        };
+        self.send("speech_done", &done);
     }
 }
 

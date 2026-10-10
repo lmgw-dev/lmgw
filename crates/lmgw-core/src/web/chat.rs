@@ -15,10 +15,13 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use lmgw_api_types::chat::ThreadList;
+use lmgw_api_types::chat::{Ack, ThreadList};
+use lmgw_api_types::chat_frames as frames;
+use lmgw_api_types::chat_threads::{ArchiveRequest, PinRequest, ThreadCreate, ThreadDetail};
+use lmgw_api_types::chat_turn::SendRequest;
 use lmgw_api_types::ApiError;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::agentchat::ADMIN_KIND;
 use super::chat_caller::Caller;
@@ -40,10 +43,10 @@ mod rows;
 mod settings;
 mod stopped;
 
-pub use rows::thread_rows;
+pub use rows::{thread_rows, RowsQuery};
 pub use settings::update_thread;
 pub(super) use settings::{
-    apply_settings_patch, present, restore_flag, same_thread, Attaching, SettingsReq,
+    apply_settings_patch, restore_flag, same_thread, Attaching, SettingsReq,
 };
 
 // ---------------------------------------------------------------------------
@@ -118,25 +121,6 @@ pub async fn list_threads(
     .into_response()
 }
 
-#[derive(Deserialize, Default)]
-pub struct CreateReq {
-    #[serde(default)]
-    model_alias: String,
-    /// `"chat"` (default) or `"admin"` — see [`ADMIN_KIND`].
-    #[serde(default)]
-    kind: String,
-    /// A temporary chat (chat-complete design §7): kept in memory only,
-    /// never written to the DB unless it is kept (`…/persist`). Always a
-    /// `chat` thread, whatever `kind` says.
-    #[serde(default)]
-    temporary: bool,
-    /// Create the thread in this folder, starting from the folder's defaults
-    /// laid over the global ones (chat-complete design §5). Not with
-    /// `temporary`: a temporary chat has no folder.
-    #[serde(default)]
-    folder_id: Option<i64>,
-}
-
 /// `POST /chat/api/threads` — create a thread, returning it. A plain chat
 /// thread starts from the default system prompt and profile (Settings →
 /// Chat), the prompt as its own copy; an Admin Chat thread has its built-in prompt already, and starts
@@ -147,7 +131,7 @@ pub struct CreateReq {
 pub async fn create_thread(
     State(state): State<SharedState>,
     caller: Caller,
-    ChatJson(req): ChatJson<CreateReq>,
+    ChatJson(req): ChatJson<ThreadCreate>,
 ) -> Response {
     if req.kind == ADMIN_KIND && caller.is_device() {
         return err_json(
@@ -275,22 +259,11 @@ pub async fn get_thread(
         }
     }
     let last = messages.last();
-    let messages: Vec<Value> = messages
+    let wire_messages: Vec<_> = messages
         .iter()
         .map(|m| {
-            let mut v = serde_json::to_value(m).expect("ChatMessageRow always serializes");
-            v["attachments"] = json!(by_message.get(&m.id).cloned().unwrap_or_default());
-            // The calls a gated turn's reply still waits on (client-apps
-            // design §6.2): what `POST …/approvals` decides.
-            if let Some(waiting) = m
-                .pending_approvals
-                .as_ref()
-                .map(|p| p.requests())
-                .filter(|r| !r.is_empty())
-            {
-                v["pending_approvals"] = json!(waiting);
-            }
-            v
+            let own = by_message.get(&m.id).map(Vec::as_slice).unwrap_or_default();
+            chat_wire::message(m, own)
         })
         .collect();
     let snap = state.snapshot();
@@ -299,18 +272,13 @@ pub async fn get_thread(
     // Its MCP tasks still running or waiting to enter it (MCP Tasks design
     // §5.1).
     let tasks = super::chat_tasks::thread_tasks(&state, id).await;
-    Json(json!({
-        "thread": chat_wire::wire(&thread_v),
-        "messages": messages,
-        "draft_attachments": drafts,
-        "tasks": tasks,
+    Json(chat_wire::wire(&ThreadDetail {
+        thread: thread_v,
+        messages: wire_messages,
+        draft_attachments: drafts.iter().map(|a| chat_wire::attachment(a)).collect(),
+        tasks,
     }))
     .into_response()
-}
-
-#[derive(Deserialize)]
-pub struct PinReq {
-    pinned: bool,
 }
 
 /// `POST /chat/api/threads/{id}/pin` — pinning an archived thread also
@@ -319,7 +287,7 @@ pub async fn pin_thread(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<PinReq>,
+    ChatJson(req): ChatJson<PinRequest>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let held = match reach_held(&state, &caller, id).await {
@@ -361,11 +329,6 @@ pub(super) async fn reach_held(
     Ok(held)
 }
 
-#[derive(Deserialize)]
-pub struct ArchiveReq {
-    archived: bool,
-}
-
 /// `POST /chat/api/threads/{id}/archive` — `{archived: true}` archives it by
 /// hand; `{archived: false}` restores it (clears `archived_at`, bumps
 /// `updated_at` — design §1).
@@ -373,7 +336,7 @@ pub async fn archive_thread(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<ArchiveReq>,
+    ChatJson(req): ChatJson<ArchiveRequest>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let held = match reach_held(&state, &caller, id).await {
@@ -418,7 +381,7 @@ pub async fn delete_thread(
     let repo = ChatRepo::of(id);
     if !caller.is_device() {
         let _ = repo.delete_thread(&state, id, &caller).await;
-        return Json(json!({ "ok": true })).into_response();
+        return Json(Ack::ok()).into_response();
     }
     // A device's reach, re-checked under the thread's lock it deletes
     // under (review W6-6).
@@ -427,7 +390,7 @@ pub async fn delete_thread(
         Err(r) => return r,
     };
     let _ = repo.delete_thread_held(&state, id, &caller, held).await;
-    Json(json!({ "ok": true })).into_response()
+    Json(Ack::ok()).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -524,11 +487,6 @@ pub(super) async fn read_upload_body(
     })
 }
 
-#[derive(Deserialize)]
-pub struct UploadQuery {
-    name: String,
-}
-
 /// `POST /chat/api/threads/{id}/attachments?name=FILENAME` — raw body, sniffed
 /// into a kind (never trusted from `name` or a `Content-Type`), stored as a
 /// draft. Body size is bounded by `max_body_mb`, read and enforced here
@@ -539,7 +497,7 @@ pub async fn upload_attachment(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatQuery(q): ChatQuery<UploadQuery>,
+    ChatQuery(q): ChatQuery<lmgw_api_types::chat_attachments::UploadQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -588,7 +546,7 @@ pub async fn delete_attachment(
         return refused;
     }
     match ChatRepo::of(id).delete_draft(&state, id).await {
-        Ok(store::DeleteAttachmentOutcome::Deleted) => Json(json!({ "ok": true })).into_response(),
+        Ok(store::DeleteAttachmentOutcome::Deleted) => Json(Ack::ok()).into_response(),
         Ok(store::DeleteAttachmentOutcome::NotFound) => {
             err_json(StatusCode::NOT_FOUND, "not_found", "attachment not found")
         }
@@ -668,27 +626,6 @@ pub(super) async fn unreachable_attachment(
 // Streaming send
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-pub struct SendReq {
-    content: String,
-    /// Draft attachment ids this message binds, in the order the composer
-    /// uploaded them (design §2). `content` may be empty when this is
-    /// non-empty — a message can be "just a file".
-    #[serde(default)]
-    attachments: Vec<i64>,
-    /// Knowledge bases picked with `#` for this message alone, on top of the
-    /// thread's own (chat-complete design §9.3).
-    #[serde(default)]
-    kb_refs: Vec<i64>,
-    /// A dictated message's `{via: "dictation", asr, asr_answered_by, asr_ms,
-    /// audio_ms}` (chat-voice design §3, §5), stored on the user message.
-    #[serde(default)]
-    voice: Option<Value>,
-    /// Read the reply aloud as it streams (chat-voice design §6.4).
-    #[serde(default)]
-    speak: bool,
-}
-
 /// `POST /chat/api/threads/{id}/send` — persist the user turn, then stream the
 /// assistant reply as SSE (`turn` / `retrieval` / `delta` / `usage` / `tool` /
 /// `error` / `done` events; [`chat_turn::start_turn`]). The client reads the
@@ -697,7 +634,7 @@ pub async fn send(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<SendReq>,
+    ChatJson(req): ChatJson<SendRequest>,
 ) -> Response {
     let content = req.content.trim().to_string();
     // Dedup keeping the first occurrence: the list's order is the order the
@@ -950,9 +887,9 @@ pub(super) async fn run_send(
     mut ir: ChatRequest,
     tx: chat_turn::Events,
 ) {
-    let emit = |ev: &'static str, data: String| {
+    let emit = |frame: chat_turn::TurnFrame| {
         let tx = tx.clone();
-        async move { tx.send(chat_turn::TurnFrame::new(ev, data)).await.is_ok() }
+        async move { tx.send(frame).await.is_ok() }
     };
 
     // A device's turn runs as its key (client-apps design L4): the call
@@ -1081,7 +1018,7 @@ async fn relay<E, Fut>(
     emit: &E,
 ) -> Option<crate::gate::Opened>
 where
-    E: Fn(&'static str, String) -> Fut,
+    E: Fn(chat_turn::TurnFrame) -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
     let crate::gate::Opened {
@@ -1367,38 +1304,58 @@ where
     let mut read = stopped::Read::default();
     let drained = drive_upstream(resp, decoder, timeout, started, &state.telemetry, |delta| {
         read.note(&delta, started);
-        let (ev, data) = match &delta {
+        let frame = match &delta {
             StreamDelta::TextDelta(t) => {
                 assistant.push_str(t);
-                ("delta", json!({ "text": t }).to_string())
+                chat_turn::TurnFrame::of("delta", &frames::TextFrame { text: t.clone() })
             }
             // Reasoning ("thinking") stream — kept separate from the answer so
             // the UI can show it in a collapsible block and a reasoning-only
             // turn (out of token budget) is still recorded, not blank.
             StreamDelta::ReasoningDelta(r) => {
                 reasoning.push_str(r);
-                ("reasoning", json!({ "text": r }).to_string())
+                chat_turn::TurnFrame::of("reasoning", &frames::TextFrame { text: r.clone() })
             }
-            StreamDelta::ToolCallStart { index, id, name } => (
+            StreamDelta::ToolCallStart { index, id, name } => chat_turn::TurnFrame::of(
                 "tool",
-                json!({ "event": "start", "index": index, "id": id, "name": name }).to_string(),
+                &frames::ToolFrame::Start(frames::ToolStartFrame {
+                    index: *index,
+                    id: Some(id.clone()),
+                    name: name.clone(),
+                }),
             ),
-            StreamDelta::ToolCallArgsDelta { index, fragment } => (
+            StreamDelta::ToolCallArgsDelta { index, fragment } => chat_turn::TurnFrame::of(
                 "tool",
-                json!({ "event": "args", "index": index, "fragment": fragment }).to_string(),
+                &frames::ToolFrame::Args(frames::ToolArgsFrame {
+                    index: *index,
+                    fragment: fragment.clone(),
+                }),
             ),
-            StreamDelta::Usage(u) => (
+            StreamDelta::Usage(u) => chat_turn::TurnFrame::of(
                 "usage",
-                json!({ "prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens })
-                    .to_string(),
+                &frames::UsageFrame {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                },
             ),
-            StreamDelta::Stop(r) => ("stop", json!({ "reason": r.to_openai() }).to_string()),
+            StreamDelta::Stop(r) => chat_turn::TurnFrame::of(
+                "stop",
+                &frames::StopFrame {
+                    reason: r.to_openai().to_string(),
+                },
+            ),
             // Server-measured prefill/decode timings (llama.cpp). Live per token
             // when `timings_per_token` is on, so the panel updates as it streams.
-            StreamDelta::Timings(t) => ("stats", json!(t).to_string()),
-            StreamDelta::Error(msg) => ("error", json!({ "message": msg }).to_string()),
+            StreamDelta::Timings(t) => chat_turn::TurnFrame::of("stats", &chat_wire::timings(t)),
+            StreamDelta::Error(msg) => chat_turn::TurnFrame::of(
+                "error",
+                &frames::ErrorFrame {
+                    message: msg.clone(),
+                    code: None,
+                },
+            ),
         };
-        emit(ev, data)
+        emit(frame)
     });
     // Raced against the stop, not only noticed at the next delta: a long
     // prefill emits nothing, and the GPU should not finish it for nobody.
@@ -1479,7 +1436,11 @@ where
     // A stream that broke before it said anything saved nothing: `done
     // {aborted}`, as for an upstream that refused outright.
     if outcome.error.is_some() && assistant.is_empty() && reasoning.is_empty() {
-        let _ = emit("done", json!({ "aborted": true }).to_string()).await;
+        let _ = emit(chat_turn::TurnFrame::of(
+            "done",
+            &frames::DoneFrame::aborted(),
+        ))
+        .await;
         return None;
     }
     // A model that reasoned although off was asked — a local template that
@@ -1490,41 +1451,42 @@ where
     let reasoning_note = fitted.note(answered_by.as_deref().unwrap_or(turn.model()));
     let total_ms = started.elapsed().as_millis() as i64;
     if saved.refused {
-        let _ = emit(
-            "error",
-            json!({ "message": NOT_SAVED, "code": "not_saved" }).to_string(),
-        )
-        .await;
+        let not_saved = frames::ErrorFrame {
+            message: NOT_SAVED.into(),
+            code: Some("not_saved".into()),
+        };
+        let _ = emit(chat_turn::TurnFrame::of("error", &not_saved)).await;
     }
-    let mut done = json!({
-        "message_id": saved.id,
-        // False: nothing of this reply is stored (its bubble is not a
-        // row, and no action on it can work).
-        "saved": saved.saved(),
-        // What answered: the thread's model, and the alias that took
-        // its place (a fallback, a candidate's pick), when one did.
-        "model": turn.model(),
-        "answered_by": answered_by,
-        "prompt_tokens": outcome.usage.prompt_tokens,
-        "completion_tokens": outcome.usage.completion_tokens,
-        "ttfb_ms": outcome.ttfb_ms,
-        "total_ms": total_ms,
-        "aborted": outcome.aborted,
-        // Authoritative final timings (llama.cpp); null for cloud upstreams.
-        "timings": outcome.timings,
-        // The thread's reasoning and sampling overrides this route did
-        // not send.
-        "reasoning_ignored": reasoning_ignored,
-        // The model reasoned although off was asked, in a sentence.
-        "reasoning_note": reasoning_note,
-    });
-    // A fallback that cannot see answered, and got the images as
-    // placeholders: who, in a sentence (`gate::fallback_images`). Only when
-    // it did, so every other turn's frame is what it was.
-    if let Some(note) = turn.blind().note() {
-        done["images_note"] = json!(note);
-    }
-    let _ = emit("done", done.to_string()).await;
+    let done = frames::DoneFrame {
+        aborted: outcome.aborted,
+        saved: Some(frames::DoneSaved {
+            message_id: saved.id,
+            // False: nothing of this reply is stored (its bubble is not a
+            // row, and no action on it can work).
+            saved: saved.saved(),
+            // What answered: the thread's model, and the alias that took
+            // its place (a fallback, a candidate's pick), when one did.
+            model: turn.model().to_string(),
+            answered_by,
+            prompt_tokens: outcome.usage.prompt_tokens,
+            completion_tokens: outcome.usage.completion_tokens,
+            ttfb_ms: outcome.ttfb_ms,
+            total_ms,
+            // Authoritative final timings (llama.cpp); null for cloud upstreams.
+            timings: outcome.timings.as_ref().map(chat_wire::timings),
+            // The thread's reasoning and sampling overrides this route did
+            // not send.
+            reasoning_ignored: reasoning_ignored.iter().map(|s| s.to_string()).collect(),
+            // The model reasoned although off was asked, in a sentence.
+            reasoning_note,
+            // A fallback that cannot see answered, and got the images as
+            // placeholders: who, in a sentence (`gate::fallback_images`).
+            // Only when it did, so every other turn's frame is what it was.
+            images_note: turn.blind().note(),
+            pending_approvals: None,
+        }),
+    };
+    let _ = emit(chat_turn::TurnFrame::of("done", &done)).await;
     None
 }
 

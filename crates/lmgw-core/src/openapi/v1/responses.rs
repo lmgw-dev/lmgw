@@ -138,25 +138,40 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
 fn usage_schema() -> Value {
     json!({
         "type": "object",
+        "required": [
+            "input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details",
+            "total_tokens"
+        ],
         "properties": {
             "input_tokens": {"type": "integer"},
             "input_tokens_details": {
                 "type": "object",
+                "required": ["cached_tokens"],
                 "properties": {
                     "cached_tokens": {"type": "integer"},
                     "cache_write_tokens": {"type": "integer"}
                 },
                 "description": "Tokens read from and written to the prompt cache, both \
-                    part of input_tokens; 0 when the upstream reported none."
+                    part of input_tokens; 0 when the upstream reported none (cache_write_tokens \
+                    is lmgw's own addition and absent from a verbatim upstream body)."
             },
             "output_tokens": {"type": "integer"},
             "output_tokens_details": {
                 "type": "object",
+                "required": ["reasoning_tokens"],
                 "properties": {"reasoning_tokens": {"type": "integer"}}
             },
             "total_tokens": {"type": "integer"}
         }
     })
+}
+
+/// The usage object, or `null` (a native upstream's response that has not
+/// finished, or reports none).
+fn usage_nullable() -> Value {
+    let mut usage = usage_schema();
+    usage["type"] = json!(["object", "null"]);
+    usage
 }
 
 /// `ResponsesEncoder::snapshot`. The non-streaming shape — the one
@@ -174,19 +189,28 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
         "Response",
         schemars::json_schema!({
             "type": "object",
+            "required": [
+                "id", "object", "created_at", "status", "model", "output", "error",
+                "incomplete_details"
+            ],
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["response"]},
                 "created_at": {"type": "integer"},
-                "status": {"type": "string", "enum": ["in_progress", "completed", "incomplete", "failed"]},
+                "status": {"type": "string", "enum": ["queued", "in_progress", "completed", "incomplete", "failed", "cancelled"]},
                 "model": {"type": "string"},
                 "output": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
                 "error": {"type": ["object", "null"]},
-                "incomplete_details": {"type": ["object", "null"], "properties": {"reason": {"type": "string"}}},
-                "usage": usage_schema(),
+                "incomplete_details": {"type": ["object", "null"], "required": ["reason"],
+                    "properties": {"reason": {"type": "string"}}},
+                "usage": usage_nullable(),
                 "store": {"type": "boolean", "description": "Whether lmgw stored this response, so a later \
-                    request can continue from it with previous_response_id."}
+                    request can continue from it with previous_response_id. Sent by lmgw's own \
+                    translation; a verbatim upstream body may leave it out."}
             },
+            "description": "An upstream that speaks the Responses API natively is relayed as it \
+                sends the body: such a body may carry status queued (background), a null or \
+                missing usage and no store. lmgw's own translation always sends usage and store.",
             "additionalProperties": true
         }),
     )
@@ -232,6 +256,7 @@ pub(crate) fn input_items(g: &mut SchemaGenerator) -> Schema {
         "ResponseInputItems",
         schemars::json_schema!({
             "type": "object",
+            "required": ["object", "data"],
             "properties": {
                 "object": {"type": "string", "enum": ["list"]},
                 "data": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
@@ -247,6 +272,7 @@ pub(crate) fn deletion(g: &mut SchemaGenerator) -> Schema {
         "ResponseDeleted",
         schemars::json_schema!({
             "type": "object",
+            "required": ["id", "object", "deleted"],
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["response"]},

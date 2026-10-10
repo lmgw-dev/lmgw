@@ -7,8 +7,9 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use lmgw_api_types::chat::Ack;
+use lmgw_api_types::chat_threads::ThreadKept;
+use serde_json::json;
 
 use super::chat::{matches_query, thread_row, ChatThread, ListItem};
 use crate::scope::Scope;
@@ -31,14 +32,9 @@ pub(super) fn temp_items(temps: &[ChatThread], words: &[String], today: &str) ->
 pub(super) fn discard(id: i64) {
     debug_assert!(id < 0, "only temporary chats are discarded silently");
     spawn_local(async move {
-        let _ = crate::api::post::<Value, _>(format!("/chat/api/threads/{id}/delete"), &json!({}))
-            .await;
+        let _ =
+            crate::api::post::<Ack, _>(format!("/chat/api/threads/{id}/delete"), &json!({})).await;
     });
-}
-
-#[derive(Deserialize)]
-struct Kept {
-    id: i64,
 }
 
 /// **Keep**: write the chat to the database and open it under its new id.
@@ -58,9 +54,11 @@ pub(super) fn keep(
     }
     busy.set(true);
     scope.spawn(async move {
-        let res =
-            crate::api::post::<Kept, _>(format!("/chat/api/threads/{id}/persist"), &json!({}))
-                .await;
+        let res = crate::api::post::<ThreadKept, _>(
+            format!("/chat/api/threads/{id}/persist"),
+            &json!({}),
+        )
+        .await;
         busy.set(false);
         match res {
             Ok(k) => {

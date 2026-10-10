@@ -24,6 +24,9 @@ use super::chat_repo::ChatRepo;
 use crate::state::SharedState;
 use crate::store::{self, ChatFolderListed, ChatThread};
 
+mod messages;
+pub(crate) use messages::{attachment, message, message_context};
+
 #[cfg(test)]
 mod tests;
 
@@ -31,6 +34,32 @@ mod tests;
 /// keys sorted at every depth (module doc).
 pub(super) fn wire<T: Serialize>(dto: &T) -> Value {
     serde_json::to_value(dto).expect("a Chat DTO always serializes")
+}
+
+/// A local model's timings as the `stats` and `done` frames carry them.
+pub(crate) fn timings(t: &crate::ir::Timings) -> lmgw_api_types::chat_frames::Timings {
+    let crate::ir::Timings {
+        prompt_n,
+        prompt_ms,
+        prompt_per_second,
+        predicted_n,
+        predicted_ms,
+        predicted_per_second,
+        cache_n,
+        draft_n,
+        draft_n_accepted,
+    } = *t;
+    lmgw_api_types::chat_frames::Timings {
+        prompt_n,
+        prompt_ms,
+        prompt_per_second,
+        predicted_n,
+        predicted_ms,
+        predicted_per_second,
+        cache_n,
+        draft_n,
+        draft_n_accepted,
+    }
 }
 
 /// When each of `threads`' newest message was written, in unix seconds
@@ -223,6 +252,21 @@ fn thread_mcp(m: &store::ThreadMcp) -> api::ThreadMcp {
     }
 }
 
+/// A thread's tool server as a request wrote it, in the store's form: the
+/// label read trimmed, as the store reads it from a stored row.
+pub(crate) fn store_thread_mcp(m: api::ThreadMcp) -> store::ThreadMcp {
+    let api::ThreadMcp {
+        server_label,
+        allowed_tools,
+        require_approval,
+    } = m;
+    store::ThreadMcp {
+        server_label: server_label.trim().to_string(),
+        allowed_tools,
+        require_approval,
+    }
+}
+
 fn kb_mode_of(m: store::KbMode) -> api::KbMode {
     match m {
         store::KbMode::Auto => api::KbMode::Auto,
@@ -245,7 +289,7 @@ fn audio_input_of(m: store::AudioInputMode) -> api::AudioInputMode {
     }
 }
 
-fn thread_voice(v: &store::ThreadVoice) -> api::ThreadVoice {
+pub(crate) fn thread_voice(v: &store::ThreadVoice) -> api::ThreadVoice {
     let store::ThreadVoice {
         asr_alias,
         tts_alias,

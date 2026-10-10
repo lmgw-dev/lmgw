@@ -776,7 +776,10 @@ fn main() {
                                 )
                                 .await
                                 {
-                                    Ok(v) => tracing::info!("container {action}: {v}"),
+                                    Ok(v) => tracing::info!(
+                                        "container {action}: {}",
+                                        serde_json::to_string(&v).unwrap_or_default()
+                                    ),
                                     Err(e) => tracing::error!("container {action}: {e}"),
                                 }
                             });

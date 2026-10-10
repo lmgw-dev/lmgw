@@ -6,7 +6,6 @@
 use leptos::html;
 use leptos::prelude::*;
 use lmgw_api_types::SettingsFull;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::chat::ChatThread;
@@ -19,11 +18,7 @@ use crate::widgets::Popover;
 // The shared list of bases
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct BasesResponse {
-    bases: Vec<Kb>,
-}
+use lmgw_api_types::knowledge::KnowledgeBaseList as BasesResponse;
 
 /// The Chat page's knowledge state: the bases (for pickers and chip names)
 /// and the one source viewer citations and excerpts open. Provided as context

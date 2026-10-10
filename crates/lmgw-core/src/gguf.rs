@@ -1168,6 +1168,41 @@ pub struct TemplateSignals {
     pub tool_call_format: Option<String>,
 }
 
+/// The API shape of the signals. Destructured without `..`: a field added to
+/// [`TemplateSignals`] stops compiling here until the API type has it too.
+impl From<&TemplateSignals> for lmgw_api_types::TemplateSignals {
+    fn from(s: &TemplateSignals) -> Self {
+        let TemplateSignals {
+            thinking_markers,
+            thinking_marker,
+            enable_thinking_var,
+            enable_thinking_default,
+            reasoning_effort_var,
+            effort_var_names,
+            effort_levels,
+            effort_default,
+            preserve_thinking_var,
+            tools_var,
+            parallel_tool_calls,
+            tool_call_format,
+        } = s.clone();
+        Self {
+            thinking_markers,
+            thinking_marker,
+            enable_thinking_var,
+            enable_thinking_default,
+            reasoning_effort_var,
+            effort_var_names,
+            effort_levels,
+            effort_default,
+            preserve_thinking_var,
+            tools_var,
+            parallel_tool_calls,
+            tool_call_format,
+        }
+    }
+}
+
 impl TemplateSignals {
     /// Derive the signals from a template's raw Jinja source. Pure text
     /// heuristics (see the module section header) — no Jinja parsing, so a

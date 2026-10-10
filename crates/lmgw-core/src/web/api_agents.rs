@@ -31,7 +31,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use lmgw_api_types as dto;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 
@@ -369,11 +369,11 @@ pub async fn run_open(
         deadline_seconds,
         token::plaintext_of(&st.snapshot(), &id),
     );
-    Json(json!({
-        "run": job_id,
+    Json(dto::AgentRunOpened {
+        run: job_id,
         // Printed, never silent: the caller is told exactly how long it has.
-        "deadline_seconds": deadline_seconds,
-    }))
+        deadline_seconds,
+    })
     .into_response()
 }
 
@@ -411,7 +411,12 @@ pub async fn run_events(
     // executor's next tick: a hand-posted row should be on screen by the time
     // the POST returns.
     st.agent_runs.put(job_id, &run.rows());
-    Json(json!({ "ok": true, "applied": applied, "rejected": rejected })).into_response()
+    Json(dto::AgentEventsApplied {
+        ok: true,
+        applied,
+        rejected,
+    })
+    .into_response()
 }
 
 /// `POST /api/agents/runs/{run}/close` — the run's terminal status.
@@ -442,7 +447,7 @@ pub async fn run_close(
         output: v.get("output").cloned(),
     };
     match run.close(close) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Ok(()) => Json(dto::Ack::ok()).into_response(),
         Err(r) => refused(&r),
     }
 }
@@ -1605,28 +1610,9 @@ pub async fn export(
 /// the config schema's properties and the review columns. The form's field
 /// order is the author's, not the alphabet's (§2.6), which is why the manifest
 /// holds an order-preserving map — serializing this struct straight to text is
-/// what keeps that order in the downloaded file.
-#[derive(Serialize)]
-struct ExportDoc<'a> {
-    #[serde(flatten)]
-    manifest: &'a manifest::Manifest,
-    exported_at: String,
-    lmgw_version: &'static str,
-    /// The `secret` fields left out, so the receiver knows what to fill in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    config_omitted: Option<Vec<String>>,
-    /// The mount slots left out (mounts §5.2) — beside `config_omitted`, and
-    /// meaning the other half of the same sentence: these are not values the
-    /// receiver types in, they are folders on the receiver's own box.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    config_unbound: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    config_values: Option<Map<String, Value>>,
-    /// Whether this file lands on another box (§3.4). Always written, portable
-    /// or not: "nothing here is local to the exporter" is worth saying too, and
-    /// a key that appears only on failure is a key nobody looks for.
-    portability: dto::AgentPortability,
-}
+/// what keeps that order in the downloaded file. The envelope is the API type
+/// [`dto::AgentExport`], generic over the manifest for exactly this.
+type ExportDoc<'a> = dto::AgentExport<&'a manifest::Manifest>;
 
 /// The export document as text: the manifest, plus the envelope, plus
 /// (optionally) the non-secret config.
@@ -1658,7 +1644,7 @@ pub(crate) async fn export_inner(
     let doc = ExportDoc {
         manifest: &agent.manifest,
         exported_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        lmgw_version: env!("CARGO_PKG_VERSION"),
+        lmgw_version: env!("CARGO_PKG_VERSION").to_string(),
         config_omitted: (!omitted.is_empty()).then_some(omitted),
         config_unbound: (!unbound.is_empty()).then_some(unbound),
         config_values: include_config

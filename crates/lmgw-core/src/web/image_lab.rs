@@ -23,12 +23,18 @@ use axum::extract::{Multipart, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use lmgw_api_types::image_lab::{ImageGenForm, EDITS_ENDPOINT, GENERATIONS_ENDPOINT};
-use serde_json::{json, Value};
+use lmgw_api_types::image_lab::{
+    ImageEditField, ImageEditFile, ImageEditResult, ImageEditSummary, ImageGenForm,
+    ImageGenerateResult, ImageLabModel, ImageLabModels, EDITS_ENDPOINT, GENERATIONS_ENDPOINT,
+};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::capabilities::exposed::exposed_entries;
+use crate::error::GatewayError;
 use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
+use lmgw_api_types::OpenAiError;
 
 // ---------------------------------------------------------------------------
 // Model list
@@ -59,7 +65,9 @@ pub async fn list_models(State(state): State<SharedState>) -> Response {
         .filter(|v| v.class == crate::runtime::Class::Image)
         .collect();
 
-    let mut models: Vec<Value> = Vec::new();
+    // The gateway's own probed capabilities; the document's mirror is
+    // `ImageCapabilities` (lmgw-api-types).
+    let mut models: Vec<ImageLabModel<crate::runtime::image::ImageCapabilities>> = Vec::new();
     for e in exposed_entries(&state).await {
         let Some(caps) = e.capabilities.as_ref() else {
             continue;
@@ -71,31 +79,31 @@ pub async fn list_models(State(state): State<SharedState>) -> Response {
             .enabled_image_models()
             .find(|m| snap.image_public_name(&m.model_id) == e.name);
         let rt = row.and_then(|m| runtime.iter().find(|r| r.model_id == m.model_id));
-        models.push(json!({
-            "name": e.name,
-            "owner": e.owner,
-            "local": row.is_some(),
-            "model_id": row.map(|m| m.model_id.clone()),
-            "task": caps.task,
-            "endpoints": caps.endpoints,
-            "edit": caps.endpoints.iter().any(|p| p == EDITS_ENDPOINT),
+        models.push(ImageLabModel {
+            edit: caps.endpoints.iter().any(|p| p == EDITS_ENDPOINT),
+            local: row.is_some(),
+            model_id: row.map(|m| m.model_id.clone()),
+            task: caps.task.clone(),
+            endpoints: caps.endpoints.clone(),
             // The operator's own words about the pipeline, and the flags its
             // argv carries — `width`, `height`, `steps`, `cfg_scale`,
             // `sampling_method` are the form's defaults when the row sets them.
-            "modes": row.map(|m| m.modes()),
-            "args": row.map(|m| m.args.clone()),
-            "notes": e.notes,
+            modes: row.map(|m| m.modes()),
+            args: row.map(|m| m.args.clone()),
+            notes: e.notes,
             // Runtime facts. Absent for a cloud alias, which has no container.
-            "state": rt.map(|r| r.state.as_str()),
-            "warnings": rt.map(|r| r.warnings.clone()).unwrap_or_default(),
-            "image_capabilities": rt.and_then(|r| r.image_capabilities.clone()),
-        }));
+            state: rt.map(|r| r.state.as_str().to_string()),
+            warnings: rt.map(|r| r.warnings.clone()).unwrap_or_default(),
+            image_capabilities: rt.and_then(|r| r.image_capabilities.clone()),
+            name: e.name,
+            owner: e.owner,
+        });
     }
-    Json(json!({
-        "models": models,
-        "models_dir": snap.settings.image.models_dir,
-        "hold": snap.settings.hold.active,
-    }))
+    Json(ImageLabModels {
+        models,
+        models_dir: snap.settings.image.models_dir.clone(),
+        hold: snap.settings.hold.active,
+    })
     .into_response()
 }
 
@@ -107,50 +115,53 @@ pub async fn list_models(State(state): State<SharedState>) -> Response {
 /// really served the request (a hold fallback names itself here), which
 /// upstream, how long it took. Relayed beside the body because the lab wraps
 /// the success case and would otherwise drop them.
-fn gateway_headers(h: &HeaderMap) -> Value {
-    let mut out = serde_json::Map::new();
+fn gateway_headers(h: &HeaderMap) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
     for (name, value) in h {
         let name = name.as_str();
         if let (true, Ok(v)) = (name.starts_with("x-lmgw-"), value.to_str()) {
-            out.insert(name.to_string(), json!(v));
+            out.insert(name.to_string(), v.to_string());
         }
     }
-    Value::Object(out)
+    out
 }
 
-/// Run one in-process dispatch and render its answer for the page.
+/// What a dispatch answered, for the page: the gateway's headers and the
+/// parsed body of a success.
+struct Dispatched {
+    headers: BTreeMap<String, String>,
+    response: Value,
+    latency_ms: u64,
+}
+
+/// Run one in-process dispatch and read its answer for the page.
 ///
-/// A success is wrapped — `{endpoint, request, latency_ms, headers, response}`
-/// — because the page shows what was sent next to what came back. A failure is
-/// **not**: the status, the headers and the body go back exactly as the handler
-/// produced them, so what the lab displays is the envelope a client would have
-/// received, down to the `code`. A lab that re-wrapped errors would be showing
-/// its own error handling rather than the gateway's.
-async fn relay(endpoint: &str, request: Value, resp: Response, latency_ms: u64) -> Response {
+/// A success is wrapped by the caller — `{endpoint, request, latency_ms,
+/// headers, response}` — because the page shows what was sent next to what
+/// came back. A failure is **not**: the status, the headers and the body go
+/// back exactly as the handler produced them, so what the lab displays is the
+/// envelope a client would have received, down to the `code`. A lab that
+/// re-wrapped errors would be showing its own error handling rather than the
+/// gateway's.
+async fn dispatched(resp: Response, latency_ms: u64) -> Result<Dispatched, Response> {
     let status = resp.status();
     let (parts, body) = resp.into_parts();
     // Unbounded, like the route: a 4096² PNG is the size it is.
-    let raw =
-        match axum::body::to_bytes(body, usize::MAX).await {
-            Ok(b) => b,
-            Err(e) => return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": { "message": format!("reading the image response: {e}") } })),
-            )
-                .into_response(),
-        };
+    let raw = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(e) => {
+            let err = GatewayError::Internal(format!("reading the image response: {e}"));
+            return Err((err.http_status(), Json(err.to_openai_json())).into_response());
+        }
+    };
     if !status.is_success() {
-        return (parts, raw).into_response();
+        return Err((parts, raw).into_response());
     }
-    let parsed: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
-    Json(json!({
-        "endpoint": endpoint,
-        "request": request,
-        "latency_ms": latency_ms,
-        "headers": gateway_headers(&parts.headers),
-        "response": parsed,
-    }))
-    .into_response()
+    Ok(Dispatched {
+        headers: gateway_headers(&parts.headers),
+        response: serde_json::from_slice(&raw).unwrap_or(Value::Null),
+        latency_ms,
+    })
 }
 
 /// A form that does not describe a request at all — a missing prompt, a
@@ -159,10 +170,11 @@ async fn relay(endpoint: &str, request: Value, resp: Response, latency_ms: u64) 
 fn bad_form(message: String) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(
-            json!({ "error": { "message": message, "type": "invalid_request_error",
-                               "code": "image_lab_form" } }),
-        ),
+        Json(OpenAiError::new(
+            message,
+            "invalid_request_error",
+            "image_lab_form",
+        )),
     )
         .into_response()
 }
@@ -180,7 +192,17 @@ pub async fn generate(
     let started = std::time::Instant::now();
     let resp = proxy::handle_image_generation(state, RequestCtx::default(), body.clone()).await;
     let ms = started.elapsed().as_millis() as u64;
-    relay(GENERATIONS_ENDPOINT, body, resp, ms).await
+    match dispatched(resp, ms).await {
+        Ok(d) => Json(ImageGenerateResult {
+            endpoint: GENERATIONS_ENDPOINT.into(),
+            request: body,
+            latency_ms: d.latency_ms,
+            headers: d.headers,
+            response: d.response,
+        })
+        .into_response(),
+        Err(failed) => failed,
+    }
 }
 
 /// `POST /image-lab/api/edit` — the browser's upload (`form` as JSON, `image`,
@@ -249,13 +271,24 @@ pub async fn edit(State(state): State<SharedState>, mut mp: Multipart) -> Respon
     // The summary the page shows beside the result: the text fields as sent,
     // plus each file part by name and size. Built from the same `fields` the
     // body is, so it cannot describe a request that was not made.
-    let request = json!({
-        "fields": fields.iter().map(|(k, v)| json!({"name": k, "value": v})).collect::<Vec<_>>(),
-        "files": files
+    let request = ImageEditSummary {
+        fields: fields
             .iter()
-            .map(|(n, f, ct, b)| json!({"name": n, "filename": f, "type": ct, "bytes": b.len()}))
-            .collect::<Vec<_>>(),
-    });
+            .map(|(k, v)| ImageEditField {
+                name: k.clone(),
+                value: v.clone(),
+            })
+            .collect(),
+        files: files
+            .iter()
+            .map(|(n, f, ct, b)| ImageEditFile {
+                name: n.clone(),
+                filename: f.clone(),
+                content_type: ct.clone(),
+                bytes: b.len(),
+            })
+            .collect(),
+    };
 
     let boundary = format!("lmgwimagelab{}", super::rand_hex32());
     let body = multipart_body(&boundary, &fields, &files);
@@ -274,7 +307,17 @@ pub async fn edit(State(state): State<SharedState>, mut mp: Multipart) -> Respon
     let started = std::time::Instant::now();
     let resp = proxy::handle_image_edit(state, RequestCtx::default(), req).await;
     let ms = started.elapsed().as_millis() as u64;
-    relay(EDITS_ENDPOINT, request, resp, ms).await
+    match dispatched(resp, ms).await {
+        Ok(d) => Json(ImageEditResult {
+            endpoint: EDITS_ENDPOINT.into(),
+            request,
+            latency_ms: d.latency_ms,
+            headers: d.headers,
+            response: d.response,
+        })
+        .into_response(),
+        Err(failed) => failed,
+    }
 }
 
 /// Serialize one `multipart/form-data` body: the text fields in the order the

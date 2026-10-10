@@ -274,6 +274,10 @@ async fn catalog_downloads_follow_the_spec_pin_unless_set_to_latest() {
     // Refresh lists the repo at main and at the pin.
     let (status, body) = op(&base, "audio_catalog", json!({"action": "refresh"})).await;
     assert_eq!(status, 200, "{body}");
+    crate::common::round_trips::<lmgw_api_types::AudioCatalogAnswer>(
+        "audio_catalog refresh",
+        &body,
+    );
     let warnings = body["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{body}");
     assert!(
@@ -325,6 +329,10 @@ async fn catalog_downloads_follow_the_spec_pin_unless_set_to_latest() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
+    crate::common::round_trips::<lmgw_api_types::AudioCatalogAnswer>(
+        "audio_catalog download",
+        &body,
+    );
     assert_eq!(body["revision"], json!(PIN));
     assert!(
         body["message"]

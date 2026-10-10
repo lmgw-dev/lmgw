@@ -1,6 +1,8 @@
 //! `ops-models`: the local model classes — chat, aux (embed/rerank), audio,
 //! image — and the load smoke test (api-docs design §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 
 const TAG: &str = "ops-models";
@@ -90,10 +92,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: Some("lmgw__voice_transcribe"),
         args: OpArgs::Tool,
-        response: Resp::Untyped(
-            "{ok, transcribed: [{clip, chars, transcript_source, answered_by, fallback_reason, \
-             by}], failed: [{clip, error}], already, message}",
-        ),
+        response: Resp::Json(|g| g.root_schema_for::<dto::audio_lab::VoiceTranscribed>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -121,10 +120,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__local_model_test"),
         args: OpArgs::Tool,
-        response: Resp::Untyped(
-            "the shape depends on the model's class (chat/aux/image) and whether it is a \
-             ladder — see lmgw__local_model_test's description",
-        ),
+        response: Resp::Json(|g| g.root_schema_for::<dto::ModelTest>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

@@ -22,7 +22,6 @@ mod routes;
 pub(in crate::web) use routes::{answer, cancel, tasks};
 
 use lmgw_api_types::chat::ThreadTask;
-use serde_json::{json, Value};
 
 use crate::state::{AppState, SharedState};
 use crate::store::mcp_tasks::{self, McpTaskRow};
@@ -158,7 +157,10 @@ impl FrameTasks {
 
     /// The task call `call_id` of this model turn started, as the frame
     /// carries it; `None` for a call that started none.
-    pub(crate) async fn of_call(&self, call_id: &str) -> Option<Value> {
+    pub(crate) async fn of_call(
+        &self,
+        call_id: &str,
+    ) -> Option<lmgw_api_types::mcp_apps::ResultTask> {
         if call_id.is_empty() {
             return None;
         }
@@ -166,6 +168,10 @@ impl FrameTasks {
             .await
             .ok()
             .flatten()?;
-        Some(json!({"id": row.id, "task_id": row.task_id, "server_label": row.server_label}))
+        Some(lmgw_api_types::mcp_apps::ResultTask {
+            id: row.id,
+            task_id: row.task_id,
+            server_label: row.server_label,
+        })
     }
 }

@@ -136,6 +136,20 @@ pub struct ToolResultFrame {
     /// The call's id, as its `ready` frame carries it.
     #[serde(default)]
     pub call_id: Option<String>,
+    /// For a call that started an MCP task: which. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<ResultTask>,
+}
+
+/// The MCP task a call started, on its `result` frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ResultTask {
+    /// lmgw's id of the task (`ThreadTask.id`).
+    pub id: i64,
+    /// The server's id of the task.
+    pub task_id: String,
+    pub server_label: String,
 }
 
 #[cfg(test)]

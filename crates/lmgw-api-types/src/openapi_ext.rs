@@ -71,6 +71,67 @@ pub fn secret(schema: &mut schemars::Schema) {
     schema.insert(SECRET.to_string(), true.into());
 }
 
+/// A field's schema transform that drops `null` from its types:
+/// `#[schemars(transform = lmgw_api_types::openapi_ext::non_null)]`.
+///
+/// For an `Option` field that is skipped when `None` (`skip_serializing_if`)
+/// and so is absent or has a value, never `null`; the derive documents every
+/// `Option` as nullable.
+#[cfg(feature = "schema")]
+pub fn non_null(schema: &mut schemars::Schema) {
+    if let Some(object) = schema.as_object_mut() {
+        drop_null(object);
+    }
+}
+
+/// [`non_null`] on a schema that is already a plain JSON object (the document
+/// builder drops `null` from every field the gateway leaves out rather than
+/// sends as `null`).
+#[cfg(feature = "schema")]
+pub fn drop_null(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    if let Some(Value::Array(types)) = schema.get_mut("type") {
+        types.retain(|t| t != "null");
+        if types.len() == 1 {
+            let only = types.remove(0);
+            schema.insert("type".to_string(), only);
+        }
+    }
+    for key in ["anyOf", "oneOf"] {
+        let Some(Value::Array(arms)) = schema.get_mut(key) else {
+            continue;
+        };
+        arms.retain(|a| a.get("type").and_then(Value::as_str) != Some("null"));
+        if arms.len() == 1 {
+            let Value::Object(only) = arms.remove(0) else {
+                continue;
+            };
+            schema.remove(key);
+            for (k, v) in only {
+                schema.insert(k, v);
+            }
+        }
+    }
+}
+
+/// A struct's schema transform that lists every property as `required`:
+/// `#[schemars(transform = lmgw_api_types::openapi_ext::require_all)]`.
+///
+/// For an answer type whose container-level `#[serde(default)]` (a lenient
+/// reader) would otherwise leave the schema with no `required` at all,
+/// though the gateway always sends every field.
+#[cfg(feature = "schema")]
+pub fn require_all(schema: &mut schemars::Schema) {
+    let names: Vec<serde_json::Value> = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|p| p.keys().map(|k| k.clone().into()).collect())
+        .unwrap_or_default();
+    if !names.is_empty() {
+        schema.insert("required".to_string(), names.into());
+    }
+}
+
 // -- Value vocabularies -------------------------------------------------------
 
 /// [`DIALECT`] values.
@@ -80,6 +141,8 @@ pub mod dialect {
     pub const LLAMACPP: &str = "llamacpp";
     pub const JSONRPC: &str = "jsonrpc";
     pub const DASHBOARD: &str = "dashboard";
+    /// The Audio lab's own routes: the dashboard's, but a failure is `{error, code?}`.
+    pub const LAB: &str = "lab";
 }
 
 /// [`MODEL_TASK`] values.

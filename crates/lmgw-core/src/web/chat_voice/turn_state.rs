@@ -77,7 +77,5 @@ pub(crate) async fn held_at_resolve(tx: &Events, alias: &str, e: &GatewayError) 
 }
 
 async fn frame(tx: &Events, s: ModelState) {
-    if let Ok(data) = serde_json::to_string(&s) {
-        let _ = tx.send(TurnFrame::new("state", data)).await;
-    }
+    let _ = tx.send(TurnFrame::of("state", &s)).await;
 }

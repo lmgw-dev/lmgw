@@ -421,6 +421,45 @@ diff to, and a smoke set; the dashboard build and the worklet check run only
 when their inputs changed. The narrowing needs nextest (without it, `--changed`
 runs the whole suite), and the full run stays the check before a merge.
 
+### Typed answers
+
+lmgw's own API (Chat, knowledge, the labs, the agent run API, the dashboard
+and admin routes, ops) is typed end to end: every answer, op result, SSE frame
+and request body is an `lmgw-api-types` type that the handler or op itself
+builds or parses, and the OpenAPI schema is generated from that type; drift
+tests check the description against the wire. The exceptions are named: verbatim
+relays of another program's JSON (listed with the reason in `UNTYPED`,
+`crates/lmgw-core/src/openapi/exclusions.rs`) and file downloads.
+
+The `/v1` protocol routes (OpenAI, Anthropic, llama.cpp, MCP) follow those
+protocols, so their request and response schemas are written by hand
+(`json_schema!` in `crates/lmgw-core/src/openapi/v1`) and their handlers pass
+JSON through; they are held to the protocol, not to an lmgw type.
+
+Two checks enforce the rule for the rest:
+
+- `untyped_responses_are_exactly_the_allowlist` (a unit test in
+  `crates/lmgw-core/src/openapi/build.rs`) walks every operation of the
+  OpenAPI description: each response in every content type, each SSE event
+  frame and each request body, with `$ref`s resolved. It fails when one is
+  untyped (`Resp::Untyped`, or a free-form object: `{}`, `true`, an object
+  with neither `properties` nor typed `additionalProperties`) and the
+  operation is not on `UNTYPED`, or when an `UNTYPED` entry no longer is.
+- `ci/json_ratchet.py` counts inline `json!` macros in the non-test code of
+  `crates/lmgw-core/src/web/` and `ops/` (the handlers and ops, not the
+  knowledge, chat or server modules) and compares the count with
+  `ci/json-ratchet.toml`. Inline JSON is being ratcheted down: it fails above
+  the baseline (build the answer from an api-types type instead) and below it
+  (lower the baseline in the same commit), so the number only ever falls.
+  `--verbose` prints the per-file counts. It runs in `ci/check.sh` and in the
+  `fmt` job of the CI workflow.
+
+For a new answer, add a drift test: call the live route, read the body into
+its type, write it back and compare with the live JSON (`round_trips` in
+`crates/lmgw-core/tests/it/common/mod.rs`; see
+`tests/it/chat_threads_wire.rs`). A field the handler adds without adding it to
+the type then fails the test.
+
 Linking with [mold](https://github.com/rui314/mold) is optional. Rust already
 links this target with its bundled rust-lld; mold took 1.2 s instead of 2.0 s
 for the `tests/it` binary, a small part of a rebuild. To use it, install

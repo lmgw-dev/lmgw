@@ -13,7 +13,6 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 use lmgw_api_types::JobRow;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::fmt::{grouped, human_bytes};
@@ -27,87 +26,10 @@ pub const KB_JOB_KINDS: [&str; 2] = ["kb_ingest", "kb_reembed"];
 // What the API sends
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Hash)]
-#[serde(default)]
-pub struct Counts {
-    pub files: i64,
-    pub ready: i64,
-    pub pending: i64,
-    pub ingesting: i64,
-    pub failed: i64,
-    pub chunks: i64,
-    pub embedded: i64,
-    pub bytes: i64,
-}
-
-/// The last (or live) job as the base view carries it.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct KbJob {
-    pub id: i64,
-    pub kind: String,
-    pub status: String,
-    pub error: Option<String>,
-}
-
-/// A knowledge base, as `KbView` serialises it.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct Kb {
-    pub id: i64,
-    pub name: String,
-    pub description: String,
-    pub embed_alias: String,
-    pub embed_identity: String,
-    pub rerank_alias: String,
-    pub vision_alias: String,
-    pub chunk_tokens: i64,
-    pub chunk_overlap: i64,
-    pub mcp_visible: bool,
-    pub status: String,
-    pub counts: Counts,
-    pub resident_bytes: i64,
-    pub embed_context: Option<u64>,
-    pub embed_input_limit: Option<u64>,
-    pub embed_input_limit_source: String,
-    pub embed_tokenizer: String,
-    pub embed_resolvable: bool,
-    pub job: Option<KbJob>,
-    pub notes: Vec<String>,
-    pub updated_at: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct KbFile {
-    pub id: i64,
-    pub kb_id: i64,
-    pub name: String,
-    pub kind: String,
-    pub sub: String,
-    pub mime: String,
-    pub size: i64,
-    pub status: String,
-    pub error: Option<String>,
-    pub pages: Option<i64>,
-    pub skipped_pages: i64,
-    pub notes: Vec<String>,
-    pub chunk_count: i64,
-    pub added_at: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct BasesResponse {
-    bases: Vec<Kb>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct DetailResponse {
-    base: Kb,
-    files: Vec<KbFile>,
-}
+pub use lmgw_api_types::knowledge::{
+    KnowledgeBase as Kb, KnowledgeBaseDetail as DetailResponse, KnowledgeBaseList as BasesResponse,
+    KnowledgeFile as KbFile,
+};
 
 // ---------------------------------------------------------------------------
 // Live job

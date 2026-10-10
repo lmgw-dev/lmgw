@@ -33,7 +33,10 @@ use crate::quickdoc::{
 };
 use crate::state::SharedState;
 
+use lmgw_api_types as dto;
+
 use super::api::ops_result;
+use crate::ops::backends::to_json;
 
 pub fn routes(state: &SharedState) -> Router<SharedState> {
     Router::new()
@@ -319,15 +322,18 @@ async fn corpus_detail_inner(st: &SharedState, id: i64, limit: i64) -> Result<Va
 }
 
 async fn delete_corpus(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(delete_corpus_inner(&st, id).await)
+    ops_result(to_json(delete_corpus_inner(&st, id).await))
 }
 
-pub(crate) async fn delete_corpus_inner(st: &SharedState, id: i64) -> Result<Value, String> {
+pub(crate) async fn delete_corpus_inner(
+    st: &SharedState,
+    id: i64,
+) -> Result<dto::MessageAck, String> {
     let c = corpus_or_err(st, id).await?;
     qstore::delete_corpus(&st.corpus, id)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true, "message": format!("deleted {}", c.corpus_id()) }))
+    Ok(dto::MessageAck::new(format!("deleted {}", c.corpus_id())))
 }
 
 async fn start_ingest(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
@@ -451,13 +457,30 @@ async fn search_inner(st: &SharedState, p: SearchBody) -> Result<Value, String> 
     // markdown for seeing exactly what a `docs__query` caller would receive.
     let markdown =
         quickdoc_core::markdown::render(&corpus, &p.query, &result, &urls, &status.warnings);
-    Ok(json!({
-        "corpus_id": result.corpus_id,
-        "hits": result.hits,
-        "trace": result.trace,
-        "urls": urls,
-        "status": status,
-        "markdown": markdown,
+    let query::CorpusStatus {
+        embed_status,
+        embed_model_resolvable,
+        eval_status,
+        flags,
+        warnings,
+    } = status;
+    to_json(Ok(dto::DocsSearchResponse {
+        corpus_id: result.corpus_id,
+        hits: result
+            .hits
+            .iter()
+            .map(crate::knowledge::wire::hit)
+            .collect(),
+        trace: crate::knowledge::wire::trace(&result.trace),
+        urls,
+        status: dto::CorpusStatusView {
+            embed_status: embed_status.into(),
+            embed_model_resolvable,
+            eval_status: eval_status.into(),
+            flags,
+            warnings,
+        },
+        markdown,
     }))
 }
 
@@ -498,10 +521,10 @@ pub(crate) struct GoldenBody {
 }
 
 async fn set_golden(State(st): State<SharedState>, Json(p): Json<GoldenBody>) -> Response {
-    ops_result(set_golden_inner(&st, p).await)
+    ops_result(to_json(set_golden_inner(&st, p).await))
 }
 
-async fn set_golden_inner(st: &SharedState, p: GoldenBody) -> Result<Value, String> {
+async fn set_golden_inner(st: &SharedState, p: GoldenBody) -> Result<dto::GoldenSaved, String> {
     let query = p.query.trim();
     if query.is_empty() {
         return Err("a golden query needs a query".into());
@@ -542,7 +565,7 @@ async fn set_golden_inner(st: &SharedState, p: GoldenBody) -> Result<Value, Stri
             .map_err(|e| e.to_string())?
         }
     };
-    Ok(json!({ "ok": true, "id": id }))
+    Ok(dto::GoldenSaved { ok: true, id })
 }
 
 async fn check_expected(st: &SharedState, corpus_id: i64, ids: &[String]) -> Result<(), String> {
@@ -570,12 +593,12 @@ async fn check_expected(st: &SharedState, corpus_id: i64, ids: &[String]) -> Res
 }
 
 async fn delete_golden(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(
+    ops_result(to_json(
         qstore::delete_golden_query(&st.corpus, id)
             .await
-            .map(|_| json!({ "ok": true }))
+            .map(|_| dto::Ack::ok())
             .map_err(|e| e.to_string()),
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -662,10 +685,14 @@ async fn accept_candidate(
     body: Option<Json<AcceptBody>>,
 ) -> Response {
     let p = body.map(|Json(b)| b).unwrap_or_default();
-    ops_result(accept_candidate_inner(&st, id, p).await)
+    ops_result(to_json(accept_candidate_inner(&st, id, p).await))
 }
 
-async fn accept_candidate_inner(st: &SharedState, id: i64, p: AcceptBody) -> Result<Value, String> {
+async fn accept_candidate_inner(
+    st: &SharedState,
+    id: i64,
+    p: AcceptBody,
+) -> Result<dto::GoldenSaved, String> {
     let c = candidate_or_err(st, id).await?;
     if c.status != "pending" {
         return Err(format!(
@@ -689,14 +716,17 @@ async fn accept_candidate_inner(st: &SharedState, id: i64, p: AcceptBody) -> Res
     qstore::decide_golden_candidate(&st.corpus, id, "accepted", Some(golden_id))
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true, "id": golden_id }))
+    Ok(dto::GoldenSaved {
+        ok: true,
+        id: golden_id,
+    })
 }
 
 /// Discard a candidate. The row stays with `rejected` on it rather than being
 /// deleted, which is what stops the next generation run from proposing the same
 /// question again.
 async fn reject_candidate(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(
+    ops_result(to_json(
         async {
             let c = candidate_or_err(&st, id).await?;
             if c.status != "pending" {
@@ -708,10 +738,10 @@ async fn reject_candidate(State(st): State<SharedState>, Path(id): Path<i64>) ->
             qstore::decide_golden_candidate(&st.corpus, id, "rejected", None)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(json!({ "ok": true }))
+            Ok(dto::Ack::ok())
         }
         .await,
-    )
+    ))
 }
 
 async fn candidate_or_err(st: &SharedState, id: i64) -> Result<qstore::GoldenCandidate, String> {
@@ -797,14 +827,14 @@ async fn set_request_status(
     Path(id): Path<i64>,
     Json(p): Json<RequestStatusBody>,
 ) -> Response {
-    ops_result(set_request_status_inner(&st, id, &p.status).await)
+    ops_result(to_json(set_request_status_inner(&st, id, &p.status).await))
 }
 
 pub(crate) async fn set_request_status_inner(
     st: &SharedState,
     id: i64,
     status: &str,
-) -> Result<Value, String> {
+) -> Result<dto::Ack, String> {
     // `fulfilled` is not settable by hand: it means "an ingest finished
     // for this library@version", which only the ingest job can know.
     if !matches!(status, "pending" | "dismissed") {
@@ -816,7 +846,7 @@ pub(crate) async fn set_request_status_inner(
     qstore::set_doc_request_status(&st.corpus, id, status)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true }))
+    Ok(dto::Ack::ok())
 }
 
 // ---------------------------------------------------------------------------

@@ -178,13 +178,20 @@ where
         return Ok(reroute(state, hold, lease, cause, deadline, prompt_sent).await);
     }
     let Some(plan) = lease.ladder.clone() else {
-        let sent = crate::vram::send_local_marked(hold, route, timeout, build, prompt_sent).await;
+        let sent = Box::pin(crate::vram::send_local_marked(
+            hold,
+            route,
+            timeout,
+            build,
+            prompt_sent,
+        ))
+        .await;
         return match (hold, sent) {
             (Some(h), Err(e)) if candidate::repicks(hold, &e) => {
                 Ok(reroute(state, h, lease, e, deadline, prompt_sent).await)
             }
             (Some(h), Ok(resp)) if candidate::holds_back_refusals(hold) => {
-                match context_refusal(h, resp).await? {
+                match Box::pin(context_refusal(h, resp)).await? {
                     Ok(resp) => Ok(Sent::Upstream(resp)),
                     Err(cause) => Ok(reroute(state, h, lease, cause, deadline, prompt_sent).await),
                 }
@@ -223,6 +230,19 @@ where
 /// prompt of this send is being worked on any more (`prompt_sent`,
 /// [`send_gated_marked`]).
 async fn reroute(
+    state: &SharedState,
+    hold: &LocalHold,
+    lease: &mut TurnLease,
+    cause: GatewayError,
+    deadline: Option<Instant>,
+    prompt_sent: Option<&AtomicBool>,
+) -> Sent {
+    // Boxed: kept out of `send_gated_marked`'s debug-build poll frame (143 KB inline),
+    // which sits on the turn -> gate -> climb chain sharing a 2 MiB stack.
+    Box::pin(repicked(state, hold, lease, cause, deadline, prompt_sent)).await
+}
+
+async fn repicked(
     state: &SharedState,
     hold: &LocalHold,
     lease: &mut TurnLease,
@@ -374,13 +394,15 @@ where
                 // The model came back without a ladder (the row was edited,
                 // and a recovery restarted it): judged like any such row.
                 lease.served = None;
-                return crate::vram::send_local_marked(
+                // Boxed like the climb below: this future sits on the turn ->
+                // gate chain that shares a 2 MiB stack in a debug build.
+                return Box::pin(crate::vram::send_local_marked(
                     Some(self.hold),
                     self.route,
                     self.timeout,
                     self.build,
                     self.prompt_sent,
-                )
+                ))
                 .await
                 .map(Sent::Upstream);
             };
@@ -388,7 +410,8 @@ where
             if let Some(prompt) =
                 known.filter(|&p| p.saturating_add(self.plan.max_output) > tag.per_slot)
             {
-                match self.climb(&tag, prompt).await? {
+                // Boxed: the climb's poll frame is 111 KB in a debug build.
+                match Box::pin(self.climb(&tag, prompt)).await? {
                     Some(fallback) => return Ok(fallen_back(lease, fallback)),
                     None => continue,
                 }
@@ -441,7 +464,9 @@ where
                     backstop_left &= !backstop;
                     let prompt = known.map_or(prompt, |k| k.max(prompt));
                     known = Some(prompt);
-                    if let Some(fallback) = self.climb(&tag, prompt).await? {
+                    // Boxed: the climb's poll frame is 111 KB in a debug build (chain of
+                    // frames from the turn to the climb, 2 MiB test stack).
+                    if let Some(fallback) = Box::pin(self.climb(&tag, prompt)).await? {
                         return Ok(fallen_back(lease, fallback));
                     }
                 }
@@ -599,7 +624,12 @@ where
         debug_assert!(to > running.index, "a climb only goes up");
         let reason = climb_reason(prompt, max_output, running.per_slot);
         let need = prompt.saturating_add(max_output);
-        let climbed = match crate::vram::climb_for(self.state, self.hold, to, need, &reason).await {
+        // Boxed: 78 KB poll frame in a debug build, on the turn -> gate -> climb chain.
+        let climbed = match Box::pin(crate::vram::climb_for(
+            self.state, self.hold, to, need, &reason,
+        ))
+        .await
+        {
             Ok(climbed) => climbed,
             // A guest's climb that failed (§12 entry 92): nothing was sent
             // yet, and the walk goes on without this model, as for a denial —

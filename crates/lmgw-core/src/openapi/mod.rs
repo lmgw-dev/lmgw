@@ -3,8 +3,9 @@
 //! carries — `server::CAPABILITY_TABLE`, the op dispatcher
 //! (`web::op_names`), `schemars` schemas of the api-types DTOs — rather than
 //! hand-maintained. Served twice (§4.11): the admin document at
-//! `GET /api/openapi.json` is everything; the inference document at
-//! `GET /v1/openapi.json` is `x-lmgw-capability == "inference"` only.
+//! `GET /api/openapi.json` is everything; the developer document at
+//! `GET /v1/openapi.json` is every operation a non-owner credential reaches
+//! (inference, the device Chat API, the agent run API) plus `GET /api/version`.
 //!
 //! This is the skeleton (WP1, §9): the registry types, the tag and exclusion
 //! lists, the schema generator, the assembly and the two handlers. The
@@ -22,6 +23,8 @@ mod params;
 mod planes;
 mod registry;
 mod schemas;
+#[cfg(test)]
+mod sent_required_tests;
 mod serve;
 mod tags;
 mod v1;

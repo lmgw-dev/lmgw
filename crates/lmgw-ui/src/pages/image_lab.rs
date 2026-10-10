@@ -25,6 +25,7 @@ use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos_router::components::A;
 use lmgw_api_types::image_lab::{ImageGenForm, ImageLoraRow, EDITS_ENDPOINT, GENERATIONS_ENDPOINT};
+use lmgw_api_types::image_lab::{ImageLabModel, ImageLabModels};
 use lmgw_api_types::ImageCapabilities;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -41,34 +42,10 @@ use crate::widgets::{Explain, ModelPicker, Select};
 // Server shapes
 // ---------------------------------------------------------------------------
 
-/// One row of `GET /image-lab/api/models`: a local `image/<id>` row or a cloud
-/// alias whose catalog says it draws.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-struct LabModel {
-    name: String,
-    owner: String,
-    local: bool,
-    model_id: Option<String>,
-    task: String,
-    endpoints: Vec<String>,
-    edit: bool,
-    modes: Option<Vec<String>>,
-    args: Option<serde_json::Map<String, Value>>,
-    notes: Vec<String>,
-    /// Container state; `None` for a cloud alias, which has no container.
-    state: Option<String>,
-    warnings: Vec<String>,
-    image_capabilities: Option<ImageCapabilities>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct ModelsResp {
-    models: Vec<LabModel>,
-    models_dir: String,
-    hold: bool,
-}
+// `GET /image-lab/api/models` is `lmgw_api_types::image_lab`'s answer — the
+// type the gateway builds — so a renamed field breaks this build, not the page.
+type LabModel = ImageLabModel;
+type ModelsResp = ImageLabModels;
 
 /// The lab's success wrapper: what was sent, where, and what came back.
 #[derive(Clone, Debug, Default, Deserialize)]

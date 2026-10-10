@@ -1546,9 +1546,11 @@ async fn renaming_a_running_aux_model_takes_its_old_container_with_it() {
     f.state.reload_snapshot().await.unwrap();
     let id = f.state.snapshot().aux_models[0].id;
 
-    ops::container(&f.state, Some("aux"), Some("e1"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, Some("aux"), Some("e1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
     let old = container_name("lmgw", Class::Aux, "e1");
     assert!(f.podman.names().contains(&old));
 
@@ -1950,9 +1952,11 @@ async fn restart_brings_a_climbed_ladder_back_to_its_base() {
     add_ladder_row(&f, 0).await;
     let _running = left_running_at(&f, 2).await;
 
-    let out = ops::container(&f.state, None, Some(LADDER), "restart", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some(LADDER), "restart", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(started_rungs(&f), vec![base()]);
     let live = f.state.runtime().list();

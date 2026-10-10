@@ -30,7 +30,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use lmgw_api_types::chat_threads::SpeechStopped;
 use tokio::sync::mpsc;
 
 use crate::state::SharedState;
@@ -110,5 +110,9 @@ pub(crate) async fn stop_speech(
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
     }
     let stopped = state.chat_live.stop_speech(id);
-    Json(json!({ "ok": true, "stopped": stopped })).into_response()
+    Json(SpeechStopped {
+        ok: true,
+        stopped: stopped as u64,
+    })
+    .into_response()
 }

@@ -18,6 +18,10 @@
 # than three commands remembered differently each time) means "did you run the
 # checks" has one answer.
 #
+# ci/json_ratchet.py counts inline `json!(` in the non-test code of lmgw-core's
+# web/ and ops/ and compares it with ci/json-ratchet.toml: above fails (build
+# the answer from an lmgw-api-types type), below fails (lower the baseline).
+#
 # rustfmt is gated for the WHOLE workspace: `cargo fmt --all` is a no-op on a
 # clean tree, so a drift fails here instead of burying a later diff. rustfmt does not touch the contents of lmgw-ui's Leptos
 # `view!` blocks — it treats a macro body as an opaque token tree — so the
@@ -153,6 +157,11 @@ if $changed; then
   plan=$(python3 ci/changed.py ${base:+"$base"})
   eval "$plan"
 fi
+
+# Typed answers (README.md): inline json! in handlers and ops may only fall.
+# Tens of milliseconds; the baseline lives in ci/json-ratchet.toml.
+stage "inline JSON ratchet (ci/json_ratchet.py)"
+python3 ci/json_ratchet.py
 
 stage "cargo fmt --check (workspace)"
 cargo fmt --check --all

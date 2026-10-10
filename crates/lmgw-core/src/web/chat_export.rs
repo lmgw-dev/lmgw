@@ -22,7 +22,8 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde::{Deserialize, Serialize};
+use lmgw_api_types::chat_export::{ExportQuery, EXPORT_FORMAT};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use zip::write::SimpleFileOptions;
@@ -39,18 +40,7 @@ use crate::store::{
 };
 
 /// The `format` marker of the JSON export; an import checks it.
-pub const JSON_FORMAT: &str = "lmgw.chat.v1";
-
-#[derive(Deserialize, Default)]
-pub struct ExportQuery {
-    /// `md` (default) or `json`.
-    #[serde(default)]
-    format: String,
-    /// Zips only: `0` active threads, `1` archived only, `all` both
-    /// (default).
-    #[serde(default)]
-    archived: String,
-}
+pub const JSON_FORMAT: &str = EXPORT_FORMAT;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {

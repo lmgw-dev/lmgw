@@ -9,8 +9,8 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{DocRequestRow, DocRequestsResponse};
-use serde_json::{json, Value};
+use lmgw_api_types::{Ack, DocRequestRow, DocRequestsResponse};
+use serde_json::json;
 
 use crate::fmt::hue_for;
 use crate::widgets::{use_toasts, Explain, MenuItem, RowMenu};
@@ -169,7 +169,7 @@ fn RequestRow(
 
     let set_status = move |status: &'static str| {
         spawn_local(async move {
-            match crate::api::post::<Value, _>(
+            match crate::api::post::<Ack, _>(
                 format!("/api/docs/requests/{id}/status"),
                 &json!({ "status": status }),
             )

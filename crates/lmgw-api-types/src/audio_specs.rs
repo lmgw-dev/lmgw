@@ -181,3 +181,33 @@ pub struct AudioPackage {
     pub suggested_task: String,
     pub suggested_mode: String,
 }
+
+/// The `audio_catalog` op's answer: a refresh's summary or a queued
+/// download, by `action`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum AudioCatalogAnswer {
+    /// `action: refresh`.
+    Refreshed(AudioCatalogRefreshed),
+    /// `action: download`.
+    Download(crate::AudioCatalogInstall),
+}
+
+/// `audio_catalog` with `action: refresh`: the catalog was fetched anew.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AudioCatalogRefreshed {
+    /// Always `true`; a warning does not fail a refresh.
+    #[cfg_attr(feature = "schema", schemars(extend("const" = true)))]
+    pub ok: bool,
+    /// How many model families the catalog holds.
+    pub families: usize,
+    /// RFC 3339 time of the fetch.
+    pub fetched_at: String,
+    /// What the refresh could not do (a spec file that did not load, a
+    /// package repository Hugging Face could not list).
+    pub warnings: Vec<String>,
+    /// The outcome in a sentence.
+    pub message: String,
+}

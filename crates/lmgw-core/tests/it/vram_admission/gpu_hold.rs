@@ -560,9 +560,11 @@ async fn container_apply_stops_a_running_model_under_hold_and_says_when_it_resta
     store::save_settings(&f.state.db, &s).await.unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = lmgw_core::ops::container(&f.state, None, Some("chat-model"), "apply", false, None)
-        .await
-        .expect("apply stops on purpose — it does not refuse");
+    let out = crate::common::container_wire(
+        lmgw_core::ops::container(&f.state, None, Some("chat-model"), "apply", false, None)
+            .await
+            .expect("apply stops on purpose — it does not refuse"),
+    );
     assert_eq!(out["held"], true, "{out}");
     assert_eq!(out["running"], false, "{out}");
     let msg = out["message"].as_str().unwrap_or_default();
@@ -1087,9 +1089,11 @@ async fn apply_under_hold_reports_a_failed_stop_as_a_failure_not_as_held() {
     f.state.reload_snapshot().await.unwrap();
     *f.podman.fail_stop.lock().unwrap() = true;
 
-    let out = lmgw_core::ops::container(&f.state, None, Some("chat-model"), "apply", false, None)
-        .await
-        .expect("apply reports, it does not error out");
+    let out = crate::common::container_wire(
+        lmgw_core::ops::container(&f.state, None, Some("chat-model"), "apply", false, None)
+            .await
+            .expect("apply reports, it does not error out"),
+    );
     assert_eq!(out["ok"], false, "a failed stop is not a success: {out}");
     let msg = out["message"].as_str().unwrap_or_default();
     assert!(msg.contains("could NOT be stopped"), "{out}");
@@ -1108,9 +1112,11 @@ async fn apply_under_hold_reports_a_failed_stop_as_a_failure_not_as_held() {
     f.state.reload_snapshot().await.unwrap();
     *f.podman.fail_stop.lock().unwrap() = true;
 
-    let out = lmgw_core::ops::container(&f.state, Some("all"), None, "apply", false, None)
-        .await
-        .expect("group apply reports too");
+    let out = crate::common::container_wire(
+        lmgw_core::ops::container(&f.state, Some("all"), None, "apply", false, None)
+            .await
+            .expect("group apply reports too"),
+    );
     assert_eq!(
         out["held"],
         json!([]),

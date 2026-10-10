@@ -3,8 +3,8 @@
 //! the source viewer, and Resume / Cancel of a base's job. Live job progress
 //! is the ordinary jobs feed (`kb_ingest` / `kb_reembed`, key `kb:<id>`).
 //!
-//! A dashboard backend, not a contract: `Cap::Admin` and an
-//! `openapi/exclusions.rs` row each. Every handler is a thin call into
+//! Documented in the admin API document (`openapi/planes/knowledge.rs`),
+//! `Cap::Admin`; every shape is `lmgw_api_types::knowledge`'s. Every handler is a thin call into
 //! [`crate::knowledge::ops`] (or `retrieve` / `read`), answering through
 //! [`ops_result`] so failures have `/api`'s one shape.
 
@@ -17,14 +17,18 @@ use axum::Router;
 use bytes::Bytes;
 use lmgw_api_types as dto;
 use quickdoc_core::retrieve::SearchParams;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::knowledge::{self, ops, read, retrieve};
+use crate::knowledge::{self, ops, read, retrieve, wire};
 use crate::state::SharedState;
 
 use super::api::ops_result;
+
+/// A typed answer as the JSON value `ops_result` wraps.
+fn typed<T: serde::Serialize>(v: &T) -> Value {
+    serde_json::to_value(v).expect("a knowledge answer encodes as JSON")
+}
 
 pub fn routes(state: &SharedState) -> Router<SharedState> {
     Router::new()
@@ -52,11 +56,18 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
 }
 
 async fn list(State(st): State<SharedState>) -> Response {
-    ops_result(ops::list(&st).await.map(|b| json!({ "bases": b })))
+    ops_result(ops::list(&st).await.map(|b| {
+        typed(&dto::knowledge::KnowledgeBaseList {
+            bases: b.into_iter().map(wire::base).collect(),
+        })
+    }))
 }
 
-async fn create(State(st): State<SharedState>, Json(req): Json<ops::CreateKb>) -> Response {
-    ops_result(ops::create(&st, req).await.map(|v| json!(v)))
+async fn create(
+    State(st): State<SharedState>,
+    Json(req): Json<dto::knowledge::CreateKnowledgeBase>,
+) -> Response {
+    ops_result(ops::create(&st, req).await.map(|v| typed(&wire::base(v))))
 }
 
 async fn detail(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
@@ -64,7 +75,10 @@ async fn detail(State(st): State<SharedState>, Path(id): Path<i64>) -> Response 
         async {
             let base = ops::get(&st, id).await?;
             let files = ops::files(&st, id).await?;
-            Ok(json!({ "base": base, "files": files }))
+            Ok(typed(&dto::knowledge::KnowledgeBaseDetail {
+                base: wire::base(base),
+                files: files.into_iter().map(wire::file).collect(),
+            }))
         }
         .await,
     )
@@ -73,33 +87,41 @@ async fn detail(State(st): State<SharedState>, Path(id): Path<i64>) -> Response 
 async fn edit(
     State(st): State<SharedState>,
     Path(id): Path<i64>,
-    Json(req): Json<ops::EditKbRequest>,
+    Json(req): Json<dto::knowledge::EditKnowledgeBase>,
 ) -> Response {
-    ops_result(ops::edit(&st, id, req).await.map(|v| json!(v)))
+    ops_result(
+        ops::edit(&st, id, req)
+            .await
+            .map(|v| typed(&wire::edited(v))),
+    )
 }
 
 async fn delete(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(ops::delete(&st, id).await)
+    ops_result(ops::delete(&st, id).await.map(|v| typed(&v)))
 }
 
 async fn resume(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(ops::resume(&st, id).await)
+    ops_result(ops::resume(&st, id).await.map(|v| typed(&v)))
 }
 
 async fn cancel(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(ops::cancel(&st, id).await)
+    ops_result(ops::cancel(&st, id).await.map(|v| typed(&v)))
 }
 
 async fn files(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(ops::files(&st, id).await.map(|f| json!({ "files": f })))
+    ops_result(ops::files(&st, id).await.map(|f| {
+        typed(&dto::knowledge::KnowledgeFileList {
+            files: f.into_iter().map(wire::file).collect(),
+        })
+    }))
 }
 
 async fn delete_file(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(ops::delete_file(&st, id).await)
+    ops_result(ops::delete_file(&st, id).await.map(|v| typed(&v)))
 }
 
 async fn reingest_file(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(ops::reingest_file(&st, id).await)
+    ops_result(ops::reingest_file(&st, id).await.map(|v| typed(&v)))
 }
 
 fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -179,23 +201,11 @@ async fn upload(State(st): State<SharedState>, Path(id): Path<i64>, req: Request
             "the upload carried no files — send them as multipart/form-data parts",
         );
     }
-    ops_result(ops::upload(&st, id, files).await.map(|o| json!(o)))
-}
-
-#[derive(Debug, Deserialize)]
-struct TextQuery {
-    /// The chunk to highlight (a citation's chunk id).
-    #[serde(default)]
-    chunk: Option<String>,
-    /// What the citation stored besides the id: the passage's position and
-    /// the file's sha256 then, for a citation whose chunk id a re-ingest
-    /// renamed ([`read::Cited`]).
-    #[serde(default)]
-    span_start: Option<i64>,
-    #[serde(default)]
-    span_end: Option<i64>,
-    #[serde(default)]
-    sha: Option<String>,
+    ops_result(
+        ops::upload(&st, id, files)
+            .await
+            .map(|o| typed(&wire::uploaded(o))),
+    )
 }
 
 /// `GET /api/knowledge/files/{id}/text?chunk=<id>[&span_start=&span_end=&sha=]`
@@ -204,7 +214,7 @@ struct TextQuery {
 async fn file_text(
     State(st): State<SharedState>,
     Path(id): Path<i64>,
-    Query(q): Query<TextQuery>,
+    Query(q): Query<dto::knowledge::SourceQuery>,
 ) -> Response {
     ops_result(
         read::source(
@@ -218,7 +228,7 @@ async fn file_text(
             },
         )
         .await
-        .map(|s| json!(s)),
+        .map(|s| typed(&wire::source(s))),
     )
 }
 
@@ -274,26 +284,12 @@ pub(super) fn attachment(name: &str) -> String {
     format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchRequest {
-    query: String,
-    /// The bases to search; omitted or empty searches every base (the
-    /// playground is the owner's, so `mcp_visible` does not apply).
-    #[serde(default)]
-    kb_ids: Vec<i64>,
-    /// `0` or omitted: no budget.
-    #[serde(default)]
-    budget_tokens: Option<usize>,
-    /// Stage overrides on top of the owner's search defaults — the same
-    /// object the docs playground takes.
-    #[serde(default)]
-    params: Option<Value>,
-}
-
 /// `POST /api/knowledge/search` — the playground: excerpts with their scores,
 /// the notes, and every search's per-stage trace.
-async fn search(State(st): State<SharedState>, Json(req): Json<SearchRequest>) -> Response {
+async fn search(
+    State(st): State<SharedState>,
+    Json(req): Json<dto::knowledge::KnowledgeSearchRequest>,
+) -> Response {
     ops_result(
         async {
             let ids = if req.kb_ids.is_empty() {
@@ -325,7 +321,7 @@ async fn search(State(st): State<SharedState>, Json(req): Json<SearchRequest>) -
                 },
             )
             .await;
-            Ok(json!(r))
+            Ok(typed(&wire::search(r)))
         }
         .await,
     )

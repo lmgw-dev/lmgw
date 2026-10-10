@@ -45,6 +45,7 @@ pub(crate) fn completions_response(g: &mut SchemaGenerator) -> Schema {
         "TextCompletion",
         schemars::json_schema!({
             "type": "object",
+            "required": ["id", "object", "created", "model", "choices"],
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["text_completion"]},
@@ -52,7 +53,8 @@ pub(crate) fn completions_response(g: &mut SchemaGenerator) -> Schema {
                 "model": {"type": "string"},
                 "choices": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
                 "usage": {"type": "object", "additionalProperties": true}
-            }
+            },
+            "description": "Relayed as the upstream sends it."
         }),
     )
 }
@@ -72,6 +74,7 @@ pub(crate) fn completions_stream_chunk(g: &mut SchemaGenerator) -> Schema {
         "TextCompletionChunk",
         schemars::json_schema!({
             "type": "object",
+            "required": ["id", "object", "created", "model", "choices"],
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["text_completion"]},
@@ -80,8 +83,8 @@ pub(crate) fn completions_stream_chunk(g: &mut SchemaGenerator) -> Schema {
                 "choices": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
             },
             "additionalProperties": true,
-            "description": "One frame: `data: <this object>`, repeated, ending with the \
-                literal `data: [DONE]`."
+            "description": "One frame, relayed as the upstream sends it: `data: <this \
+                object>`, repeated, ending with the literal `data: [DONE]`."
         }),
     )
 }
@@ -120,6 +123,7 @@ pub(crate) fn embeddings_response(g: &mut SchemaGenerator) -> Schema {
         "EmbeddingsResponse",
         schemars::json_schema!({
             "type": "object",
+            "required": ["object", "model", "data", "usage"],
             "properties": {
                 "object": {"type": "string", "enum": ["list"]},
                 "model": {"type": "string"},
@@ -127,6 +131,7 @@ pub(crate) fn embeddings_response(g: &mut SchemaGenerator) -> Schema {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "required": ["object", "index", "embedding"],
                         "properties": {
                             "object": {"type": "string", "enum": ["embedding"]},
                             "index": {"type": "integer"},
@@ -184,11 +189,13 @@ pub(crate) fn rerank_response(g: &mut SchemaGenerator) -> Schema {
             "type": "object",
             "description": "Jina's results shape, regardless of which request spelling was \
                 sent.",
+            "required": ["results"],
             "properties": {
                 "results": {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "required": ["index", "relevance_score"],
                         "properties": {
                             "index": {"type": "integer"},
                             "relevance_score": {"type": "number"},

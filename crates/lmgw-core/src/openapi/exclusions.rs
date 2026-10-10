@@ -12,6 +12,29 @@
 //! entirely rather than documented `x-lmgw-internal`. `Group::Internal`, the
 //! `x-lmgw-internal` derivation and constant, and the UI's "internal" chip
 //! went with it — see the spec's §12.
+//!
+//! *Changed, 2026-10-10 (the owner's decision):* every lmgw HTTP API except
+//! the dashboard itself goes into the description, typed — the Chat API, the
+//! Knowledge bases API, the Audio lab and Image lab APIs, and the Chat
+//! page's row refresh too. Their rows left this list as they were
+//! documented. The thread, message, folder-patch and search rows of the
+//! Chat API were the first to go (`planes/chat_threads.rs`), then the streaming
+//! turns — send, continue, regenerate, a stored reply's read-aloud and the voice
+//! warm-up (`planes/chat_turns.rs`), and then the attachments and exports
+//! (`planes/chat_attachments.rs`). The Knowledge bases API followed
+//! (`planes/knowledge.rs`, admin document only), and last the Audio lab
+//! (`planes/audio_lab.rs`), the Image lab (`planes/image_lab.rs`) and the Chat
+//! page's row refresh, `GET /chat/api/threads/rows`, which sits beside the
+//! thread list (`planes/chat_threads.rs`). All are `Cap::Admin` routes and so
+//! in the admin document only. The labs' four hand-offs to `/v1` handlers
+//! (speech, transcriptions, alignments, tasks) reuse their siblings' schemas
+//! and say how they differ; `DASHBOARD_BACKEND`, the shared reason of the
+//! 2026-09-28 decision, went with its last user.
+//!
+//! **What stays, as of 2026-10-10:** the dashboard SPA and its bundle
+//! (`/`, `/{*path}`), the legacy `/ui` redirects, and the agent app and agent
+//! MCP reverse proxies (`/agents/{id}/app*`, `/agents/{id}/mcp*`: the agent's
+//! own surface). Nothing else in `CAPABILITY_TABLE` is undocumented.
 
 /// `(method, path, reason)` — `method` is `CAPABILITY_TABLE`'s own spelling,
 /// `*` included. The reason is what `x-lmgw-undocumented` carries.
@@ -51,136 +74,40 @@ pub(crate) const UNDOCUMENTED: &[(&str, &str, &str)] = &[
     ("GET", "/ui", "Legacy redirects to the SPA."),
     ("GET", "/ui/", "Legacy redirects to the SPA."),
     ("GET", "/ui/{*path}", "Legacy redirects to the SPA."),
-    // The three internal mini-APIs (Chat, Audio lab, Image lab) — owner
-    // decision 2026-09-28 (api-docs design §1, §3, §4.2 amendment): the
-    // dashboard's own backend is not a contract, so it comes out of the
-    // description entirely rather than being documented `x-lmgw-internal`.
-    // The Chat subset a desktop client uses is documented since 2026-10-07
-    // (client-apps design §4.3, the owner's decision D of 2026-10-06):
-    // the thread and folder lists, a folder create, `current` and the feed
-    // (`planes/chat.rs`). The rows below wait for a client that needs them.
-    ("POST", "/chat/api/threads", CHAT_API),
-    ("GET", "/chat/api/threads/{id}", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/settings", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/delete", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/send", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/voice/warm", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/speech/stop", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/pin", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/move", CHAT_API),
-    ("GET", "/chat/api/search", CHAT_API),
-    ("GET", "/chat/api/threads/{id}/export", CHAT_API),
-    ("GET", "/chat/api/folders/{id}/export", CHAT_API),
-    ("GET", "/chat/api/export", CHAT_API),
-    ("POST", "/chat/api/folders/{id}", CHAT_API),
-    ("POST", "/chat/api/folders/{id}/delete", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/archive", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/persist", CHAT_API),
-    ("POST", "/chat/api/threads/{id}/continue", CHAT_API),
-    (
-        "POST",
-        "/chat/api/threads/{id}/messages/{mid}/delete",
-        CHAT_API,
-    ),
-    (
-        "POST",
-        "/chat/api/threads/{id}/messages/{mid}/edit",
-        CHAT_API,
-    ),
-    (
-        "POST",
-        "/chat/api/threads/{id}/messages/{mid}/speak",
-        CHAT_API,
-    ),
-    (
-        "POST",
-        "/chat/api/threads/{id}/messages/{mid}/regenerate",
-        CHAT_API,
-    ),
-    ("POST", "/chat/api/threads/{id}/attachments", CHAT_API),
-    ("POST", "/chat/api/attachments/{id}/delete", CHAT_API),
-    ("GET", "/chat/api/attachments/{id}", CHAT_API),
-    ("POST", "/chat/api/attachments/{id}/mode", CHAT_API),
-    ("POST", "/chat/api/attachments/{id}/transcribe", CHAT_API),
-    ("GET", "/chat/api/attachments/{id}/text", CHAT_API),
-    // The owner's alone (`Cap::Admin`): the Chat page's lighter re-read of
-    // the rows a `chat` frame named (review CL-11, 2026-10-08).
-    ("GET", "/chat/api/threads/rows", DASHBOARD_BACKEND),
-    ("GET", "/audio-lab/api/models", DASHBOARD_BACKEND),
-    ("GET", "/audio-lab/api/voices", DASHBOARD_BACKEND),
-    ("GET", "/audio-lab/api/refs", DASHBOARD_BACKEND),
-    ("POST", "/audio-lab/api/refs", DASHBOARD_BACKEND),
-    ("GET", "/audio-lab/api/refs/{name}", DASHBOARD_BACKEND),
-    (
-        "POST",
-        "/audio-lab/api/refs/{name}/delete",
-        DASHBOARD_BACKEND,
-    ),
-    ("POST", "/audio-lab/api/refs/{name}/text", DASHBOARD_BACKEND),
-    (
-        "POST",
-        "/audio-lab/api/refs/{name}/transcribe",
-        DASHBOARD_BACKEND,
-    ),
-    ("POST", "/audio-lab/api/speech", DASHBOARD_BACKEND),
-    ("POST", "/audio-lab/api/transcriptions", DASHBOARD_BACKEND),
-    ("POST", "/audio-lab/api/alignments", DASHBOARD_BACKEND),
-    ("POST", "/audio-lab/api/tasks/run", DASHBOARD_BACKEND),
-    ("GET", "/image-lab/api/models", DASHBOARD_BACKEND),
-    ("POST", "/image-lab/api/generate", DASHBOARD_BACKEND),
-    ("POST", "/image-lab/api/edit", DASHBOARD_BACKEND),
-    // The Knowledge page's backend (chat-complete design §9.5).
-    ("GET", "/api/knowledge/bases", DASHBOARD_BACKEND),
-    ("POST", "/api/knowledge/bases", DASHBOARD_BACKEND),
-    ("GET", "/api/knowledge/bases/{id}", DASHBOARD_BACKEND),
-    (
-        "POST",
-        "/api/knowledge/bases/{id}/settings",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/api/knowledge/bases/{id}/delete",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/api/knowledge/bases/{id}/resume",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/api/knowledge/bases/{id}/cancel",
-        DASHBOARD_BACKEND,
-    ),
-    ("GET", "/api/knowledge/bases/{id}/files", DASHBOARD_BACKEND),
-    ("POST", "/api/knowledge/bases/{id}/files", DASHBOARD_BACKEND),
-    (
-        "POST",
-        "/api/knowledge/files/{id}/delete",
-        DASHBOARD_BACKEND,
-    ),
-    (
-        "POST",
-        "/api/knowledge/files/{id}/reingest",
-        DASHBOARD_BACKEND,
-    ),
-    ("GET", "/api/knowledge/files/{id}/text", DASHBOARD_BACKEND),
-    (
-        "GET",
-        "/api/knowledge/files/{id}/original",
-        DASHBOARD_BACKEND,
-    ),
-    ("POST", "/api/knowledge/search", DASHBOARD_BACKEND),
 ];
 
-/// The reason string shared by every dashboard-internal mini-API row (owner
-/// decision 2026-09-28): its shape follows the UI, not a published contract.
-const DASHBOARD_BACKEND: &str =
-    "The dashboard's own backend; its shapes follow the UI and are no contract.";
-
-/// The Chat API's rows not documented yet (review W2-24): a paired device
-/// calls them too, so they are no longer the dashboard's alone. The subset
-/// a client uses is documented as it is typed (client-apps design §4.3).
-const CHAT_API: &str = "The Chat API, the dashboard's and a paired device's: not documented \
-     yet. Until it is, its shapes are the ones the dashboard reads.";
+/// `(method, path, reason)` — every operation whose answer is
+/// `Resp::Untyped`, by the document's own spelling (`get`/`post`, path with
+/// `{id}`). Only a verbatim relay of another program's JSON belongs here: the
+/// bytes are that program's, so lmgw has no type to build them from. Anything
+/// else gives its answer an `lmgw-api-types` type the handler builds.
+/// `build.rs`'s `untyped_responses_are_exactly_the_allowlist` fails both ways:
+/// a new untyped answer or request body not listed, a listed one that no longer is.
+#[cfg(test)]
+pub(crate) const UNTYPED: &[(&str, &str, &str)] = &[
+    (
+        "post",
+        "/v1/audio/alignments",
+        "audio.cpp's own alignment JSON, relayed verbatim.",
+    ),
+    (
+        "post",
+        "/audio-lab/api/alignments",
+        "audio.cpp's own alignment JSON, relayed verbatim.",
+    ),
+    (
+        "post",
+        "/v1/tasks/run",
+        "audio.cpp's own per-task JSON, relayed verbatim.",
+    ),
+    (
+        "post",
+        "/v1/tasks/stream",
+        "audio.cpp's own per-task stream, relayed verbatim.",
+    ),
+    (
+        "post",
+        "/audio-lab/api/tasks/run",
+        "audio.cpp's own per-task JSON, relayed verbatim.",
+    ),
+];

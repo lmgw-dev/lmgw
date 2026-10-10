@@ -23,6 +23,9 @@ async fn a_gated_turn_stops_and_a_decision_resumes_it_with_its_sibling() {
     attach(&w, &owner, tid).await;
     both_calls(&w);
     let frames = send(&w, &owner, tid, "tell me").await;
+    // The gated turn's frames — the `approval` tool frame and the `done`
+    // that lists what waits — are the documented types.
+    crate::chat_turn_wire::typed_frames(&frames);
 
     let asks = approval_frames(&frames);
     assert_eq!(asks.len(), 1, "{frames:?}");
@@ -64,6 +67,8 @@ async fn a_gated_turn_stops_and_a_decision_resumes_it_with_its_sibling() {
     )
     .await;
     assert_eq!(s, 200, "{frames:?}");
+    // The resumed turn streams the same frame types.
+    crate::chat_turn_wire::typed_frames(&frames);
     let end = done(&frames);
     assert_eq!(end["message_id"], reply, "appended to the gated reply");
     assert_eq!(end["aborted"], false, "{end}");

@@ -446,9 +446,11 @@ async fn local_model_get_shows_every_rungs_command_line_and_derived_numbers() {
     .await
     .unwrap();
 
-    let got = ops::local_model_get(&state, None, Some("laddered"), None)
-        .await
-        .unwrap();
+    let got = crate::common::read_wire(
+        ops::local_model_get(&state, None, Some("laddered"), None)
+            .await
+            .unwrap(),
+    );
     let rungs = got["rungs"].as_array().unwrap_or_else(|| panic!("{got}"));
     assert_eq!(rungs.len(), 3, "{got}");
 
@@ -486,9 +488,11 @@ async fn local_model_get_shows_every_rungs_command_line_and_derived_numbers() {
     )
     .await
     .unwrap();
-    let plain = ops::local_model_get(&state, None, Some("plain"), None)
-        .await
-        .unwrap();
+    let plain = crate::common::read_wire(
+        ops::local_model_get(&state, None, Some("plain"), None)
+            .await
+            .unwrap(),
+    );
     assert!(plain["rungs"].is_null(), "{plain}");
     assert!(
         !plain["command_line"].as_str().unwrap().is_empty(),
@@ -620,9 +624,11 @@ async fn local_model_get_caps_the_shown_per_slot_context_at_the_trained_one() {
     .await
     .unwrap();
 
-    let got = ops::local_model_get(&state, None, Some("stale-ladder"), None)
-        .await
-        .unwrap();
+    let got = crate::common::read_wire(
+        ops::local_model_get(&state, None, Some("stale-ladder"), None)
+            .await
+            .unwrap(),
+    );
     let rungs = got["rungs"].as_array().unwrap_or_else(|| panic!("{got}"));
     assert_eq!(
         rungs[1]["ctx_size"], 262144,

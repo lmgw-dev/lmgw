@@ -8,7 +8,7 @@ use lmgw_api_types::chat::{self, AnswerRequest, TaskCancelled, ThreadTask};
 
 use super::super::registry::{DocRoute, Req, Resp};
 use super::chat::chat_route;
-use super::chat_approvals::{done_frame, error_frame, text_frame, tool_frame};
+use super::chat_turns::turn_events;
 
 pub(crate) fn routes() -> Vec<DocRoute> {
     vec![
@@ -29,13 +29,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<AnswerRequest>()),
-            response: Resp::Sse(&[
-                ("delta", text_frame),
-                ("reasoning", text_frame),
-                ("tool", tool_frame),
-                ("error", error_frame),
-                ("done", done_frame),
-            ]),
+            response: Resp::Sse(turn_events!(speech)),
             ..chat_route(
                 "POST",
                 chat::ANSWER_PATH,

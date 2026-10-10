@@ -1,9 +1,12 @@
-//! The Chat API's documented routes (client-apps design §4.3): the subset
-//! a desktop client uses — the thread and folder lists, a folder create,
-//! an ongoing conversation's current thread, and the change feed — under
-//! the "Chat" tag. Every shape is `lmgw-api-types`' (`chat`,
-//! `chat_folders`, `chat_feed`), the types the handlers serialize. The rest
-//! of the Chat API stays in `exclusions.rs` until a client needs it typed.
+//! The Chat API's documented routes (client-apps design §4.3) under the
+//! "Chat" tag: the thread and folder lists, a folder create, an
+//! ongoing conversation's current thread and the change feed here; the
+//! profiles, approvals, tasks and thread routes in the sub-planes merged at
+//! the end of [`routes`] (the streaming turns among them,
+//! `chat_turns`, which also holds the frame vocabulary every turn route
+//! shares). Every shape is `lmgw-api-types`' (`chat`,
+//! `chat_folders`, `chat_feed`, `chat_threads`), the types the handlers
+//! read and write. The attachments and exports are in `chat_attachments`.
 
 use lmgw_api_types::chat;
 use lmgw_api_types::chat_feed as feed;
@@ -336,6 +339,12 @@ pub(crate) fn routes() -> Vec<DocRoute> {
     routes.extend(super::chat_approvals::routes());
     // A thread's MCP tasks: answer and cancel (MCP Tasks design §5.1).
     routes.extend(super::chat_tasks::routes());
+    // A thread: create, read, settings and the actions on it and its messages,
+    // the folder patch and delete, the search.
+    routes.extend(super::chat_attachments::routes());
+    routes.extend(super::chat_threads::routes());
+    // The streaming turns: send, continue, regenerate, read-aloud, warm-up.
+    routes.extend(super::chat_turns::routes());
     routes
 }
 

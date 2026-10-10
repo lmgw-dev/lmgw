@@ -31,8 +31,6 @@
 
 use std::collections::HashSet;
 
-use serde_json::json;
-
 use super::chat_caller::Caller;
 use super::chat_live::Ticket;
 use super::chat_repo::ChatRepo;
@@ -417,14 +415,13 @@ pub(super) async fn run_auto(
             (message_id, sent, false)
         }
     };
-    let mut payload = serde_json::to_value(&context).unwrap_or_else(|_| json!({}));
-    payload["message_id"] = json!(message_id);
-    payload["reused"] = json!(reused);
+    let retrieval = lmgw_api_types::chat_frames::RetrievalFrame {
+        context: super::chat_wire::message_context(&context),
+        message_id,
+        reused,
+    };
     let _ = tx
-        .send(super::chat_turn::TurnFrame::new(
-            "retrieval",
-            payload.to_string(),
-        ))
+        .send(super::chat_turn::TurnFrame::of("retrieval", &retrieval))
         .await;
 }
 

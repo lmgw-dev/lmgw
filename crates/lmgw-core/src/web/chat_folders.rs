@@ -28,9 +28,8 @@ use axum::Json;
 use lmgw_api_types::chat::FolderList;
 use lmgw_api_types::chat_folders::OngoingInput;
 use serde::Deserialize;
-use serde_json::json;
 
-use super::chat::{err_json, present};
+use super::chat::err_json;
 use super::chat_caller::Caller;
 use super::chat_extract::{ChatJson, ChatPath};
 use super::chat_repo::ChatRepo;
@@ -40,6 +39,9 @@ use crate::state::{AppState, SharedState};
 use crate::store::{
     self, ChatFolder, ChatFolderPatch, ChatThread, CurrentSettings, FolderOptions, ThreadDefaults,
 };
+use lmgw_api_types::chat::Ack;
+use lmgw_api_types::chat_folders::{FolderDelete, FolderPatch, FolderPatched, ThreadsFate};
+use lmgw_api_types::chat_threads::MoveRequest;
 
 /// Normalise and validate folder defaults with the checks a thread's own
 /// settings go through (`chat_sampling::check`, `chat_reasoning::check`):
@@ -376,7 +378,7 @@ pub async fn create_folder(
     };
     state.chat_feed.wake();
     match folder_json(&state, &caller, id).await {
-        Ok(v) => Json(v).into_response(),
+        Ok(f) => Json(chat_wire::wire(&f)).into_response(),
         Err(r) => r,
     }
 }
@@ -386,55 +388,13 @@ async fn folder_json(
     state: &AppState,
     caller: &Caller,
     id: i64,
-) -> Result<serde_json::Value, Response> {
+) -> Result<lmgw_api_types::chat::Folder, Response> {
     let snap = state.snapshot();
     match store::get_chat_folder_listed(&state.db, id, caller.reach(&snap)).await {
-        Ok(Some(f)) if caller.sees_folder(&snap, &f.folder) => {
-            Ok(chat_wire::wire(&chat_wire::folder(&f)))
-        }
+        Ok(Some(f)) if caller.sees_folder(&snap, &f.folder) => Ok(chat_wire::folder(&f)),
         Ok(_) => Err(not_found()),
         Err(e) => Err(internal(e)),
     }
-}
-
-fn yes() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateFolderReq {
-    name: Option<String>,
-    sort: Option<i64>,
-    /// Replaces the folder's defaults whole (an absent field is unchanged;
-    /// `{}` clears them).
-    defaults: Option<serde_json::Value>,
-    /// Changes the defaults field by field instead (review W6-10): each
-    /// field given replaces the stored one (`null` unsets it), the others
-    /// stay as stored — so a save of the fields one client changed never
-    /// writes back, and an ongoing folder never re-applies to its current
-    /// thread, what another changed meanwhile. `voice` is laid field by
-    /// field the same way (`voice: null` unsets the whole voice). Not beside
-    /// `defaults`.
-    defaults_patch: Option<serde_json::Value>,
-    /// `{idle_minutes}` marks the folder as one ongoing conversation (or
-    /// changes its idle minutes); `null` ends that. Absent: unchanged.
-    #[serde(default, deserialize_with = "present")]
-    ongoing: Option<Option<OngoingInput>>,
-    /// The folder's own retention; `null` goes back to the global setting.
-    /// Absent: unchanged.
-    #[serde(default, deserialize_with = "present")]
-    archive_days: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "present")]
-    purge_days: Option<Option<i64>>,
-    /// `false` shows a folder a device's delete hid from devices to them
-    /// again (review F-7). The owner's alone, as the retention is; `true` is
-    /// no request anyone makes — a device's delete is what hides a folder.
-    devices_hidden: Option<bool>,
-    /// For an ongoing folder: also apply the defaults' changes to its
-    /// current thread (client-apps design L9). Default `true`.
-    #[serde(default = "yes")]
-    apply_to_current: bool,
 }
 
 /// `POST /chat/api/folders/{id}` `{name?, sort?, defaults?, ongoing?,
@@ -448,7 +408,7 @@ pub async fn update_folder(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<UpdateFolderReq>,
+    ChatJson(req): ChatJson<FolderPatch>,
 ) -> Response {
     // Read to write under the folder's lock: the folder as read (its
     // defaults, its current thread) does not change under the patch, and a
@@ -695,25 +655,9 @@ pub async fn update_folder(
         .filter(|_| written.current.is_some())
         .map(|a| a.report());
     match folder_json(&state, &caller, id).await {
-        Ok(mut v) => {
-            v["applied"] = json!(applied);
-            Json(v).into_response()
-        }
+        Ok(folder) => Json(chat_wire::wire(&FolderPatched { folder, applied })).into_response(),
         Err(r) => r,
     }
-}
-
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum ThreadsFate {
-    Keep,
-    Delete,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeleteFolderReq {
-    threads: ThreadsFate,
 }
 
 /// `POST /chat/api/folders/{id}/delete` `{threads: "keep"|"delete"}` — `keep`
@@ -730,7 +674,7 @@ pub async fn delete_folder(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<DeleteFolderReq>,
+    ChatJson(req): ChatJson<FolderDelete>,
 ) -> Response {
     // No thread starts in it while it goes.
     let folder_lock = state.chat_folder_locks.lock(id).await;
@@ -795,16 +739,10 @@ pub async fn delete_folder(
     })
     .await;
     match deleted.and_then(|d| d) {
-        Ok(Some(_)) => Json(json!({ "ok": true })).into_response(),
+        Ok(Some(_)) => Json(Ack::ok()).into_response(),
         Ok(None) => not_found(),
         Err(e) => internal(e),
     }
-}
-
-#[derive(Deserialize)]
-pub struct MoveReq {
-    /// The target folder; `null` takes the thread out of any folder.
-    folder_id: Option<i64>,
 }
 
 /// `POST /chat/api/threads/{id}/move` `{folder_id|null}` — the thread, moved.
@@ -813,7 +751,7 @@ pub async fn move_thread(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(req): ChatJson<MoveReq>,
+    ChatJson(req): ChatJson<MoveRequest>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     // Reach checked, then again under the thread's lock held across the

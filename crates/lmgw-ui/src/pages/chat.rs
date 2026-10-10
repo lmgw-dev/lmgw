@@ -12,7 +12,7 @@ use std::cell::Cell;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
-use lmgw_api_types::chat::{MessageTask, ThreadTask};
+use lmgw_api_types::chat::{Ack, MessageTask, ThreadTask};
 use lmgw_api_types::chat_approvals::ApprovalRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -960,7 +960,7 @@ pub fn Chat() -> impl IntoView {
         deleting.set_value(Some(id));
         scope.spawn(async move {
             if let Err(e) =
-                crate::api::post::<Value, _>(format!("/chat/api/threads/{id}/delete"), &json!({}))
+                crate::api::post::<Ack, _>(format!("/chat/api/threads/{id}/delete"), &json!({}))
                     .await
             {
                 deleting.try_set_value(None);
@@ -1250,7 +1250,7 @@ pub fn Chat() -> impl IntoView {
         draft_attachments.update(|v| v.retain(|c| c.key != chip.key));
         if let Some(id) = chip.id.get_untracked() {
             spawn_local(async move {
-                if let Err(e) = crate::api::post::<Value, _>(
+                if let Err(e) = crate::api::post::<lmgw_api_types::chat::Ack, _>(
                     format!("/chat/api/attachments/{id}/delete"),
                     &json!({}),
                 )

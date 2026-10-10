@@ -25,34 +25,9 @@ pub enum SearchArchived {
     All,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SearchHit {
-    /// `t` title, `m` message, `a` attachment name.
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    pub snippet: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SearchThread {
-    pub thread_id: i64,
-    pub title: String,
-    pub folder_id: Option<i64>,
-    pub archived: bool,
-    pub updated_at: String,
-    pub match_count: i64,
-    pub hits: Vec<SearchHit>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SearchPage {
-    pub total_threads: i64,
-    pub threads: Vec<SearchThread>,
-    pub next_offset: Option<i64>,
-}
+// The answer's shapes are the API's: `lmgw-api-types` writes the document
+// and the client's reader from the same types.
+pub use lmgw_api_types::chat_threads::{SearchHit, SearchPage, SearchThread};
 
 /// Turn free text into an FTS5 MATCH expression that cannot be a syntax
 /// error: whitespace-separated words become quoted prefix terms (`"foo"*`),

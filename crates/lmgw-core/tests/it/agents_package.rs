@@ -1068,6 +1068,20 @@ async fn the_export_names_the_localhost_caveat_and_carries_no_token_provenance_o
     let (status, body) = get(&base, "/api/agents/board/export").await;
     assert_eq!(status, 200, "{body}");
     let doc: Value = serde_json::from_str(&body).unwrap();
+    // The file is the documented envelope around the manifest: every envelope
+    // key is a field of the type, so none is left in the manifest's own map.
+    let typed: lmgw_api_types::AgentExport = crate::common::round_trips("export an agent", &doc);
+    for key in [
+        "exported_at",
+        "lmgw_version",
+        "config_values",
+        "config_omitted",
+        "config_unbound",
+        "portability",
+    ] {
+        assert!(!typed.manifest.contains_key(key), "{key} left untyped");
+    }
+    assert_eq!(typed.manifest["id"], json!("board"));
     assert_eq!(doc["portability"]["portable"], false, "{body}");
     let notes = doc["portability"]["notes"].to_string();
     assert!(

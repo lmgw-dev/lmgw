@@ -79,9 +79,9 @@ pub(super) async fn run(
             }
             Ok(v)
         }
-        "lmgw__voice_transcribe" => {
-            ops::voice_transcribe(state, arg_str(&a, "clip")?, arg_str(&a, "alias")?).await
-        }
+        "lmgw__voice_transcribe" => ops::backends::to_json(
+            ops::voice_transcribe(state, arg_str(&a, "clip")?, arg_str(&a, "alias")?).await,
+        ),
         other => Err(format!("unhandled built-in tool '{other}'")),
     }
 }

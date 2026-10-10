@@ -7,6 +7,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use lmgw_api_types::ContainerAnswer;
 use serde_json::{json, Value};
 
 use crate::ops_state::{model_key, use_ops, OpsState};
@@ -53,7 +54,7 @@ fn fire(
     action: &'static str,
     force: bool,
     tail: Option<i64>,
-    then: impl FnOnce(crate::api::Result<Value>) + 'static,
+    then: impl FnOnce(crate::api::Result<ContainerAnswer>) + 'static,
 ) {
     let key = model_key(class, &model_id);
     if !ops.start(&key) {
@@ -67,22 +68,17 @@ fn fire(
         if let Some(t) = tail {
             body["tail"] = json!(t);
         }
-        let res = crate::api::post::<Value, _>("/api/op/container", &body).await;
+        let res = crate::api::post::<ContainerAnswer, _>("/api/op/container", &body).await;
         ops.finish(&key);
         then(res);
     });
 }
 
-fn toast_message(toasts: Toasts, res: crate::api::Result<Value>, fallback: &str) {
+fn toast_message(toasts: Toasts, res: crate::api::Result<ContainerAnswer>, fallback: &str) {
     match res {
         Ok(v) => {
-            let ok = v.get("ok").and_then(Value::as_bool).unwrap_or(true);
-            let msg = v
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or(fallback)
-                .to_string();
-            if ok {
+            let msg = v.message().unwrap_or(fallback).to_string();
+            if v.ok() {
                 toasts.ok(msg);
             } else {
                 // `model_apply`'s busy refusal: HTTP 200, `ok:false` — a
@@ -153,12 +149,7 @@ pub fn ModelRunButtons(
             None,
             move |res| match res {
                 Ok(v) => {
-                    let msg = v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("stopped")
-                        .to_string();
-                    toasts.ok(msg);
+                    toasts.ok(v.message().unwrap_or("stopped").to_string());
                 }
                 Err(e) => {
                     // `model_stop`'s busy refusal is a transport error (HTTP
@@ -406,7 +397,7 @@ fn LogsBody(class: &'static str, model_id: String, open: RwSignal<bool>) -> impl
                 return None;
             }
             Some(
-                crate::api::post::<Value, _>(
+                crate::api::post::<ContainerAnswer, _>(
                     "/api/op/container",
                     &json!({ "target": class, "model": model_id, "action": "logs", "tail": t }),
                 )
@@ -434,7 +425,10 @@ fn LogsBody(class: &'static str, model_id: String, open: RwSignal<bool>) -> impl
                     logs.get()
                         .flatten()
                         .and_then(|r| r.ok())
-                        .and_then(|v| v.get("container").and_then(Value::as_str).map(String::from))
+                        .and_then(|v| match v {
+                            ContainerAnswer::Logs(l) => Some(l.container),
+                            _ => None,
+                        })
                         .unwrap_or_default()
                 }}
             </span>
@@ -463,12 +457,10 @@ fn LogsBody(class: &'static str, model_id: String, open: RwSignal<bool>) -> impl
             None => view! { <div class="dim">"Loading…"</div> }.into_any(),
             Some(Err(e)) => view! { <div class="notice err">{e.to_string()}</div> }.into_any(),
             Some(Ok(v)) => {
-                let text = v
-                    .get("logs")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("(no output)")
-                    .to_string();
+                let text = match v {
+                    ContainerAnswer::Logs(l) if !l.logs.is_empty() => l.logs,
+                    _ => "(no output)".to_string(),
+                };
                 view! { <pre class="preset fill-pane logs-pre" node_ref=pre>{text}</pre> }.into_any()
             }
         }}

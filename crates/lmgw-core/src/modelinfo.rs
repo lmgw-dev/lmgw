@@ -16,6 +16,8 @@
 
 use serde_json::{json, Value};
 
+use lmgw_api_types as dto;
+
 use crate::capabilities::{self, ModelCapabilities};
 use crate::config::{AuxKind, LlamaParams, LocalModel, Snapshot};
 use crate::gguf::{self, ModelSummary};
@@ -856,7 +858,7 @@ pub async fn gguf_files(
 /// not by itself stop anything: `tokio::time::timeout` abandons the future but
 /// the container keeps running. That is why the probe container is named and
 /// removed by name afterwards.
-async fn probe_runtime(state: &SharedState, rel: &str, class: Class) -> Value {
+async fn probe_runtime(state: &SharedState, rel: &str, class: Class) -> dto::RuntimeProbe {
     /// How long to wait before concluding the architecture was accepted.
     ///
     /// Note which path this bounds. A *rejected* architecture returns as soon
@@ -874,11 +876,10 @@ async fn probe_runtime(state: &SharedState, rel: &str, class: Class) -> Value {
     // mutation for exactly this reason, and the probe does a smaller version
     // of the same thing — so at read_only it declines rather than doing it.
     if !snap.settings.self_admin.allows_write() {
-        return json!({
-            "checked": false,
-            "reason": "the runtime probe loads the model into a container, so it \
-                       needs self-admin 'full'; the GGUF metadata above needs no probe",
-        });
+        return dto::RuntimeProbe::unchecked(
+            "the runtime probe loads the model into a container, so it \
+             needs self-admin 'full'; the GGUF metadata above needs no probe",
+        );
     }
     // The owner switched the GPU hold on: the card is in use elsewhere, and
     // nothing lmgw starts should compete with it — deferred, and said so. A
@@ -887,36 +888,29 @@ async fn probe_runtime(state: &SharedState, rel: &str, class: Class) -> Value {
     match snap.gpu_block() {
         None => {}
         Some(crate::bench::lease::GpuBlock::Hold) => {
-            return json!({
-                "checked": false,
-                "reason": "the GPU hold is on, so the runtime probe (a container of the model's \
-                           image) is deferred until it is released; the GGUF metadata above \
-                           needs no probe",
-            })
+            return dto::RuntimeProbe::unchecked(
+                "the GPU hold is on, so the runtime probe (a container of the model's \
+                 image) is deferred until it is released; the GGUF metadata above \
+                 needs no probe",
+            )
         }
         Some(crate::bench::lease::GpuBlock::Benchmark(l)) => {
-            return json!({
-                "checked": false,
-                "reason": format!(
-                    "benchmark run {} has the GPU to itself, so the runtime probe (a container \
-                     of the model's image) is deferred until it ends; the GGUF metadata above \
-                     needs no probe",
-                    l.run_id
-                ),
-            })
+            return dto::RuntimeProbe::unchecked(format!(
+                "benchmark run {} has the GPU to itself, so the runtime probe (a container \
+                 of the model's image) is deferred until it ends; the GGUF metadata above \
+                 needs no probe",
+                l.run_id
+            ))
         }
     }
     let models_dir = models_dir_of(&snap, class);
     if models_dir.trim().is_empty() {
-        return json!({
-            "checked": false,
-            "reason": format!(
-                "the {} models dir is not configured, so there is nothing to mount into the \
-                 probe container (Settings → {})",
-                class.as_str(),
-                settings_page(class)
-            ),
-        });
+        return dto::RuntimeProbe::unchecked(format!(
+            "the {} models dir is not configured, so there is nothing to mount into the \
+             probe container (Settings → {})",
+            class.as_str(),
+            settings_page(class)
+        ));
     }
     let (image, class_run_args) = runtime_for_gguf(&snap, rel, class);
     let name = format!(
@@ -963,20 +957,16 @@ async fn probe_runtime(state: &SharedState, rel: &str, class: Class) -> Value {
 
     let verdict = match tokio::time::timeout(PROBE_TIMEOUT, run).await {
         // Timed out: the arch check would have fired by now, so it passed.
-        Err(_) => json!({
-            "checked": true,
-            "supported": true,
-            "detail": "architecture accepted (loading was still in progress when \
-                       the probe was cut short, which is past the check)",
-        }),
-        Ok(None) => json!({
-            "checked": false,
-            "reason": format!(
-                "could not run llama-server from image '{image}' — is that image pulled? \
-                 the probe never pulls one, since a read call must not turn into a \
-                 multi-gigabyte download"
-            ),
-        }),
+        Err(_) => dto::RuntimeProbe::supported(Some(
+            "architecture accepted (loading was still in progress when \
+             the probe was cut short, which is past the check)"
+                .into(),
+        )),
+        Ok(None) => dto::RuntimeProbe::unchecked(format!(
+            "could not run llama-server from image '{image}' — is that image pulled? \
+             the probe never pulls one, since a read call must not turn into a \
+             multi-gigabyte download"
+        )),
         Ok(Some((text, status))) => classify_exit(&text, status),
     };
 
@@ -1118,10 +1108,10 @@ fn probe_args(rel: &str) -> Vec<String> {
 /// (measured 2026-09-26) — so it counts only when the output shows the
 /// architecture was already accepted (the model's metadata was printed, which
 /// happens after the check); a crash before that is no answer.
-fn classify_exit(text: &str, status: i32) -> Value {
+fn classify_exit(text: &str, status: i32) -> dto::RuntimeProbe {
     let verdict = classify_probe(text);
     let crashed = status > 128;
-    if !crashed || verdict["supported"] == false {
+    if !crashed || verdict.supported == Some(false) {
         return verdict;
     }
     let past_check = text.lines().any(|l| {
@@ -1129,50 +1119,45 @@ fn classify_exit(text: &str, status: i32) -> Value {
         (l.contains("print_meta") || l.contains("print_info")) && l.contains("arch")
     });
     if past_check {
-        return json!({
-            "checked": true,
-            "supported": true,
-            "detail": format!(
-                "architecture accepted (the probe printed the model's metadata, which comes \
-                 after the check, then exited with status {status})"
-            ),
-        });
+        return dto::RuntimeProbe::supported(Some(format!(
+            "architecture accepted (the probe printed the model's metadata, which comes \
+             after the check, then exited with status {status})"
+        )));
     }
-    json!({
-        "checked": false,
-        "reason": format!(
-            "the probe exited with status {status} before the architecture check said anything"
-        ),
-    })
+    dto::RuntimeProbe::unchecked(format!(
+        "the probe exited with status {status} before the architecture check said anything"
+    ))
 }
 
 /// Turn probe output into a verdict. Split out so it is testable without a
 /// container.
-fn classify_probe(text: &str) -> Value {
+fn classify_probe(text: &str) -> dto::RuntimeProbe {
     let line_with = |needle: &str| {
         text.lines()
             .find(|l| l.to_ascii_lowercase().contains(needle))
             .map(|l| l.trim().to_string())
     };
     if let Some(l) = line_with("unknown model architecture") {
-        return json!({
-            "checked": true, "supported": false, "reason": l,
-            "hint": "the llama.cpp build in this container predates the model's \
-                     architecture — update the container image",
-        });
+        return dto::RuntimeProbe::unsupported(
+            l,
+            Some(
+                "the llama.cpp build in this container predates the model's \
+                 architecture — update the container image",
+            ),
+        );
     }
     if let Some(l) = line_with("failed to load clip model") {
-        return json!({
-            "checked": true, "supported": false, "reason": l,
-            "hint": "this build does not recognise the projector type",
-        });
+        return dto::RuntimeProbe::unsupported(
+            l,
+            Some("this build does not recognise the projector type"),
+        );
     }
     for needle in ["error loading model", "failed to load model"] {
         if let Some(l) = line_with(needle) {
-            return json!({ "checked": true, "supported": false, "reason": l });
+            return dto::RuntimeProbe::unsupported(l, None);
         }
     }
-    json!({ "checked": true, "supported": true })
+    dto::RuntimeProbe::supported(None)
 }
 
 /// What a GGUF is: architecture, shape, quantization, role, and whether the
@@ -1182,7 +1167,7 @@ pub async fn model_inspect(
     gguf_path: &str,
     probe: bool,
     target: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::ModelInspect, String> {
     let class = class_of(target)?;
     let dir = models_dir_of(&state.snapshot(), class);
     let (rel, full) = resolve(&dir, gguf_path, class)?;
@@ -1205,63 +1190,67 @@ pub async fn model_inspect(
     let runtime = if probe {
         probe_runtime(state, &rel, class).await
     } else {
-        json!({ "checked": false, "reason": "probe not requested" })
+        dto::RuntimeProbe::unchecked("probe not requested")
     };
 
-    Ok(json!({
-        "path": rel,
-        "target": class.as_str(),
-        "role": role,
+    Ok(dto::ModelInspect {
+        path: rel,
+        target: class.as_str().to_string(),
+        role: role.to_string(),
         // Which class serves this file, read from the header: an embedding
         // or rerank model is an aux model (`lmgw__aux_model_set`), whatever
         // directory it was found in.
-        "serve_as": serve_as,
-        "aux_kind": aux_kind.map(|k| k.as_str()),
-        "pooling_type": s.pooling_type.and_then(gguf::pooling_name),
-        "has_classifier_head": s.has_classifier_head,
-        "suggested_spec_type": spec_type_for(&s),
-        "architecture": s.architecture,
-        "name": s.general_name,
-        "size_label": s.size_label,
-        "quant": s.quant,
-        "context_length": s.context_length,
-        "block_count": s.block_count,
-        "head_count": s.head_count,
-        "head_count_kv": s.head_count_kv,
-        "head_count_kv_per_layer": s.head_count_kv_per_layer,
-        "sliding_window": s.sliding_window,
-        "sliding_window_pattern": s.sliding_window_pattern,
-        "sliding_window_pattern_is_array": s.sliding_window_pattern_is_array,
-        "full_attention_interval": s.full_attention_interval,
-        "has_chat_template": s.has_chat_template,
+        serve_as: serve_as.to_string(),
+        aux_kind: aux_kind.map(|k| k.as_str().to_string()),
+        pooling_type: s
+            .pooling_type
+            .and_then(gguf::pooling_name)
+            .map(str::to_string),
+        has_classifier_head: s.has_classifier_head,
+        suggested_spec_type: spec_type_for(&s).map(str::to_string),
+        architecture: s.architecture.clone(),
+        name: s.general_name.clone(),
+        size_label: s.size_label.clone(),
+        quant: s.quant.clone(),
+        context_length: s.context_length,
+        block_count: s.block_count,
+        head_count: s.head_count,
+        head_count_kv: s.head_count_kv,
+        head_count_kv_per_layer: s.head_count_kv_per_layer.clone(),
+        sliding_window: s.sliding_window,
+        sliding_window_pattern: s.sliding_window_pattern,
+        sliding_window_pattern_is_array: s.sliding_window_pattern_is_array,
+        full_attention_interval: s.full_attention_interval,
+        has_chat_template: s.has_chat_template,
         // Text heuristics over the chat template — reasoning, effort levels,
         // tool-call syntax (model capabilities design §3.1). `null` exactly
         // when there is no chat template to read.
-        "signals": s.signals,
-        "has_mtp_layers": s.has_mtp_layers,
-        "projector_type": s.projector_type,
-        "vision_block_count": s.vision_block_count,
+        signals: s.signals.as_ref().map(dto::TemplateSignals::from),
+        has_mtp_layers: s.has_mtp_layers,
+        projector_type: s.projector_type.clone(),
+        vision_block_count: s.vision_block_count,
         // `clip.has_vision_encoder` / `clip.has_audio_encoder` (design §3.3)
         // — meaningful on mmproj files; `null` when the header says nothing.
-        "has_vision_encoder": s.has_vision_encoder,
-        "has_audio_encoder": s.has_audio_encoder,
-        "file_size_bytes": s.file_size,
-        "file_size": crate::hf::fmt_bytes(s.file_size),
-        "vram_estimate": {
-            "weights_bytes": s.file_size,
-            "kv_cache_bytes_at_full_ctx_f16": kv(16),
-            "kv_cache_bytes_at_full_ctx_q8_0": kv(8),
-            "note": "KV figures are for context_length tokens and exclude \
-                     quantization scale overhead, so treat them as a lower \
-                     bound. Sliding-window layers are counted at the window \
-                     size, and on hybrid linear-attention models only every \
-                     full_attention_interval-th layer holds a per-token cache \
-                     (the rest charge their fixed recurrent state) — which is \
-                     why either kind's KV is far below the naive layers x \
-                     context product.",
+        has_vision_encoder: s.has_vision_encoder,
+        has_audio_encoder: s.has_audio_encoder,
+        file_size_bytes: s.file_size,
+        file_size: crate::hf::fmt_bytes(s.file_size),
+        vram_estimate: dto::VramEstimate {
+            weights_bytes: s.file_size,
+            kv_cache_bytes_at_full_ctx_f16: kv(16),
+            kv_cache_bytes_at_full_ctx_q8_0: kv(8),
+            note: "KV figures are for context_length tokens and exclude \
+                   quantization scale overhead, so treat them as a lower \
+                   bound. Sliding-window layers are counted at the window \
+                   size, and on hybrid linear-attention models only every \
+                   full_attention_interval-th layer holds a per-token cache \
+                   (the rest charge their fixed recurrent state) — which is \
+                   why either kind's KV is far below the naive layers x \
+                   context product."
+                .to_string(),
         },
-        "runtime": runtime,
-    }))
+        runtime,
+    })
 }
 
 /// Speculative knobs that are inert once `spec_type` is gone, and so have to
@@ -1851,17 +1840,18 @@ pub async fn local_model_plan(
     let runtime = if probe {
         probe_runtime(state, &rel, class).await
     } else {
-        json!({ "checked": false, "reason": "probe not requested" })
+        dto::RuntimeProbe::unchecked("probe not requested")
     };
-    if runtime["supported"] == Value::Bool(false) {
+    if runtime.supported == Some(false) {
         warnings.push(format!(
             "the running llama.cpp build cannot load this model: {}",
-            runtime["reason"]
-                .as_str()
+            runtime
+                .reason
+                .as_deref()
                 .unwrap_or("see lmgw__model_inspect")
         ));
     }
-    if mmproj.is_some() && runtime["checked"] == Value::Bool(false) {
+    if mmproj.is_some() && !runtime.checked {
         warnings.push(
             "projector support was not verified — run lmgw__local_model_test \
              after applying"
@@ -2125,13 +2115,14 @@ async fn aux_plan(
     let runtime = if probe {
         probe_runtime(state, rel, found_in).await
     } else {
-        json!({ "checked": false, "reason": "probe not requested" })
+        dto::RuntimeProbe::unchecked("probe not requested")
     };
-    if runtime["supported"] == Value::Bool(false) {
+    if runtime.supported == Some(false) {
         warnings.push(format!(
             "the running llama.cpp build cannot load this model: {}",
-            runtime["reason"]
-                .as_str()
+            runtime
+                .reason
+                .as_deref()
                 .unwrap_or("see lmgw__model_inspect")
         ));
     }
@@ -2352,7 +2343,7 @@ pub async fn local_model_test(
     state: &SharedState,
     model_id: &str,
     target: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::ModelTest, String> {
     let snap = state.snapshot();
     let given = crate::ops::parse_class_target(target)?;
     let class = crate::ops::resolve_model_class(&snap, model_id, given).map_err(|e| {
@@ -2580,7 +2571,8 @@ pub async fn local_model_test(
     // A 200 is necessary, not sufficient: an embedder misconfigured as a
     // reranker answers with an all-zero vector (spike-verified), and that is
     // the failure this probe exists to catch.
-    let mut extra = serde_json::Map::new();
+    let mut dimensions = None;
+    let mut scored = None;
     // Whether the probe's answer was read to its end — the generation probe's
     // lease is released at once then, and only once llama-server lets go of
     // the slot otherwise (`gate::pool`, second review, finding 6).
@@ -2597,7 +2589,7 @@ pub async fn local_model_test(
                     match vec {
                         Some(v) if !v.is_empty() => {
                             let nonzero = v.iter().any(|x| x.as_f64().is_some_and(|f| f != 0.0));
-                            extra.insert("dimensions".into(), json!(v.len()));
+                            dimensions = Some(v.len());
                             if nonzero {
                                 (true, String::new())
                             } else {
@@ -2628,7 +2620,7 @@ pub async fn local_model_test(
                         if !results.is_empty()
                             && results.iter().all(|x| x["relevance_score"].is_number()) =>
                     {
-                        extra.insert("scored".into(), json!(results.len()));
+                        scored = Some(results.len());
                         (true, String::new())
                     }
                     _ => (
@@ -2654,13 +2646,16 @@ pub async fn local_model_test(
     // The probe's answer is read (or failed): it no longer occupies the pool.
     lease.end(read_whole);
     if ok {
-        let mut out = json!({
-            "ok": true, "loaded": true, "model_id": model_id,
-            "class": class.as_str(),
-            "probe": probe.as_str(),
-            "latency_ms": latency_ms,
-        });
-        out.as_object_mut().expect("object").extend(extra);
+        let passed = dto::ModelTestPassed {
+            ok: true,
+            loaded: true,
+            model_id: model_id.to_string(),
+            class: class.as_str().to_string(),
+            probe: probe.as_str().to_string(),
+            latency_ms,
+            dimensions,
+            scored,
+        };
         // The running-build cross-check (design §3.1's live-verified gloss,
         // §8 item 9): only for the chat class, since `/props`'
         // `chat_template_caps` and `modalities` are compared against the same
@@ -2668,15 +2663,15 @@ pub async fn local_model_test(
         // `LocalModel` row — aux rows have no chat template to disagree over.
         if let Some(model) = &chat_row {
             let check = props_cross_check(state, &hold, model).await;
-            let obj = out.as_object_mut().expect("object");
-            obj.insert("props".to_string(), check.props);
-            obj.insert("static".to_string(), check.static_caps);
-            obj.insert("disagreements".to_string(), json!(check.disagreements));
-            if let Some(note) = check.note {
-                obj.insert("note".to_string(), json!(note));
-            }
+            return Ok(dto::ModelTest::ChatPassed(dto::ChatTestPassed {
+                base: passed,
+                props: check.props,
+                static_caps: check.static_caps,
+                disagreements: check.disagreements,
+                note: check.note,
+            }));
         }
-        return Ok(out);
+        return Ok(dto::ModelTest::Passed(passed));
     }
 
     // The HTTP error is usually a generic "failed to load"; the reason is in
@@ -2748,14 +2743,18 @@ pub async fn local_model_test(
          line this model renders to"
     };
 
-    Ok(json!({
-        "ok": false, "loaded": false, "model_id": model_id,
-        "class": class.as_str(),
-        "probe": probe.as_str(),
-        "latency_ms": latency_ms,
-        "error": detail,
-        "container_log": log_lines,
-        "hint": hint,
+    Ok(dto::ModelTest::Failed(dto::ModelTestFailed {
+        ok: false,
+        loaded: false,
+        model_id: model_id.to_string(),
+        class: class.as_str().to_string(),
+        public_name: None,
+        probe: probe.as_str().to_string(),
+        endpoint: None,
+        latency_ms,
+        error: detail,
+        container_log: log_lines,
+        hint: hint.to_string(),
     }))
 }
 
@@ -2788,7 +2787,7 @@ async fn ladder_local_model_test(
     route: &crate::config::Route,
     model_id: &str,
     row: &LocalModel,
-) -> Result<Value, String> {
+) -> Result<dto::ModelTest, String> {
     let was_running = state
         .runtime()
         .list()
@@ -2820,9 +2819,7 @@ async fn ladder_local_model_test(
         Err(e) => return Err(e.to_string()),
     };
     rungs.push(probe_rung(state, route, &hold, model_id, row, 0, started.elapsed()).await);
-    let mut all_ok = rungs
-        .last()
-        .is_some_and(|r| r["ok"].as_bool().unwrap_or(false));
+    let mut all_ok = rungs.last().is_some_and(|r| r.ok);
 
     for k in 1..=row.top_rung() {
         if !all_ok {
@@ -2889,7 +2886,7 @@ async fn ladder_local_model_test(
             }
             Err(e) => rung_error(state, row, k, t0.elapsed(), e.to_string()).await,
         };
-        all_ok = outcome["ok"].as_bool().unwrap_or(false);
+        all_ok = outcome.ok;
         rungs.push(outcome);
     }
 
@@ -2907,15 +2904,15 @@ async fn ladder_local_model_test(
         .await
         .is_ok();
 
-    Ok(json!({
-        "ok": all_ok,
-        "model_id": model_id,
-        "class": "chat",
-        "ladder": true,
-        "top_rung": row.top_rung() + 1,
-        "rungs": rungs,
-        "was_running_rung": was_running,
-        "reset_to_base": reset_to_base,
+    Ok(dto::ModelTest::Ladder(dto::LadderTest {
+        ok: all_ok,
+        model_id: model_id.to_string(),
+        class: "chat".to_string(),
+        ladder: true,
+        top_rung: row.top_rung() + 1,
+        rungs,
+        was_running_rung: was_running,
+        reset_to_base,
     }))
 }
 
@@ -2928,13 +2925,12 @@ async fn probe_rung(
     row: &LocalModel,
     index: usize,
     load: std::time::Duration,
-) -> Value {
+) -> dto::RungTest {
     let (ok, detail) = generate_probe(state, route, hold, model_id).await;
     let mut v = rung_facts(state, row, index, load).await;
-    let obj = v.as_object_mut().expect("object");
-    obj.insert("ok".into(), json!(ok));
+    v.ok = ok;
     if !ok {
-        obj.insert("error".into(), json!(detail));
+        v.error = Some(detail);
     }
     v
 }
@@ -2947,11 +2943,10 @@ async fn rung_error(
     index: usize,
     load: std::time::Duration,
     error: String,
-) -> Value {
+) -> dto::RungTest {
     let mut v = rung_facts(state, row, index, load).await;
-    let obj = v.as_object_mut().expect("object");
-    obj.insert("ok".into(), json!(false));
-    obj.insert("error".into(), json!(error));
+    v.ok = false;
+    v.error = Some(error);
     v
 }
 
@@ -2971,7 +2966,7 @@ async fn rung_facts(
     row: &LocalModel,
     index: usize,
     load: std::time::Duration,
-) -> Value {
+) -> dto::RungTest {
     let view = row
         .all_rungs()
         .unwrap_or_default()
@@ -2984,15 +2979,18 @@ async fn rung_facts(
         .map(|c| crate::ladder::slot_ctx(c, trained.get(index).copied().flatten()));
     let n_predict = row.params.n_predict.filter(|&n| n > 0);
     let switchover = per_slot_ctx.zip(n_predict).map(|(c, n)| c - n);
-    json!({
-        "rung": index + 1,
-        "of": row.top_rung() + 1,
-        "gguf_path": view.map(|r| r.gguf_path.to_string()),
-        "ctx_size": view.map(|r| r.ctx_size),
-        "per_slot_ctx": per_slot_ctx,
-        "switchover": switchover,
-        "load_seconds": load.as_secs_f64(),
-    })
+    dto::RungTest {
+        rung: index + 1,
+        of: row.top_rung() + 1,
+        gguf_path: view.as_ref().map(|r| r.gguf_path.to_string()),
+        ctx_size: view.as_ref().map(|r| r.ctx_size),
+        per_slot_ctx,
+        switchover,
+        load_seconds: load.as_secs_f64(),
+        // The caller sets the verdict.
+        ok: false,
+        error: None,
+    }
 }
 
 /// One `/chat/completions` probe on `hold`'s container — one user "hi",
@@ -3136,7 +3134,7 @@ async fn image_model_test(
     state: &SharedState,
     snap: &Snapshot,
     model_id: &str,
-) -> Result<Value, String> {
+) -> Result<dto::ModelTest, String> {
     use base64::Engine as _;
 
     let row = snap
@@ -3214,24 +3212,28 @@ async fn image_model_test(
             .unwrap_or_default();
         match base64::engine::general_purpose::STANDARD.decode(first) {
             Ok(bytes) if !bytes.is_empty() => {
-                return Ok(json!({
-                    "ok": true, "loaded": true, "model_id": model_id, "class": "image",
-                    "public_name": public,
-                    "probe": "image_generation",
-                    "endpoint": "/v1/images/generations",
-                    "latency_ms": latency_ms,
-                    "size": IMAGE_TEST_SIZE,
-                    "steps": IMAGE_TEST_STEPS,
-                    "seed": IMAGE_TEST_SEED,
-                    "n": images.len(),
+                return Ok(dto::ModelTest::ImagePassed(dto::ImageTestPassed {
+                    ok: true,
+                    loaded: true,
+                    model_id: model_id.to_string(),
+                    class: "image".to_string(),
+                    public_name: public,
+                    probe: "image_generation".to_string(),
+                    endpoint: "/v1/images/generations".to_string(),
+                    latency_ms,
+                    size: IMAGE_TEST_SIZE.to_string(),
+                    steps: IMAGE_TEST_STEPS,
+                    seed: IMAGE_TEST_SEED,
+                    n: images.len(),
                     // The server's own word for what it encoded; `null` when a
                     // build stops echoing it, never a guess of lmgw's.
-                    "output_format": parsed["output_format"].clone(),
-                    "bytes": bytes.len(),
-                    "note": "One generation, never an edit: /v1/images/edits takes a \
-                             reference image, and on a pipeline that cannot read one \
-                             sd-server does not refuse it — it dies (design §12.8). An \
-                             `edit` row is proven by a real edits request.",
+                    output_format: Some(parsed["output_format"].clone()).filter(|v| !v.is_null()),
+                    bytes: bytes.len(),
+                    note: "One generation, never an edit: /v1/images/edits takes a \
+                           reference image, and on a pipeline that cannot read one \
+                           sd-server does not refuse it — it dies (design §12.8). An \
+                           `edit` row is proven by a real edits request."
+                        .to_string(),
                 }));
             }
             Ok(_) => format!(
@@ -3286,15 +3288,18 @@ async fn image_model_test(
          line this row renders to"
     };
 
-    Ok(json!({
-        "ok": false, "loaded": false, "model_id": model_id, "class": "image",
-        "public_name": public,
-        "probe": "image_generation",
-        "endpoint": "/v1/images/generations",
-        "latency_ms": latency_ms,
-        "error": detail,
-        "container_log": log_lines,
-        "hint": hint,
+    Ok(dto::ModelTest::Failed(dto::ModelTestFailed {
+        ok: false,
+        loaded: false,
+        model_id: model_id.to_string(),
+        class: "image".to_string(),
+        public_name: Some(public),
+        probe: "image_generation".to_string(),
+        endpoint: Some("/v1/images/generations".to_string()),
+        latency_ms,
+        error: detail,
+        container_log: log_lines,
+        hint: hint.to_string(),
     }))
 }
 
@@ -3307,7 +3312,7 @@ struct PropsCheck {
     props: Value,
     /// `{reasoning, tool_calls, input_modalities}` — the subset of this row's
     /// static [`ModelCapabilities`] that `/props` also states an opinion on.
-    static_caps: Value,
+    static_caps: dto::StaticCaps,
     disagreements: Vec<String>,
     /// Why `props` is null, when it is.
     note: Option<String>,
@@ -3329,11 +3334,15 @@ async fn props_cross_check(
 ) -> PropsCheck {
     let derived = capabilities::exposed::derived_for_local(state, model).await;
     let caps = derived.capabilities.as_ref();
-    let static_caps = json!({
-        "reasoning": caps.and_then(|c| c.reasoning.clone()),
-        "tool_calls": caps.and_then(|c| c.tool_calls.clone()),
-        "input_modalities": caps.and_then(|c| c.input_modalities.clone()),
-    });
+    let static_caps = dto::StaticCaps {
+        reasoning: caps
+            .and_then(|c| c.reasoning.as_ref())
+            .and_then(|v| serde_json::to_value(v).ok()),
+        tool_calls: caps
+            .and_then(|c| c.tool_calls.as_ref())
+            .and_then(|v| serde_json::to_value(v).ok()),
+        input_modalities: caps.and_then(|c| c.input_modalities.clone()),
+    };
 
     let (port, generation) = hold.attempt();
     let budget = state.snapshot().settings.vram.load_timeout_seconds;
@@ -3702,8 +3711,8 @@ mod tests {
         state.reload_snapshot().await.unwrap();
 
         let verdict = probe_runtime(&state, "x/w.gguf", Class::Chat).await;
-        assert_eq!(verdict["checked"], true, "{verdict}");
-        assert_eq!(verdict["supported"], false, "{verdict}");
+        assert!(verdict.checked, "{verdict:?}");
+        assert_eq!(verdict.supported, Some(false), "{verdict:?}");
 
         let calls = fake.calls.lock().unwrap().clone();
         let runs: Vec<&Vec<String>> = calls.iter().filter(|a| a[0] == "run").collect();
@@ -3725,8 +3734,8 @@ mod tests {
         state.reload_snapshot().await.unwrap();
         fake.calls.lock().unwrap().clear();
         let verdict = probe_runtime(&state, "x/w.gguf", Class::Chat).await;
-        assert_eq!(verdict["checked"], false, "{verdict}");
-        assert!(verdict["reason"].as_str().unwrap().contains("GPU hold"));
+        assert!(!verdict.checked, "{verdict:?}");
+        assert!(verdict.reason.unwrap().contains("GPU hold"));
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 
@@ -3736,33 +3745,33 @@ mod tests {
             "0.00.712 E llama_model_load: error loading model: unknown model architecture: 'muse-glimmer'\n\
              0.00.712 E llama_model_load_from_file_impl: failed to load model",
         );
-        assert_eq!(unknown["supported"], false);
-        assert!(unknown["reason"].as_str().unwrap().contains("muse-glimmer"));
-        assert!(unknown["hint"]
-            .as_str()
-            .unwrap()
-            .contains("container image"));
+        assert_eq!(unknown.supported, Some(false));
+        assert!(unknown.reason.unwrap().contains("muse-glimmer"));
+        assert!(unknown.hint.unwrap().contains("container image"));
 
         let clip = classify_probe("E mtmd: Failed to load CLIP model from /models/mmproj.gguf");
-        assert_eq!(clip["supported"], false);
+        assert_eq!(clip.supported, Some(false));
 
         // Progress past the architecture check is a pass, even mid-load.
         let fine = classify_probe(
             "load_tensors: loading model tensors\nllama_context: constructing context",
         );
-        assert_eq!(fine["supported"], true);
+        assert_eq!(fine.supported, Some(true));
 
         // A crash counts only past the check (ik without a visible GPU
         // segfaults after printing the model's metadata).
         let ik = "llm_load_print_meta: arch             = qwen35\nLayer 24: 198.93 MiB";
-        assert_eq!(classify_exit(ik, 139)["supported"], true);
+        assert_eq!(classify_exit(ik, 139).supported, Some(true));
         let early = classify_exit("ggml_cuda_init: failed to initialize CUDA", 139);
-        assert_eq!(early["checked"], false, "{early}");
+        assert!(!early.checked, "{early:?}");
         assert_eq!(
-            classify_exit("error loading model: unknown model architecture: 'x'", 1)["supported"],
-            false
+            classify_exit("error loading model: unknown model architecture: 'x'", 1).supported,
+            Some(false)
         );
-        assert_eq!(classify_exit("load_tensors: loading", 0)["supported"], true);
+        assert_eq!(
+            classify_exit("load_tensors: loading", 0).supported,
+            Some(true)
+        );
     }
 
     // -- the batch a projector needs -----------------------------------------

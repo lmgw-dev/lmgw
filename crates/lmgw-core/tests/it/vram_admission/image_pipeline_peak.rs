@@ -554,9 +554,11 @@ async fn changing_the_pipeline_resets_its_learned_peak_and_says_so() {
     assert_eq!(peak_of(&f, "z-image").await, None);
 
     // And the surface an agent reads says what to do about it.
-    let got = lmgw_core::ops::local_model_get(&f.state, None, Some("z-image"), Some("image"))
-        .await
-        .unwrap();
+    let got = crate::common::read_wire(
+        lmgw_core::ops::local_model_get(&f.state, None, Some("z-image"), Some("image"))
+            .await
+            .unwrap(),
+    );
     assert!(got["peak_extra_bytes"].is_null());
     assert!(
         got["peak"]

@@ -66,7 +66,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Deletes a corpus and everything ingested into it.",
             path_ints: &["id"],
-            response: Resp::Untyped("ad-hoc {ok, message}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
             confirm_note: Some("deletes every document, chunk and golden query in this corpus"),
             ..base("POST", "/api/docs/corpora/{id}/delete", "Delete a corpus")
         },
@@ -133,7 +133,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "Creates or edits (id present) a golden query. Expected chunk ids \
                 are validated against the corpus before they are stored.",
             request: Req::Json(|g| g.root_schema_for::<GoldenBody>()),
-            response: Resp::Untyped("ad-hoc {ok, id}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::GoldenSaved>()),
             ..base("POST", "/api/docs/golden", "Create or edit a golden query")
         },
         DocRoute {
@@ -164,7 +164,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 synthetic. A decision is made once — a candidate not pending is refused.",
             path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<AcceptBody>()),
-            response: Resp::Untyped("ad-hoc {ok, id}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::GoldenSaved>()),
             ..base(
                 "POST",
                 "/api/docs/golden/candidates/{id}/accept",
@@ -175,7 +175,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "Discards a candidate; the row stays rejected rather than being \
                 deleted, so a later generation run does not propose the same question again.",
             path_ints: &["id"],
-            response: Resp::Untyped("ad-hoc {ok}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::Ack>()),
             ..base(
                 "POST",
                 "/api/docs/golden/candidates/{id}/reject",
@@ -185,7 +185,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Deletes one golden query.",
             path_ints: &["id"],
-            response: Resp::Untyped("ad-hoc {ok}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::Ack>()),
             ..base(
                 "POST",
                 "/api/docs/golden/{id}/delete",
@@ -219,7 +219,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 fulfilled is set only by a matching ingest completing, never by hand.",
             path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<RequestStatusBody>()),
-            response: Resp::Untyped("ad-hoc {ok}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::Ack>()),
             ..base(
                 "POST",
                 "/api/docs/requests/{id}/status",

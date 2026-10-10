@@ -7,7 +7,7 @@
 //! and a tool caller is not the place their words go. The dashboard's Audio
 //! lab shows them.
 
-use serde_json::{json, Value};
+use lmgw_api_types as dto;
 
 use crate::state::SharedState;
 use crate::web::audio_lab::transcribe::{alias_for, transcribe_clip, transcribe_missing};
@@ -21,26 +21,28 @@ pub async fn voice_transcribe(
     state: &SharedState,
     clip: Option<&str>,
     alias: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::audio_lab::VoiceTranscribed, String> {
     let alias = alias_for(state, alias)?;
     if let Some(clip) = clip.map(str::trim).filter(|c| !c.is_empty()) {
         let w = transcribe_clip(state, clip, &alias)
             .await
             .map_err(|e| e.to_string())?;
         let chars = w.transcript.chars().count();
-        let mut entry = w.provenance();
-        entry["clip"] = json!(clip);
-        entry["chars"] = json!(chars);
-        return Ok(json!({
-            "ok": true,
-            "transcribed": [entry],
-            "failed": [],
-            "message": format!(
+        return Ok(dto::audio_lab::VoiceTranscribed {
+            ok: true,
+            transcribed: vec![dto::audio_lab::TranscribedClip {
+                clip: clip.to_string(),
+                chars,
+                provenance: w.provenance(),
+            }],
+            failed: Vec::new(),
+            already: None,
+            message: format!(
                 "{clip} transcribed by {} ({chars} characters) and recorded as its \
                  transcript — the Audio lab's voice library shows it",
                 w.by
             ),
-        }));
+        });
     }
     let bulk = transcribe_missing(state, &alias).await?;
     if bulk.transcribed.is_empty() {
@@ -48,14 +50,13 @@ pub async fn voice_transcribe(
             return Err(why);
         }
     }
-    let transcribed: Vec<Value> = bulk
+    let transcribed: Vec<dto::audio_lab::TranscribedClip> = bulk
         .transcribed
         .iter()
-        .map(|(clip, chars, w)| {
-            let mut entry = w.provenance();
-            entry["clip"] = json!(clip);
-            entry["chars"] = json!(chars);
-            entry
+        .map(|(clip, chars, w)| dto::audio_lab::TranscribedClip {
+            clip: clip.clone(),
+            chars: *chars,
+            provenance: w.provenance(),
         })
         .collect();
     // Who wrote them: one line per model, a fallback named as one.
@@ -71,10 +72,13 @@ pub async fn voice_transcribe(
         [one] => one.to_string(),
         many => many.join(" and "),
     };
-    let failed: Vec<Value> = bulk
+    let failed: Vec<dto::audio_lab::VoiceClipFailed> = bulk
         .failed
         .iter()
-        .map(|(clip, why)| json!({"clip": clip, "error": why}))
+        .map(|(clip, why)| dto::audio_lab::VoiceClipFailed {
+            clip: clip.clone(),
+            error: why.clone(),
+        })
         .collect();
     let mut message = match (transcribed.len(), failed.len()) {
         (0, 0) => format!(
@@ -87,11 +91,11 @@ pub async fn voice_transcribe(
     if let Some(why) = &bulk.stopped {
         message.push_str(&format!("; stopped before the rest: {why}"));
     }
-    Ok(json!({
-        "ok": true,
-        "transcribed": transcribed,
-        "failed": failed,
-        "already": bulk.kept,
-        "message": message,
-    }))
+    Ok(dto::audio_lab::VoiceTranscribed {
+        ok: true,
+        transcribed,
+        failed,
+        already: Some(bulk.kept),
+        message,
+    })
 }

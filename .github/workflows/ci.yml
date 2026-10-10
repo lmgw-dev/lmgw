@@ -46,8 +46,11 @@ jobs:
     steps:
       # git so actions/checkout makes a real clone instead of a REST tarball.
       - name: Install rustfmt
-        run: dnf -y install git-core cargo rustfmt
+        run: dnf -y install git-core cargo rustfmt python3
       - uses: actions/checkout@v7
+        with:
+          # Nothing here needs the token in .git/config.
+          persist-credentials: false
       # Container root vs the runner-owned workspace: git refuses it as "dubious ownership".
       - name: Mark the workspace a safe git directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -55,6 +58,9 @@ jobs:
       # is downloaded or compiled.
       - name: cargo fmt --check --all
         run: cargo fmt --check --all
+      # Holds the count of inline json! in web/ and ops/ (same step as ci/check.sh).
+      - name: Inline JSON ratchet
+        run: python3 -B ci/json_ratchet.py
 
   test:
     name: cargo test
@@ -75,6 +81,9 @@ jobs:
       - name: Install checkout and cache tools
         run: dnf -y install git-core tar zstd
       - uses: actions/checkout@v7
+        with:
+          # Nothing here needs the token in .git/config.
+          persist-credentials: false
       # Container root vs the runner-owned workspace: git refuses it as "dubious ownership".
       - name: Mark the workspace a safe git directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"

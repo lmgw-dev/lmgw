@@ -314,9 +314,11 @@ async fn a_projector_plan_carries_the_ubatch_its_images_need() {
             .any(|w| w.as_str().unwrap_or("").contains("n_ubatch >= n_tokens")),
         "{created}"
     );
-    let checked = lmgw_core::ops::local_model_check(&state, Some("gemma4-12b"), None)
-        .await
-        .unwrap();
+    let checked = crate::common::check_wire(
+        lmgw_core::ops::local_model_check(&state, Some("gemma4-12b"), None)
+            .await
+            .unwrap(),
+    );
     let row = &checked["models"][0];
     assert!(
         row["advisories"].as_array().unwrap().iter().any(|p| {
@@ -340,9 +342,11 @@ async fn a_projector_plan_carries_the_ubatch_its_images_need() {
     lmgw_core::ops::local_model_set(&state, repair)
         .await
         .unwrap();
-    let checked = lmgw_core::ops::local_model_check(&state, Some("gemma4-12b"), None)
-        .await
-        .unwrap();
+    let checked = crate::common::check_wire(
+        lmgw_core::ops::local_model_check(&state, Some("gemma4-12b"), None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(checked["broken"], 0, "{checked}");
     assert_eq!(checked["with_advisories"], 0, "{checked}");
 }
@@ -384,9 +388,11 @@ async fn a_causal_projector_gets_no_ubatch_floor_and_no_warning() {
         lmgw_core::ops::local_model_set(&state, patch)
             .await
             .unwrap();
-        let checked = lmgw_core::ops::local_model_check(&state, Some(id), None)
-            .await
-            .unwrap();
+        let checked = crate::common::check_wire(
+            lmgw_core::ops::local_model_check(&state, Some(id), None)
+                .await
+                .unwrap(),
+        );
         assert_eq!(checked["broken"], 0, "{checked}");
         assert_eq!(checked["with_advisories"], 0, "{checked}");
     }
@@ -424,18 +430,22 @@ async fn inspect_classifies_each_file_in_the_repo() {
         ("mmproj-kquant.gguf", "mmproj"),
         ("dflash-kquant.gguf", "drafter"),
     ] {
-        let got = modelinfo::model_inspect(&state, &format!("{REPO}/{file}"), false, None)
-            .await
-            .unwrap();
+        let got = crate::common::inspect_wire(
+            modelinfo::model_inspect(&state, &format!("{REPO}/{file}"), false, None)
+                .await
+                .unwrap(),
+        );
         assert_eq!(got["role"], role, "{file} misclassified: {got}");
     }
 
     // KV cost is reported for the real context. Muse-Glimmer is 3:1 sliding
     // window, so the honest figure is far below layers x context x heads —
     // which is precisely why reporting it beats making the caller guess.
-    let w = modelinfo::model_inspect(&state, WEIGHTS, false, None)
-        .await
-        .unwrap();
+    let w = crate::common::inspect_wire(
+        modelinfo::model_inspect(&state, WEIGHTS, false, None)
+            .await
+            .unwrap(),
+    );
     let kv = w["vram_estimate"]["kv_cache_bytes_at_full_ctx_q8_0"]
         .as_u64()
         .expect("kv estimate");
@@ -660,9 +670,11 @@ async fn real_embedders_plan_as_aux_with_their_declared_pooling() {
         assert_eq!(plan["params"]["ctx_size"], 2048);
     }
 
-    let inspect = modelinfo::model_inspect(&state, QWEN_EMBED, false, Some("aux"))
-        .await
-        .unwrap();
+    let inspect = crate::common::inspect_wire(
+        modelinfo::model_inspect(&state, QWEN_EMBED, false, Some("aux"))
+            .await
+            .unwrap(),
+    );
     assert_eq!(inspect["serve_as"], "aux");
     assert_eq!(inspect["aux_kind"], "embed");
     assert_eq!(inspect["pooling_type"], "last");

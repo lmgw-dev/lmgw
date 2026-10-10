@@ -217,5 +217,161 @@ pub fn refusing_port() -> (u16, tokio::net::TcpSocket) {
     (socket.local_addr().unwrap().port(), socket)
 }
 
+/// `live` read into `T` and written back is `live`: a field the gateway adds
+/// to an answer without adding it to the documented type is dropped by the
+/// read and fails here. The one drift guard the typed-answer tests share.
+///
+/// It also holds the document to what the gateway sends: every field the
+/// admin document lists as `required` for `T` is in `live`, so a field the
+/// server leaves out is never promised to a client generator.
+pub fn round_trips<T: serde::de::DeserializeOwned + serde::Serialize + schemars::JsonSchema>(
+    what: &str,
+    live: &serde_json::Value,
+) -> T {
+    let typed: T =
+        serde_json::from_value(live.clone()).unwrap_or_else(|e| panic!("{what}: {e}\n{live}"));
+    assert_eq!(
+        &serde_json::to_value(&typed).unwrap(),
+        live,
+        "{what}: the type drops or invents a field"
+    );
+    let name = T::schema_name();
+    let doc = lmgw_core::openapi::admin_doc();
+    let schemas = documented_schemas(doc, &name);
+    assert!(
+        !schemas.is_empty(),
+        "{what}: the document has neither a component nor an answer schema titled {name}"
+    );
+    for schema in &schemas {
+        if let (Some(required), Some(sent)) = (
+            schema.get("required").and_then(serde_json::Value::as_array),
+            live.as_object(),
+        ) {
+            for field in required.iter().filter_map(serde_json::Value::as_str) {
+                assert!(
+                    sent.contains_key(field),
+                    "{what}: the document lists {name}.{field} as required, the answer has none\n{live}"
+                );
+            }
+        }
+        validates_against(what, doc, schema, live);
+    }
+    typed
+}
+
+/// The document's schemas for the type titled `name`: its component when it
+/// has one, else every answer or event-frame schema a route carries inline
+/// (a `root_schema_for` answer keeps the type's name as its `title`).
+pub fn documented_schemas(doc: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+    if let Some(c) = doc.pointer(&format!("/components/schemas/{name}")) {
+        return vec![c.clone()];
+    }
+    let mut found = Vec::new();
+    let Some(paths) = doc.get("paths").and_then(serde_json::Value::as_object) else {
+        return found;
+    };
+    for op in paths
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|methods| methods.values())
+    {
+        let Some(responses) = op.get("responses").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for resp in responses.values() {
+            let bodies = resp
+                .get("content")
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flat_map(|c| c.values().filter_map(|m| m.get("schema")));
+            let frames = resp
+                .get("x-lmgw-sse-events")
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flat_map(|e| e.values());
+            for schema in bodies.chain(frames) {
+                if schema.get("title").and_then(serde_json::Value::as_str) == Some(name)
+                    && !found.contains(schema)
+                {
+                    found.push(schema.clone());
+                }
+            }
+        }
+    }
+    found
+}
+
+/// `instance` validated against the named component of the built document;
+/// a missing component is a failure.
+pub fn validates_against_component_of(what: &str, name: &str, instance: &serde_json::Value) {
+    let doc = lmgw_core::openapi::admin_doc();
+    assert!(
+        doc.pointer(&format!("/components/schemas/{name}"))
+            .is_some(),
+        "{what}: the document has no component {name}"
+    );
+    validates_against(
+        what,
+        doc,
+        &serde_json::json!({"$ref": format!("#/components/schemas/{name}")}),
+        instance,
+    );
+}
+
+/// `instance` validated against `schema`, whose `$ref`s resolve in `doc`'s
+/// `components` (the synthetic-root trick of `openapi_live.rs`'s
+/// `validator_root`).
+pub fn validates_against(
+    what: &str,
+    doc: &serde_json::Value,
+    schema: &serde_json::Value,
+    instance: &serde_json::Value,
+) {
+    let mut root = schema.clone();
+    if let serde_json::Value::Object(map) = &mut root {
+        map.insert("components".to_string(), doc["components"].clone());
+    }
+    if let Err(e) = jsonschema::validate(&root, instance) {
+        panic!("{what}: the answer does not validate against the built document: {e}\n{instance}");
+    }
+}
+
+/// A `container` op answer as the JSON it goes out as, read through the
+/// documented type on the way: a field the gateway adds without adding it to
+/// the type fails here.
+pub fn container_wire(answer: impl serde::Serialize) -> serde_json::Value {
+    let live = serde_json::to_value(answer).unwrap();
+    round_trips::<lmgw_api_types::ContainerAnswer>("container", &live);
+    live
+}
+
+/// The same for the load test's answer.
+pub fn model_test_wire(answer: impl serde::Serialize) -> serde_json::Value {
+    let live = serde_json::to_value(answer).unwrap();
+    round_trips::<lmgw_api_types::ModelTest>("local_model_test", &live);
+    live
+}
+
+/// `local_model_get`'s answer as JSON, read through its documented type.
+pub fn read_wire(answer: impl serde::Serialize) -> serde_json::Value {
+    let live = serde_json::to_value(answer).unwrap();
+    round_trips::<lmgw_api_types::LocalModelRead>("local_model_get", &live);
+    live
+}
+
+/// `local_model_check`'s answer as JSON, read through its documented type.
+pub fn check_wire(answer: impl serde::Serialize) -> serde_json::Value {
+    let live = serde_json::to_value(answer).unwrap();
+    round_trips::<lmgw_api_types::LocalModelCheck>("local_model_check", &live);
+    live
+}
+
+/// `model_inspect`'s answer as JSON, read through its documented type.
+pub fn inspect_wire(answer: impl serde::Serialize) -> serde_json::Value {
+    let live = serde_json::to_value(answer).unwrap();
+    round_trips::<lmgw_api_types::ModelInspect>("model_inspect", &live);
+    live
+}
+
 pub mod captured_log;
 pub mod patience;

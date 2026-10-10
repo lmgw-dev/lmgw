@@ -37,6 +37,7 @@ pub mod retrieve;
 pub mod retrieve_guard;
 pub mod sections;
 pub mod store;
+pub mod wire;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

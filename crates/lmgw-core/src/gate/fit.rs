@@ -332,6 +332,9 @@ pub(super) async fn within<T>(
     deadline: Option<Instant>,
     step: impl std::future::Future<Output = Result<T, GatewayError>>,
 ) -> Result<T, GatewayError> {
+    // Boxed: the step is the gate's send, whose poll frame is 172 KB in a
+    // debug build; the turn -> gate -> climb chain shares a 2 MiB test stack.
+    let step = Box::pin(step);
     match deadline {
         Some(d) => tokio::time::timeout_at(tokio::time::Instant::from_std(d), step)
             .await

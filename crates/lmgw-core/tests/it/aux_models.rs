@@ -513,9 +513,11 @@ async fn a_row_whose_flags_could_not_be_checked_says_so() {
     ] {
         assert!(said.contains(part), "{part:?} missing: {chat}");
     }
-    let got = ops::local_model_get(&f.state, None, Some("q"), None)
-        .await
-        .unwrap();
+    let got = crate::common::read_wire(
+        ops::local_model_get(&f.state, None, Some("q"), None)
+            .await
+            .unwrap(),
+    );
     assert!(
         got["problems"].to_string().contains("not validated"),
         "{got}"
@@ -540,9 +542,11 @@ async fn a_row_whose_flags_could_not_be_checked_says_so() {
     // about the read, not the row.
     f.podman.help_broken.store(false, Relaxed);
     for (model_id, target) in [("q", None), ("e", Some("aux"))] {
-        let got = ops::local_model_get(&f.state, None, Some(model_id), target)
-            .await
-            .unwrap();
+        let got = crate::common::read_wire(
+            ops::local_model_get(&f.state, None, Some(model_id), target)
+                .await
+                .unwrap(),
+        );
         assert_eq!(got["problems"], json!([]), "{got}");
     }
 }
@@ -653,9 +657,11 @@ async fn load_testing_an_embedding_model_embeds_instead_of_generating() {
     .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = modelinfo::local_model_test(&f.state, "e", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "e", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["class"], "aux");
     assert_eq!(out["probe"], "embed");
@@ -684,9 +690,11 @@ async fn an_all_zero_vector_fails_the_load_test_with_a_hint() {
     .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = modelinfo::local_model_test(&f.state, "z", Some("aux"))
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "z", Some("aux"))
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], false, "{out}");
     assert!(out["error"].as_str().unwrap().contains("all-zero"), "{out}");
     assert!(out["hint"].as_str().unwrap().contains("pooling"), "{out}");
@@ -700,9 +708,11 @@ async fn load_testing_a_reranker_scores_documents() {
         .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = modelinfo::local_model_test(&f.state, "rr", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "rr", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["probe"], "rerank");
     assert_eq!(out["scored"], 2);
@@ -740,9 +750,11 @@ async fn a_chat_row_with_embedding_args_is_probed_for_embeddings() {
     .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = modelinfo::local_model_test(&f.state, "embed/e-cpu", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "embed/e-cpu", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["class"], "chat");
     assert_eq!(out["probe"], "embed");
@@ -775,9 +787,11 @@ async fn a_plain_chat_model_is_still_tested_by_generation() {
     .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = modelinfo::local_model_test(&f.state, "chat", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "chat", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["probe"], "generate");
     let hits = f.server.received_requests().await.unwrap();
@@ -845,9 +859,11 @@ async fn local_model_test_reports_props_and_an_empty_disagreement_list_when_they
         .mount(&f.server)
         .await;
 
-    let out = modelinfo::local_model_test(&f.state, "chat", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "chat", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert!(!out["props"].is_null(), "{out}");
     assert!(!out["static"].is_null(), "{out}");
@@ -915,9 +931,11 @@ async fn local_model_test_names_a_tool_support_disagreement() {
         .mount(&f.server)
         .await;
 
-    let out = modelinfo::local_model_test(&f.state, "tools-chat", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        modelinfo::local_model_test(&f.state, "tools-chat", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["static"]["tool_calls"]["kind"], "native", "{out}");
     let disagreements = out["disagreements"].as_array().unwrap();
@@ -959,7 +977,8 @@ async fn local_model_check_reports_aux_rows_that_contradict_their_header() {
     .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = ops::local_model_check(&f.state, None, None).await.unwrap();
+    let out =
+        crate::common::check_wire(ops::local_model_check(&f.state, None, None).await.unwrap());
     assert_eq!(out["checked"], 3, "{out}");
     assert_eq!(out["broken"], 2, "{out}");
     let by_id = |id: &str| {
@@ -981,9 +1000,48 @@ async fn local_model_check_reports_aux_rows_that_contradict_their_header() {
     assert!(by_id("fine").is_none(), "a healthy row is omitted: {out}");
 
     // Naming one restricts to it, in either class.
-    let one = ops::local_model_check(&f.state, Some("fine"), Some("aux"))
-        .await
-        .unwrap();
+    let one = crate::common::check_wire(
+        ops::local_model_check(&f.state, Some("fine"), Some("aux"))
+            .await
+            .unwrap(),
+    );
     assert_eq!(one["checked"], 1);
     assert_eq!(one["models"][0]["ok"], true, "{one}");
+}
+
+/// The flag vocabulary and a GGUF's header, read through the types the API
+/// document describes; a field added to either answer without the type fails
+/// here.
+#[tokio::test]
+async fn llama_flags_and_model_inspect_answer_their_documented_types() {
+    let f = fixture(vec![0.1, 0.2]).await;
+
+    let flags =
+        serde_json::to_value(ops::llama_flags(&f.state, None, None).await.unwrap()).unwrap();
+    let typed: lmgw_api_types::LlamaFlags = crate::common::round_trips("llama_flags", &flags);
+    assert!(typed.flag_count > 0, "{flags}");
+    assert_eq!(typed.flag_count, typed.flags.len());
+    let narrowed =
+        serde_json::to_value(ops::llama_flags(&f.state, Some("ctx"), None).await.unwrap()).unwrap();
+    let narrowed: lmgw_api_types::LlamaFlags =
+        crate::common::round_trips("llama_flags search", &narrowed);
+    assert!(narrowed.flags.len() < narrowed.flag_count);
+
+    let chat = crate::common::inspect_wire(
+        lmgw_core::modelinfo::model_inspect(&f.state, CHAT, false, None)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(chat["serve_as"], "chat", "{chat}");
+    assert_eq!(
+        chat["runtime"],
+        json!({"checked": false, "reason": "probe not requested"})
+    );
+    let embed = crate::common::inspect_wire(
+        lmgw_core::modelinfo::model_inspect(&f.state, EMBEDDER, false, Some("aux"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(embed["serve_as"], "aux", "{embed}");
+    assert_eq!(embed["aux_kind"], "embed", "{embed}");
 }

@@ -10,7 +10,7 @@
 //! call, as its `ready` and `result` frames carry it), and `done` lists them
 //! as `pending_approvals`.
 
-use serde_json::json;
+use lmgw_api_types::chat_frames::ToolFrame;
 
 use super::super::chat_turn::{Events, TurnFrame};
 use crate::agent::PendingCall;
@@ -37,16 +37,8 @@ pub(super) fn pending_of(
 /// the model's order.
 pub(super) async fn announce(tx: &Events, pending: &PendingApprovals) {
     for c in pending.open() {
-        let r = approval_request_of(c);
-        let data = json!({
-            "event": "approval",
-            "approval_request_id": r.approval_request_id,
-            "server_label": r.server_label,
-            "name": r.name,
-            "arguments": r.arguments,
-            // The id its `ready` and `result` frames carry.
-            "call_id": r.call_id,
-        });
-        let _ = tx.send(TurnFrame::new("tool", data.to_string())).await;
+        // `call_id` is the id its `ready` and `result` frames carry.
+        let r = ToolFrame::Approval(approval_request_of(c));
+        let _ = tx.send(TurnFrame::of("tool", &r)).await;
     }
 }

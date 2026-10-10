@@ -14,11 +14,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__container"),
         args: OpArgs::Tool,
-        response: Resp::Untyped(
-            "the shape depends on `action` (status/start/stop/restart/apply/logs) and whether \
-             `target`/`model` names one model or a whole class — see lmgw__container's \
-             description",
-        ),
+        response: Resp::Json(|g| g.root_schema_for::<lmgw_api_types::ContainerAnswer>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

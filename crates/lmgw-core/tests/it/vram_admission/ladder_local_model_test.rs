@@ -13,9 +13,11 @@ use super::*;
 async fn local_model_test_climbs_every_rung_then_resets_to_the_base() {
     let f = ladder_fixture(64 * GIB, 60).await;
 
-    let out = lmgw_core::modelinfo::local_model_test(&f.state, LADDER, None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        lmgw_core::modelinfo::local_model_test(&f.state, LADDER, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["was_running_rung"], Value::Null, "{out}");
     assert_eq!(out["reset_to_base"], true, "{out}");
@@ -88,9 +90,11 @@ async fn local_model_test_stops_at_the_first_rung_that_will_not_load() {
     let f = ladder_fixture(64 * GIB, 60).await;
     f.world().fail_run_file = Some("ladder-mid.gguf".into());
 
-    let out = lmgw_core::modelinfo::local_model_test(&f.state, LADDER, None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        lmgw_core::modelinfo::local_model_test(&f.state, LADDER, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], false, "{out}");
 
     let rungs = out["rungs"].as_array().unwrap_or_else(|| panic!("{out}"));
@@ -185,7 +189,7 @@ async fn local_model_test_does_not_credit_a_rung_another_climb_actually_reached(
         "{joined:?}"
     );
 
-    let out = test_task.await.unwrap().unwrap();
+    let out = crate::common::model_test_wire(test_task.await.unwrap().unwrap());
     assert_eq!(out["ok"], false, "{out}");
     let rungs = out["rungs"].as_array().unwrap_or_else(|| panic!("{out}"));
     assert_eq!(
@@ -250,7 +254,7 @@ async fn local_model_test_names_a_closing_stop_it_could_not_make() {
     // is still in flight, and kept past the test's own closing stop.
     let extra = ladder_hold(&f).await;
 
-    let out = test_task.await.unwrap().unwrap();
+    let out = crate::common::model_test_wire(test_task.await.unwrap().unwrap());
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(
         out["reset_to_base"], false,

@@ -82,10 +82,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: Some("lmgw__audio_catalog"),
         args: OpArgs::Hand(args::audio_catalog),
-        response: Resp::Untyped(
-            "the two actions answer different shapes — a refresh summary, or a queued-download \
-             report — see lmgw__hf_downloads for the shared download shape",
-        ),
+        response: Resp::Json(|g| g.root_schema_for::<dto::AudioCatalogAnswer>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

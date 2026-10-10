@@ -49,14 +49,30 @@ impl Ask {
     }
 }
 
-/// The JSON chunks of an OpenAI SSE answer, which must end with `[DONE]`.
+/// Every frame of `POST /v1/chat/completions`'s stream validated against the
+/// schema the built document lists for its `chunk` event.
+pub(crate) fn frames_validate(frames: &[Value]) {
+    let doc = lmgw_core::openapi::admin_doc();
+    let schema = doc
+        .pointer("/paths/~1v1~1chat~1completions/post/responses/200/x-lmgw-sse-events/chunk")
+        .expect("the chat completions stream lists a chunk event");
+    for frame in frames {
+        crate::common::validates_against("/v1/chat/completions chunk", doc, schema, frame);
+    }
+}
+
+/// The JSON chunks of an OpenAI SSE answer, which must end with `[DONE]`;
+/// each is validated against the document's chunk schema.
 pub(crate) fn chunks(text: &str) -> Vec<Value> {
     let events = lmgw_core::sse::SseDecoder::new().feed(text.as_bytes());
     let (done, rest) = events.split_last().expect("a non-empty stream");
     assert_eq!(done.data, "[DONE]", "{text}");
-    rest.iter()
+    let frames: Vec<Value> = rest
+        .iter()
         .map(|e| serde_json::from_str(&e.data).unwrap_or_else(|_| panic!("not JSON: {}", e.data)))
-        .collect()
+        .collect();
+    frames_validate(&frames);
+    frames
 }
 
 /// OpenAI's rule for `ask`, with `(prompt, completion)` the usage the last
@@ -319,5 +335,45 @@ async fn legacy_completions_forward_the_clients_stream_options_as_sent() {
             body.get("stream_options"),
             "{ask:?}"
         );
+    }
+}
+
+/// An upstream that fails after it began: its error frame comes out as the
+/// stream's own error frame, which the document lists beside the chunk.
+#[tokio::test]
+async fn a_failure_after_the_first_chunk_is_a_documented_error_frame() {
+    const FAILING: &str = concat!(
+        "data: {\"id\":\"chatcmpl-up\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}],\"usage\":null}\n\n",
+        "data: {\"error\":{\"message\":\"overloaded\",\"type\":\"server_error\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(sse(FAILING))
+        .mount(&mock)
+        .await;
+    let (_state, base) = setup_kind(&mock.uri(), Protocol::Openai, UpstreamKind::Generic).await;
+    for ask in [Ask::Absent, Ask::True] {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/v1/chat/completions"))
+            .json(&ask.body("my-model", "hi"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{ask:?}");
+        let text = resp.text().await.unwrap();
+        let frames: Vec<Value> = lmgw_core::sse::SseDecoder::new()
+            .feed(text.as_bytes())
+            .iter()
+            .filter(|e| e.data != "[DONE]")
+            .map(|e| serde_json::from_str(&e.data).unwrap())
+            .collect();
+        let error = frames
+            .iter()
+            .find(|f| f.get("error").is_some())
+            .unwrap_or_else(|| panic!("{ask:?}: no error frame in {text}"));
+        assert_eq!(error["error"]["message"], "overloaded");
+        frames_validate(&frames);
     }
 }

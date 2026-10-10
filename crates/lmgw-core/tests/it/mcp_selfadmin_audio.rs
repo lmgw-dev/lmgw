@@ -217,6 +217,7 @@ async fn an_audio_row_is_created_read_updated_and_deleted_through_the_tools() {
     )
     .await;
     assert_eq!(got["class"], "audio", "{got}");
+    crate::common::round_trips::<lmgw_api_types::LocalModelRead>("audio local_model_get", &got);
     assert_eq!(got["public_name"], "audio/tts-de");
     assert_eq!(got["path_present"], true);
     assert_eq!(got["load_options"]["language"], "de");

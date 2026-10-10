@@ -502,3 +502,74 @@ pub struct AgentImportReport {
     /// `validate_only=1`: the same report, nothing written.
     pub validate_only: bool,
 }
+
+/// `POST /api/agents/{id}/runs` — a run opened from outside lmgw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AgentRunOpened {
+    /// The run's job id, for `/api/agents/runs/{job_id}` and its events and
+    /// close routes.
+    pub run: i64,
+    /// How long the run has before lmgw ends it; `0` is no deadline.
+    pub deadline_seconds: u64,
+}
+
+/// `POST /api/agents/runs/{job_id}/events` — what became of the batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AgentEventsApplied {
+    /// Always `true`: rejected events are reported below, not failed.
+    pub ok: bool,
+    /// How many events went into the run.
+    pub applied: usize,
+    /// One line per event the run did not take (unparseable, or refused by
+    /// the run's rules), in the order they were sent.
+    pub rejected: Vec<String>,
+}
+
+/// `GET /api/agents/{id}/export` — the `<id>.agent.json` file: the agent's
+/// manifest with an envelope around it. The manifest's fields sit at the top
+/// level of the file, in the order the manifest has them; the envelope's own
+/// fields follow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "schema",
+    derive(schemars::JsonSchema),
+    schemars(rename = "AgentExport")
+)]
+pub struct AgentExport<M = serde_json::Map<String, serde_json::Value>> {
+    /// The manifest's own fields (`id`, `name`, `kind`, `tools`, `config`,
+    /// …), at the top level of the file.
+    #[serde(flatten)]
+    pub manifest: M,
+    /// RFC 3339 time of the export.
+    pub exported_at: String,
+    /// The lmgw version that wrote the file.
+    pub lmgw_version: String,
+    /// The `secret` config fields left out, so the receiver knows what to
+    /// fill in. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub config_omitted: Option<Vec<String>>,
+    /// The folder and file slots left out: they are paths on the exporting
+    /// machine, so the receiver chooses its own. Absent when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub config_unbound: Option<Vec<String>>,
+    /// The non-secret config values; only with `include_config=1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub config_values: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Whether the file runs on another machine as it is, and what the
+    /// receiver would have to do if not.
+    pub portability: AgentPortability,
+}

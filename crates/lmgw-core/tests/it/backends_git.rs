@@ -1045,12 +1045,15 @@ async fn a_token_goes_through_the_environment_never_argv_or_the_log() {
         Some(Some(format!("Authorization: Basic {encoded}")))
     );
 
+    // Outside any repo: a checkout's own config must not answer (actions/checkout
+    // persists an extraheader into it).
+    let dir = tempfile::tempdir().unwrap();
     // Git really reads it from there — and the echoed command line does not
     // carry it.
     let (cap, lines) = capture();
     let out = git
         .run(
-            None,
+            Some(dir.path()),
             &["config", "--get", "http.https://github.com/.extraHeader"],
             Some(&auth),
             Some(&*cap),
@@ -1066,7 +1069,7 @@ async fn a_token_goes_through_the_environment_never_argv_or_the_log() {
     // Without auth no header is configured at all.
     let out = git
         .run(
-            None,
+            Some(dir.path()),
             &["config", "--get", "http.https://github.com/.extraHeader"],
             None,
             None,

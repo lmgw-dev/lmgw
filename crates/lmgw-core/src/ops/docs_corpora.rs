@@ -187,7 +187,7 @@ pub async fn docs_corpus_set(state: &SharedState, p: DocsCorpusPatch) -> Result<
         }
         "delete" => {
             let c = corpus_arg(state, p.corpus.as_deref()).await?;
-            crate::web::api_docs::delete_corpus_inner(state, c.id).await
+            super::backends::to_json(crate::web::api_docs::delete_corpus_inner(state, c.id).await)
         }
         other => Err(format!("unknown action '{other}' (create|delete)")),
     }
@@ -267,5 +267,7 @@ pub async fn docs_request_set(
     status: &str,
 ) -> Result<Value, String> {
     let id = id.ok_or("pass id (from lmgw__docs_requests)")?;
-    crate::web::api_docs::set_request_status_inner(state, id, status.trim()).await
+    super::backends::to_json(
+        crate::web::api_docs::set_request_status_inner(state, id, status.trim()).await,
+    )
 }

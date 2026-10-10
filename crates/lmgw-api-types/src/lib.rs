@@ -47,6 +47,11 @@ pub mod candidate_alias;
 pub mod chat;
 /// MCP approvals in the Chat (client-apps design §6).
 pub mod chat_approvals;
+/// The Chat's attachment routes: the upload's query, a PDF's mode, a new
+/// transcription.
+pub mod chat_attachments;
+/// The Chat export: its query and the `lmgw.chat.v1` JSON file.
+pub mod chat_export;
 // The client-apps design record, §2.
 /// The Chat change feed's events and cursor: what `GET /chat/api/feed`
 /// sends, a namespace of its own like [`chat_voice`].
@@ -55,15 +60,29 @@ pub mod chat_feed;
 /// Ongoing-conversation folders: a folder's `ongoing` field and
 /// `POST /chat/api/folders/{id}/current`.
 pub mod chat_folders;
+/// The frames of the Chat API's event streams, one type per event name.
+pub mod chat_frames;
 // The personality-profiles design record, §1 and §3.1.
+/// The Audio lab's shapes: its model list, the voice library of reference
+/// clips and the transcripts written for them.
+pub mod audio_lab;
 /// Personality profiles: `/chat/api/profiles*`'s shapes and the examples'
 /// text form, a namespace of its own like [`chat_voice`].
 pub mod chat_profiles;
+/// A thread's whole read, its settings and message actions, and the search
+/// (`GET /chat/api/threads/{id}` and the routes that act on a thread).
+pub mod chat_threads;
+/// The bodies of the streaming Chat routes: send, continue, regenerate,
+/// voice warm-up.
+pub mod chat_turn;
 /// The Chat's voice rules (chat-voice design §2): turn-detection names and
 /// labels, the language hint's shape — checked by the gateway and said
 /// before Save by the dashboard.
 pub mod chat_voice;
 pub mod image_lab;
+/// The Knowledge bases API: bases, files, uploads, jobs' answers, the source
+/// viewer and the search playground.
+pub mod knowledge;
 // The client-apps design record, §5.
 /// MCP Apps on `/mcp` (§7): the revision followed, its identifiers, and
 /// the Chat `tool` result frame's fields a host reads.
@@ -81,6 +100,16 @@ pub mod scope;
 
 pub use candidate_alias::CandidateAliasView;
 
+mod container;
+pub use container::*;
+mod model_test;
+pub use model_test::*;
+mod model_detail;
+pub use model_detail::*;
+mod model_reads;
+pub use model_reads::*;
+mod ack;
+pub use ack::{Ack, MessageAck};
 mod status;
 pub use status::*;
 mod connect;

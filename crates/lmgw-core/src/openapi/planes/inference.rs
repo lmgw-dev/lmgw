@@ -61,7 +61,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             request: Req::Json(chat::request),
             response: Resp::JsonOrSse {
                 json: chat::response,
-                events: &[("chunk", chat::stream_chunk)],
+                events: &[("chunk", chat::stream_frame)],
             },
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI],
@@ -313,7 +313,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "Forced alignment against a task: \"align\" row — lmgw's own route, \
                 multipart/form-data only.",
             request: Req::Multipart(media::alignments_request),
-            response: Resp::Json(media::alignments_response),
+            response: Resp::Untyped("audio.cpp's own alignment JSON, relayed verbatim"),
             dialect: Dialect::OpenAi,
             endpoints: &[endpoint_group::OPENAI],
             writes: Some(false),

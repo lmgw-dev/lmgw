@@ -30,7 +30,8 @@ use crate::scope::Scope;
 use crate::widgets::{
     use_toasts, ConfirmButton, MenuItem, Modal, ModalFooter, ModelPicker, RowMenu, Toasts,
 };
-use lmgw_api_types::chat_folders::FolderOngoing;
+use lmgw_api_types::chat::{Ack, Thread};
+use lmgw_api_types::chat_folders::{FolderOngoing, FolderPatched};
 use ongoing::{ApplyToCurrent, OngoingDraft, OngoingFields};
 
 /// One folder as the thread list carries it.
@@ -468,7 +469,7 @@ impl FolderEnv {
         }
         let env = *self;
         self.scope.spawn(async move {
-            match crate::api::post::<Value, _>(
+            match crate::api::post::<FolderPatched, _>(
                 format!("/chat/api/folders/{id}"),
                 &json!({ "name": name }),
             )
@@ -484,7 +485,7 @@ impl FolderEnv {
     pub(super) fn move_thread(&self, thread: i64, folder: Option<i64>) {
         let env = *self;
         self.scope.spawn(async move {
-            match crate::api::post::<Value, _>(
+            match crate::api::post::<Thread, _>(
                 format!("/chat/api/threads/{thread}/move"),
                 &json!({ "folder_id": folder }),
             )
@@ -524,8 +525,7 @@ impl FolderEnv {
         }
         self.scope.spawn(async move {
             let body = json!({ "threads": if delete_threads { "delete" } else { "keep" } });
-            match crate::api::post::<Value, _>(format!("/chat/api/folders/{id}/delete"), &body)
-                .await
+            match crate::api::post::<Ack, _>(format!("/chat/api/folders/{id}/delete"), &body).await
             {
                 Ok(_) => {
                     env.toasts.ok("folder deleted");
@@ -833,16 +833,15 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
         }
         busy.set(true);
         env.scope.spawn(async move {
-            match crate::api::post::<Value, _>(format!("/chat/api/folders/{id}"), &body).await {
+            match crate::api::post::<FolderPatched, _>(format!("/chat/api/folders/{id}"), &body)
+                .await
+            {
                 Ok(v) => {
                     env.settings_open.set(false);
-                    match v["applied"]["fields"].as_array() {
-                        Some(f) => toasts.ok(format!(
+                    match v.applied {
+                        Some(a) => toasts.ok(format!(
                             "folder settings saved, and applied to the current thread ({})",
-                            f.iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            a.fields.join(", ")
                         )),
                         None => toasts.ok("folder settings saved"),
                     }
@@ -862,7 +861,9 @@ fn FolderSettingsForm(env: FolderEnv, folder: FolderInfo) -> impl IntoView {
             busy.set(true);
             env.scope.spawn(async move {
                 let body = json!({ "devices_hidden": false });
-                match crate::api::post::<Value, _>(format!("/chat/api/folders/{id}"), &body).await {
+                match crate::api::post::<FolderPatched, _>(format!("/chat/api/folders/{id}"), &body)
+                    .await
+                {
                     Ok(_) => {
                         env.settings_open.set(false);
                         toasts.ok("the folder is shown to devices again");

@@ -69,7 +69,7 @@ async fn re_uploading_the_same_bytes_restores_a_missing_original() {
     let original = originals::path(&state.data_dir, &file.sha256).unwrap();
     std::fs::remove_file(&original).unwrap();
     let ops_v = ops::reingest_file(&state, file.id).await.unwrap();
-    wait_job(&state, ops_v["job"].as_i64().unwrap()).await;
+    wait_job(&state, ops_v.job.unwrap()).await;
     wait_file(&state, file.id, "failed").await;
     let failed = file_named(&state, id, "a.md").await;
     assert!(
@@ -216,8 +216,8 @@ async fn a_persistently_failing_file_is_reported_not_retried() {
     );
 
     let v = ops::resume(&state, id).await.unwrap();
-    assert_eq!(v["kind"], "kb_reembed", "{v}");
-    let row = wait_job(&state, v["job"].as_i64().unwrap()).await;
+    assert_eq!(v.kind.as_deref(), Some("kb_reembed"), "{v:?}");
+    let row = wait_job(&state, v.job.unwrap()).await;
     assert_eq!(row.status, "done", "{:?}", row.error);
     let d = detail(&row);
     assert_eq!(d["failed_over"], json!(["bad.md"]), "reported: {d}");
@@ -237,7 +237,7 @@ async fn a_persistently_failing_file_is_reported_not_retried() {
     );
     // Nothing left for Resume to do.
     let v = ops::resume(&state, id).await.unwrap();
-    assert!(v["job"].is_null(), "{v}");
+    assert!(v.job.is_none(), "{v:?}");
     cleanup(&state);
 }
 

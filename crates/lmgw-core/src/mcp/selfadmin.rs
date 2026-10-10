@@ -522,31 +522,33 @@ async fn run(
             .await
         }
         "lmgw__settings" => ops::settings(state).await,
-        "lmgw__local_model_get" => {
+        "lmgw__local_model_get" => ops::backends::to_json(
             ops::local_model_get(
                 state,
                 arg_i64(&a, "id")?,
                 arg_str(&a, "model_id")?,
                 arg_str(&a, "target")?,
             )
-            .await
-        }
-        "lmgw__local_model_check" => {
-            ops::local_model_check(state, arg_str(&a, "model_id")?, arg_str(&a, "target")?).await
-        }
+            .await,
+        ),
+        "lmgw__local_model_check" => ops::backends::to_json(
+            ops::local_model_check(state, arg_str(&a, "model_id")?, arg_str(&a, "target")?).await,
+        ),
         "lmgw__gguf_files" => {
             crate::modelinfo::gguf_files(state, arg_str(&a, "search")?, arg_str(&a, "target")?)
                 .await
         }
         "lmgw__model_inspect" => {
             let path = arg_str(&a, "gguf_path")?.ok_or("gguf_path is required")?;
-            crate::modelinfo::model_inspect(
-                state,
-                path,
-                arg_bool(&a, "probe")?.unwrap_or(true),
-                arg_str(&a, "target")?,
+            ops::backends::to_json(
+                crate::modelinfo::model_inspect(
+                    state,
+                    path,
+                    arg_bool(&a, "probe")?.unwrap_or(true),
+                    arg_str(&a, "target")?,
+                )
+                .await,
             )
-            .await
         }
         "lmgw__local_model_plan" => {
             let path = arg_str(&a, "gguf_path")?.ok_or("gguf_path is required")?;
@@ -560,11 +562,13 @@ async fn run(
         }
         "lmgw__local_model_test" => {
             let mid = arg_str(&a, "model_id")?.ok_or("model_id is required")?;
-            crate::modelinfo::local_model_test(state, mid, arg_str(&a, "target")?).await
+            ops::backends::to_json(
+                crate::modelinfo::local_model_test(state, mid, arg_str(&a, "target")?).await,
+            )
         }
-        "lmgw__llama_flags" => {
-            ops::llama_flags(state, arg_str(&a, "search")?, arg_str(&a, "model")?).await
-        }
+        "lmgw__llama_flags" => ops::backends::to_json(
+            ops::llama_flags(state, arg_str(&a, "search")?, arg_str(&a, "model")?).await,
+        ),
         "lmgw__hf_repo" => {
             let repo = arg_str(&a, "repo")?.ok_or("repo is required (owner/name)")?;
             ops::hf_repo(
@@ -641,7 +645,7 @@ async fn run(
                 .ok_or("action is required (status|start|stop|restart|apply|logs)")?;
             let force = arg_bool(&a, "override")?.unwrap_or(false);
             let tail = arg_i64(&a, "tail")?;
-            ops::container(state, target, model, action, force, tail).await
+            ops::backends::to_json(ops::container(state, target, model, action, force, tail).await)
         }
         "lmgw__hold_set" => {
             let active = arg_bool(&a, "active")?.ok_or("active is required (true|false)")?;

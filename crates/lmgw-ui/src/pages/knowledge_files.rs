@@ -4,7 +4,6 @@
 //! each row, and Resume / Cancel for the base's job.
 
 use leptos::prelude::*;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 
@@ -14,19 +13,9 @@ use crate::widgets::{use_toasts, MenuItem, RowMenu};
 use super::knowledge::{use_kb, KbFile, KbJobLine};
 use super::knowledge_source::{SourceModal, SourceRef};
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct UploadItem {
-    name: String,
-    outcome: String,
-    reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct UploadResponse {
-    items: Vec<UploadItem>,
-}
+use lmgw_api_types::knowledge::{
+    ResumeResult, UploadItem, UploadResult as UploadResponse, UploadVerdict,
+};
 
 fn drag_has_files(dt: &web_sys::DataTransfer) -> bool {
     dt.types().includes(&JsValue::from_str("Files"), 0)
@@ -35,10 +24,16 @@ fn drag_has_files(dt: &web_sys::DataTransfer) -> bool {
 /// One toast for the whole upload: how many of each outcome.
 fn summary(items: &[UploadItem]) -> String {
     let mut parts = Vec::new();
-    for o in ["added", "replaced", "unchanged", "duplicate", "refused"] {
+    for o in [
+        UploadVerdict::Added,
+        UploadVerdict::Replaced,
+        UploadVerdict::Unchanged,
+        UploadVerdict::Duplicate,
+        UploadVerdict::Refused,
+    ] {
         let n = items.iter().filter(|i| i.outcome == o).count();
         if n > 0 {
-            parts.push(format!("{n} {o}"));
+            parts.push(format!("{n} {}", o.as_str()));
         }
     }
     parts.join(", ")
@@ -77,7 +72,7 @@ pub fn FilesTab() -> impl IntoView {
             match res {
                 Ok(r) => {
                     let s = summary(&r.items);
-                    if r.items.iter().any(|i| i.outcome == "refused") {
+                    if r.items.iter().any(|i| i.outcome == UploadVerdict::Refused) {
                         toasts.warn(s);
                     } else {
                         toasts.ok(s);
@@ -107,14 +102,14 @@ pub fn FilesTab() -> impl IntoView {
 
     let resume = move |_| {
         leptos::task::spawn_local(async move {
-            match crate::api::post::<Value, _>(
+            match crate::api::post::<ResumeResult, _>(
                 format!("/api/knowledge/bases/{}/resume", ctx.id),
                 &json!({}),
             )
             .await
             {
-                Ok(v) => match v.get("message").and_then(Value::as_str) {
-                    Some(m) => toasts.ok(m.to_string()),
+                Ok(v) => match v.message {
+                    Some(m) => toasts.ok(m),
                     None => toasts.ok("resumed"),
                 },
                 Err(e) => toasts.err(e.to_string()),
@@ -211,13 +206,13 @@ pub fn FilesTab() -> impl IntoView {
                         "Dismiss"
                     </button>
                 </div>
-                <For each=move || results.get() key=|i| (i.name.clone(), i.outcome.clone(), i.reason.clone()) let:i>
+                <For each=move || results.get() key=|i| (i.name.clone(), i.outcome, i.reason.clone()) let:i>
                     <div class="kb-result">
                         <span class=match i.outcome.as_str() {
                             "added" | "replaced" => "chip ok",
                             "refused" => "chip err",
                             _ => "chip off",
-                        }>{i.outcome.clone()}</span>
+                        }>{i.outcome.as_str()}</span>
                         <span class="mono-sm">{i.name.clone()}</span>
                         {i.reason.clone().map(|r| view! { <span class="dim mini-note">{r}</span> })}
                     </div>

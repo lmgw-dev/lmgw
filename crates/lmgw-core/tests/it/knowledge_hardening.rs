@@ -635,7 +635,12 @@ async fn a_replace_during_an_ingest_is_picked_up_after_it() {
     )
     .await
     .unwrap();
-    assert_eq!(out.items[0].outcome, "replaced", "{:?}", out.items[0]);
+    assert_eq!(
+        out.items[0].outcome,
+        lmgw_api_types::knowledge::UploadVerdict::Replaced,
+        "{:?}",
+        out.items[0]
+    );
     let now = kstore::get_file(pool, file.id).await.unwrap().unwrap();
     assert_eq!(now.status, "pending");
     assert_ne!(now.sha256, file.sha256);
@@ -842,8 +847,8 @@ async fn a_finished_reembed_hands_on_to_waiting_files() {
         .await
         .unwrap();
     let v = ops::resume(&state, id).await.unwrap();
-    assert_eq!(v["kind"], "kb_reembed", "{v}");
-    let row = wait_job(&state, v["job"].as_i64().unwrap()).await;
+    assert_eq!(v.kind.as_deref(), Some("kb_reembed"), "{v:?}");
+    let row = wait_job(&state, v.job.unwrap()).await;
     assert_eq!(row.status, "done", "{:?}", row.error);
     wait_file(&state, fid, "ready").await;
     cleanup(&state);

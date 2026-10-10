@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use base64::Engine as _;
 use bytes::Bytes;
-use serde_json::json;
+use lmgw_api_types::chat_frames as frames;
 use tokio::sync::mpsc;
 
 use crate::realtime::audio::resample::INPUT_RATE;
@@ -158,10 +158,7 @@ impl SpeechRx {
                     b.first_taken.get_or_insert_with(Instant::now);
                 }
                 let pcm = base64::engine::general_purpose::STANDARD.encode(&pcm);
-                TurnFrame::new(
-                    "speech",
-                    json!({ "seq": seq, "text": text, "pcm": pcm }).to_string(),
-                )
+                TurnFrame::of("speech", &frames::SpeechFrame { seq, text, pcm })
             }
         })
     }

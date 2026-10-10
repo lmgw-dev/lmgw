@@ -7,6 +7,8 @@
 //! - `POST /chat/api/folders/{id}/current`: the ongoing conversation's
 //!   current thread;
 //! - `GET /chat/api/threads`: every thread, for a client that shows them;
+//!   `GET /chat/api/threads/{id}`: one thread whole, with its messages
+//!   ([`thread`]);
 //! - `GET /chat/api/profiles` and the profile writes: the personality
 //!   profiles, listed, created, changed, reset and deleted; and
 //!   `POST /chat/api/folders/{id}` with `defaults_patch: {profile_id}`, the
@@ -38,11 +40,12 @@
 
 pub use lmgw_api_types::chat::{Folder, FolderCreate, FolderList, Thread, ThreadList, ThreadRow};
 pub use lmgw_api_types::chat_folders::{
-    AppliedToCurrent, CurrentReason, CurrentRequest, CurrentThread, FolderPatched,
+    AppliedToCurrent, CurrentReason, CurrentRequest, CurrentThread, FolderPatch, FolderPatched,
 };
 pub use lmgw_api_types::chat_profiles::{
     Profile, ProfileCreate, ProfileDeleted, ProfileList, ProfilePatch,
 };
+pub use lmgw_api_types::chat_threads::{AttachmentMeta, Message, ThreadDetail};
 pub use lmgw_api_types::ApiError;
 
 /// An HTTP method.
@@ -167,6 +170,13 @@ pub fn threads() -> Request {
     Request::new(Method::Get, "/chat/api/threads".into())
 }
 
+/// `GET /chat/api/threads/{id}`: the thread with its whole history, its
+/// drafts and its tasks; read with [`read_thread`]. Read it again on the
+/// feed's `thread.updated` for it.
+pub fn thread(thread_id: i64) -> Request {
+    Request::new(Method::Get, format!("/chat/api/threads/{thread_id}"))
+}
+
 /// `GET /chat/api/profiles`: every personality profile and the one new
 /// threads start with; read with [`read_profiles`]. The feed's `profile.*`
 /// events say when to read it again.
@@ -214,8 +224,12 @@ pub fn delete_profile(id: i64) -> Request {
 /// on, a bound voice session's included; the answer's `applied` names the
 /// thread. Read with [`read_folder_patched`].
 pub fn set_folder_profile(folder_id: i64, profile_id: Option<i64>) -> Request {
+    let patch = FolderPatch {
+        defaults_patch: Some(serde_json::json!({ "profile_id": profile_id })),
+        ..FolderPatch::default()
+    };
     Request::new(Method::Post, format!("/chat/api/folders/{folder_id}"))
-        .json(serde_json::json!({ "defaults_patch": { "profile_id": profile_id } }).to_string())
+        .json(serde_json::to_string(&patch).expect("a folder patch always serializes"))
 }
 
 /// The profile `name` names in `list`, as a user says it: any case,
@@ -441,6 +455,10 @@ reader!(
     read_threads -> ThreadList
 );
 reader!(
+    /// `GET /chat/api/threads/{id}`'s answer.
+    read_thread -> ThreadDetail
+);
+reader!(
     /// `GET /chat/api/profiles`'s answer.
     read_profiles -> ProfileList
 );
@@ -536,6 +554,30 @@ mod tests {
         let row: ThreadRow =
             serde_json::from_str(r#"{"id": 5, "last_message_at": 1760000000}"#).unwrap();
         assert_eq!(row.last_message_at, Some(at));
+    }
+
+    #[test]
+    fn a_thread_reads_whole_with_the_calls_its_reply_waits_on() {
+        let r = thread(7);
+        assert_eq!(r.method, Method::Get);
+        assert_eq!(r.path, "/chat/api/threads/7");
+        let d = read_thread(
+            200,
+            r#"{"thread": {"id": 7}, "tasks": [], "draft_attachments": [],
+                "messages": [{"id": 3, "role": "assistant", "content": "x",
+                              "pending_approvals": [{"approval_request_id": "mcpr_1",
+                                "server_label": "s", "name": "t", "arguments": "{}"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.thread.row.id, 7);
+        let waiting = d.messages[0].pending_approvals.as_ref().unwrap();
+        assert_eq!(waiting[0].approval_request_id, "mcpr_1");
+        assert_eq!(
+            read_thread(404, r#"{"code":"not_found","message":"thread not found"}"#)
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
     }
 
     #[test]

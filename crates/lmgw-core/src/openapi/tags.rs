@@ -51,13 +51,14 @@ pub(crate) const TAGS: &[TagDef] = &[
         group: Group::Inference,
         description: "",
     },
-    // -- Dashboard API ---------------------------------------------------
+    // -- Gateway -----------------------------------------------------------
     TagDef {
         id: "meta",
         name: "API description",
-        group: Group::DashboardApi,
+        group: Group::Gateway,
         description: "",
     },
+    // -- Dashboard API ---------------------------------------------------
     TagDef {
         id: "session",
         name: "Session",
@@ -119,15 +120,45 @@ pub(crate) const TAGS: &[TagDef] = &[
         description: "",
     },
     TagDef {
+        id: "knowledge",
+        name: "Knowledge bases",
+        group: Group::DashboardApi,
+        description: "Named collections of your own documents: create a base, upload \
+                       files, follow the background job that reads and embeds them, view a \
+                       file's text and search across bases. Uploading and changing a base's \
+                       model or chunk size start jobs (kinds kb_ingest and kb_reembed, key \
+                       kb:<id>) that answer at once; watch them on the jobs routes and the \
+                       event stream.",
+    },
+    TagDef {
+        id: "audio-lab",
+        name: "Audio lab",
+        group: Group::DashboardApi,
+        description: "The dashboard's audio playground: the audio models and their voices, \
+                       the library of reference clips a voice-cloning model reads (upload, \
+                       preview, transcripts, delete), and the synthesis, transcription, \
+                       alignment and generic-task routes that run a request through the same \
+                       handlers as /v1/audio/* and /v1/tasks/*.",
+    },
+    TagDef {
+        id: "image-lab",
+        name: "Image lab",
+        group: Group::DashboardApi,
+        description: "The dashboard's image playground: the models that can draw, and the \
+                       generate and edit routes that turn a form into a /v1/images/* request \
+                       and run it through the same handlers.",
+    },
+    TagDef {
         id: "agents",
         name: "Agents",
         group: Group::DashboardApi,
         description: "",
     },
+    // -- Device API ----------------------------------------------------------
     TagDef {
         id: "chat",
         name: "Chat",
-        group: Group::DashboardApi,
+        group: Group::DeviceApi,
         description: "The Chat API a client app uses with its device key (the `chat` \
                        capability): the threads and folders it follows, an ongoing \
                        conversation's current thread, and the change feed that keeps them \

@@ -16,7 +16,7 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use lmgw_api_types::{
     ChunksResponse, CorpusView, DocRequestsResponse, DocsJobStarted, DocsOverview, DocumentRow,
-    DocumentsResponse, ExportManifest, ImportReport, JobRow,
+    DocumentsResponse, ExportManifest, ImportReport, JobRow, MessageAck,
 };
 use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
@@ -949,15 +949,14 @@ fn DeleteCorpusModal(target: RwSignal<Option<CorpusView>>) -> impl IntoView {
         open.set(false);
         let id = c.id;
         spawn_local(async move {
-            match crate::api::post::<Value, _>(format!("/api/docs/corpora/{id}/delete"), &json!({}))
-                .await
+            match crate::api::post::<MessageAck, _>(
+                format!("/api/docs/corpora/{id}/delete"),
+                &json!({}),
+            )
+            .await
             {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("corpus deleted")
-                        .to_string());
+                    toasts.ok(v.message);
                     state.bump();
                 }
                 Err(e) => toasts.err(e.to_string()),

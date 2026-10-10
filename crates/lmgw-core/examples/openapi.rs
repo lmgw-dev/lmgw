@@ -4,7 +4,7 @@
 //! The project site's API reference is built from the `v1` one.
 //!
 //! ```sh
-//! cargo run -p lmgw-core --example openapi > v1.json          # the inference plane
+//! cargo run -p lmgw-core --example openapi > v1.json          # the developer document
 //! cargo run -p lmgw-core --example openapi -- admin > all.json  # everything
 //! ```
 

@@ -166,10 +166,15 @@ async fn regenerate_and_continue_take_an_empty_body_and_refuse_one_that_is_no_js
     let user = ids(&w.gw, tid).await[0];
     let regenerate = format!("/chat/api/threads/{tid}/messages/{user}/regenerate");
 
-    // Refused before anything is cut: `null`, text, a wrong type.
-    for body in ["null", "not json", "{\"speak\": \"yes\"}"] {
+    // Refused before anything is cut: text is a 400, `null` and a wrong type
+    // are JSON of another shape, a 422 (as every typed Chat body answers).
+    for (body, status) in [
+        ("null", 422),
+        ("not json", 400),
+        ("{\"speak\": \"yes\"}", 422),
+    ] {
         let r = raw(&w.gw, &regenerate, body).await;
-        assert_eq!(r.status(), 400, "{body:?}");
+        assert_eq!(r.status(), status, "{body:?}");
         let v: Value = r.json().await.unwrap();
         assert!(v["message"].as_str().is_some(), "{body:?}: {v}");
     }
@@ -191,6 +196,6 @@ async fn regenerate_and_continue_take_an_empty_body_and_refuse_one_that_is_no_js
     let events = sse_events(&r.text().await.unwrap());
     assert_eq!(events.last().unwrap().0, "done", "{events:?}");
     let r = raw(&w.gw, &format!("/chat/api/threads/{tid}/continue"), "null").await;
-    assert_eq!(r.status(), 400);
+    assert_eq!(r.status(), 422);
     assert_eq!(w.tts.seen.count(), 0, "nothing was read aloud");
 }

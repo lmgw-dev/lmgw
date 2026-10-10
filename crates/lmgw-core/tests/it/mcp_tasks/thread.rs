@@ -164,6 +164,8 @@ async fn the_turn_answers_started_and_the_result_enters_the_idle_thread() {
     build_call(&w);
     w.chat.push(Turn::text(&["Started", " it."]));
     let frames = send(&w, &w.gw.client(), tid, "build it").await;
+    // The `result` tool frame with its `task` is the documented type.
+    crate::chat_turn_wire::typed_frames(&frames);
     let result = &results(&frames)[0];
     assert_eq!(result["output"], "started, job t1", "{result}");
     let task = &result["task"];
@@ -404,7 +406,7 @@ async fn edit_and_regenerate_keep_the_result_and_answer_it_again() {
     dev.complete("t1", "42 files", true);
     until_results(&w, tid, 1).await;
     w.chat.push(Turn::text(&["Done: 42."]));
-    let (s, _) = sse(
+    let (s, frames) = sse(
         &w,
         &owner,
         &format!("/chat/api/threads/{tid}/answer"),
@@ -412,6 +414,7 @@ async fn edit_and_regenerate_keep_the_result_and_answer_it_again() {
     )
     .await;
     assert_eq!(s, 200);
+    crate::chat_turn_wire::typed_frames(&frames);
     let msgs = messages(&w, tid).await;
     let answer = msgs[3]["id"].as_i64().unwrap();
 
@@ -426,6 +429,7 @@ async fn edit_and_regenerate_keep_the_result_and_answer_it_again() {
     )
     .await;
     assert_eq!(s, 200, "{frames:?}");
+    crate::chat_turn_wire::typed_frames(&frames);
     let req = sent(&w, n);
     assert_strict(&req);
     assert_eq!(req.last().unwrap()["role"], "tool");
@@ -445,6 +449,7 @@ async fn edit_and_regenerate_keep_the_result_and_answer_it_again() {
     )
     .await;
     assert_eq!(s, 200, "{frames:?}");
+    crate::chat_turn_wire::typed_frames(&frames);
     let req = sent(&w, n);
     assert_strict(&req);
     let tail: Vec<&str> = roles(&req).into_iter().rev().take(3).collect();
@@ -463,6 +468,7 @@ async fn an_approved_required_call_carries_approval_and_task() {
     let owner = w.gw.client();
     build_call(&w);
     let frames = send(&w, &owner, tid, "build it").await;
+    crate::chat_turn_wire::typed_frames(&frames);
     let id = approval_frames(&frames)[0]["approval_request_id"].clone();
     w.chat.push(Turn::text(&["Started."]));
     let (s, frames) = decide(
@@ -473,6 +479,7 @@ async fn an_approved_required_call_carries_approval_and_task() {
     )
     .await;
     assert_eq!(s, 200, "{frames:?}");
+    crate::chat_turn_wire::typed_frames(&frames);
     let call = next("the approved call", &mut dev.seen.calls).await;
     let meta = &call["params"]["_meta"];
     assert_eq!(

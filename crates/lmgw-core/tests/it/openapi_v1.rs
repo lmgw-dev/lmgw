@@ -214,12 +214,12 @@ fn image_edits_image_field_is_an_array_of_binary_files() {
 }
 
 // ---------------------------------------------------------------------------
-// GET /v1/openapi.json — this document filtered to the inference plane
+// GET /v1/openapi.json — the developer document: no admin operation
 // (§4.5), served live.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn v1_openapi_json_is_served_and_inference_only() {
+async fn v1_openapi_json_is_served_as_the_developer_document() {
     let state = lmgw_core::state::AppState::init_for_tests().await.unwrap();
     let gw = crate::common::serve(state).await;
 
@@ -235,7 +235,11 @@ async fn v1_openapi_json_is_served_and_inference_only() {
     assert!(body["paths"].get("/api/openapi.json").is_none());
     for (_, methods) in body["paths"].as_object().unwrap() {
         for (_, operation) in methods.as_object().unwrap() {
-            assert_eq!(operation[ext::CAPABILITY], "inference");
+            assert_ne!(operation[ext::CAPABILITY], "admin");
         }
     }
+    assert!(body["paths"]["/chat/api/feed"]["get"].is_object());
+    assert!(body["paths"]["/api/agents/runs/{job_id}/events"]["post"].is_object());
+    assert!(body["paths"]["/api/version"]["get"].is_object());
+    assert!(body["paths"].get("/api/session").is_none());
 }

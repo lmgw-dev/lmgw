@@ -634,6 +634,8 @@ async fn the_ledger_routes_carry_their_own_bearer_check() {
     .await;
     assert_eq!(status, 200, "{opened}");
     let run = opened["run"].as_i64().unwrap();
+    let typed: lmgw_api_types::AgentRunOpened = common::round_trips("open a run", &opened);
+    assert_eq!(typed.run, run);
     assert_eq!(
         opened["deadline_seconds"],
         json!(0),
@@ -666,13 +668,15 @@ async fn the_ledger_routes_carry_their_own_bearer_check() {
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["code"], json!("run_not_owned"));
 
-    post_as(
+    let (status, closed) = post_as(
         &base,
         &format!("/api/agents/runs/{run}/close"),
         Some(&mine),
         json!({ "status": "done" }),
     )
     .await;
+    assert_eq!(status, 200, "{closed}");
+    common::round_trips::<lmgw_api_types::Ack>("close a run", &closed);
 }
 
 #[tokio::test]
@@ -708,6 +712,9 @@ async fn a_hand_posted_event_sequence_becomes_the_runs_review_table() {
     )
     .await;
     assert_eq!(status, 200, "{applied}");
+    let typed: lmgw_api_types::AgentEventsApplied =
+        common::round_trips("append run events", &applied);
+    assert_eq!(typed.rejected.len(), 2, "{applied}");
     assert_eq!(
         applied["applied"],
         json!(5),

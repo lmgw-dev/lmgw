@@ -3,11 +3,8 @@
 //! dialog the Chat's citations will open (design §9.3).
 
 use leptos::prelude::*;
-use serde::Deserialize;
 
 use crate::widgets::{Modal, ModalFooter, ModalSize};
-
-use super::knowledge::KbFile;
 
 /// What to show: a file, and the chunk to highlight when there is one. A
 /// citation also carries where the passage was in the file's text and which
@@ -41,29 +38,7 @@ impl SourceRef {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct Span {
-    id: String,
-    seq: i64,
-    page: Option<i64>,
-    heading_path: String,
-    span_start: i64,
-    span_end: i64,
-    tokens: i64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct Source {
-    file: KbFile,
-    kb_name: String,
-    text: Option<String>,
-    chunks: Vec<Span>,
-    highlight: Option<Span>,
-    /// Said when the highlight was found by the citation's stored position.
-    notice: Option<String>,
-}
+use lmgw_api_types::knowledge::{ChunkSpan as Span, KnowledgeSource as Source};
 
 /// The dialog. Open by setting `target`; closing (Esc, ✕, backdrop) clears it.
 #[component]

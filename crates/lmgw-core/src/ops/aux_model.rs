@@ -3,6 +3,8 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use lmgw_api_types as dto;
+
 use crate::config::{AuxKind, AuxModel, HoldFallbackMode, Snapshot};
 use crate::runtime::argv;
 use crate::runtime::{lifecycle, Class};
@@ -315,7 +317,7 @@ pub(super) async fn aux_model_get(
     state: &SharedState,
     id: Option<i64>,
     model_id: Option<&str>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<dto::AuxModelDetail>, String> {
     let snap = state.snapshot();
     let found = match (id, model_id) {
         (Some(id), _) => snap.aux_models.iter().find(|m| m.id == id),
@@ -330,39 +332,45 @@ pub(super) async fn aux_model_get(
     let origin = downloads
         .iter()
         .find(|d| d.dest_path == m.gguf_path && d.target == "aux")
-        .map(|d| json!({ "repo": d.repo, "file": d.file, "download_id": d.id }));
+        .map(|d| dto::DownloadedFrom {
+            repo: d.repo.clone(),
+            file: d.file.clone(),
+            download_id: d.id,
+        });
     let mut problems = aux_model_problems(&models_dir, m).await;
     let (image, run_args) = effective_aux_image(state, &m.image, &m.extra_run_args);
     problems.extend(aux_config_warnings(state, &image, &run_args, &m.args).await);
     let command_line = command_line_preview(state, Class::Aux, &m.model_id);
-    Ok(Some(json!({
-        "id": m.id,
-        "class": "aux",
-        "model_id": m.model_id,
-        "public_name": snap.aux_public_name(&m.model_id),
-        "kind": m.kind.as_str(),
-        "endpoint": match m.kind {
+    Ok(Some(dto::AuxModelDetail {
+        id: m.id,
+        model_id: m.model_id.clone(),
+        public_name: snap.aux_public_name(&m.model_id),
+        kind: m.kind.as_str().to_string(),
+        endpoint: match m.kind {
             AuxKind::Embed => "/v1/embeddings",
             AuxKind::Rerank => "/v1/rerank",
-        },
-        "pooling": m.pooling,
-        "ctx_size": m.ctx_size,
-        "gguf_path": m.gguf_path,
-        "gguf_present": !models_dir.trim().is_empty()
-            && std::path::Path::new(&models_dir).join(&m.gguf_path).is_file(),
-        "source": if origin.is_some() { "hf" } else { "manual" },
-        "downloaded_from": origin,
-        "extra_args": argv::args_to_lines(&m.args),
-        "idle_seconds": m.idle_seconds,
-        "enabled": m.enabled,
-        "image": m.image,
-        "extra_run_args": m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
-        "warm_start": m.warm_start,
-        "hold_fallback_mode": m.hold_fallback_mode.as_str(),
-        "hold_fallback": m.hold_fallback.clone(),
-        "command_line": command_line,
-        "problems": problems,
-    })))
+        }
+        .to_string(),
+        pooling: m.pooling.clone(),
+        ctx_size: m.ctx_size,
+        gguf_path: m.gguf_path.clone(),
+        gguf_present: !models_dir.trim().is_empty()
+            && std::path::Path::new(&models_dir)
+                .join(&m.gguf_path)
+                .is_file(),
+        source: if origin.is_some() { "hf" } else { "manual" }.to_string(),
+        downloaded_from: origin,
+        extra_args: argv::args_to_lines(&m.args),
+        idle_seconds: m.idle_seconds,
+        enabled: m.enabled,
+        image: m.image.clone(),
+        extra_run_args: m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        warm_start: m.warm_start,
+        hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
+        hold_fallback: m.hold_fallback.clone(),
+        command_line,
+        problems,
+    }))
 }
 
 /// Resolve the hold fallback for an aux create/update from string-typed

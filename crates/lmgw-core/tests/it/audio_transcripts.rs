@@ -221,6 +221,10 @@ async fn clips_without_a_transcript_are_transcribed_together_and_on_upload_when_
     )
     .await;
     assert_eq!(status, 200, "{body}");
+    crate::common::round_trips::<lmgw_api_types::audio_lab::VoiceTranscribed>(
+        "voice_transcribe",
+        &body,
+    );
     assert_eq!(
         body["transcribed"],
         json!([{"clip": "me.wav", "chars": 11, "transcript_source": "asr:audio/asr",

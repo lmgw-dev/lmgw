@@ -316,16 +316,22 @@ async fn served_docs_follow_their_capabilities() {
     let v1: Value = v1_resp.json().await.unwrap();
 
     for (path, methods) in v1["paths"].as_object().unwrap() {
-        assert!(!path.starts_with("/api"), "{path} leaked into the v1 doc");
+        assert!(
+            !path.starts_with("/api/session"),
+            "{path} leaked into the v1 doc"
+        );
         for (method, op) in methods.as_object().unwrap() {
-            assert_eq!(
+            assert_ne!(
                 op[ext::CAPABILITY],
-                "inference",
+                "admin",
                 "{method} {path} is in the v1 doc with capability {}",
                 op[ext::CAPABILITY]
             );
         }
     }
+    assert!(v1["paths"]["/chat/api/feed"]["get"].is_object());
+    assert!(v1["paths"]["/api/agents/runs/{job_id}/events"]["post"].is_object());
+    assert!(v1["paths"]["/api/version"]["get"].is_object());
 
     let schemas: BTreeSet<String> = v1["components"]["schemas"]
         .as_object()
@@ -376,9 +382,16 @@ async fn served_docs_follow_their_capabilities() {
         v1.get(ext::UNDOCUMENTED).is_none(),
         "undocumented list in v1"
     );
-    assert!(v1.get(ext::PRINCIPALS).is_none(), "principals matrix in v1");
+    // The key-kind map stays, for the capabilities v1 covers (no admin).
+    let matrix = v1[ext::PRINCIPALS]
+        .as_object()
+        .expect("principals map in v1");
+    assert!(matrix
+        .values()
+        .flat_map(|v| v.as_array().unwrap())
+        .all(|cap| cap != "admin"));
 
-    // The admin document keeps both: the page reads the matrix, and the
+    // The admin document keeps the whole matrix, and the
     // undocumented list is the admin plane's honest inventory (spec §12).
     let admin: Value = owner.json().await.unwrap();
     assert!(admin[ext::UNDOCUMENTED]
@@ -708,7 +721,17 @@ fn a_feed_event_s_one_of_matches_exactly_one_branch() {
     let cases = [
         (
             "thread.updated",
-            serde_json::json!({"id": 9, "title": "Plan", "by": "device 'phone'"}),
+            // Whole rows, as the feed sends them: an answer lists every
+            // field the server always sends as required.
+            serde_json::to_value(lmgw_api_types::chat_feed::ThreadChanged {
+                thread: lmgw_api_types::chat::ThreadRow {
+                    id: 9,
+                    title: "Plan".into(),
+                    ..Default::default()
+                },
+                by: Some("device 'phone'".into()),
+            })
+            .unwrap(),
         ),
         (
             "thread.created",
@@ -716,7 +739,15 @@ fn a_feed_event_s_one_of_matches_exactly_one_branch() {
         ),
         (
             "folder.updated",
-            serde_json::json!({"id": 3, "name": "Desk", "by": null}),
+            serde_json::to_value(lmgw_api_types::chat_feed::FolderChanged {
+                folder: lmgw_api_types::chat::Folder {
+                    id: 3,
+                    name: "Desk".into(),
+                    ..Default::default()
+                },
+                by: None,
+            })
+            .unwrap(),
         ),
         (
             "folder.created",

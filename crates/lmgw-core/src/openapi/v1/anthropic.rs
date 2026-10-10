@@ -109,6 +109,7 @@ fn content_json() -> Value {
 fn usage_schema() -> Value {
     json!({
         "type": "object",
+        "required": ["input_tokens", "output_tokens"],
         "properties": {
             "input_tokens": {"type": "integer"},
             "output_tokens": {"type": "integer"},
@@ -132,6 +133,9 @@ pub(crate) fn messages_response(g: &mut SchemaGenerator) -> Schema {
         "AnthropicMessage",
         schemars::json_schema!({
             "type": "object",
+            "required": [
+                "id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"
+            ],
             "properties": {
                 "id": {"type": "string"},
                 "type": {"type": "string", "enum": ["message"]},

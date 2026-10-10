@@ -114,7 +114,7 @@ pub struct LocalModelDetail {
     /// An alias's capabilities override for the derived `/v1/models` capability facts: a JSON
     /// object with optional keys `capabilities`, `max_output_tokens`, `notes`. `None` = no
     /// override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub capabilities_override: Option<serde_json::Value>,
     /// Ladder rungs above the base; empty = not a ladder. The editor's ladder table reads
     /// it.
@@ -124,8 +124,50 @@ pub struct LocalModelDetail {
     /// the published host port is a placeholder, since it is allocated per
     /// start.
     pub command_line: String,
+    /// Every rung's own command line, per-slot context and switchover;
+    /// `null` on a row that is not a ladder.
+    #[serde(default)]
+    pub rungs: Option<Vec<RungDetail>>,
     /// Static findings; empty means "nothing obviously wrong", not "loads".
     pub problems: Vec<String>,
+    /// Configuration that loads and serves but misbehaves under some input
+    /// (a large image, say). Apart from `problems` because the model starts.
+    #[serde(default)]
+    pub advisories: Vec<String>,
+    /// The download this file came from, when the downloader fetched it.
+    #[serde(default)]
+    pub downloaded_from: Option<DownloadedFrom>,
+}
+
+/// Where a downloaded weights file came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DownloadedFrom {
+    /// The Hugging Face repository.
+    pub repo: String,
+    /// The file within it.
+    pub file: String,
+    /// The download's id.
+    pub download_id: i64,
+}
+
+/// One ladder rung as the model read shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RungDetail {
+    /// This rung's number, from 1 (the base row).
+    pub rung: usize,
+    /// How many rungs the ladder has.
+    pub of: usize,
+    pub gguf_path: String,
+    pub ctx_size: i64,
+    /// The context one slot gets on this rung; null when the base row
+    /// predates the rule that derives it.
+    pub per_slot_ctx: Option<i64>,
+    /// The prompt length at which a request moves up to the next rung.
+    pub switchover: Option<i64>,
+    /// The `podman run …` command line this rung renders to.
+    pub command_line: String,
 }
 
 /// `GET /api/gguf-files` — GGUFs under the chat models dir.

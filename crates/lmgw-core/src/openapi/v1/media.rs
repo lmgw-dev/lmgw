@@ -205,25 +205,23 @@ pub(crate) fn alignments_request(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-pub(crate) fn alignments_response(g: &mut SchemaGenerator) -> Schema {
-    schemas::named(
-        g,
-        "AudioAlignments",
-        schemars::json_schema!({"type": "object", "additionalProperties": true}),
-    )
-}
-
 pub(crate) fn voices_response(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
         g,
         "AudioVoices",
         schemars::json_schema!({
             "type": "object",
+            "required": ["voices"],
             "properties": {
                 "voices": {"type": "array", "items": {"type": "string"},
-                    "description": "Every name the model answers to as `voice`, sorted."},
+                    "description": "Every name the model answers to as `voice`, sorted; for a \
+                        probe of the engine or of a remote upstream, as that source sent it."},
                 "lmgw": {
                     "type": "object",
+                    "required": [
+                        "source", "engine_asked", "held", "entries", "default", "missing",
+                        "needs_transcript"
+                    ],
                     "description": "Only on a local audio model answered from lmgw's catalog \
                         (x-lmgw-voices-source: config).",
                     "properties": {
@@ -302,16 +300,28 @@ pub(crate) fn image_response(g: &mut SchemaGenerator) -> Schema {
         "ImageGenerationsResponse",
         schemars::json_schema!({
             "type": "object",
+            "required": ["created", "data"],
             "properties": {
                 "created": {"type": "integer"},
                 "data": {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "properties": {"b64_json": {"type": "string"}}
+                        "properties": {
+                            "b64_json": {"type": "string"},
+                            "url": {"type": "string"},
+                            "revised_prompt": {"type": "string"}
+                        },
+                        "anyOf": [{"required": ["b64_json"]}, {"required": ["url"]}],
+                        "description": "One image: b64_json, or url when the request asked \
+                            for response_format url (an upstream's default, dall-e's, \
+                            for instance)."
                     }
                 }
-            }
+            },
+            "description": "The upstream's answer, relayed as it sends it: each image \
+                carries what response_format asked for, plus whatever else the upstream \
+                adds (revised_prompt)."
         }),
     )
 }

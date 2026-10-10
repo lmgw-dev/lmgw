@@ -743,7 +743,9 @@ pub(crate) async fn stream_once_on(
         // the sink before the count's verdict on the rung that answered.
         // A re-pick clears the record (A2 review 2): what the candidate it
         // left was sent is not being worked on.
-        let send = super::reasoning_fit::send_chat(
+        // Boxed: this select is a 226 KB poll frame in a debug build when the send
+        // sits inline, on the turn -> gate chain (2 MiB test stack).
+        let send = Box::pin(super::reasoning_fit::send_chat(
             state,
             hold,
             route,
@@ -765,7 +767,7 @@ pub(crate) async fn stream_once_on(
                 prompt_sent.store(true, Ordering::Relaxed);
                 egress.build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, true)
             },
-        );
+        ));
         // Dropping the send closes its connection, so a stop while the
         // upstream prefills ends the work there too.
         let sent = tokio::select! {

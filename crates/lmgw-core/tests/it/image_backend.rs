@@ -1332,9 +1332,11 @@ async fn load_testing_an_image_model_draws_one_small_image_and_reports_its_bytes
         .await;
     let (state, _base) = setup_local(&mock, &[image_row("z-image-turbo")]).await;
 
-    let out = lmgw_core::modelinfo::local_model_test(&state, "z-image-turbo", Some("image"))
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        lmgw_core::modelinfo::local_model_test(&state, "z-image-turbo", Some("image"))
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["class"], "image");
     assert_eq!(out["probe"], "image_generation");
@@ -1394,9 +1396,11 @@ async fn a_failing_generation_reports_the_error_and_a_hint() {
         .await;
     let (state, _base) = setup_local(&mock, &[image_row("flux")]).await;
 
-    let out = lmgw_core::modelinfo::local_model_test(&state, "flux", None)
-        .await
-        .unwrap();
+    let out = crate::common::model_test_wire(
+        lmgw_core::modelinfo::local_model_test(&state, "flux", None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], false, "{out}");
     assert_eq!(out["loaded"], false);
     assert!(

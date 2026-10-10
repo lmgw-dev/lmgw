@@ -184,6 +184,8 @@ async fn auto_mode_sends_the_excerpts_ahead_of_the_question_and_replays_them() {
     let events = w
         .send(tid, json!({"content": "When did the refund arrive?"}))
         .await;
+    // Every frame of the turn is the documented type.
+    crate::chat_turn_wire::typed_frames(&events);
     let r = event(&events, "retrieval").expect("a retrieval event");
     let at = position(&events, "retrieval").unwrap();
     let first_delta = position(&events, "delta").expect("an answer");

@@ -3,6 +3,7 @@
 //! old chat-app.js did, but typed.
 
 use futures::StreamExt;
+use lmgw_api_types::chat_frames as frames;
 use serde_json::Value;
 use wasm_bindgen::JsCast;
 
@@ -63,19 +64,32 @@ fn parse_record(record: &str) -> Option<ChatEvent> {
     frame(event, v)
 }
 
+/// The text of a `delta` or `reasoning` frame.
+fn text_of(v: Value) -> String {
+    serde_json::from_value::<frames::TextFrame>(v)
+        .unwrap_or_default()
+        .text
+}
+
 /// One frame by its event name and data: an SSE record's, or a chat-turn
 /// frame a bound realtime session relays verbatim (`lmgw.chat.frame`,
 /// chat-voice §8.7) — the same bubble code renders both.
 pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
     Some(match event {
-        "turn" => ChatEvent::Turn(v["user_message_id"].as_i64()?),
-        "delta" => ChatEvent::Delta(v["text"].as_str().unwrap_or_default().to_string()),
-        "reasoning" => ChatEvent::Reasoning(v["text"].as_str().unwrap_or_default().to_string()),
-        "tool" => ChatEvent::Tool(v),
-        "usage" => ChatEvent::Usage {
-            prompt_tokens: v["prompt_tokens"].as_i64(),
-            completion_tokens: v["completion_tokens"].as_i64(),
+        "turn" => match serde_json::from_value::<frames::TurnStarted>(v) {
+            Ok(t) => ChatEvent::Turn(t.user_message_id),
+            Err(_) => return None,
         },
+        "delta" => ChatEvent::Delta(text_of(v)),
+        "reasoning" => ChatEvent::Reasoning(text_of(v)),
+        "tool" => ChatEvent::Tool(v),
+        "usage" => {
+            let u: frames::UsageFrame = serde_json::from_value(v).unwrap_or_default();
+            ChatEvent::Usage {
+                prompt_tokens: u.prompt_tokens.map(|n| n as i64),
+                completion_tokens: u.completion_tokens.map(|n| n as i64),
+            }
+        }
         "stats" => ChatEvent::Stats(v),
         "retrieval" => match serde_json::from_value(v) {
             Ok(c) => ChatEvent::Retrieval(c),
@@ -83,13 +97,19 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
         },
         "stop" => ChatEvent::Stop,
         "error" => {
-            let msg = v["message"].as_str().unwrap_or("stream failed").to_string();
-            match v["code"].as_str() {
+            // A frame that is not a whole `ErrorFrame` (no message) still
+            // keeps the code it carries, which is what the page branches on.
+            let e: frames::ErrorFrame =
+                serde_json::from_value(v.clone()).unwrap_or_else(|_| frames::ErrorFrame {
+                    message: "stream failed".into(),
+                    code: v.get("code").and_then(|c| c.as_str()).map(str::to_string),
+                });
+            match e.code.as_deref() {
                 Some("superseded") => ChatEvent::Superseded,
-                Some("not_saved") => ChatEvent::NotSaved(msg),
+                Some("not_saved") => ChatEvent::NotSaved(e.message),
                 code => ChatEvent::Error {
-                    message: msg,
                     code: code.filter(|c| !c.is_empty()).map(str::to_string),
+                    message: e.message,
                 },
             }
         }

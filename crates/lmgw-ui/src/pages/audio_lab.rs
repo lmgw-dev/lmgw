@@ -27,8 +27,11 @@ use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
+use lmgw_api_types::audio_lab::{
+    AudioLabModel, AudioLabModels, Clip, ClipList, ClipTranscribed, ClipTranscription, ClipsAck,
+    ClipsUploaded,
+};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::audio_spec::{
@@ -49,62 +52,14 @@ use crate::widgets::{use_toasts, ConfirmButton, Explain, ModelPicker, Select};
 // Server shapes
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-struct AudioModel {
-    alias: String,
-    model_id: String,
-    family: String,
-    task: String,
-    mode: String,
-}
+// The lab's answers are `lmgw_api_types::audio_lab`'s types — the ones the
+// gateway builds — so a renamed field breaks this build, not the page.
+type AudioModel = AudioLabModel;
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct RuntimeRow {
     model_id: String,
     state: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct ModelsResp {
-    models: Vec<AudioModel>,
-    /// Per-model containers of the audio class (per-model-containers §3.2) —
-    /// there is no single audio.cpp container to report a state for any more.
-    runtime: Vec<RuntimeRow>,
-    voices_dir: Option<String>,
-    /// The class's `voice_dir` points at this library, so a clip's name is a
-    /// voice every TTS model here answers to — not just a path to paste.
-    voice_library_active: bool,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-struct Clip {
-    name: String,
-    size: u64,
-    server_path: String,
-    /// The name a request's `voice` uses once the class's `voice_dir` points
-    /// at this library — the file name without its extension.
-    voice: String,
-    /// The clip's line in `prompt_text`: what it says, injected as
-    /// `reference_text` when a request clones it by name.
-    transcript: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct RefsResp {
-    clips: Vec<Clip>,
-    error: Option<String>,
-    /// An upload's clips the settings' transcription model wrote a
-    /// transcript for — `{clip, transcript_source, answered_by, by}` or
-    /// `{clip, transcribe_error}` each (audio-class gap 5).
-    transcribed: Vec<Value>,
-    /// One clip transcribed: which model wrote it, in a sentence — a
-    /// fallback that answered named as one.
-    message: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -837,9 +792,17 @@ pub fn AudioLab() -> impl IntoView {
 
     let load_models = move || {
         lab.scope.spawn(async move {
-            match lab_get::<ModelsResp>("/audio-lab/api/models".into()).await {
+            match lab_get::<AudioLabModels>("/audio-lab/api/models".into()).await {
                 Ok(m) => {
-                    lab.runtime.set(m.runtime);
+                    lab.runtime.set(
+                        m.runtime
+                            .into_iter()
+                            .map(|r| RuntimeRow {
+                                model_id: r.model_id,
+                                state: r.state,
+                            })
+                            .collect(),
+                    );
                     lab.voices_dir.set(m.voices_dir.unwrap_or_default());
                     lab.voice_library_active.set(m.voice_library_active);
                     let first = m.models.first().map(|f| f.alias.clone());
@@ -860,7 +823,7 @@ pub fn AudioLab() -> impl IntoView {
     };
     let load_clips = move || {
         lab.scope.spawn(async move {
-            match lab_get::<RefsResp>("/audio-lab/api/refs".into()).await {
+            match lab_get::<ClipList>("/audio-lab/api/refs".into()).await {
                 Ok(r) => {
                     lab.clips.set(r.clips);
                     lab.clips_err.set(r.error.unwrap_or_default());
@@ -2305,19 +2268,25 @@ fn VoiceLibrary(
                 Err(e) => Err(e.to_string()),
             };
             match sent {
-                Ok(resp) => match finish::<RefsResp>(resp).await {
+                Ok(resp) => match finish::<ClipsUploaded>(resp).await {
                     Ok(r) => {
                         lab.clips.set(r.clips);
                         lab.clips_err.set(String::new());
                         let failed: Vec<String> = r
                             .transcribed
                             .iter()
-                            .filter_map(|t| t["transcribe_error"].as_str().map(str::to_string))
+                            .filter_map(|t| match t {
+                                ClipTranscription::Failed(f) => Some(f.transcribe_error.clone()),
+                                ClipTranscription::Written(_) => None,
+                            })
                             .collect();
                         let by = r
                             .transcribed
                             .first()
-                            .and_then(|t| t["by"].as_str())
+                            .and_then(|t| match t {
+                                ClipTranscription::Written(w) => Some(w.provenance.by.as_str()),
+                                ClipTranscription::Failed(_) => None,
+                            })
                             .map(|by| format!(" by {by}"))
                             .unwrap_or_default();
                         match (r.transcribed.len(), failed.first()) {
@@ -2343,7 +2312,7 @@ fn VoiceLibrary(
         spawn_local(async move {
             let url = format!("/audio-lab/api/refs/{}/text", enc(&voice));
             let body = json!({ "transcript": text });
-            match lab_post_json::<RefsResp>(url, body).await {
+            match lab_post_json::<ClipsAck>(url, body).await {
                 Ok(r) => {
                     lab.clips.set(r.clips);
                     lab.clips_err.set(String::new());
@@ -2361,12 +2330,12 @@ fn VoiceLibrary(
         transcribing.set(Some(name.clone()));
         spawn_local(async move {
             let url = format!("/audio-lab/api/refs/{}/transcribe", enc(&name));
-            match lab_post_json::<RefsResp>(url, json!({})).await {
+            match lab_post_json::<ClipTranscribed>(url, json!({})).await {
                 Ok(r) => {
                     lab.clips.set(r.clips);
                     lab.clips_err.set(String::new());
                     // Who wrote it, a fallback named as one (review V1).
-                    toasts.ok(r.message.unwrap_or_else(|| format!("{name} transcribed")));
+                    toasts.ok(r.message);
                 }
                 Err(e) => lab.clips_err.set(e),
             }
@@ -2394,7 +2363,7 @@ fn VoiceLibrary(
     let delete = move |name: String| {
         spawn_local(async move {
             let url = format!("/audio-lab/api/refs/{}/delete", enc(&name));
-            match lab_post_empty::<RefsResp>(url).await {
+            match lab_post_empty::<ClipsAck>(url).await {
                 Ok(r) => {
                     toasts.ok(format!("deleted {name}"));
                     if !lab.scope.alive() {

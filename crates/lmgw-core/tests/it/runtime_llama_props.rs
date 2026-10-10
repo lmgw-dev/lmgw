@@ -45,9 +45,11 @@ async fn world(props: Option<Value>) -> Gpu {
 }
 
 async fn start(gpu: &Gpu) {
-    lmgw_core::ops::container(&gpu.state, None, Some("seer"), "start", false, None)
-        .await
-        .expect("the model starts");
+    crate::common::container_wire(
+        lmgw_core::ops::container(&gpu.state, None, Some("seer"), "start", false, None)
+            .await
+            .expect("the model starts"),
+    );
 }
 
 async fn hold(gpu: &Gpu) -> LocalHold {
@@ -70,9 +72,11 @@ async fn a_start_reads_what_the_server_says_about_itself() {
     assert_eq!(gpu.world().props_reads, ["seer"]);
     assert!(warnings(&gpu).is_empty(), "{:?}", warnings(&gpu));
 
-    let status = lmgw_core::ops::container(&gpu.state, None, Some("seer"), "status", false, None)
-        .await
-        .unwrap();
+    let status = crate::common::container_wire(
+        lmgw_core::ops::container(&gpu.state, None, Some("seer"), "status", false, None)
+            .await
+            .unwrap(),
+    );
     let shown = &status["runtime"]["llama_props"];
     assert_eq!(
         *shown,
@@ -217,9 +221,11 @@ async fn the_local_model_test_refreshes_the_entry() {
     start(&gpu).await;
     assert_eq!(warnings(&gpu).len(), 1);
     let test = || async {
-        lmgw_core::modelinfo::local_model_test(&gpu.state, "seer", None)
-            .await
-            .unwrap()
+        crate::common::model_test_wire(
+            lmgw_core::modelinfo::local_model_test(&gpu.state, "seer", None)
+                .await
+                .unwrap(),
+        )
     };
 
     // No facts yet: a failed read is stored as the start's was.

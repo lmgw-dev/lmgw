@@ -209,33 +209,41 @@ fn make_missing(f: &Fixture, model_id: &str) {
 async fn per_model_start_status_and_stop_round_trip() {
     let f = fixture(&[("m1", false)], &[]).await;
 
-    let out = ops::container(&f.state, None, Some("m1"), "start", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     assert!(out["port"].as_u64().unwrap() > 0);
     assert_eq!(f.podman.run_count(), 1);
 
-    let status = ops::container(&f.state, None, Some("m1"), "status", false, None)
-        .await
-        .unwrap();
+    let status = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(status["class"], "chat");
     assert_eq!(status["model_id"], "m1");
     assert_eq!(status["runtime"]["state"], "ready");
     assert_eq!(status["runtime"]["model_id"], "m1");
 
-    let stop = ops::container(&f.state, None, Some("m1"), "stop", false, None)
-        .await
-        .unwrap();
+    let stop = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "stop", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(stop["ok"], true);
     assert_eq!(
         f.podman.stopped_names(),
         vec![container_name("lmgw", Class::Chat, "m1")]
     );
 
-    let status = ops::container(&f.state, None, Some("m1"), "status", false, None)
-        .await
-        .unwrap();
+    let status = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert!(status["runtime"].is_null(), "{status}");
 }
 
@@ -244,12 +252,16 @@ async fn per_model_logs_reads_the_containers_recent_output() {
     let f = fixture(&[("m1", false)], &[]).await;
     f.podman.set_logs("booting\nready to serve\n");
 
-    ops::container(&f.state, None, Some("m1"), "start", false, None)
-        .await
-        .unwrap();
-    let out = ops::container(&f.state, None, Some("m1"), "logs", false, Some(5))
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "logs", false, Some(5))
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["tail"], 5);
     assert_eq!(out["container"], container_name("lmgw", Class::Chat, "m1"));
     assert!(
@@ -269,9 +281,11 @@ async fn per_model_logs_reads_the_containers_recent_output() {
 async fn per_model_logs_work_before_the_model_has_ever_started() {
     let f = fixture(&[("m1", false)], &[]).await;
     // Default tail (60) applies when the caller doesn't pass one.
-    let out = ops::container(&f.state, None, Some("m1"), "logs", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "logs", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["tail"], 60);
     assert_eq!(out["container"], container_name("lmgw", Class::Chat, "m1"));
     assert!(
@@ -283,14 +297,18 @@ async fn per_model_logs_work_before_the_model_has_ever_started() {
 #[tokio::test]
 async fn per_model_apply_on_a_running_model_recreates_it_with_fresh_argv() {
     let f = fixture(&[("m1", false)], &[]).await;
-    ops::container(&f.state, None, Some("m1"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(f.podman.run_count(), 1);
 
-    let out = ops::container(&f.state, None, Some("m1"), "apply", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "apply", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     assert_eq!(f.podman.run_count(), 2, "apply stops then starts again");
     assert_eq!(
@@ -310,9 +328,11 @@ async fn per_model_apply_on_a_running_model_recreates_it_with_fresh_argv() {
 async fn per_model_apply_on_a_stopped_model_is_a_no_op() {
     let f = fixture(&[("m1", false)], &[]).await;
     for action in ["apply", "restart"] {
-        let out = ops::container(&f.state, None, Some("m1"), action, false, None)
-            .await
-            .unwrap();
+        let out = crate::common::container_wire(
+            ops::container(&f.state, None, Some("m1"), action, false, None)
+                .await
+                .unwrap(),
+        );
         assert_eq!(out["ok"], true, "{action}: {out}");
         assert_eq!(out["applied"], false, "{action}: {out}");
         assert_eq!(out["running"], false, "{action}: {out}");
@@ -327,18 +347,22 @@ async fn per_model_apply_on_a_stopped_model_is_a_no_op() {
 
     // …and the model is still startable, so the no-op did not leave anything
     // half-decided behind.
-    ops::container(&f.state, None, Some("m1"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(f.podman.run_count(), 1);
 }
 
 #[tokio::test]
 async fn stop_refuses_a_busy_model_and_override_forces_it() {
     let f = fixture(&[("m1", false)], &[]).await;
-    ops::container(&f.state, None, Some("m1"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
 
     // Hold an in-flight claim the way a real request would, directly against
     // the registry — `ops::container`'s own `start` drops its guard
@@ -355,9 +379,11 @@ async fn stop_refuses_a_busy_model_and_override_forces_it() {
     assert!(err.contains("override=true"), "{err}");
     assert!(f.podman.stopped_names().is_empty());
 
-    let out = ops::container(&f.state, None, Some("m1"), "stop", true, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "stop", true, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     assert_eq!(
         f.podman.stopped_names(),
@@ -399,9 +425,11 @@ async fn a_model_id_shared_across_classes_needs_target_to_disambiguate() {
     assert!(err.contains("more than one class"), "{err}");
     assert!(err.contains("chat") && err.contains("aux"), "{err}");
 
-    let out = ops::container(&f.state, Some("aux"), Some("shared"), "status", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, Some("aux"), Some("shared"), "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["class"], "aux");
 }
 
@@ -421,13 +449,17 @@ async fn target_and_model_that_disagree_are_rejected() {
 #[tokio::test]
 async fn group_status_reports_the_runtime_list_and_vram_no_legacy_shape() {
     let f = fixture(&[("a", false), ("b", false)], &[]).await;
-    ops::container(&f.state, None, Some("a"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("a"), "start", false, None)
+            .await
+            .unwrap(),
+    );
 
-    let out = ops::container(&f.state, Some("chat"), None, "status", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, Some("chat"), None, "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["target"], "chat");
     assert!(
         out.get("state").is_none(),
@@ -443,15 +475,19 @@ async fn group_status_reports_the_runtime_list_and_vram_no_legacy_shape() {
 async fn group_stop_stops_every_running_member_of_the_class() {
     let f = fixture(&[("a", false), ("b", false)], &[]).await;
     for id in ["a", "b"] {
-        ops::container(&f.state, None, Some(id), "start", false, None)
-            .await
-            .unwrap();
+        crate::common::container_wire(
+            ops::container(&f.state, None, Some(id), "start", false, None)
+                .await
+                .unwrap(),
+        );
     }
     assert_eq!(f.state.runtime().list().len(), 2);
 
-    let out = ops::container(&f.state, Some("chat"), None, "stop", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, Some("chat"), None, "stop", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     let stopped: Vec<&str> = out["stopped"]
         .as_array()
@@ -467,9 +503,11 @@ async fn group_stop_stops_every_running_member_of_the_class() {
 async fn group_start_only_warms_the_warm_start_flagged_models() {
     let f = fixture(&[("warm", true), ("cold", false)], &[]).await;
 
-    let out = ops::container(&f.state, Some("chat"), None, "start", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, Some("chat"), None, "start", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     let started: Vec<&str> = out["started"]
         .as_array()
@@ -491,14 +529,18 @@ async fn group_apply_reports_the_pre_flight_and_recreates_only_running_members()
     let f = fixture(&[("clean", false), ("broken", false)], &[]).await;
     make_missing(&f, "broken");
 
-    ops::container(&f.state, None, Some("clean"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("clean"), "start", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(f.podman.run_count(), 1);
 
-    let out = ops::container(&f.state, Some("chat"), None, "apply", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, Some("chat"), None, "apply", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     assert_eq!(out["models_enabled"], 2);
     assert_eq!(out["models_with_problems"], 1);
@@ -536,9 +578,11 @@ async fn group_apply_reports_the_pre_flight_and_recreates_only_running_members()
 #[tokio::test]
 async fn gateway_status_carries_runtime_and_drops_the_old_containers_key() {
     let f = fixture(&[("m1", false)], &[]).await;
-    ops::container(&f.state, None, Some("m1"), "start", false, None)
-        .await
-        .unwrap();
+    crate::common::container_wire(
+        ops::container(&f.state, None, Some("m1"), "start", false, None)
+            .await
+            .unwrap(),
+    );
 
     let status = ops::status(&f.state).await.unwrap();
     assert!(status.get("containers").is_none(), "{status}");
@@ -612,9 +656,11 @@ async fn group_apply_reports_the_image_pre_flight() {
     .unwrap();
     f.state.reload_snapshot().await.unwrap();
 
-    let out = ops::container(&f.state, Some("image"), None, "apply", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, Some("image"), None, "apply", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true);
     assert_eq!(out["target"], "image");
     assert_eq!(out["models_enabled"], 2);
@@ -698,54 +744,68 @@ async fn the_image_class_starts_stops_and_applies_like_every_other() {
     };
 
     // The class is found from the id alone.
-    let out = ops::container(&f.state, None, Some("z-image"), "start", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        ops::container(&f.state, None, Some("z-image"), "start", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["class"], "image");
     assert_eq!(starts(), 1, "the container was never started");
 
-    let status = ops::container(&f.state, None, Some("z-image"), "status", false, None)
-        .await
-        .unwrap();
+    let status = crate::common::container_wire(
+        ops::container(&f.state, None, Some("z-image"), "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(status["class"], "image");
     assert_eq!(status["engine"], "sdcpp");
     assert_eq!(status["runtime"]["state"], "ready");
 
     // Apply recreates: one more stop and one more run, on the image-class name.
-    let applied = ops::container(&f.state, None, Some("z-image"), "apply", false, None)
-        .await
-        .unwrap();
+    let applied = crate::common::container_wire(
+        ops::container(&f.state, None, Some("z-image"), "apply", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(applied["ok"], true, "{applied}");
     assert_eq!(starts(), 2);
     assert_eq!(f.podman.stopped_names(), vec![name.clone()]);
 
     // The group verbs see it under its own target and not under another's.
-    let group = ops::container(&f.state, Some("image"), None, "status", false, None)
-        .await
-        .unwrap();
+    let group = crate::common::container_wire(
+        ops::container(&f.state, Some("image"), None, "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(group["target"], "image");
     assert_eq!(
         group["runtime"].as_array().map(Vec::len),
         Some(1),
         "{group}"
     );
-    let chat = ops::container(&f.state, Some("chat"), None, "status", false, None)
-        .await
-        .unwrap();
+    let chat = crate::common::container_wire(
+        ops::container(&f.state, Some("chat"), None, "status", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(chat["runtime"].as_array().map(Vec::len), Some(0), "{chat}");
 
-    let stopped = ops::container(&f.state, Some("image"), None, "stop", false, None)
-        .await
-        .unwrap();
+    let stopped = crate::common::container_wire(
+        ops::container(&f.state, Some("image"), None, "stop", false, None)
+            .await
+            .unwrap(),
+    );
     assert_eq!(stopped["ok"], true, "{stopped}");
     assert!(f.state.runtime().list().is_empty());
 
     // Logs are per model, and the image class is no exception.
     f.podman.set_logs("sd-server: loading tensors completed\n");
-    let logs = ops::container(&f.state, None, Some("z-image"), "logs", false, Some(5))
-        .await
-        .unwrap();
+    let logs = crate::common::container_wire(
+        ops::container(&f.state, None, Some("z-image"), "logs", false, Some(5))
+            .await
+            .unwrap(),
+    );
     assert!(
         logs["logs"].as_str().unwrap().contains("loading tensors"),
         "{logs}"

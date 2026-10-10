@@ -33,6 +33,7 @@ pub(crate) use run::{cold, Feed};
 
 use std::time::Instant;
 
+use lmgw_api_types::chat_frames as frames;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::realtime::warm::{warm_group, Reporter, WarmMode};
@@ -87,10 +88,13 @@ pub(crate) fn start(
         // use (client-apps design §1.3, review W2-3): scope and budget before
         // the warm below can load it; the speaker counts each call.
         if let Err(e) = device_check(&state, charged.as_ref(), &plan).await {
-            let data = serde_json::json!({ "code": e.code(), "message": e.to_string() });
-            return out.frame(super::super::chat_turn::TurnFrame::new(
+            let error = frames::SpeechError {
+                code: e.code().to_string(),
+                message: e.to_string(),
+            };
+            return out.frame(super::super::chat_turn::TurnFrame::of(
                 "speech_error",
-                data.to_string(),
+                &error,
             ));
         }
         let states = (warm && !stop.is_raised() && !out.is_closed()).then(|| {

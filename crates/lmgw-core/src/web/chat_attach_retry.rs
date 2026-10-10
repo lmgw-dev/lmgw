@@ -10,6 +10,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
+use lmgw_api_types::chat_attachments::Transcribed;
 use serde_json::{json, Value};
 
 use crate::state::SharedState;
@@ -150,7 +151,12 @@ pub async fn transcribe(
     let unprocessable =
         |code: &'static str, msg: String| err_json(StatusCode::UNPROCESSABLE_ENTITY, code, msg);
     match retry_transcript(&state, &caller, id, None).await {
-        Ok(Retried::Done(meta)) => Json(json!({ "ok": true, "id": id, "meta": meta })).into_response(),
+        Ok(Retried::Done(meta)) => Json(Transcribed {
+            ok: true,
+            id,
+            meta,
+        })
+        .into_response(),
         Ok(Retried::NotFound) => err_json(StatusCode::NOT_FOUND, "not_found", "attachment not found"),
         Ok(Retried::Sent) => err_json(
             StatusCode::CONFLICT,

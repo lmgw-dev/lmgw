@@ -1410,7 +1410,8 @@ async fn candidates_are_curated_over_the_api_and_decided_once() {
         .json()
         .await
         .unwrap();
-    let gid = accepted["id"].as_i64().unwrap();
+    let gid =
+        common::round_trips::<lmgw_api_types::GoldenSaved>("accept a candidate", &accepted).id;
     let golden = qstore::get_golden_query(&state.corpus, gid)
         .await
         .unwrap()
@@ -1436,11 +1437,16 @@ async fn candidates_are_curated_over_the_api_and_decided_once() {
     );
 
     // ---- reject: discarded, but remembered ----
-    http.post(format!("{base}/api/docs/golden/candidates/{second}/reject"))
+    let rejected: Value = http
+        .post(format!("{base}/api/docs/golden/candidates/{second}/reject"))
         .json(&json!({}))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    common::round_trips::<lmgw_api_types::Ack>("reject a candidate", &rejected);
     let queue: Value = http
         .get(format!("{base}/api/docs/golden/candidates?corpus_id={cid}"))
         .send()
@@ -1839,7 +1845,8 @@ async fn corpora_golden_queries_and_the_request_queue_are_manageable_over_the_ap
         .json()
         .await
         .unwrap();
-    let gid = created["id"].as_i64().unwrap();
+    let gid =
+        common::round_trips::<lmgw_api_types::GoldenSaved>("save a golden query", &created).id;
 
     let resp = http
         .post(format!("{base}/api/docs/golden"))
@@ -1872,6 +1879,27 @@ async fn corpora_golden_queries_and_the_request_queue_are_manageable_over_the_ap
         .unwrap();
     assert_eq!(body["golden_queries"][0]["query"], "extractor typed data");
 
+    // A second one, deleted again: the delete's answer is the plain ack.
+    let spare: Value = http
+        .post(format!("{base}/api/docs/golden"))
+        .json(&json!({"corpus_id": cid, "query": "spare", "expected_chunk_ids": [ids[1]]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let spare = common::round_trips::<lmgw_api_types::GoldenSaved>("save a golden query", &spare);
+    let removed: Value = http
+        .post(format!("{base}/api/docs/golden/{}/delete", spare.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    common::round_trips::<lmgw_api_types::Ack>("delete a golden query", &removed);
+
     // ---- the doc-request queue ----
     let body: Value = http
         .get(format!("{base}/api/docs/requests?status=pending"))
@@ -1897,11 +1925,16 @@ async fn corpora_golden_queries_and_the_request_queue_are_manageable_over_the_ap
         "only a finished ingest may call a request fulfilled"
     );
 
-    http.post(format!("{base}/api/docs/requests/{rid}/status"))
+    let dismissed: Value = http
+        .post(format!("{base}/api/docs/requests/{rid}/status"))
         .json(&json!({"status": "dismissed"}))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    common::round_trips::<lmgw_api_types::Ack>("set a request's status", &dismissed);
     let body: Value = http
         .get(format!("{base}/api/docs/requests?status=pending"))
         .send()
@@ -1934,10 +1967,15 @@ async fn corpora_golden_queries_and_the_request_queue_are_manageable_over_the_ap
     assert_eq!(body["chunks"][1]["derived_title"], "Extractors");
 
     // ---- and deleting the corpus takes its queries with it ----
-    http.post(format!("{base}/api/docs/corpora/{cid}/delete"))
+    let deleted: Value = http
+        .post(format!("{base}/api/docs/corpora/{cid}/delete"))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    common::round_trips::<lmgw_api_types::MessageAck>("delete a corpus", &deleted);
     assert!(qstore::list_corpora(&state.corpus)
         .await
         .unwrap()
@@ -2294,7 +2332,12 @@ async fn the_docs_tab_decodes_every_dashboard_response() {
         status, 200,
         "the UI's own params object is accepted: {text}"
     );
-    let search: dto::DocsSearchResponse = serde_json::from_str(&text).unwrap();
+    // Nothing the route writes is dropped by the documented type, and the
+    // answer validates against the built document.
+    let search: dto::DocsSearchResponse = crate::common::round_trips(
+        "docs search",
+        &serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+    );
     assert_eq!(search.corpus_id, "axum@0.8");
     assert_eq!(
         search.trace.params.k_fts, 5,

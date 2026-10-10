@@ -64,7 +64,7 @@ Checked against the `feat/api-docs` branch. Each finding says what this design d
   - hand-written `/v1` protocol schemas.
 - **Served twice:**
   - `GET /api/openapi.json` (Admin): everything.
-  - `GET /v1/openapi.json` (Inference): only the inference plane.
+  - `GET /v1/openapi.json` (Inference): only the inference plane. *Changed, 2026-10-10 (the owner's decision):* the v1 document is the developer document: every operation a non-owner credential reaches (inference, chat, agent-self, ledger) and GET /api/version; the browser session routes and the admin plane stay in the admin document only. The project site's API reference is built from it.
 - **Drift guards** in `tests/it`, both ways, including live validation of every `/api` GET that can be exercised in the test gateway.
 - **`POST /v1/messages/count_tokens` (Anthropic SDK) and `POST /tokenize` (llama.cpp) work for real.**
   - Each is a thin adapter onto the universal counter's machinery.
@@ -275,6 +275,8 @@ pub(crate) struct DocRoute {
 | `GET /ui`, `/ui/`, `/ui/{*path}` | Legacy redirects to the SPA. |
 | Every `/chat/api/*`, `/audio-lab/api/*`, `/image-lab/api/*` row (25 rows) | *(Owner decision, 2026-09-28.)* The dashboard's own backend; its shapes follow the UI and are no contract. Formerly documented `x-lmgw-internal: true` via a fourth `Group::Internal` tag group (§4.3) and `planes/labs.rs` (§3.2) — both removed; see §12. |
 
+*Changed, 2026-10-10 (the owner's decision):* every lmgw HTTP API except the dashboard itself is documented and typed, the Chat API, the Knowledge bases API, the Audio lab and Image lab APIs and the Chat page's row refresh included (planes `chat_threads.rs`, `chat_turns.rs`, `chat_attachments.rs`, `knowledge.rs`, `audio_lab.rs`, `image_lab.rs`). The Knowledge bases, lab and row-refresh routes are admin routes, so they are in the admin document only. The shared reason `DASHBOARD_BACKEND` is gone. **Final state of the exclusion list:** the dashboard SPA and its bundle (`/`, `/{*path}`), the legacy `/ui` redirects (`/ui`, `/ui/`, `/ui/{*path}`), and the agent app and agent MCP reverse proxies (`/agents/{id}/app*`, `/agents/{id}/mcp*`). Nothing else in `CAPABILITY_TABLE` is undocumented.
+
 ### 4.3 Document shape
 
 - **Top level:**
@@ -303,7 +305,9 @@ pub(crate) struct DocRoute {
   | Group | Tags (id — name) |
   |---|---|
   | Inference | `openai` OpenAI-compatible · `anthropic` Anthropic-compatible · `llamacpp` llama.cpp-compatible · `lmgw-inference` lmgw extensions · `mcp` MCP |
-  | Dashboard API | `meta` API description · `session` Session · `status` Status & live feed · `models` Models · `upstreams` Upstreams · `tools` MCP servers & tools · `downloads` Downloads · `settings` Settings · `responses` Stored responses · `usage` Usage · `docs` Doc corpora · `agents` Agents |
+  | Gateway | `meta` API description |
+  | Dashboard API | `session` Session · `status` Status & live feed · `models` Models · `upstreams` Upstreams · `tools` MCP servers & tools · `downloads` Downloads · `settings` Settings · `responses` Stored responses · `usage` Usage · `docs` Doc corpora · `knowledge` Knowledge bases · `audio-lab` Audio lab · `image-lab` Image lab · `agents` Agents |
+  | Device API | `chat` Chat |
   | Ops | `ops-routing` · `ops-models` · `ops-runtime` · `ops-downloads` · `ops-settings` · `ops-tools` · `ops-keys` · `ops-usage` · `ops-responses` · `ops-builds` · `ops-agents` |
   | Agent runtime | `agent-runtime` (every AgentSelf and Ledger route) |
 
@@ -349,7 +353,7 @@ pub(crate) struct DocRoute {
   - Worker: verify the setter names against schemars 1.2.
 - **Hand-written schemas** register through `schemas::named(g, "Name", json_schema!({...}))`. It panics on a name that already exists with different content, so every component name is unique.
 - **Untyped:** `schemas::untyped(why)` = `{"type":"object","x-lmgw-untyped": why}`.
-- **The v1 document** is the admin document filtered to `x-lmgw-capability == "inference"` operations, then `prune_components` drops schemas nothing reaches.
+- **The v1 document** is the admin document filtered to `x-lmgw-capability == "inference"` operations, then `prune_components` drops schemas nothing reaches. *Changed, 2026-10-10 (the owner's decision):* the v1 document is the developer document: every operation a non-owner credential reaches (inference, chat, agent-self, ledger) and GET /api/version; the browser session routes and the admin plane stay in the admin document only. The project site's API reference is built from it.
 
 ### 4.6 `/api` GET reads → documented response schema
 
@@ -906,7 +910,7 @@ Existing tokens only (Breeze graphite + blue; no new colours):
 | `openapi_coverage.rs` (WP8) | `every_capability_row_is_documented_or_excluded` | each `CAPABILITY_TABLE` row is exactly one of: a documented operation (path normalized `{*x}`→`{x}`), `POST /api/op/{name}`, an `UNDOCUMENTED` entry |
 | | `every_documented_operation_is_a_capability_row` | reverse direction; op paths map to `/api/op/{name}`; `x-lmgw-capability` equals the row's |
 | | `exclusions_are_real_rows_with_reasons` | every `UNDOCUMENTED` entry is a table row with a non-empty reason |
-| | `served_docs_follow_their_capabilities` | `/api/openapi.json`: owner 200, client 403, anon (auth on) 401; `/v1/openapi.json`: client 200, only inference ops, no `/api` path, no unreachable component |
+| | `served_docs_follow_their_capabilities` | `/api/openapi.json`: owner 200, client 403, anon (auth on) 401; `/v1/openapi.json`: client 200, no admin op, no `/api/session*` path, no unreachable component (*changed 2026-10-10: was "only inference ops, no `/api` path"*) |
 | | `lmgw_endpoints_are_documented_inference_paths` | every path in `/v1/models` `lmgw.endpoints` is a v1-doc path, and every v1 op with a group appears |
 | | `every_typed_extractor_is_referenced_by_the_doc` | source scan of `src/web`, `src/server.rs`, `src/mcp/ingress.rs`: each `Query<X>`/`Json<X>` (not `Value`/`Args`) names a type that appears in `src/openapi/**` |
 | | `every_example_validates_against_its_schema` | all JSON request examples (and generated op examples) validate (`jsonschema`, root = `{"$ref": …, "components": doc.components}`) |
@@ -1074,6 +1078,7 @@ Added after review R1 (§12 entries 15–18): `a_spent_budget_never_refuses_a_co
 ## 11. Later / out of scope
 
 - **DTOs for the untyped reads:** `local-model-check`, `model-inspect`, `llama-flags`, the agent export, and `local-model?target=image`. *(The internal mini-APIs' reads are no longer a candidate here — owner decision, 2026-09-28: they are not documented operations at all, only rows in `x-lmgw-undocumented`, §4.2, not merely untyped.)*
+  *(Done 2026-10-10, all but the verbatim relays: every answer is an `lmgw-api-types` type the handler or op builds. The exceptions, `POST /v1/tasks/run`, `POST /v1/tasks/stream` and `POST /audio-lab/api/tasks/run`, relay audio.cpp's own JSON and sit on `UNTYPED` in `exclusions.rs`. Enforced by `untyped_responses_are_exactly_the_allowlist` (`build.rs`: a new `Resp::Untyped` outside the list fails, and so does a stale entry) and by the `ci/json_ratchet.py` ratchet on inline `json!(` in `web/` and `ops/`; see README, "Typed answers".)*
 - **`/detokenize` (and `/props`)** for llama.cpp compatibility clients (§0.9).
 - **`/v1/embeddings`** forwarding `dimensions`/`encoding_format`, or refusing them visibly (§0.10).
   *(Done 2026-09-29: `dimensions` is forwarded (Gemini: `outputDimensionality`) and the returned
@@ -1102,6 +1107,8 @@ source — kept here for the same reason: wrong, they are one line to revert.
    in `exclusions.rs` instead, one shared reason: "The dashboard's own
    backend; its shapes follow the UI and are no contract." §1, §3, §4.2,
    §4.3, §4.4 and §6 are amended in place, dated to this decision.
+
+   *Changed, 2026-10-10 (the owner's decision):* superseded: every lmgw HTTP API except the dashboard itself is now documented and typed; §4.2 has the final exclusion list.
 2. **`x-lmgw-writes` means *exactly* "changes stored state," applied
    literally even where it reads oddly.** The test is "does a row get
    written," not "does this have a side effect" or "could this cost money" —

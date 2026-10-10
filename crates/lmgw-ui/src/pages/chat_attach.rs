@@ -6,7 +6,7 @@
 //! the pure helpers and the components live here; `chat.rs` only calls them.
 
 use leptos::prelude::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::chat::{Attachment, ThreadDetail};
 use crate::scope::Scope;
@@ -443,7 +443,7 @@ fn DraftChipView(
         retrying.set(true);
         let scope = Scope::new();
         scope.spawn(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<lmgw_api_types::chat_attachments::Transcribed, _>(
                 format!("/chat/api/attachments/{aid}/transcribe"),
                 &json!({}),
             )
@@ -451,7 +451,7 @@ fn DraftChipView(
             retrying.try_set(false);
             match res {
                 Ok(v) => {
-                    att.try_update(|a| a.meta = v["meta"].clone());
+                    att.try_update(|a| a.meta = v.meta);
                     on_refresh.run(());
                 }
                 Err(e) => toasts.err(format!("transcription failed: {e}")),
@@ -472,9 +472,9 @@ fn DraftChipView(
         att.update(|a| a.mode = Some(m.to_string()));
         let scope = Scope::new();
         scope.spawn(async move {
-            match crate::api::post::<Value, _>(
+            match crate::api::post::<lmgw_api_types::chat_attachments::ModeSet, _>(
                 format!("/chat/api/attachments/{aid}/mode"),
-                &json!({ "mode": m }),
+                &lmgw_api_types::chat_attachments::ModeRequest { mode: m.into() },
             )
             .await
             {
@@ -653,6 +653,7 @@ pub(super) fn ViewerMeta(att: RwSignal<Option<Attachment>>) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn att(kind: &str, meta: Value) -> Attachment {
         Attachment {

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use lmgw_api_types as dto;
+
 use crate::config::AudioModel;
 use crate::runtime::argv;
 use crate::state::SharedState;
@@ -26,9 +28,22 @@ pub async fn audio_catalog(
     package: Option<&str>,
     search: Option<&str>,
 ) -> Result<Value, String> {
+    if action == "list" {
+        let family = family.map(str::trim).filter(|s| !s.is_empty());
+        return Ok(list(state, family, search).await);
+    }
+    super::backends::to_json(audio_catalog_act(state, action, family, package).await)
+}
+
+/// The two actions the op takes: a refresh's summary or a queued download.
+pub async fn audio_catalog_act(
+    state: &SharedState,
+    action: &str,
+    family: Option<&str>,
+    package: Option<&str>,
+) -> Result<dto::AudioCatalogAnswer, String> {
     let family = family.map(str::trim).filter(|s| !s.is_empty());
     match action {
-        "list" => Ok(list(state, family, search).await),
         "refresh" => {
             let snapshot = audio::catalog_refresh(state).await?;
             let families = snapshot.specs.len();
@@ -42,21 +57,24 @@ pub async fn audio_catalog(
                     if n == 1 { "" } else { "s" }
                 ),
             };
-            Ok(json!({
-                "ok": true,
-                "families": families,
-                "fetched_at": snapshot.fetched_at,
-                "warnings": snapshot.warnings,
-                "message": message,
-            }))
+            Ok(dto::AudioCatalogAnswer::Refreshed(
+                dto::AudioCatalogRefreshed {
+                    ok: true,
+                    families,
+                    fetched_at: snapshot.fetched_at,
+                    warnings: snapshot.warnings,
+                    message,
+                },
+            ))
         }
         "download" => {
             let package = package.map(str::trim).unwrap_or_default();
             let (Some(family), false) = (family, package.is_empty()) else {
                 return Err("pass family and package".into());
             };
-            let install = audio::catalog_download(state, family, package).await?;
-            serde_json::to_value(install).map_err(|e| e.to_string())
+            Ok(dto::AudioCatalogAnswer::Download(
+                audio::catalog_download(state, family, package).await?,
+            ))
         }
         other => Err(format!(
             "unknown action '{other}' (list, refresh, download)"
@@ -139,7 +157,7 @@ pub(super) async fn audio_model_get(
     state: &SharedState,
     id: Option<i64>,
     model_id: Option<&str>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<dto::AudioModelDetail>, String> {
     let snap = state.snapshot();
     let found: Option<&AudioModel> = match (id, model_id) {
         (Some(id), _) => snap.audio_models.iter().find(|m| m.id == id),
@@ -186,58 +204,94 @@ pub(super) async fn audio_model_get(
         .list()
         .into_iter()
         .find(|e| e.class == crate::runtime::Class::Audio && e.model_id == m.model_id)
-        .map(|e| json!({"state": e.state.as_str(), "in_flight": e.in_flight}));
+        .map(|e| dto::AudioRunning {
+            state: e.state.as_str().to_string(),
+            in_flight: e.in_flight as u64,
+        });
     let residency_note = state.vram.audio_residency_note(state, &snap, m).await;
-    let mut row = serde_json::to_value(m).map_err(|e| e.to_string())?;
-    if let Some(o) = row.as_object_mut() {
-        o.insert("class".into(), json!("audio"));
-        o.insert(
-            "public_name".into(),
-            json!(snap.audio_public_name(&m.model_id)),
-        );
-        o.insert("path_present".into(), json!(path_present));
-        o.insert(
-            "extra_run_args".into(),
-            json!(m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a))),
-        );
-        // What the container is started with: the row's override, else the
-        // class's — `image`/`extra_run_args` above are the override alone.
-        o.insert(
-            "effective_image".into(),
-            json!(m.image.clone().unwrap_or_else(|| s.image.clone())),
-        );
-        o.insert(
-            "effective_extra_run_args".into(),
-            json!(argv::args_to_lines(&crate::runtime::audio::run_args(m, s))),
-        );
+    // Every field of the stored row, named: a field added to the row stops
+    // compiling here until the read carries it too.
+    let AudioModel {
+        id,
+        model_id,
+        family,
+        path,
+        task,
+        mode,
+        lazy,
+        busy_timeout_ms,
+        backend,
+        threads: row_threads,
+        default_request_options,
+        model_spec_override,
+        config_id,
+        weight_id,
+        load_options,
+        session_options,
+        voice_presets,
+        default_voice_preset,
+        enabled,
+        image,
+        extra_run_args,
+        warm_start,
+        hold_fallback_mode,
+        hold_fallback,
+        residency,
+    } = m.clone();
+    Ok(Some(dto::AudioModelDetail {
+        id,
+        public_name: snap.audio_public_name(&model_id),
+        next_step: format!(
+            "audio.cpp loads the model on its first request: POST /v1/audio/speech \
+             (task tts) or /v1/audio/transcriptions (task asr) with model '{}' proves \
+             it works; lmgw__container model={} action=logs shows a start that failed",
+            snap.audio_public_name(&model_id),
+            model_id
+        ),
+        model_id,
+        family,
+        path,
+        path_present,
+        task,
+        mode,
+        lazy,
+        busy_timeout_ms,
+        backend,
+        threads: row_threads,
+        default_request_options,
+        model_spec_override,
+        config_id,
+        weight_id,
+        load_options,
+        session_options,
+        voice_presets,
+        default_voice_preset,
+        enabled,
+        // The row's override alone; what the container is started with is
+        // `effective_image` and `effective_extra_run_args`.
+        image: image.clone(),
+        extra_run_args: extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        warm_start,
+        hold_fallback_mode: hold_fallback_mode.as_str().to_string(),
+        hold_fallback,
+        residency: residency.map(|r| dto::LearnedResidency {
+            bytes: r.bytes,
+            learned_at: r.learned_at,
+            key: r.key,
+        }),
+        effective_image: image.unwrap_or_else(|| s.image.clone()),
+        effective_extra_run_args: argv::args_to_lines(&crate::runtime::audio::run_args(m, s)),
         // Where it runs, and its thread count with where that comes from:
         // `row`, the audio `class`, or this machine's physical `cores`.
-        o.insert(
-            "runs_on".into(),
-            json!(crate::runtime::audio::placement(m, s).as_str()),
-        );
-        o.insert("threads_in_effect".into(), json!(threads));
-        o.insert("threads_source".into(), json!(threads_source.as_str()));
-        o.insert("server_json".into(), server_json);
-        o.insert("running".into(), running.unwrap_or(Value::Null));
-        o.insert("residency_note".into(), json!(residency_note));
-        o.insert(
-            "residency_charged_bytes".into(),
-            json!(crate::vram::residency::learned(m, s)),
-        );
-        o.insert("problems".into(), json!(problems));
-        o.insert(
-            "next_step".into(),
-            json!(format!(
-                "audio.cpp loads the model on its first request: POST /v1/audio/speech \
-                 (task tts) or /v1/audio/transcriptions (task asr) with model '{}' proves \
-                 it works; lmgw__container model={} action=logs shows a start that failed",
-                snap.audio_public_name(&m.model_id),
-                m.model_id
-            )),
-        );
-    }
-    Ok(Some(row))
+        runs_on: crate::runtime::audio::placement(m, s).as_str().to_string(),
+        threads_in_effect: threads,
+        threads_source: threads_source.as_str().to_string(),
+        server_json,
+        running,
+        residency_note,
+        residency_charged_bytes: crate::vram::residency::learned(m, s),
+        problems,
+    }))
 }
 
 /// The problem the links out of the models dir on the way to a row's GGUFs

@@ -98,6 +98,9 @@ async fn the_rows_route_answers_the_named_rows_as_the_list_lists_them() {
     )
     .await;
     assert_eq!(s, 200, "{rows}");
+    // The documented type (`ThreadRows`) is the answer, key by key.
+    let typed: lmgw_api_types::chat::ThreadRows = serde_json::from_value(rows.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&typed).unwrap(), rows);
     let named = [a, b, c];
     let in_list: Vec<i64> = ids(&list)
         .into_iter()

@@ -17,6 +17,7 @@ use std::convert::Infallible;
 use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
+use lmgw_api_types::chat_frames as frames;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -87,16 +88,35 @@ impl TurnFrame {
         }
     }
 
+    /// The frame `event` says, written from its type in
+    /// `lmgw_api_types::chat_frames` — every frame of the Chat API is one.
+    pub fn of(event: &'static str, data: &impl serde::Serialize) -> Self {
+        // Through a `Value`, whose map keeps its keys sorted: the same JSON
+        // as the struct order, with its keys in alphabetical order
+        // (`chat_wire::wire` writes the thread answers the same way).
+        let data = serde_json::to_value(data).map_or_else(
+            |e| {
+                tracing::error!("chat: the {event} frame did not serialize: {e}");
+                "{}".into()
+            },
+            |v| v.to_string(),
+        );
+        Self::new(event, data)
+    }
+
     /// The `error` frame of a gateway error: `{message, code}`, the code
     /// being the one a client branches on (`GatewayError::code`, e.g.
     /// `gpu_hold`, `context_length_exceeded`, `vram_queue_timeout`).
     pub fn error(e: &GatewayError) -> Self {
-        let data = serde_json::json!({ "message": e.to_string(), "code": e.code() });
         Self {
-            event: "error",
-            data: data.to_string(),
             failure: Some(e.clone()),
-            sent: None,
+            ..Self::of(
+                "error",
+                &frames::ErrorFrame {
+                    message: e.to_string(),
+                    code: Some(e.code().to_string()),
+                },
+            )
         }
     }
 
@@ -238,8 +258,9 @@ pub(crate) async fn refuse_sent(tx: &super::Events, e: &GatewayError, sent: Sent
 
 async fn refuse_frame(tx: &super::Events, error: TurnFrame) {
     let _ = tx.send(error).await;
-    let done = serde_json::json!({ "aborted": true }).to_string();
-    let _ = tx.send(TurnFrame::new("done", done)).await;
+    let _ = tx
+        .send(TurnFrame::of("done", &frames::DoneFrame::aborted()))
+        .await;
 }
 
 /// A turn's frames as its SSE response, one event per frame, in order —

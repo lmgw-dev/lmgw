@@ -28,7 +28,8 @@ pub struct LanguageNote {
 /// A voice stage's model state: a chat stream's `state` frame and a bound
 /// realtime session's `lmgw.model.state` event.
 /// Read leniently: a field a client does not know of is ignored, a missing
-/// one is empty.
+/// one is empty. Written as the gateway sends it: `ms` always, the other
+/// optional facts only when the state has them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -41,18 +42,24 @@ pub struct ModelState {
     /// How long the load took, for `ready`.
     pub ms: Option<u64>,
     /// `held`: `gpu_hold` or `benchmark`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
     /// `fallback`: the alias that answers in its place.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub answered_by: Option<String>,
     /// `skipped`: `full`, `does_not_fit` or `cannot_speak`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The sentence a client shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// `skipped` with `does_not_fit`: what the stage's group needs on the
     /// card, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub needed_bytes: Option<u64>,
     /// `skipped` with `does_not_fit`: what the group could have together,
     /// in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_bytes: Option<u64>,
 }
 

@@ -27,7 +27,7 @@ const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0, 1, 2, 254, 255, 0];
 /// A stored thread with every kind of content: settings, a user turn with an
 /// attachment and retrieval, an assistant turn with reasoning and a tool
 /// record.
-async fn rich_thread(state: &SharedState, title: &str) -> i64 {
+pub(crate) async fn rich_thread(state: &SharedState, title: &str) -> i64 {
     let db = &state.db;
     let id = store::create_chat_thread_with_prompt(db, "m-alias", "chat", "Be ``` careful.", None)
         .await

@@ -34,6 +34,7 @@ pub(crate) fn register(g: &mut SchemaGenerator, dialect: Dialect) -> Schema {
         Dialect::LlamaCpp => llamacpp_error(g),
         Dialect::JsonRpc => jsonrpc_error(g),
         Dialect::Dashboard => api_error(g),
+        Dialect::Lab => g.subschema_for::<lmgw_api_types::audio_lab::LabError>(),
     };
     debug_assert_eq!(
         schema

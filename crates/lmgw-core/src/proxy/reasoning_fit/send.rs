@@ -89,7 +89,8 @@ where
     let mut retried = false;
     loop {
         let started = Instant::now();
-        let sent = crate::gate::send_gated_marked(
+        // Boxed: 111 KB of poll frame in a debug build, on the turn -> gate chain.
+        let sent = Box::pin(crate::gate::send_gated_marked(
             state,
             hold,
             route,
@@ -103,7 +104,7 @@ where
             timeout,
             |r| build(r, &current),
             prompt_sent,
-        )
+        ))
         .await;
         let sent = crate::llama_facts::observe(state, hold, route, sent).await?;
         let Sent::Upstream(resp) = sent else {

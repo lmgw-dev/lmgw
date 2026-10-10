@@ -165,9 +165,13 @@ pub async fn climb_for(
     need: u64,
     reason: &str,
 ) -> Result<Climbed, GatewayError> {
-    climb_with(state, hold, to, Some(need), reason).await
+    // Boxed: climb_with's poll frame is 129 KB in a debug build, on the turn ->
+    // gate -> climb chain that shares a 2 MiB test-thread stack.
+    Box::pin(climb_with(state, hold, to, Some(need), reason)).await
 }
 
+// Its awaits are boxed one by one: inline, this function's debug-build poll frame
+// was 129 KB, on the turn -> gate -> climb chain that shares a 2 MiB stack.
 async fn climb_with(
     state: &SharedState,
     hold: &LocalHold,
@@ -181,10 +185,10 @@ async fn climb_with(
         return Ok(Climbed::Done);
     };
     if snap.gpu_block().is_some() {
-        return held(state, &snap, hold).await;
+        return Box::pin(held(state, &snap, hold)).await;
     }
 
-    let Some(plan) = Plan::of(state, &snap, &target, pos).await else {
+    let Some(plan) = Box::pin(Plan::of(state, &snap, &target, pos)).await else {
         return Ok(Climbed::Done);
     };
     let guest = hold.origin() == Origin::Background;
@@ -207,7 +211,7 @@ async fn climb_with(
     }
     // After the card-size check, so a rung no card could hold stays the
     // configuration error it is for the owner, guest or not (§4.7's rule).
-    if let ClimbPermission::Denied(why) = may_climb(state, &snap, hold, &plan).await {
+    if let ClimbPermission::Denied(why) = Box::pin(may_climb(state, &snap, hold, &plan)).await {
         tracing::info!(
             "not climbing chat model '{}' to rung {} for background traffic ('{}'): {why}",
             target.model_id,
@@ -218,10 +222,12 @@ async fn climb_with(
     }
     if vs.enabled {
         if let Some(fb) = fallback.as_mut() {
-            match state
-                .vram
-                .verdict_for(state, &snap, &target, plan.needs, Fill::Verdict)
-                .await
+            match Box::pin(
+                state
+                    .vram
+                    .verdict_for(state, &snap, &target, plan.needs, Fill::Verdict),
+            )
+            .await
             {
                 ExternalVerdict::External(short) => {
                     if fb.external.confirm().await {
@@ -303,7 +309,7 @@ async fn climb_with(
 
     // 3. The drain.
     let deadline = budget.map(|b| started + b);
-    drain(state, &mut ticket, deadline, started, &target, &plan).await?;
+    Box::pin(drain(state, &mut ticket, deadline, started, &target, &plan)).await?;
 
     // The row, the hold, or another trigger's need may have changed while the
     // drain waited: plan again on what is true now (review findings 3–4, §12
@@ -315,7 +321,7 @@ async fn climb_with(
     let snap = state.snapshot();
     if snap.gpu_block().is_some() {
         drop(ticket);
-        return held(state, &snap, hold).await;
+        return Box::pin(held(state, &snap, hold)).await;
     }
     // The rung is picked on the row as it is now: by the request's need when
     // it has one, else by the index it asked for; either way it has to be a
@@ -328,14 +334,14 @@ async fn climb_with(
     let own_index = match need {
         Some(n) => {
             let floor = n.max(running.saturating_add(1));
-            match smallest_rung_holding(state, &snap, &target, floor).await {
+            match Box::pin(smallest_rung_holding(state, &snap, &target, floor)).await {
                 Some(i) => i,
                 None => return Ok(Climbed::Done),
             }
         }
         None => plan.pos.index,
     };
-    let Some(own) = Plan::at(state, &snap, &target, own_index)
+    let Some(own) = Box::pin(Plan::at(state, &snap, &target, own_index))
         .await
         .filter(|own| own.slot > running)
     else {
@@ -343,7 +349,7 @@ async fn climb_with(
     };
     let raised = ticket.to().index;
     let mut joiner = if raised > own.pos.index {
-        Plan::at(state, &snap, &target, raised)
+        Box::pin(Plan::at(state, &snap, &target, raised))
             .await
             .filter(|j| j.slot > own.slot)
     } else {
@@ -368,9 +374,9 @@ async fn climb_with(
             .map_or(0, |f| f.total_bytes);
         let spec = StartSpec::of(&lifecycle_spec(state, &snap, &plan.runtime));
         let rung = plan.label(&target);
-        match background::admit_climb_background(
+        match Box::pin(background::admit_climb_background(
             state, &snap, &target, ticket, spec, plan.needs, running, &rung,
-        )
+        ))
         .await
         {
             GuestClimb::Started(run) => (run, plan, false),
@@ -391,22 +397,20 @@ async fn climb_with(
             .footprint_at(&snap, target.class, &target.model_id, ticket.running())
             .await
             .map_or(0, |f| f.total_bytes);
-        let admitted = state
-            .vram
-            .admit_climb(
-                state,
-                &snap,
-                &target,
-                ticket,
-                (&plan, joiner.as_ref()),
-                running,
-                &hold.alias,
-                queued.id,
-                started,
-                budget,
-                fallback.as_mut().map(|fb| &mut fb.external),
-            )
-            .await?;
+        let admitted = Box::pin(state.vram.admit_climb(
+            state,
+            &snap,
+            &target,
+            ticket,
+            (&plan, joiner.as_ref()),
+            running,
+            &hold.alias,
+            queued.id,
+            started,
+            budget,
+            fallback.as_mut().map(|fb| &mut fb.external),
+        ))
+        .await?;
         match admitted {
             AdmittedClimb::Started {
                 run,
@@ -442,7 +446,7 @@ async fn climb_with(
 
     // 5. The start, in its own task: a trigger that goes away here does not
     // take the climb with it.
-    let outcome = run.finish().await;
+    let outcome = Box::pin(run.finish()).await;
     state.vram.cache_pids(state);
     broadcast(state);
     match outcome {

@@ -131,7 +131,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             // Review R2 #8: NDJSON is raw text, not the JSON *string* the
             // old `"type": [.., "string"]` schema described.
             request: Req::JsonOrNdjson(run_events_body),
-            response: Resp::Untyped("ad-hoc {ok, applied, rejected}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::AgentEventsApplied>()),
             ..base(
                 "POST",
                 "/api/agents/runs/{job_id}/events",
@@ -143,7 +143,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "Closes a run this caller owns with its terminal status.",
             path_ints: &["job_id"],
             request: Req::Json(run_close_body),
-            response: Resp::Untyped("ad-hoc {ok}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::Ack>()),
             ..base(
                 "POST",
                 "/api/agents/runs/{job_id}/close",
@@ -160,13 +160,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Downloads the agent as `<id>.agent.json`: its manifest plus an \
-                envelope (export time, lmgw version, and — with include_config=1 — its \
-                non-secret config values). No fixed shape this document models; a secret \
-                never leaves.",
+                envelope (export time, lmgw version, portability, the names of the secret \
+                and folder fields left out, and — with include_config=1 — the non-secret \
+                config values). A secret never leaves; the file imports back unchanged.",
             query: Some(|g| g.root_schema_for::<ExportQuery>()),
-            response: Resp::Untyped(
-                "a JSON attachment: the manifest plus an export envelope, no fixed schema",
-            ),
+            response: Resp::Download(&[(
+                "application/json",
+                Some(|g| g.root_schema_for::<dto::AgentExport>()),
+            )]),
             ..base(
                 "GET",
                 "/api/agents/{id}/export",
@@ -190,7 +191,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 trigger would. An agent has at most one live run: a second open while one is live \
                 is refused with the running job's id.",
             request: Req::Json(|g| g.root_schema_for::<OpenBody>()),
-            response: Resp::Untyped("ad-hoc {run, deadline_seconds}; no DTO"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::AgentRunOpened>()),
             ..base(
                 "POST",
                 "/api/agents/{id}/runs",

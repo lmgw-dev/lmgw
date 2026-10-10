@@ -10,10 +10,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
-use serde_json::{json, Value};
 
-use super::chat::{err_json, thread_json};
+use super::chat::err_json;
 use super::chat_caller::Caller;
 use super::chat_extract::{ChatJson, ChatOptJson, ChatPath};
 use super::chat_knowledge;
@@ -21,8 +19,12 @@ use super::chat_repo::{ChatRepo, KeepOutcome};
 use super::chat_steer::Change;
 use super::chat_turn::{self, TurnMode};
 use super::chat_voice::ReadAloud;
+use super::chat_wire;
 use crate::state::SharedState;
 use crate::store::{ChatMessageRow, ChatMessageUpdate, ChatThread, MessageVoice};
+use lmgw_api_types::chat::Ack;
+use lmgw_api_types::chat_threads::{Message, MessageEdit, ReplyEdited, ThreadKept};
+use lmgw_api_types::chat_turn::TurnRequest;
 
 /// `POST /chat/api/threads/{id}/persist` — **Keep** a temporary chat: it is
 /// written to the DB as an ordinary thread (messages, attachments, settings)
@@ -72,7 +74,11 @@ pub async fn persist_thread(
     };
     match ChatRepo::Db.thread(&state, new_id).await {
         Ok(Some(t)) => {
-            Json(json!({ "id": new_id, "thread": thread_json(&state, &t).await })).into_response()
+            let kept = ThreadKept {
+                id: new_id,
+                thread: chat_wire::thread(&state, &t).await,
+            };
+            Json(chat_wire::wire(&kept)).into_response()
         }
         _ => err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -145,7 +151,7 @@ async fn thread_and_message(
 
 /// A message as `GET /chat/api/threads/{id}` lists it: the row plus its
 /// `attachments`.
-async fn message_json(state: &SharedState, repo: ChatRepo, m: &ChatMessageRow) -> Value {
+async fn message_json(state: &SharedState, repo: ChatRepo, m: &ChatMessageRow) -> Message {
     let atts: Vec<_> = repo
         .attachments_meta(state, m.thread_id)
         .await
@@ -153,9 +159,10 @@ async fn message_json(state: &SharedState, repo: ChatRepo, m: &ChatMessageRow) -
         .into_iter()
         .filter(|a| a.message_id == Some(m.id))
         .collect();
-    let mut v = serde_json::to_value(m).expect("ChatMessageRow always serializes");
-    v["attachments"] = json!(atts);
-    v
+    let mut message = chat_wire::message(m, &atts.iter().collect::<Vec<_>>());
+    // This answer has never listed the calls a reply waits on.
+    message.pending_approvals = None;
+    message
 }
 
 /// `POST /chat/api/threads/{id}/messages/{mid}/delete` — delete that one
@@ -179,32 +186,10 @@ pub async fn delete_message(
         return refused;
     }
     match repo.delete_message(&state, id, mid).await {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(true) => Json(Ack::ok()).into_response(),
         Ok(false) => message_not_found(),
         Err(e) => internal(e),
     }
-}
-
-#[derive(Deserialize)]
-pub struct EditReq {
-    content: String,
-    /// A user message's knowledge bases for itself (`#`), replacing the ones
-    /// it had; absent keeps them. Ignored for a reply.
-    #[serde(default)]
-    kb_refs: Option<Vec<i64>>,
-    /// Read the new answer aloud as it streams (chat-voice design §6.4).
-    /// Ignored for a reply, which is not answered again.
-    #[serde(default)]
-    speak: bool,
-}
-
-/// The optional body of a regenerate or a continue (chat-voice design
-/// §6.4): an empty request is still accepted.
-#[derive(Debug, Default, Deserialize)]
-pub struct TurnReq {
-    /// Read the answer aloud as it streams.
-    #[serde(default)]
-    speak: bool,
 }
 
 /// `POST /chat/api/threads/{id}/messages/{mid}/edit` `{content}`.
@@ -230,7 +215,7 @@ pub async fn edit_message(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
-    ChatJson(req): ChatJson<EditReq>,
+    ChatJson(req): ChatJson<MessageEdit>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let (thread, msg) = match thread_and_message(&state, &caller, repo, id, mid).await {
@@ -260,7 +245,7 @@ pub async fn edit_message(
             match repo.message(&state, id, mid).await {
                 Ok(Some(m)) => {
                     let message = message_json(&state, repo, &m).await;
-                    Json(json!({ "ok": true, "message": message })).into_response()
+                    Json(chat_wire::wire(&ReplyEdited { ok: true, message })).into_response()
                 }
                 Ok(None) => message_not_found(),
                 Err(e) => internal(e),
@@ -332,12 +317,12 @@ pub async fn edit_message(
 /// - **On a user message**: everything after it is deleted and it is answered
 ///   again; the stream opens with `turn {user_message_id}`.
 ///
-/// The body is optional (`{speak}`, [`TurnReq`]); an empty one is accepted.
+/// The body is optional (`{speak}`, [`TurnRequest`]); an empty one is accepted.
 pub async fn regenerate_message(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath((id, mid)): ChatPath<(i64, i64)>,
-    ChatOptJson(req): ChatOptJson<TurnReq>,
+    ChatOptJson(req): ChatOptJson<TurnRequest>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let (thread, msg) = match thread_and_message(&state, &caller, repo, id, mid).await {
@@ -414,13 +399,13 @@ async fn answer(
 /// call's). Refused with `409 continue_unavailable` and the reason the
 /// thread JSON's `continue` gives when that says no; a route the send is
 /// re-routed to that cannot take a prefill is refused in the stream. The
-/// body is optional (`{speak}`, [`TurnReq`]): with `speak`, the
+/// body is optional (`{speak}`, [`TurnRequest`]): with `speak`, the
 /// continuation is read aloud as it streams.
 pub async fn continue_reply(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatOptJson(req): ChatOptJson<TurnReq>,
+    ChatOptJson(req): ChatOptJson<TurnRequest>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let thread = match reachable_thread(&state, &caller, repo, id).await {

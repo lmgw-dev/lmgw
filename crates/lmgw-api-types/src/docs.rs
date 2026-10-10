@@ -318,11 +318,15 @@ pub struct SearchHit {
     /// otherwise.
     pub score: f32,
     pub rrf_score: f32,
-    pub fts_rank: Option<u32>,
-    pub knn_rank: Option<u32>,
+    pub fts_rank: Option<u64>,
+    pub knn_rank: Option<u64>,
     pub knn_score: Option<f32>,
     pub rerank_score: Option<f32>,
-    pub tokens: u32,
+    /// The rerank stage ran but did not score this candidate: `score` is then
+    /// its RRF score and it ranks behind the reranked ones. Absent when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rerank_skipped: bool,
+    pub tokens: u64,
 }
 
 /// The corpus status badges (embedding and evaluation state). Neither blocks a query.
@@ -331,6 +335,11 @@ pub struct SearchHit {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CorpusStatusView {
     pub embed_status: String,
+    /// Whether a model on this gateway still resolves to the corpus's pinned
+    /// embedding identity. `false` with `embed_status` `re_embed_required`
+    /// means the corpus cannot be queried until it is re-embedded; `true`
+    /// means it is mid re-embed and still answers.
+    pub embed_model_resolvable: bool,
     pub eval_status: String,
     pub flags: Vec<String>,
     pub warnings: Vec<String>,
@@ -348,6 +357,10 @@ pub struct SearchTraceView {
     /// through raw.
     pub fts_query: String,
     pub fts: Vec<StageHitView>,
+    /// Why the vector stage did not run, so BM25 alone answered. Absent when
+    /// it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knn_skipped: Option<String>,
     pub knn: Vec<StageHitView>,
     pub fused: Vec<FusedHitView>,
     pub rerank_model: Option<String>,
@@ -355,10 +368,10 @@ pub struct SearchTraceView {
     pub rerank_skipped: Option<String>,
     pub rerank: Vec<StageHitView>,
     pub token_counter: String,
-    pub budget_used_tokens: u32,
+    pub budget_used_tokens: u64,
     /// Chunks the token budget dropped, in the order they would have come.
     pub budget_dropped: Vec<String>,
-    pub resident_vectors: u32,
+    pub resident_vectors: u64,
     pub resident_bytes: u64,
     /// Which widening kernel the KNN scan used.
     pub knn_kernel: String,
@@ -371,15 +384,15 @@ pub struct SearchTraceView {
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SearchParamsView {
-    pub k_fts: u32,
-    pub k_vec: u32,
+    pub k_fts: u64,
+    pub k_vec: u64,
     pub rrf_k: f32,
     pub fts_weights: FtsWeightsView,
     pub rerank: bool,
-    pub k_rerank: u32,
-    pub limit: u32,
+    pub k_rerank: u64,
+    pub limit: u64,
     /// `None` returns all `limit` chunks — the budget is the caller's choice.
-    pub budget_tokens: Option<u32>,
+    pub budget_tokens: Option<u64>,
 }
 
 impl Default for SearchParamsView {
@@ -402,14 +415,14 @@ impl SearchParamsView {
     /// from them. `k_rerank == 0` is how Settings says "no rerank stage".
     pub fn from_defaults(d: &DocsSearchDefaults) -> Self {
         Self {
-            k_fts: d.k_fts,
-            k_vec: d.k_vec,
+            k_fts: d.k_fts.into(),
+            k_vec: d.k_vec.into(),
             rrf_k: d.rrf_k,
             fts_weights: d.fts_weights,
             rerank: d.k_rerank > 0,
-            k_rerank: d.k_rerank,
-            limit: d.limit,
-            budget_tokens: (d.budget_tokens > 0).then_some(d.budget_tokens),
+            k_rerank: d.k_rerank.into(),
+            limit: d.limit.into(),
+            budget_tokens: (d.budget_tokens > 0).then_some(d.budget_tokens.into()),
         }
     }
 }
@@ -444,8 +457,13 @@ impl Default for FtsWeightsView {
 pub struct StageHitView {
     pub chunk_id: String,
     /// 1-based within the stage.
-    pub rank: u32,
+    pub rank: u64,
     pub score: f32,
+    /// Rerank stage only: the reranker did not score this candidate (its pair
+    /// was over the model's input limit); `score` is then its fused score and
+    /// it ranks behind the scored ones. Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -454,8 +472,8 @@ pub struct StageHitView {
 pub struct FusedHitView {
     pub chunk_id: String,
     pub rrf_score: f32,
-    pub fts_rank: Option<u32>,
-    pub knn_rank: Option<u32>,
+    pub fts_rank: Option<u64>,
+    pub knn_rank: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -540,4 +558,15 @@ pub struct DocsJobStarted {
     pub already_running: bool,
     /// Present on corpus creation.
     pub corpus: Option<CorpusView>,
+}
+
+/// A golden query written: `POST /api/docs/golden` and accepting a
+/// candidate answer the id of the query now in the set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GoldenSaved {
+    /// Always `true`; a failure is an error answer instead.
+    pub ok: bool,
+    /// The golden query's id: the edited one, or the one just created.
+    pub id: i64,
 }

@@ -18,16 +18,15 @@
 //!   414, and the page then reads the whole list instead, as after any
 //!   failed rows read (`chat_sync/rows.rs` in lmgw-ui): slower, nothing
 //!   lost.
-//! - **The owner's** (`Cap::Admin`, the dashboard's backend): a device's own
-//!   feed carries whole rows already. Not in the API document, like the
-//!   rest of the dashboard's backend (`openapi/exclusions.rs`).
+//! - **The owner's** (`Cap::Admin`): a device's own feed carries whole rows
+//!   already. In the admin API document only (`openapi/planes/chat_threads.rs`).
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use lmgw_api_types::chat::ThreadRow;
-use serde::{Deserialize, Serialize};
+use lmgw_api_types::chat::ThreadRows;
+use serde::Deserialize;
 
 use super::super::chat_caller::Caller;
 use super::super::chat_extract::ChatQuery;
@@ -37,17 +36,13 @@ use super::super::chat_wire;
 use super::{err_json, read_failed};
 use crate::state::SharedState;
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub struct RowsQuery {
-    /// The thread ids, comma-separated.
+    /// The thread ids, comma-separated (`3,7`). A temporary id, one that is
+    /// not there and one out of the caller's reach are left out of the
+    /// answer; a part that is not a number is a 400.
     #[serde(default)]
     ids: String,
-}
-
-/// The answer: the rows found.
-#[derive(Serialize)]
-struct Rows {
-    threads: Vec<ThreadRow>,
 }
 
 /// `ids` as thread ids; the first part that is not one, as the refusal.
@@ -87,7 +82,7 @@ pub async fn thread_rows(
         .iter()
         .map(|t| chat_wire::thread_row(t, &purge, last.get(&t.id).copied()))
         .collect();
-    Json(chat_wire::wire(&Rows { threads: rows })).into_response()
+    Json(chat_wire::wire(&ThreadRows { threads: rows })).into_response()
 }
 
 #[cfg(test)]

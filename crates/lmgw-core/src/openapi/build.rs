@@ -43,14 +43,14 @@ pub fn admin_doc() -> &'static Value {
     ADMIN_DOC.get_or_init(build_admin)
 }
 
-/// The inference plane only: the admin document filtered to
-/// `x-lmgw-capability == "inference"` operations, then pruned (§4.5) — its
-/// paths, its schemas, and the root keys that only describe the admin plane
-/// (`prune_v1_root`).
+/// The developer document: the admin document filtered to the operations
+/// [`is_developer_op`] selects (inference, the device Chat API, the agent run
+/// API, `GET /api/version`), then pruned (§4.5) — its paths, its schemas, and
+/// the root keys that only describe the admin plane (`prune_v1_root`).
 pub fn v1_doc() -> &'static Value {
     V1_DOC.get_or_init(|| {
         let mut doc = admin_doc().clone();
-        filter_to_inference(&mut doc);
+        filter_to_developer(&mut doc);
         schemas::prune_components(&mut doc);
         prune_v1_root(&mut doc);
         doc
@@ -63,6 +63,7 @@ pub fn v1_doc() -> &'static Value {
 
 fn build_admin() -> Value {
     let mut g = schemas::generator();
+    let mut sent = schemas::Sent::new();
     let mut paths: Map<String, Value> = Map::new();
 
     for route in registry::all_routes() {
@@ -75,7 +76,7 @@ fn build_admin() -> Value {
             .expect("a paths entry is always an object");
         entry.insert(
             route.method.to_ascii_lowercase(),
-            route_operation(&mut g, &route, cap),
+            route_operation(&mut g, &mut sent, &route, cap),
         );
     }
 
@@ -83,9 +84,14 @@ fn build_admin() -> Value {
     for op in ops::table() {
         paths.insert(
             format!("/api/op/{}", op.name),
-            json!({ "post": op_operation(&mut g, &op, op_cap) }),
+            json!({ "post": op_operation(&mut g, &mut sent, &op, op_cap) }),
         );
     }
+
+    // An answer's `required` lists say what the server always sends, not what
+    // its tolerant reader would accept (see `apply_sent_required`).
+    let reads = request_reach(&paths, &g);
+    schemas::apply_sent_required(&mut g, sent, &reads, &mut paths);
 
     let components = json!({
         "schemas": Value::Object(g.definitions().clone()),
@@ -98,8 +104,9 @@ fn build_admin() -> Value {
             "title": "lmgw",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "lmgw's own HTTP API: the inference plane (OpenAI-, \
-                Anthropic- and llama.cpp-compatible, plus MCP) and the dashboard \
-                that configures it.",
+                Anthropic- and llama.cpp-compatible, plus MCP), the device (Chat) \
+                API paired clients use, the agent run API agents use, and the \
+                dashboard that configures the gateway.",
         },
         "servers": [{ "url": "/" }],
         "tags": tags_json(),
@@ -110,6 +117,31 @@ fn build_admin() -> Value {
     });
     mark_secrets(&mut doc);
     doc
+}
+
+/// The components a request body or a parameter reaches, `$ref`s followed:
+/// their `required` lists stay the reader's (`schemas::apply_sent_required`).
+fn request_reach(paths: &Map<String, Value>, g: &schemars::SchemaGenerator) -> BTreeSet<String> {
+    let mut frontier: Vec<String> = Vec::new();
+    for methods in paths.values().filter_map(Value::as_object) {
+        for op in methods.values() {
+            for key in ["requestBody", "parameters"] {
+                if let Some(v) = op.get(key) {
+                    schemas::collect_refs(v, &mut frontier);
+                }
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    while let Some(name) = frontier.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(schema) = g.definitions().get(&name) {
+            schemas::collect_refs(schema, &mut frontier);
+        }
+    }
+    seen
 }
 
 /// Property and parameter names that are a credential wherever they appear
@@ -272,7 +304,12 @@ fn operation_id(method: &str, openapi_path: &str) -> String {
     format!("{}_{collapsed}", method.to_ascii_lowercase())
 }
 
-fn route_operation(g: &mut schemars::SchemaGenerator, route: &DocRoute, cap: Cap) -> Value {
+fn route_operation(
+    g: &mut schemars::SchemaGenerator,
+    sent: &mut schemas::Sent,
+    route: &DocRoute,
+    cap: Cap,
+) -> Value {
     let openapi_path = params::openapi_path(route.path);
     let is_inference = cap == Cap::Inference;
 
@@ -313,6 +350,7 @@ fn route_operation(g: &mut schemars::SchemaGenerator, route: &DocRoute, cap: Cap
             route.method,
             route.path,
             is_inference,
+            sent,
         ),
     );
     obj.insert(
@@ -472,11 +510,12 @@ fn responses_object(
     method: &str,
     path: &str,
     is_inference: bool,
+    sent: &mut schemas::Sent,
 ) -> Value {
     let mut responses = Map::new();
     let (status, body) = match resp {
         Resp::Json(schema_fn) => {
-            let schema = schemas::embed(g, schema_fn);
+            let schema = sent.embed(g, schema_fn);
             (
                 "200",
                 Some(json!({ "application/json": { "schema": schema } })),
@@ -489,14 +528,17 @@ fn responses_object(
         // is what `v1::errors::api_error` already uses for a plain
         // `JsonSchema`-derived api-types struct: it registers the schema
         // under the type's own name and returns the `$ref` in one call.
-        Resp::OpOutcome => (
-            "200",
-            Some(json!({
-                "application/json": {
-                    "schema": g.subschema_for::<lmgw_api_types::OpOutcome>().to_value(),
-                },
-            })),
-        ),
+        Resp::OpOutcome => {
+            sent.touch(|g| g.subschema_for::<lmgw_api_types::OpOutcome>());
+            (
+                "200",
+                Some(json!({
+                    "application/json": {
+                        "schema": g.subschema_for::<lmgw_api_types::OpOutcome>().to_value(),
+                    },
+                })),
+            )
+        }
         Resp::Untyped(why) => (
             "200",
             Some(json!({ "application/json": { "schema": schemas::untyped(why) } })),
@@ -513,10 +555,23 @@ fn responses_object(
                 .collect();
             ("200", Some(Value::Object(content)))
         }
+        Resp::Download(media) => {
+            let content: Map<String, Value> = media
+                .iter()
+                .map(|(mime, schema_fn)| {
+                    let schema = match schema_fn {
+                        Some(f) => sent.embed(g, *f),
+                        None => json!({ "type": "string", "format": "binary" }),
+                    };
+                    ((*mime).to_string(), json!({ "schema": schema }))
+                })
+                .collect();
+            ("200", Some(Value::Object(content)))
+        }
         Resp::Sse(events) => {
             let mut sse_events = Map::new();
             for (name, schema_fn) in events {
-                sse_events.insert((*name).to_string(), schemas::embed(g, *schema_fn));
+                sse_events.insert((*name).to_string(), sent.embed(g, *schema_fn));
             }
             let mut media = Map::new();
             media.insert(
@@ -551,10 +606,10 @@ fn responses_object(
             json: schema_fn,
             events,
         } => {
-            let json_schema = schemas::embed(g, schema_fn);
+            let json_schema = sent.embed(g, schema_fn);
             let mut sse_events = Map::new();
             for (name, event_fn) in events {
-                sse_events.insert((*name).to_string(), schemas::embed(g, *event_fn));
+                sse_events.insert((*name).to_string(), sent.embed(g, *event_fn));
             }
             let mut media = Map::new();
             media.insert(
@@ -707,7 +762,12 @@ fn with_headers(mut response: Value, method: &str, path: &str, is_inference: boo
 // Op operations (§4.7)
 // ---------------------------------------------------------------------------
 
-fn op_operation(g: &mut schemars::SchemaGenerator, op: &OpDoc, cap: Cap) -> Value {
+fn op_operation(
+    g: &mut schemars::SchemaGenerator,
+    sent: &mut schemas::Sent,
+    op: &OpDoc,
+    cap: Cap,
+) -> Value {
     let mut obj = Map::new();
     obj.insert("operationId".into(), json!(format!("op_{}", op.name)));
     obj.insert("summary".into(), json!(op.summary));
@@ -727,6 +787,7 @@ fn op_operation(g: &mut schemars::SchemaGenerator, op: &OpDoc, cap: Cap) -> Valu
             "POST",
             "/api/op/{name}",
             false,
+            sent,
         ),
     );
     obj.insert(
@@ -805,6 +866,16 @@ fn op_request_body(g: &mut schemars::SchemaGenerator, op: &OpDoc) -> Option<Valu
 // Principals + undocumented
 // ---------------------------------------------------------------------------
 
+/// The capabilities the developer document's operations use: every one but
+/// `admin`, which is [`is_developer_op`]'s rule.
+const DEVELOPER_CAPS: [Cap; 5] = [
+    Cap::Public,
+    Cap::Inference,
+    Cap::Chat,
+    Cap::Ledger,
+    Cap::AgentSelf,
+];
+
 const CAPS: [Cap; 6] = [
     Cap::Public,
     Cap::Inference,
@@ -825,6 +896,19 @@ fn holds_list(principal: &Principal, snap: &Snapshot) -> Vec<&'static str> {
 /// computed at build time from [`Principal::holds`] on synthetic principals —
 /// this document cannot itself drift from what the gate actually decides.
 fn principals_matrix() -> Value {
+    principals_matrix_for(&CAPS)
+}
+
+/// [`principals_matrix`] limited to the capabilities `covered` lists: the
+/// developer document keeps the key-kind map for the capabilities its own
+/// operations use (everything but `admin`).
+fn principals_matrix_for(covered: &[Cap]) -> Value {
+    let held = |principal: &Principal, snap: &Snapshot| -> Vec<&'static str> {
+        holds_list(principal, snap)
+            .into_iter()
+            .filter(|name| covered.iter().any(|cap| cap.as_str() == *name))
+            .collect()
+    };
     let mut auth_on = Snapshot::default();
     auth_on.settings.auth_enabled = true;
     let mut auth_off = Snapshot::default();
@@ -861,12 +945,12 @@ fn principals_matrix() -> Value {
     let anonymous = Principal::Anonymous;
 
     json!({
-        "owner": holds_list(&owner, &auth_on),
-        "agent": holds_list(&agent, &auth_on),
-        "key": holds_list(&key, &auth_on),
-        "device": holds_list(&device, &auth_on),
-        "anonymous": holds_list(&anonymous, &auth_on),
-        "anonymous_auth_off": holds_list(&anonymous, &auth_off),
+        "owner": held(&owner, &auth_on),
+        "agent": held(&agent, &auth_on),
+        "key": held(&key, &auth_on),
+        "device": held(&device, &auth_on),
+        "anonymous": held(&anonymous, &auth_on),
+        "anonymous_auth_off": held(&anonymous, &auth_off),
     })
 }
 
@@ -886,16 +970,16 @@ fn undocumented_json() -> Value {
 // ---------------------------------------------------------------------------
 
 /// The v1 document's root, cut down to what its own operations use (review
-/// R2 #5, R3 #5) — [`filter_to_inference`] only ever touched `paths`, so the
+/// R2 #5, R3 #5) — [`filter_to_developer`] only ever touched `paths`, so the
 /// root kept describing the admin plane:
 ///
-/// - `tags`: only the ones an operation names (the `ops-*`, `agent-runtime`
-///   and other dashboard groups have nothing left to group);
+/// - `tags`: only the ones an operation names (the `ops-*` and the dashboard
+///   tags have nothing left to group);
 /// - `components.securitySchemes`: only the ones an operation's `security`
 ///   lists (`adminToken` is `POST /mcp/admin`'s alone);
-/// - `x-lmgw-principals` and `x-lmgw-undocumented` go entirely. The page reads
-///   the principals matrix from the admin document, the only one it fetches;
-///   the undocumented list is an inventory of the admin plane's own
+/// - `x-lmgw-principals` stays, restricted to the capabilities the document
+///   covers (no `admin`): who may call what is part of what a developer reads;
+/// - `x-lmgw-undocumented` goes: it is an inventory of the admin plane's own
 ///   exclusions, dashboard mini-APIs included, which stays in the admin
 ///   document only (spec §12).
 fn prune_v1_root(doc: &mut Value) {
@@ -929,17 +1013,52 @@ fn prune_v1_root(doc: &mut Value) {
         defined.retain(|name, _| schemes.contains(name));
     }
     if let Some(root) = doc.as_object_mut() {
-        root.remove(openapi_ext::PRINCIPALS);
+        root.insert(
+            openapi_ext::PRINCIPALS.to_string(),
+            principals_matrix_for(&DEVELOPER_CAPS),
+        );
         root.remove(openapi_ext::UNDOCUMENTED);
     }
     doc["info"]["description"] = json!(
-        "lmgw's inference plane: the OpenAI-, Anthropic- and llama.cpp-compatible \
-         routes and MCP, as an inference credential reaches them. The dashboard that \
-         configures the gateway is in the admin document, GET /api/openapi.json."
+        "What a developer builds on lmgw: the inference plane (OpenAI-, Anthropic- and \
+         llama.cpp-compatible routes, plus MCP), the device (Chat) API a paired client \
+         uses, and the run API an agent uses with its own token. The owner's admin \
+         plane, the dashboard that configures the gateway, is in the admin document, \
+         GET /api/openapi.json."
     );
 }
 
-fn filter_to_inference(doc: &mut Value) {
+/// The public-capability operations the developer document keeps; every
+/// other public operation is the dashboard's browser-session login
+/// (`/api/session*`). The one list [`is_developer_op`] and the
+/// classification test both read, so a new public route has to be put on one
+/// side or the test fails.
+const PUBLIC_DEVELOPER_OPS: &[(&str, &str)] = &[("get", "/api/version")];
+
+/// Which operations belong in the developer document: everything intended for
+/// external clients and agents building on lmgw, i.e. every operation a
+/// non-owner credential reaches (capability inference, chat, agent-self,
+/// ledger) plus the public ones in [`PUBLIC_DEVELOPER_OPS`] (`GET /api/version`,
+/// which a client uses to check the gateway). Left out: every `admin`
+/// operation (the owner's plane), the browser-session routes, and the
+/// `/mcp/admin` session handlers (`GET`, `DELETE`), which only close or read
+/// the session the admin-only `POST /mcp/admin` opens.
+fn is_developer_op(method: &str, path: &str, op: &Value) -> bool {
+    let Some(cap) = op.get(openapi_ext::CAPABILITY).and_then(Value::as_str) else {
+        return false;
+    };
+    if path == "/mcp/admin" {
+        return false;
+    }
+    if cap == Cap::Public.as_str() {
+        return PUBLIC_DEVELOPER_OPS
+            .iter()
+            .any(|(m, p)| method.eq_ignore_ascii_case(m) && path == *p);
+    }
+    cap != Cap::Admin.as_str()
+}
+
+fn filter_to_developer(doc: &mut Value) {
     let Some(paths) = doc.get_mut("paths").and_then(Value::as_object_mut) else {
         return;
     };
@@ -948,11 +1067,7 @@ fn filter_to_inference(doc: &mut Value) {
         let Some(methods_obj) = methods.as_object_mut() else {
             continue;
         };
-        methods_obj.retain(|_, op| {
-            op.get(openapi_ext::CAPABILITY)
-                .and_then(Value::as_str)
-                .is_some_and(|c| c == Cap::Inference.as_str())
-        });
+        methods_obj.retain(|method, op| is_developer_op(method, path, op));
         if methods_obj.is_empty() {
             empty_paths.push(path.clone());
         }
@@ -1138,6 +1253,175 @@ mod tests {
         }
     }
 
+    /// Why `schema` carries no type, after following `$ref`s into `components`
+    /// (`None` = typed): the `x-lmgw-untyped` marker, `true`, `{}`, an object
+    /// with neither `properties` nor a typed `additionalProperties`
+    /// (`additionalProperties: true` / `{}` count as free-form). `anyOf`,
+    /// `oneOf`, `allOf` members and array items are looked through.
+    fn free_form_reason(doc: &Value, schema: &Value, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        match schema {
+            Value::Bool(true) => return Some("the schema `true`"),
+            Value::Object(o) if o.is_empty() => return Some("the empty schema {}"),
+            Value::Object(o) => {
+                if let Some(target) = o.get("$ref").and_then(Value::as_str) {
+                    let resolved = doc.pointer(target.trim_start_matches('#'))?;
+                    return free_form_reason(doc, resolved, depth + 1);
+                }
+                if o.contains_key(openapi_ext::UNTYPED) {
+                    return Some("an x-lmgw-untyped marker");
+                }
+                for key in ["anyOf", "oneOf", "allOf"] {
+                    if let Some(members) = o.get(key).and_then(Value::as_array) {
+                        return members
+                            .iter()
+                            .find_map(|m| free_form_reason(doc, m, depth + 1));
+                    }
+                }
+                if o.get("type").and_then(Value::as_str) == Some("array") {
+                    return o
+                        .get("items")
+                        .and_then(|i| free_form_reason(doc, i, depth + 1));
+                }
+                let is_object = o.get("type").and_then(Value::as_str) == Some("object");
+                let free_map = match o.get("additionalProperties") {
+                    None | Some(Value::Bool(true)) => true,
+                    Some(Value::Object(extra)) => extra.is_empty(),
+                    Some(_) => false,
+                };
+                if is_object && !o.contains_key("properties") && free_map {
+                    return Some("a bare free-form object");
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The typed-answers rule, enforced: the operations whose answer (every
+    /// response in every content type, every `x-lmgw-sse-events` frame) or
+    /// request body is untyped (marked, or free-form once `$ref`s are
+    /// resolved) are exactly `exclusions::UNTYPED`.
+    #[test]
+    fn untyped_responses_are_exactly_the_allowlist() {
+        let doc = admin_doc();
+        let mut found = std::collections::BTreeSet::new();
+        let mut hits = Vec::new();
+        for (path, methods) in doc["paths"].as_object().unwrap() {
+            for (method, op) in methods.as_object().unwrap() {
+                // The documents describe themselves with a bare object: the
+                // one answer whose shape is the OpenAPI specification.
+                let describes_itself = path == "/api/openapi.json" || path == "/v1/openapi.json";
+                let mut schemas: Vec<(String, &Value)> = Vec::new();
+                for (status, response) in op["responses"].as_object().into_iter().flatten() {
+                    for (mime, media) in response["content"].as_object().into_iter().flatten() {
+                        if let Some(s) = media.get("schema") {
+                            schemas.push((format!("{status} {mime}"), s));
+                        }
+                    }
+                    for (event, s) in response["x-lmgw-sse-events"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                    {
+                        schemas.push((format!("{status} event {event}"), s));
+                    }
+                }
+                for (mime, media) in op["requestBody"]["content"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(s) = media.get("schema") {
+                        schemas.push((format!("request {mime}"), s));
+                    }
+                }
+                for (what, schema) in schemas {
+                    let Some(why) = free_form_reason(doc, schema, 0) else {
+                        continue;
+                    };
+                    if describes_itself {
+                        continue;
+                    }
+                    hits.push(format!("{method} {path} ({what}): {why}"));
+                    found.insert((method.clone(), path.clone()));
+                }
+            }
+        }
+        let allowed: std::collections::BTreeSet<_> = crate::openapi::exclusions::UNTYPED
+            .iter()
+            .map(|(m, p, _)| (m.to_string(), p.to_string()))
+            .collect();
+        let new: Vec<_> = hits
+            .iter()
+            .filter(|h| {
+                found
+                    .difference(&allowed)
+                    .any(|(m, p)| h.starts_with(&format!("{m} {p} ")))
+            })
+            .collect();
+        assert!(
+            new.is_empty(),
+            "untyped (give each an lmgw-api-types type the handler builds or parses; only \
+             verbatim relays of another program's JSON belong on exclusions::UNTYPED): {new:#?}"
+        );
+        if let Some((m, p)) = allowed.difference(&found).next() {
+            panic!("exclusions::UNTYPED lists {m} {p}, which is no longer untyped: remove it");
+        }
+        assert!(
+            crate::openapi::exclusions::UNTYPED
+                .iter()
+                .all(|(_, _, why)| !why.is_empty()),
+            "an UNTYPED entry must say why"
+        );
+    }
+
+    /// The public operations that are not for developers: the dashboard's login
+    /// (`/api/session*`), meaningful only in a browser with the session cookie.
+    fn is_browser_session_path(path: &str) -> bool {
+        path == "/api/session" || path.starts_with("/api/session/")
+    }
+
+    /// Every public-capability operation is classified: a developer one (in
+    /// the v1 document, on [`PUBLIC_DEVELOPER_OPS`]) or a browser-session one
+    /// (out of it). A new public route is neither until someone decides.
+    #[test]
+    fn every_public_operation_is_developer_or_browser_session() {
+        let v1 = v1_doc();
+        let mut seen = 0;
+        for (path, methods) in admin_doc()["paths"].as_object().unwrap() {
+            for (method, op) in methods.as_object().unwrap() {
+                if op[openapi_ext::CAPABILITY] != Cap::Public.as_str() {
+                    continue;
+                }
+                seen += 1;
+                let in_v1 = v1["paths"][path][method].is_object();
+                if PUBLIC_DEVELOPER_OPS
+                    .iter()
+                    .any(|(m, p)| *m == method && p == path)
+                {
+                    assert!(
+                        in_v1,
+                        "{method} {path} is a developer operation but not in v1"
+                    );
+                } else {
+                    assert!(
+                        is_browser_session_path(path),
+                        "{method} {path} is public but neither on PUBLIC_DEVELOPER_OPS nor a \
+                         browser-session route: classify it in openapi/build.rs"
+                    );
+                    assert!(
+                        !in_v1,
+                        "{method} {path} is a browser-session operation in v1"
+                    );
+                }
+            }
+        }
+        assert!(seen > 1, "the admin document has public operations");
+    }
+
     #[test]
     fn named_schema_collision_panics() {
         let result = std::panic::catch_unwind(|| {
@@ -1157,38 +1441,47 @@ mod tests {
     }
 
     #[test]
-    fn v1_doc_has_no_admin_only_path_and_is_pruned() {
-        // WP1 wrote this against an empty registry, where "no paths at all"
-        // was the only thing there was to check; WP6's inference routes are
-        // the first real ones, so the invariant worth pinning is the actual
-        // filter rule (§4.5): every v1 path is `Cap::Inference`, and nothing
-        // Admin-only (an `/api/op/{name}` row, since `OPS` is still empty in
-        // WP6, would be the concrete case once WP5 lands) leaks through.
+    fn v1_doc_is_the_developer_document_and_is_pruned() {
+        // The selection rule (`is_developer_op`): no admin operation, no
+        // browser-session route; the inference, device and agent planes and
+        // `GET /api/version` are in.
         let v1 = v1_doc();
         let paths = v1["paths"].as_object().unwrap();
-        assert!(
-            !paths.is_empty(),
-            "WP6 gave the inference plane real routes"
-        );
+        assert!(!paths.is_empty());
         for (path, methods) in paths {
             for (method, op) in methods.as_object().unwrap() {
-                assert_eq!(
+                assert_ne!(
                     op[openapi_ext::CAPABILITY],
-                    "inference",
-                    "{method} {path} is in the v1 document with capability {}",
-                    op[openapi_ext::CAPABILITY]
+                    "admin",
+                    "{method} {path} is an admin operation in the v1 document"
                 );
             }
         }
         assert!(paths.contains_key("/v1/chat/completions"));
+        assert!(paths["/chat/api/feed"]["get"].is_object());
+        assert!(paths["/api/agents/runs/{job_id}/events"]["post"].is_object());
+        assert!(paths["/api/version"]["get"].is_object());
+        assert!(!paths.contains_key("/api/session"));
         assert!(!paths.contains_key("/api/openapi.json"));
+        // /mcp/admin is the admin document's: its POST is admin, and the
+        // GET/DELETE session handlers are useless without it.
+        assert!(!paths.contains_key("/mcp/admin"));
+        assert!(admin_doc()["paths"]["/mcp/admin"]["get"].is_object());
+        assert!(admin_doc()["paths"]["/mcp/admin"]["delete"].is_object());
 
-        // Pruning: every schema in `components` is reachable, and the
-        // Dashboard-only `ApiError` (nothing in v1 is `Dialect::Dashboard`)
-        // is not among them.
+        // The key-kind map is there, without the admin capability.
+        let matrix = v1[openapi_ext::PRINCIPALS].as_object().unwrap();
+        assert_eq!(matrix["device"], json!(["public", "inference", "chat"]));
+        assert!(matrix
+            .values()
+            .flat_map(|v| v.as_array().unwrap())
+            .all(|cap| cap != "admin"));
+
+        // Pruning: a schema only an admin operation reaches is not in `components`.
         let schemas = v1["components"]["schemas"].as_object().unwrap();
         assert!(!schemas.is_empty());
-        assert!(!schemas.contains_key("ApiError"));
+        let admin = admin_doc()["components"]["schemas"].as_object().unwrap();
+        assert!(schemas.len() < admin.len());
     }
 
     #[test]

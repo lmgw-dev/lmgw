@@ -39,7 +39,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use serde_json::json;
+use lmgw_api_types::chat_frames as frames;
+use lmgw_api_types::mcp_apps::{ToolReadyFrame, ToolResultFrame};
 
 use super::chat_caller::Caller;
 use super::chat_knowledge::KbTools;
@@ -391,7 +392,9 @@ impl TurnRunner for ChatRunner {
                 return Err(e);
             }
         };
-        proxy::stream_once_on(
+        // Boxed: 119 KB of debug-build poll frame when inline, on the turn -> gate
+        // chain that shares a 2 MiB test-thread stack.
+        Box::pin(proxy::stream_once_on(
             &self.state,
             hold.as_ref(),
             &self.route,
@@ -402,7 +405,7 @@ impl TurnRunner for ChatRunner {
             deadline.saturating_sub(started.elapsed()),
             sink,
             Some((self, None)),
-        )
+        ))
         .await
     }
 }
@@ -431,8 +434,7 @@ impl ChatSink {
     /// One of the loop's frames. Once the turn is stopped it waits for no
     /// reader: a frame that still has room goes out, any other is dropped.
     /// The turn's own last frame is [`Self::say`]'s.
-    async fn emit_raw(&self, ev: &'static str, data: String) -> bool {
-        let frame = TurnFrame::new(ev, data);
+    async fn emit_raw(&self, frame: TurnFrame) -> bool {
         if self.stop.is_raised() {
             return !matches!(
                 self.tx.try_send(frame),
@@ -450,8 +452,8 @@ impl ChatSink {
     /// A frame the reader must get even after a stop (`error`, `done`): sent
     /// once the loop and its GPU admission are gone, so waiting on a slow
     /// reader holds nothing.
-    async fn say(&self, ev: &'static str, data: String) {
-        let _ = self.tx.send(TurnFrame::new(ev, data)).await;
+    async fn say(&self, frame: TurnFrame) {
+        let _ = self.tx.send(frame).await;
     }
 }
 
@@ -473,28 +475,28 @@ impl EventSink for ChatSink {
             LoopEvent::Text(t) => {
                 self.first_at.get_or_insert_with(Instant::now);
                 self.text.push_str(&t);
-                self.emit_raw("delta", json!({ "text": t }).to_string())
+                self.emit_raw(TurnFrame::of("delta", &frames::TextFrame { text: t }))
                     .await
             }
             LoopEvent::Reasoning(t) => {
                 self.first_at.get_or_insert_with(Instant::now);
                 self.reasoning.push_str(&t);
-                self.emit_raw("reasoning", json!({ "text": t }).to_string())
+                self.emit_raw(TurnFrame::of("reasoning", &frames::TextFrame { text: t }))
                     .await
             }
             LoopEvent::CallStarted { index, name, .. } => {
-                self.emit_raw(
-                    "tool",
-                    json!({"event": "start", "index": index, "name": name}).to_string(),
-                )
-                .await
+                let start = frames::ToolStartFrame {
+                    index,
+                    id: None,
+                    name,
+                };
+                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Start(start)))
+                    .await
             }
             LoopEvent::CallArgs { index, fragment } => {
-                self.emit_raw(
-                    "tool",
-                    json!({"event": "args", "index": index, "fragment": fragment}).to_string(),
-                )
-                .await
+                let args = frames::ToolArgsFrame { index, fragment };
+                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Args(args)))
+                    .await
             }
             // What a client that shows the call's MCP Apps view needs before
             // the call runs (client-apps design §7.5): whether it waits for
@@ -507,16 +509,17 @@ impl EventSink for ChatSink {
                 server_label,
                 needs_approval,
             } => {
-                let ui_resource = self.ui_resources.get(&name);
-                self.emit_raw(
-                    "tool",
-                    json!({"event": "ready", "index": index, "name": name,
-                           "arguments": args, "call_id": call_id,
-                           "server_label": server_label, "needs_approval": needs_approval,
-                           "ui_resource": ui_resource})
-                    .to_string(),
-                )
-                .await
+                let ready = ToolReadyFrame {
+                    index,
+                    arguments: args,
+                    call_id: Some(call_id),
+                    server_label,
+                    needs_approval: Some(needs_approval),
+                    ui_resource: self.ui_resources.get(&name).cloned(),
+                    name,
+                };
+                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Ready(ready)))
+                    .await
             }
             // What an MCP Apps host needs besides the text (client-apps
             // design §7.3, §7.5): the label the tool came from, the
@@ -536,20 +539,27 @@ impl EventSink for ChatSink {
                 content,
             } => {
                 let (text, _) = flatten_tool_result(&blocks);
-                let ui_resource = self.ui_resources.get(&name);
-                let mut frame = json!({"event": "result", "index": index, "name": name,
-                       "output": text, "is_error": is_error, "ms": ms,
-                       "server_label": server_label, "ui_resource": ui_resource,
-                       "structured_content": structured, "content": content,
-                       "call_id": call_id});
                 // A call that started an MCP task says which (§4.3), so a
                 // client never reads it out of `started, job …`.
-                if let Some(t) = self.tasks.as_ref() {
-                    if let Some(task) = Box::pin(t.of_call(&call_id)).await {
-                        frame["task"] = task;
-                    }
-                }
-                self.emit_raw("tool", frame.to_string()).await
+                let task = match self.tasks.as_ref() {
+                    Some(t) => Box::pin(t.of_call(&call_id)).await,
+                    None => None,
+                };
+                let result = ToolResultFrame {
+                    index,
+                    output: text,
+                    is_error,
+                    ms,
+                    server_label: Some(server_label),
+                    ui_resource: self.ui_resources.get(&name).cloned(),
+                    structured_content: structured,
+                    content: Some(content),
+                    call_id: Some(call_id),
+                    task,
+                    name,
+                };
+                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Result(result)))
+                    .await
             }
             LoopEvent::Done { usage, reason } => {
                 self.usage = usage;
@@ -562,8 +572,11 @@ impl EventSink for ChatSink {
                         "the run stopped early: {why} (raise it under Settings → Agents & \
                          tools if this was too tight)"
                     );
-                    self.emit_raw("error", json!({ "message": msg }).to_string())
-                        .await;
+                    let error = frames::ErrorFrame {
+                        message: msg,
+                        code: None,
+                    };
+                    self.emit_raw(TurnFrame::of("error", &error)).await;
                 }
                 true
             }
@@ -594,10 +607,13 @@ pub(super) async fn run_send(
     let refuse = |message: String| {
         let tx = tx.clone();
         async move {
-            let error = json!({ "message": message }).to_string();
-            let _ = tx.send(TurnFrame::new("error", error)).await;
-            let done = json!({ "aborted": true }).to_string();
-            let _ = tx.send(TurnFrame::new("done", done)).await;
+            let error = frames::ErrorFrame {
+                message,
+                code: None,
+            };
+            let _ = tx.send(TurnFrame::of("error", &error)).await;
+            let done = frames::DoneFrame::aborted();
+            let _ = tx.send(TurnFrame::of("done", &done)).await;
         }
     };
     // A device's turn passes its key's scope and budget for the thread's
@@ -605,15 +621,13 @@ pub(super) async fn run_send(
     // admission below may load the model and evict others, and a key that
     // may not use it must not get that far. Not counted: each model call of
     // the loop is counted as it is made (`ChatRunner::call`).
-    if let Err(e) = turn
-        .caller()
-        .precheck(
-            &state,
-            ClientProto::Chat,
-            &ir.model_alias,
-            crate::telemetry::RequestClass::Chat,
-        )
-        .await
+    if let Err(e) = Box::pin(turn.caller().precheck(
+        &state,
+        ClientProto::Chat,
+        &ir.model_alias,
+        crate::telemetry::RequestClass::Chat,
+    ))
+    .await
     {
         return chat_turn::refuse(&tx, &e).await;
     }
@@ -625,7 +639,11 @@ pub(super) async fn run_send(
     let resolved = turn
         .or_stop(
             &tx,
-            crate::gate::resolve(&state, &ir.model_alias, crate::gate::RouteCheck::None),
+            Box::pin(crate::gate::resolve(
+                &state,
+                &ir.model_alias,
+                crate::gate::RouteCheck::None,
+            )),
         )
         .await;
     let routed = match resolved {
@@ -669,7 +687,7 @@ pub(super) async fn run_send(
     let agg = if plan.mcp.is_empty() {
         crate::mcp::Aggregate::default()
     } else {
-        state.mcp.aggregate(&snap).await
+        Box::pin(state.mcp.aggregate(&snap)).await
     };
     let mut specs: Vec<McpToolSpec> = plan
         .mcp
@@ -701,9 +719,9 @@ pub(super) async fn run_send(
         // gateway's scope reaches them. A device's turn resolves under its
         // key's tool scope (client-apps design L4): a label it keeps out is
         // reported below like a server that could not be reached.
-        let scope = turn.caller().scope(&state).await;
+        let scope = Box::pin(turn.caller().scope(&state)).await;
         let resolved = match turn
-            .or_stop(&tx, mcp_exec::resolve(&state, &specs, &scope))
+            .or_stop(&tx, Box::pin(mcp_exec::resolve(&state, &specs, &scope)))
             .await
         {
             Ok(r) => r,
@@ -715,8 +733,11 @@ pub(super) async fn run_send(
             } else {
                 format!("MCP server '{label}': {why}")
             };
-            let error = json!({ "message": message }).to_string();
-            let _ = tx.send(TurnFrame::new("error", error)).await;
+            let error = frames::ErrorFrame {
+                message,
+                code: None,
+            };
+            let _ = tx.send(TurnFrame::of("error", &error)).await;
         }
         // A thread may attach the same self-admin toolset an admin thread gets
         // automatically; the set is what dispatches, so duplicates are inert.
@@ -768,7 +789,12 @@ pub(super) async fn run_send(
     let proto = if plan.admin { ADMIN_PROTO } else { "chat" };
     let admitted = match routed.using(uses) {
         Ok(routed) => {
-            let admit = super::chat_voice::admit_reporting(&state, routed, &ir.model_alias, &tx);
+            let admit = Box::pin(super::chat_voice::admit_reporting(
+                &state,
+                routed,
+                &ir.model_alias,
+                &tx,
+            ));
             turn.or_stop(&tx, admit).await
         }
         Err(f) => Ok(Err(f)),
@@ -806,13 +832,13 @@ pub(super) async fn run_send(
     let admitted_as = chat_turn::answered_by(&snap, &headers);
     // Raced against the stop: the capability check may read a provider's
     // catalog (review V9).
-    let first = chat_turn::fit_route(
+    let first = Box::pin(chat_turn::fit_route(
         &state,
         (&route, admission.as_ref()),
         chat_turn::answering(admitted_as.as_deref(), &headers, &ir.model_alias),
         &ir,
         (turn.is_continue(), turn.hears()),
-    );
+    ));
     let first = match turn.or_stop(&tx, first).await {
         Ok(fit) => fit,
         Err(why) => return turn.report_stop(why, &tx).await,
@@ -943,8 +969,7 @@ pub(super) async fn run_send(
 
     let mut stopped = None;
     let result = {
-        let run = agent::run(ir, cfg, &runner, &exec, &mut sink);
-        tokio::pin!(run);
+        let mut run = Box::pin(agent::run(ir, cfg, &runner, &exec, &mut sink));
         // The stop first: once it is raised the loop is not polled again
         // before it hears of it.
         tokio::select! {
@@ -1034,22 +1059,21 @@ pub(super) async fn run_send(
         .filter(|record| !record.is_empty())
         .and_then(|record| serde_json::to_string(&record).ok());
     let wrote_nothing = sink.text.is_empty() && sink.reasoning.is_empty() && ir_json.is_none();
-    let saved = turn
-        .persist(
-            &state,
-            Reply {
-                text: &sink.text,
-                reasoning: &sink.reasoning,
-                prompt_tokens: sink.usage.prompt_tokens.map(|v| v as i64),
-                completion_tokens: sink.usage.completion_tokens.map(|v| v as i64),
-                ir_messages: ir_json.as_deref(),
-                answered_by: answering.answered_by.clone(),
-                stopped: stopped.is_some(),
-                failed: err.is_some(),
-                pending: waiting.clone(),
-            },
-        )
-        .await;
+    let saved = Box::pin(turn.persist(
+        &state,
+        Reply {
+            text: &sink.text,
+            reasoning: &sink.reasoning,
+            prompt_tokens: sink.usage.prompt_tokens.map(|v| v as i64),
+            completion_tokens: sink.usage.completion_tokens.map(|v| v as i64),
+            ir_messages: ir_json.as_deref(),
+            answered_by: answering.answered_by.clone(),
+            stopped: stopped.is_some(),
+            failed: err.is_some(),
+            pending: waiting.clone(),
+        },
+    ))
+    .await;
 
     // A caller that raised its own stop still reads: it gets `done`, which
     // names the partial turn just saved.
@@ -1060,7 +1084,7 @@ pub(super) async fn run_send(
     // says so as the plain path does: `done {aborted}`, no message id. Its
     // user message stays owed, and the next send merges with it (§7.4).
     if err.is_some() && wrote_nothing {
-        sink.say("done", json!({ "aborted": true }).to_string())
+        sink.say(TurnFrame::of("done", &frames::DoneFrame::aborted()))
             .await;
         return;
     }
@@ -1068,43 +1092,47 @@ pub(super) async fn run_send(
         .first_at
         .map(|t| t.duration_since(started).as_millis() as i64);
     if saved.refused {
-        sink.say(
-            "error",
-            json!({ "message": NOT_SAVED, "code": "not_saved" }).to_string(),
-        )
-        .await;
-    }
-    let mut done = json!({
-        "message_id": saved.id,
-        "saved": saved.saved(),
-        "model": turn.model(),
-        "answered_by": answering.answered_by,
-        "prompt_tokens": sink.usage.prompt_tokens,
-        "completion_tokens": sink.usage.completion_tokens,
-        "ttfb_ms": ttfb,
-        "total_ms": started.elapsed().as_millis() as i64,
-        "aborted": err.is_some() || stopped.is_some() || held_off,
-        "timings": serde_json::Value::Null,
-        "reasoning_ignored": answering.ignored,
-        // The model reasoned although off was asked, in a sentence.
-        "reasoning_note": answering
-            .fitted
-            .as_ref()
-            .and_then(|f| f.note(answering.answered_by.as_deref().unwrap_or(turn.model()))),
-    });
-    // A fallback that cannot see got the images as placeholders: said only
-    // when it did, as on the plain path.
-    if let Some(note) = turn.blind().note() {
-        done["images_note"] = json!(note);
+        let not_saved = frames::ErrorFrame {
+            message: NOT_SAVED.into(),
+            code: Some("not_saved".into()),
+        };
+        sink.say(TurnFrame::of("error", &not_saved)).await;
     }
     // A gated stop, once its reply is saved: each waiting call announced,
     // and `done` lists them (client-apps design §6.2). One not saved waits
     // for nothing: no decision could find it.
-    if let Some(p) = waiting.as_ref().filter(|_| saved.saved()) {
-        gated::announce(&sink.tx, p).await;
-        done["pending_approvals"] = json!(p.requests());
-    }
-    sink.say("done", done.to_string()).await;
+    let pending_approvals = match waiting.as_ref().filter(|_| saved.saved()) {
+        Some(p) => {
+            gated::announce(&sink.tx, p).await;
+            Some(p.requests())
+        }
+        None => None,
+    };
+    let done = frames::DoneFrame {
+        aborted: err.is_some() || stopped.is_some() || held_off,
+        saved: Some(frames::DoneSaved {
+            message_id: saved.id,
+            saved: saved.saved(),
+            model: turn.model().to_string(),
+            answered_by: answering.answered_by.clone(),
+            prompt_tokens: sink.usage.prompt_tokens,
+            completion_tokens: sink.usage.completion_tokens,
+            ttfb_ms: ttfb,
+            total_ms: started.elapsed().as_millis() as i64,
+            timings: None,
+            reasoning_ignored: answering.ignored.iter().map(|s| s.to_string()).collect(),
+            // The model reasoned although off was asked, in a sentence.
+            reasoning_note: answering
+                .fitted
+                .as_ref()
+                .and_then(|f| f.note(answering.answered_by.as_deref().unwrap_or(turn.model()))),
+            // A fallback that cannot see got the images as placeholders:
+            // said only when it did, as on the plain path.
+            images_note: turn.blind().note(),
+            pending_approvals,
+        }),
+    };
+    sink.say(TurnFrame::of("done", &done)).await;
 }
 
 /// The executor of a stored thread's turn takes the late path (MCP Tasks

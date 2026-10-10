@@ -51,6 +51,214 @@ pub(crate) fn embed(g: &mut SchemaGenerator, f: SchemaFn) -> Value {
     value
 }
 
+/// The schemas that describe what the gateway *sends* (a response body, an
+/// event frame), generated a second time in the serialize contract; see
+/// [`Sent::embed`] and [`apply_sent_required`].
+pub(crate) struct Sent {
+    gs: SchemaGenerator,
+}
+
+impl Sent {
+    pub(crate) fn new() -> Self {
+        Self {
+            gs: sent_generator(),
+        }
+    }
+
+    /// [`embed`] for a sent schema: the same value, its `required` lists
+    /// corrected in place where the schema is inline; the components it
+    /// reaches are corrected at the end by [`apply_sent_required`].
+    pub(crate) fn embed(&mut self, g: &mut SchemaGenerator, f: SchemaFn) -> Value {
+        let mut value = embed(g, f);
+        sync_required(&mut value, &embed(&mut self.gs, f));
+        value
+    }
+
+    /// Register `f`'s components as sent without embedding it anywhere.
+    pub(crate) fn touch(&mut self, f: SchemaFn) {
+        f(&mut self.gs);
+    }
+}
+
+/// The *serialize* contract twin of [`generator`]: a field is optional only
+/// where `skip_serializing_if` can leave it out, whatever the reader's
+/// `#[serde(default)]` says.
+fn sent_generator() -> SchemaGenerator {
+    SchemaSettings::draft2020_12()
+        .for_serialize()
+        .with(|s| {
+            s.meta_schema = None;
+            s.definitions_path = "/components/schemas".into();
+        })
+        .into_generator()
+}
+
+/// Make the `required` lists of every component the gateway sends say what the
+/// server always sends.
+///
+/// [`generator`] reads the *deserialize* contract, which is right for a
+/// request (a `#[serde(default)]` field really is optional there) but wrong
+/// for an answer: the readers of the answer types are tolerant (a container
+/// level `#[serde(default)]` keeps an older UI or client working across
+/// version skew), and that left the generated schemas without any `required`,
+/// so a client generator made `id`, `role`, `content` optional although the
+/// server always sends them. The same types are generated again in the
+/// serialize contract (a field is optional only where `skip_serializing_if`
+/// can leave it out) and the `required` lists of every component found there
+/// replace the reader's, wire and readers untouched. Only the lists change:
+/// a property's type keeps whatever null it states. "Optional" does not mean
+/// "never null" (a flattened `Option` is optional in the serialize contract
+/// while its fields are sent as `null`, and a hand-written schema states its
+/// own nullability), so a field that really is never `null` says so itself
+/// with `openapi_ext::non_null`.
+///
+/// A component a request also reaches (`reads`) has one name but two truths.
+/// Where its two lists differ, the request side keeps the reader's list under
+/// the name `<Name>Input` (every request `$ref` is rewritten, as is every
+/// shared component that refers to one) and the plain name becomes the
+/// answer's. Returns the names that were split, for the test that lists them.
+pub(crate) fn apply_sent_required(
+    g: &mut SchemaGenerator,
+    sent: Sent,
+    reads: &BTreeSet<String>,
+    paths: &mut serde_json::Map<String, Value>,
+) -> BTreeSet<String> {
+    let sent_defs = sent.gs.definitions();
+    // The components both sides reach whose two views differ.
+    let mut split: BTreeSet<String> = BTreeSet::new();
+    for (name, ser) in sent_defs {
+        if !reads.contains(name) {
+            continue;
+        }
+        if let Some(de) = g.definitions().get(name) {
+            let mut synced = de.clone();
+            sync_required(&mut synced, ser);
+            if &synced != de {
+                split.insert(name.clone());
+            }
+        }
+    }
+    // ... and those that refer to one: the request side has to refer to the
+    // `Input` twin, so they split as well.
+    loop {
+        let mut added = Vec::new();
+        for name in reads.iter().filter(|n| sent_defs.contains_key(*n)) {
+            if split.contains(name) {
+                continue;
+            }
+            let mut refs = Vec::new();
+            if let Some(d) = g.definitions().get(name) {
+                collect_refs(d, &mut refs);
+            }
+            if refs.iter().any(|r| split.contains(r)) {
+                added.push(name.clone());
+            }
+        }
+        if added.is_empty() {
+            break;
+        }
+        split.extend(added);
+    }
+    // The request side's twins, and every request-side `$ref` pointed at them.
+    for name in &split {
+        let Some(mut twin) = g.definitions().get(name).cloned() else {
+            continue;
+        };
+        rewrite_refs(&mut twin, &split);
+        g.definitions_mut().insert(format!("{name}Input"), twin);
+    }
+    for name in reads.iter().filter(|n| !split.contains(*n)) {
+        if let Some(d) = g.definitions_mut().get_mut(name) {
+            rewrite_refs(d, &split);
+        }
+    }
+    for methods in paths.values_mut().filter_map(Value::as_object_mut) {
+        for op in methods.values_mut().filter_map(Value::as_object_mut) {
+            for key in ["requestBody", "parameters"] {
+                if let Some(v) = op.get_mut(key) {
+                    rewrite_refs(v, &split);
+                }
+            }
+        }
+    }
+    // The answer's lists.
+    for (name, ser) in sent_defs {
+        if let Some(de) = g.definitions_mut().get_mut(name) {
+            sync_required(de, ser);
+        }
+    }
+    split
+}
+
+/// Point every `$ref` to one of `names` at its `Input` twin.
+fn rewrite_refs(value: &mut Value, names: &BTreeSet<String>) {
+    const PREFIX: &str = "#/components/schemas/";
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(r)) = map.get_mut("$ref") {
+                if let Some(name) = r.strip_prefix(PREFIX) {
+                    if names.contains(name) {
+                        *r = format!("{PREFIX}{name}Input");
+                    }
+                }
+            }
+            for v in map.values_mut() {
+                rewrite_refs(v, names);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| rewrite_refs(v, names)),
+        _ => {}
+    }
+}
+
+/// Copy `ser`'s `required` lists over `de`'s, walking the two schemas side by
+/// side (they differ in nothing else that matters here), each list cut to the
+/// properties `de` has.
+fn sync_required(de: &mut Value, ser: &Value) {
+    let (Value::Object(de), Value::Object(ser)) = (de, ser) else {
+        return;
+    };
+    if let (Some(Value::Object(de_props)), Some(Value::Object(_))) =
+        (de.get("properties"), ser.get("properties"))
+    {
+        let required: Vec<Value> = ser
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|n| n.as_str().is_some_and(|n| de_props.contains_key(n)))
+            .cloned()
+            .collect();
+        if required.is_empty() {
+            de.remove("required");
+        } else {
+            de.insert("required".to_string(), Value::Array(required));
+        }
+    }
+    if let (Some(Value::Object(de_props)), Some(Value::Object(ser_props))) =
+        (de.get_mut("properties"), ser.get("properties"))
+    {
+        for (name, de_prop) in de_props.iter_mut() {
+            if let Some(ser_prop) = ser_props.get(name) {
+                sync_required(de_prop, ser_prop);
+            }
+        }
+    }
+    for key in ["oneOf", "anyOf", "allOf", "prefixItems"] {
+        if let (Some(Value::Array(des)), Some(Value::Array(sers))) = (de.get_mut(key), ser.get(key))
+        {
+            for (d, s) in des.iter_mut().zip(sers) {
+                sync_required(d, s);
+            }
+        }
+    }
+    for key in ["items", "additionalProperties"] {
+        if let (Some(d), Some(s)) = (de.get_mut(key), ser.get(key)) {
+            sync_required(d, s);
+        }
+    }
+}
+
 /// Register a hand-written schema under `name` in `g`'s
 /// `#/components/schemas`, and return a `$ref` to it.
 ///
@@ -136,7 +344,7 @@ fn reachable_schema_names(doc: &Value) -> BTreeSet<String> {
 /// Every `#/components/schemas/<name>` a `$ref` string in `value` names,
 /// recursively — `value` is walked whole, so a ref nested inside `oneOf`,
 /// `properties`, an array item, anywhere, is found.
-fn collect_refs(value: &Value, out: &mut Vec<String>) {
+pub(crate) fn collect_refs(value: &Value, out: &mut Vec<String>) {
     const PREFIX: &str = "#/components/schemas/";
     match value {
         Value::String(s) => {

@@ -283,6 +283,23 @@ const CASES: &[(&str, Case)] = &[
         "get_api_agents_runs_job_id",
         Case::Skip("needs a live or stored agent run"),
     ),
+    ("get_api_knowledge_bases", Case::Get("/api/knowledge/bases")),
+    (
+        "get_api_knowledge_bases_id",
+        Case::Skip("needs a base; knowledge_wire.rs reads it into its type"),
+    ),
+    (
+        "get_api_knowledge_bases_id_files",
+        Case::Skip("needs a base; knowledge_wire.rs reads it into its type"),
+    ),
+    (
+        "get_api_knowledge_files_id_text",
+        Case::Skip("needs an ingested file; knowledge_wire.rs reads it into its type"),
+    ),
+    (
+        "get_api_knowledge_files_id_original",
+        Case::Skip("the file's own bytes, not JSON; knowledge_wire.rs checks its headers"),
+    ),
     ("get_api_docs_corpora", Case::Get("/api/docs/corpora")),
     ("get_api_docs_corpora_id", Case::Skip("needs a corpus")),
     (
@@ -335,7 +352,7 @@ fn every_get_has_a_case() {
     );
     assert_eq!(
         CASES.len(),
-        53,
+        58,
         "the /api GET count moved — update this file's count comment"
     );
 

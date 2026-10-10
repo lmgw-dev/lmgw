@@ -71,7 +71,7 @@ pub mod net;
 /// from `server::CAPABILITY_TABLE`, the op dispatcher and `schemars` schemas
 /// of the api-types DTOs, rather than hand-maintained. Served at
 /// `GET /api/openapi.json` (everything) and `GET /v1/openapi.json` (the
-/// inference plane only).
+/// developer document: inference, device Chat and agent run APIs).
 pub mod openapi;
 pub mod ops;
 pub mod policy;

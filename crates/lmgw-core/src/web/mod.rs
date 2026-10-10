@@ -46,7 +46,7 @@ pub(crate) use audio_lab::{library_clips, library_voices, voice_dir_is_library};
 mod aux;
 mod chat;
 /// The thread list's query, which the API document describes.
-pub(crate) use chat::ListThreadsQuery;
+pub(crate) use chat::{ListThreadsQuery, RowsQuery};
 /// Thread-scoped actions that rewrite a conversation: Keep, and the message
 /// actions (chat-complete design §3, §7).
 mod chat_actions;
@@ -101,6 +101,7 @@ mod chat_repo;
 mod chat_sampling;
 /// Chat search (chat-complete design §4): the FTS route.
 mod chat_search;
+pub(crate) use chat_search::SearchQuery;
 /// What a device below `full` may not change in a thread or folder that
 /// carries lmgw's admin tools (client-apps design L5's note).
 mod chat_steer;

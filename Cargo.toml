@@ -9,7 +9,7 @@ members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "c
 default-members = ["crates/lmgw-core", "crates/lmgw-api-types", "crates/lmgw-client", "crates/lmgw-update", "crates/quickdoc-core", "src-tauri", "examples/agents/folder-chat"]
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 license = "FSL-1.1-MIT"
 

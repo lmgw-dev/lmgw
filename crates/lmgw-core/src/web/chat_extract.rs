@@ -56,7 +56,8 @@ fn json_rejected(e: JsonRejection) -> Response {
 /// An optional JSON body (chat-voice design §6.4: regenerate and continue
 /// took none, and still accept none): an empty body, or one of only
 /// whitespace, is `T::default()`; anything else is read as JSON whatever
-/// its content type, and refused as an `ApiError` when it is not `T`.
+/// its content type, and refused as an `ApiError` when it is not `T` (400 when it is not JSON, 422 when
+/// it is JSON of another shape, like [`ChatJson`]).
 pub(super) struct ChatOptJson<T>(pub T);
 
 impl<T, S> FromRequest<S> for ChatOptJson<T>
@@ -74,8 +75,16 @@ where
             return Ok(Self(T::default()));
         }
         serde_json::from_slice(&body).map(Self).map_err(|e| {
+            // As axum's `Json` (and so `ChatJson`) answers the same two
+            // faults: JSON that does not parse is a 400, JSON that parses
+            // but is not a `T` is a 422.
+            let status = if e.is_data() {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             rejected(
-                StatusCode::BAD_REQUEST,
+                status,
                 format!("the body is not the JSON this route reads: {e}"),
             )
         })
@@ -124,4 +133,37 @@ where
 
 fn path_rejected(e: PathRejection) -> Response {
     rejected(e.status(), e.body_text())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+
+    #[derive(serde::Deserialize, Default)]
+    struct Body1 {
+        #[allow(dead_code)]
+        n: u32,
+    }
+
+    async fn status_of(body: &'static str) -> Option<StatusCode> {
+        let req = Request::new(Body::from(body));
+        match ChatOptJson::<Body1>::from_request(req, &()).await {
+            Ok(_) => None,
+            Err(r) => Some(r.status()),
+        }
+    }
+
+    /// The optional body is refused as `ChatJson` refuses the same faults.
+    #[tokio::test]
+    async fn an_optional_body_answers_400_for_bad_json_and_422_for_another_shape() {
+        assert_eq!(status_of("").await, None);
+        assert_eq!(status_of(" \n").await, None);
+        assert_eq!(status_of(r#"{"n": 1}"#).await, None);
+        assert_eq!(status_of("{\"n\":").await, Some(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            status_of(r#"{"n": "x"}"#).await,
+            Some(StatusCode::UNPROCESSABLE_ENTITY)
+        );
+    }
 }

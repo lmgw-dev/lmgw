@@ -262,10 +262,11 @@ async fn a_request_after_the_reaper_or_restart_resets_a_climbed_ladder_to_the_ba
                 // once (runtime_lifecycle.rs's own `restart_brings_a_climbed_
                 // ladder_back_to_its_base` pins this) — nothing is absent to
                 // assert here.
-                let out =
+                let out = crate::common::container_wire(
                     lmgw_core::ops::container(&f.state, None, Some(LADDER), "restart", false, None)
                         .await
-                        .unwrap();
+                        .unwrap(),
+                );
                 assert_eq!(out["ok"], true, "{how}: {out}");
                 assert_eq!(ladder_view(&f).rung.unwrap().rung, 1, "{how}: back at once");
             }

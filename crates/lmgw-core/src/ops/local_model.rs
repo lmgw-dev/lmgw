@@ -5,6 +5,8 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use lmgw_api_types as dto;
+
 use crate::config::{HoldFallbackMode, LocalModel, Snapshot};
 use crate::runtime::argv;
 use crate::runtime::descriptor::model_runtime_at;
@@ -342,7 +344,7 @@ pub async fn local_model_get(
     id: Option<i64>,
     model_id: Option<&str>,
     target: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::LocalModelRead, String> {
     let class = parse_class_target(target)?;
     let all = store::list_local_models(&state.db)
         .await
@@ -369,18 +371,18 @@ pub async fn local_model_get(
     let Some(m) = found else {
         if matches!(class, None | Some(Class::Aux)) {
             if let Some(v) = aux_model_get(state, id, model_id).await? {
-                return Ok(v);
+                return Ok(dto::LocalModelRead::Aux(v));
             }
         }
         let snap = state.snapshot();
         if matches!(class, None | Some(Class::Image)) {
             if let Some(v) = image_model_get(&snap, state, id, model_id)? {
-                return Ok(v);
+                return Ok(dto::LocalModelRead::Image(v));
             }
         }
         if matches!(class, None | Some(Class::Audio)) {
             if let Some(v) = audio_model_get(state, id, model_id).await? {
-                return Ok(v);
+                return Ok(dto::LocalModelRead::Audio(v));
             }
         }
         let mut known: Vec<String> = all.iter().map(|m| m.model_id.clone()).collect();
@@ -426,7 +428,11 @@ pub async fn local_model_get(
     let origin = downloads
         .iter()
         .find(|d| d.dest_path == m.gguf_path)
-        .map(|d| json!({ "repo": d.repo, "file": d.file, "download_id": d.id }));
+        .map(|d| dto::DownloadedFrom {
+            repo: d.repo.clone(),
+            file: d.file.clone(),
+            download_id: d.id,
+        });
     // The same checks `apply` runs, per model. Without them a row whose
     // spec_type its GGUF cannot support reads as perfectly healthy — every
     // path present, a clean preset — right up until it fails to load. A read
@@ -476,49 +482,50 @@ pub async fn local_model_get(
     let command_line = command_line_preview(state, Class::Chat, &m.model_id);
     let rungs_detail = ladder_rungs_detail(state, &models_dir, m).await;
 
-    Ok(json!({
-        "id": m.id,
-        "class": "chat",
-        "model_id": m.model_id,
-        "gguf_path": m.gguf_path,
-        "gguf_present": std::path::Path::new(&models_dir).join(&m.gguf_path).is_file(),
-        "source": if origin.is_some() { "hf" } else { "manual" },
-        "downloaded_from": origin,
-        "mmproj_present": exists(&m.params.mmproj_path),
-        "draft_present": exists(&m.params.draft_gguf_path),
-        "params": m.params,
-        "extra_args": argv::args_to_lines(&m.args),
-        "idle_seconds": m.idle_seconds,
-        "enabled": m.enabled,
-        "public": m.public,
+    Ok(dto::LocalModelRead::Chat(dto::LocalModelDetail {
+        id: m.id,
+        model_id: m.model_id.clone(),
+        gguf_path: m.gguf_path.clone(),
+        gguf_present: std::path::Path::new(&models_dir)
+            .join(&m.gguf_path)
+            .is_file(),
+        source: if origin.is_some() { "hf" } else { "manual" }.to_string(),
+        downloaded_from: origin,
+        mmproj_present: exists(&m.params.mmproj_path),
+        draft_present: exists(&m.params.draft_gguf_path),
+        params: mirror(&m.params)?,
+        extra_args: argv::args_to_lines(&m.args),
+        idle_seconds: m.idle_seconds,
+        enabled: m.enabled,
+        public: m.public,
         // Per-model container overrides (§3.1); `null` means "inherit the
         // chat class settings".
-        "image": m.image,
-        "extra_run_args": m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
-        "warm_start": m.warm_start,
+        image: m.image.clone(),
+        extra_run_args: m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        warm_start: m.warm_start,
         // GPU-hold fallback (gpu-hold design §2/§3.2): `inherit` | `none` |
         // `alias`, plus the alias when the mode is `alias`.
-        "hold_fallback_mode": m.hold_fallback_mode.as_str(),
-        "hold_fallback": m.hold_fallback.clone(),
+        hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
+        hold_fallback: m.hold_fallback.clone(),
         // Owner override of the derived `/v1/models` capability facts
         // (model-capabilities design §7); `null` means none is set.
-        "capabilities_override": m.capabilities_override.clone(),
+        capabilities_override: m.capabilities_override.clone(),
         // Ladder rungs above the base (ladder design §4.1, §6): empty means
         // "not a ladder", the same convention `LocalModel::is_ladder` reads.
-        "ladder": m.ladder.clone(),
+        ladder: m.ladder.iter().map(dto::Rung::from).collect(),
         // What llama-server will actually be told, which is the thing a caller
         // is really trying to verify.
-        "command_line": command_line,
+        command_line,
         // Every rung's own command line, per-slot context and switchover
         // (ladder design §6, §8 WP6); `null` on a row without a ladder.
-        "rungs": rungs_detail,
+        rungs: rungs_detail,
         // Empty means the static checks found nothing, not that the model
         // loads — only lmgw__local_model_test proves that.
-        "problems": problems,
+        problems,
         // Configuration that loads and serves but misbehaves under some
         // input (a large image, say). Kept apart from `problems` because the
         // model does start.
-        "advisories": advisories,
+        advisories,
     }))
 }
 
@@ -595,9 +602,13 @@ fn command_line_preview_at(
 /// configured (uncapped) number here would disagree with what a request
 /// against this rung is actually judged against for a row saved before §4.3
 /// rule 3b started refusing the mismatch at save time.
-async fn ladder_rungs_detail(state: &SharedState, models_dir: &str, m: &LocalModel) -> Value {
+async fn ladder_rungs_detail(
+    state: &SharedState,
+    models_dir: &str,
+    m: &LocalModel,
+) -> Option<Vec<dto::RungDetail>> {
     if !m.is_ladder() {
-        return Value::Null;
+        return None;
     }
     // `None` only for a row saved before §4.3 rule 3 existed, whose base
     // ctx_size cannot derive a per-slot number at all — the rungs still
@@ -606,24 +617,63 @@ async fn ladder_rungs_detail(state: &SharedState, models_dir: &str, m: &LocalMod
     let rungs = m.all_rungs().unwrap_or_default();
     let trained = crate::gate::ladder::trained_contexts(state, models_dir, m).await;
     let n_predict = m.params.n_predict.filter(|&n| n > 0);
-    json!(rungs
-        .iter()
-        .map(|r| {
-            let per_slot_ctx = m
-                .per_slot_ctx(r.index)
-                .map(|c| crate::ladder::slot_ctx(c, trained.get(r.index).copied().flatten()));
-            let switchover = per_slot_ctx.zip(n_predict).map(|(c, n)| c - n);
-            json!({
-                "rung": r.index + 1,
-                "of": m.top_rung() + 1,
-                "gguf_path": r.gguf_path,
-                "ctx_size": r.ctx_size,
-                "per_slot_ctx": per_slot_ctx,
-                "switchover": switchover,
-                "command_line": command_line_preview_at(state, Class::Chat, &m.model_id, r.index),
+    Some(
+        rungs
+            .iter()
+            .map(|r| {
+                let per_slot_ctx = m
+                    .per_slot_ctx(r.index)
+                    .map(|c| crate::ladder::slot_ctx(c, trained.get(r.index).copied().flatten()));
+                let switchover = per_slot_ctx.zip(n_predict).map(|(c, n)| c - n);
+                dto::RungDetail {
+                    rung: r.index + 1,
+                    of: m.top_rung() + 1,
+                    gguf_path: r.gguf_path.to_string(),
+                    ctx_size: r.ctx_size,
+                    per_slot_ctx,
+                    switchover,
+                    command_line: command_line_preview_at(state, Class::Chat, &m.model_id, r.index),
+                }
             })
-        })
-        .collect::<Vec<_>>())
+            .collect(),
+    )
+}
+
+/// A core row type as its API mirror, through the shared JSON shape. The
+/// mirror is what the document describes, so it has to be the row whole:
+/// the row is read into the mirror and written back, and a key the mirror
+/// drops (a field added on the core side only) is an error rather than a
+/// silent omission. `config_mirrors_match` in the tests compares the two
+/// types' key sets ahead of any row.
+pub(super) fn mirror<T: serde::Serialize, U: serde::Serialize + serde::de::DeserializeOwned>(
+    row: &T,
+) -> Result<U, String> {
+    let err = |e: serde_json::Error| format!("reading a row as its API shape: {e}");
+    let written = serde_json::to_value(row).map_err(err)?;
+    let mirrored: U = serde_json::from_value(written.clone()).map_err(err)?;
+    if serde_json::to_value(&mirrored).map_err(err)? != written {
+        return Err(
+            "reading a row as its API shape: the API type drops or invents a field \
+                    the row has"
+                .into(),
+        );
+    }
+    Ok(mirrored)
+}
+
+/// The API shape of a ladder rung. Destructured without `..`: a field added
+/// to the row's rung stops compiling here until the API type has it too.
+impl From<&crate::ladder::Rung> for dto::Rung {
+    fn from(r: &crate::ladder::Rung) -> Self {
+        let crate::ladder::Rung {
+            gguf_path,
+            ctx_size,
+        } = r.clone();
+        Self {
+            gguf_path,
+            ctx_size,
+        }
+    }
 }
 
 /// Static health of every configured local model, or of one named model.
@@ -637,7 +687,7 @@ pub async fn local_model_check(
     state: &SharedState,
     model_id: Option<&str>,
     target: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::LocalModelCheck, String> {
     let class = parse_class_target(target)?;
     let all = store::list_local_models(&state.db)
         .await
@@ -671,7 +721,7 @@ pub async fn local_model_check(
     }
 
     let mut checked = 0usize;
-    let mut results: Vec<Value> = Vec::new();
+    let mut results: Vec<dto::ModelCheck> = Vec::new();
     for m in all
         .iter()
         .filter(|_| class.is_none_or(|c| c == Class::Chat))
@@ -714,14 +764,13 @@ pub async fn local_model_check(
         // Only problems decide `ok`: an advisory describes a model that
         // starts, and counting it as broken would say the opposite.
         if !problems.is_empty() || !advisories.is_empty() || wanted.is_some() {
-            results.push(json!({
-                "class": "chat",
-                "model_id": m.model_id,
-                "enabled": m.enabled,
-                "ok": problems.is_empty(),
-                "problems": problems,
-                "advisories": advisories,
-            }));
+            results.push(dto::ModelCheck::Chat {
+                model_id: m.model_id.clone(),
+                enabled: m.enabled,
+                ok: problems.is_empty(),
+                problems,
+                advisories,
+            });
         }
     }
 
@@ -738,14 +787,13 @@ pub async fn local_model_check(
             checked += 1;
             let problems = aux_model_problems(&aux_dir, m).await;
             if !problems.is_empty() || wanted.is_some() {
-                results.push(json!({
-                    "class": "aux",
-                    "model_id": m.model_id,
-                    "kind": m.kind.as_str(),
-                    "enabled": m.enabled,
-                    "ok": problems.is_empty(),
-                    "problems": problems,
-                }));
+                results.push(dto::ModelCheck::Aux {
+                    model_id: m.model_id.clone(),
+                    kind: m.kind.as_str().to_string(),
+                    enabled: m.enabled,
+                    ok: problems.is_empty(),
+                    problems,
+                });
             }
         }
     }
@@ -764,28 +812,29 @@ pub async fn local_model_check(
             checked += 1;
             let problems = image_model_problems(&image_dir, m);
             if !problems.is_empty() || wanted.is_some() {
-                results.push(json!({
-                    "class": "image",
-                    "model_id": m.model_id,
-                    "modes": m.modes(),
-                    "edit": m.edit,
-                    "enabled": m.enabled,
-                    "ok": problems.is_empty(),
-                    "problems": problems,
-                }));
+                results.push(dto::ModelCheck::Image {
+                    model_id: m.model_id.clone(),
+                    modes: m.modes(),
+                    edit: m.edit,
+                    enabled: m.enabled,
+                    ok: problems.is_empty(),
+                    problems,
+                });
             }
         }
     }
 
-    Ok(json!({
-        "checked": checked,
-        "broken": results.iter().filter(|r| r["ok"] == Value::Bool(false)).count(),
-        "with_advisories": results
+    Ok(dto::LocalModelCheck {
+        checked,
+        broken: results.iter().filter(|r| !r.ok()).count(),
+        with_advisories: results
             .iter()
-            .filter(|r| r["advisories"].as_array().is_some_and(|a| !a.is_empty()))
+            .filter(
+                |r| matches!(r, dto::ModelCheck::Chat { advisories, .. } if !advisories.is_empty()),
+            )
             .count(),
-        "models": results,
-        "note": "Static checks only — paths, file roles, speculative-decoding \
+        models: results,
+        note: "Static checks only — paths, file roles, speculative-decoding \
                  consistency, the embed/rerank flag rules for aux models, and for \
                  image models the files/args key vocabulary. A model with no \
                  problems here can still fail to load; lmgw__local_model_test is \
@@ -793,8 +842,9 @@ pub async fn local_model_check(
                  but misbehaves under some input (a chat model's batch sizes too \
                  small for its projector's largest image, for one), so they never \
                  set ok=false or count as broken. Models with nothing to report are \
-                 omitted unless you asked for one by name.",
-    }))
+                 omitted unless you asked for one by name."
+            .to_string(),
+    })
 }
 
 /// First free `<base>-copy`, `<base>-copy-2`, … — `model_id` is UNIQUE, so a

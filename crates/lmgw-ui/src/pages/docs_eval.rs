@@ -17,10 +17,10 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    ChunkRow, EvalHistory, EvalRunRow, GoldenCandidateRow, GoldenCandidatesResponse,
-    GoldenQueryRow, GoldenResponse,
+    Ack, ChunkRow, EvalHistory, EvalRunRow, GoldenCandidateRow, GoldenCandidatesResponse,
+    GoldenQueryRow, GoldenResponse, GoldenSaved,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::widgets::{use_toasts, ConfirmButton, Modal, ModalFooter, Select};
 
@@ -480,7 +480,7 @@ fn GoldenRow(
     let edit_row = g.clone();
     let delete = move || {
         spawn_local(async move {
-            match crate::api::post::<Value, _>(format!("/api/docs/golden/{id}/delete"), &json!({}))
+            match crate::api::post::<Ack, _>(format!("/api/docs/golden/{id}/delete"), &json!({}))
                 .await
             {
                 Ok(_) => {
@@ -562,11 +562,16 @@ fn CandidateRow(
         }
         deciding.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
-                format!("/api/docs/golden/candidates/{id}/{what}"),
-                &json!({}),
-            )
-            .await;
+            let url = format!("/api/docs/golden/candidates/{id}/{what}");
+            let res = if what == "accept" {
+                crate::api::post::<GoldenSaved, _>(url, &json!({}))
+                    .await
+                    .map(|_| ())
+            } else {
+                crate::api::post::<Ack, _>(url, &json!({}))
+                    .await
+                    .map(|_| ())
+            };
             deciding.set(false);
             match res {
                 Ok(_) => {
@@ -750,7 +755,7 @@ fn GoldenForm(
         saving.set(true);
         error.set(None);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/docs/golden", &body).await;
+            let res = crate::api::post::<GoldenSaved, _>("/api/docs/golden", &body).await;
             saving.set(false);
             match res {
                 Ok(_) => {

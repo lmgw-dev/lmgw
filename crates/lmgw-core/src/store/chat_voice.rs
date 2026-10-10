@@ -347,22 +347,6 @@ pub struct ServedModel {
     pub voice: Option<String>,
 }
 
-/// What a dictated send may say about itself (§5): the transcribe answer's
-/// facts, nothing a reply carries.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DictationInput {
-    via: String,
-    #[serde(default)]
-    asr: Option<String>,
-    #[serde(default)]
-    asr_answered_by: Option<String>,
-    #[serde(default)]
-    asr_ms: Option<u64>,
-    #[serde(default)]
-    audio_ms: Option<u64>,
-}
-
 impl MessageVoice {
     /// Read `chat_messages.voice`: NULL (a typed turn) and text that is not
     /// a JSON object are `None`; a key this build cannot read is dropped on
@@ -379,10 +363,12 @@ impl MessageVoice {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
     }
 
-    /// The `voice` of a `send` (§5): strict, and only a dictation — a
-    /// realtime turn is written by the bound session, never sent.
-    pub fn dictation_from_input(v: Value) -> Result<Self, String> {
-        let d: DictationInput = serde_json::from_value(v).map_err(|e| format!("voice: {e}"))?;
+    /// The `voice` of a `send` (§5): only a dictation — a realtime turn is
+    /// written by the bound session, never sent. The request type refuses
+    /// any field a dictation does not have.
+    pub fn dictation_from_input(
+        d: lmgw_api_types::chat_turn::DictatedVoice,
+    ) -> Result<Self, String> {
         if d.via != VIA_DICTATION {
             return Err(format!(
                 "voice.via '{}' cannot be sent: a send carries only a dictation \
@@ -789,18 +775,22 @@ mod tests {
 
     #[test]
     fn a_send_carries_only_a_dictation() {
-        let v = MessageVoice::dictation_from_input(json!({
-            "via": "dictation", "asr": "nemo", "asr_ms": 98, "audio_ms": 2800
-        }))
+        let input = |v: Value| serde_json::from_value(v);
+        let v = MessageVoice::dictation_from_input(
+            input(json!({
+                "via": "dictation", "asr": "nemo", "asr_ms": 98, "audio_ms": 2800
+            }))
+            .unwrap(),
+        )
         .unwrap();
         assert_eq!(
             (v.asr.as_deref(), v.asr_ms, v.audio_ms),
             (Some("nemo"), Some(98), Some(2800))
         );
-        assert!(MessageVoice::dictation_from_input(json!({ "via": "realtime" })).is_err());
-        let e = MessageVoice::dictation_from_input(json!({ "via": "dictation", "unheard": "x" }))
-            .unwrap_err();
-        assert!(e.contains("unheard"), "{e}");
+        let realtime = input(json!({ "via": "realtime" })).unwrap();
+        assert!(MessageVoice::dictation_from_input(realtime).is_err());
+        let e = input(json!({ "via": "dictation", "unheard": "x" })).unwrap_err();
+        assert!(e.to_string().contains("unheard"), "{e}");
     }
 
     #[test]

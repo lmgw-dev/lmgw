@@ -162,9 +162,11 @@ async fn container_stop_without_an_entry_stops_the_running_container_by_name() {
     let name = entry(&f, "chat-model").unwrap().container_name;
     forget_everything(&f);
 
-    let out = lmgw_core::ops::container(&f.state, None, Some("chat-model"), "stop", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        lmgw_core::ops::container(&f.state, None, Some("chat-model"), "stop", false, None)
+            .await
+            .unwrap(),
+    );
     let message = out["message"].as_str().unwrap_or_default();
     assert!(
         message.contains("no lmgw entry") && message.contains(&name),
@@ -179,9 +181,11 @@ async fn container_stop_without_an_entry_stops_the_running_container_by_name() {
     );
 
     // Nothing running: it says so, rather than "stopped".
-    let out = lmgw_core::ops::container(&f.state, None, Some("chat-model"), "stop", false, None)
-        .await
-        .unwrap();
+    let out = crate::common::container_wire(
+        lmgw_core::ops::container(&f.state, None, Some("chat-model"), "stop", false, None)
+            .await
+            .unwrap(),
+    );
     assert!(
         out["message"]
             .as_str()

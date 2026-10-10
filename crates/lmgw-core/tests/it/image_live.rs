@@ -233,9 +233,11 @@ async fn a_real_sd_server_container_renders_a_png() {
     // dispatches the same request through the same handler, so against the
     // real binary this costs one more 256² render (~0.23 s, §12.3) and proves
     // the tool an owner actually reaches for, not just the route under it.
-    let probe = lmgw_core::modelinfo::local_model_test(&state, "z-image-turbo", Some("image"))
-        .await
-        .unwrap();
+    let probe = crate::common::model_test_wire(
+        lmgw_core::modelinfo::local_model_test(&state, "z-image-turbo", Some("image"))
+            .await
+            .unwrap(),
+    );
     eprintln!("local_model_test target=image: {probe}");
     assert_eq!(probe["ok"], true, "{probe}");
     assert_eq!(probe["output_format"], "png");

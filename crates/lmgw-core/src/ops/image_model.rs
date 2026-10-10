@@ -3,6 +3,8 @@
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use lmgw_api_types as dto;
+
 use crate::config::{HoldFallbackMode, ImageModel, Snapshot};
 use crate::hf;
 use crate::runtime::argv;
@@ -736,7 +738,7 @@ pub(super) fn image_model_get(
     state: &SharedState,
     id: Option<i64>,
     model_id: Option<&str>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<dto::ImageModelDetail>, String> {
     let found = match (id, model_id) {
         (Some(id), _) => snap.image_models.iter().find(|m| m.id == id),
         (None, Some(mid)) => snap.image_models.iter().find(|m| m.model_id == mid),
@@ -746,7 +748,7 @@ pub(super) fn image_model_get(
         return Ok(None);
     };
     let models_dir = snap.settings.image.models_dir.clone();
-    let present: Map<String, Value> = m
+    let present: std::collections::BTreeMap<String, bool> = m
         .files
         .iter()
         .map(|(k, v)| {
@@ -759,41 +761,43 @@ pub(super) fn image_model_get(
                     path.is_file()
                 }
             };
-            (k.clone(), json!(ok))
+            (k.clone(), ok)
         })
         .collect();
-    Ok(Some(json!({
-        "id": m.id,
-        "class": "image",
-        "model_id": m.model_id,
-        "public_name": snap.image_public_name(&m.model_id),
-        "files": m.files,
-        "files_present": present,
-        "args": m.args,
-        "modes": m.modes(),
-        "edit": m.edit,
-        "endpoints": if m.edit {
-            json!(["/v1/images/generations", "/v1/images/edits"])
+    Ok(Some(dto::ImageModelDetail {
+        id: m.id,
+        model_id: m.model_id.clone(),
+        public_name: snap.image_public_name(&m.model_id),
+        files: m.files.clone(),
+        files_present: present,
+        args: m.args.clone(),
+        modes: m.modes(),
+        edit: m.edit,
+        endpoints: if m.edit {
+            vec![
+                "/v1/images/generations".to_string(),
+                "/v1/images/edits".to_string(),
+            ]
         } else {
-            json!(["/v1/images/generations"])
+            vec!["/v1/images/generations".to_string()]
         },
-        "enabled": m.enabled,
-        "image": m.image,
-        "extra_run_args": m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
-        "warm_start": m.warm_start,
-        "idle_seconds": m.idle_seconds,
-        "hold_fallback_mode": m.hold_fallback_mode.as_str(),
-        "hold_fallback": m.hold_fallback.clone(),
-        "capabilities_override": m.capabilities_override.clone(),
+        enabled: m.enabled,
+        image: m.image.clone(),
+        extra_run_args: m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        warm_start: m.warm_start,
+        idle_seconds: m.idle_seconds,
+        hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
+        hold_fallback: m.hold_fallback.clone(),
+        capabilities_override: m.capabilities_override.clone(),
         // Learned, not configured (image-generation §9): what one generation
         // was measured to need above this pipeline's idle residency, and what
         // admission keeps free while it is resident. `null` means no
         // generation has run since the row last changed — the sentence beside
         // it is what an agent reading this needs, because the hole it names is
         // invisible everywhere else.
-        "peak_extra_bytes": m.peak_extra_bytes,
-        "peak_learned_at": m.peak_learned_at,
-        "peak": match m.peak_extra_bytes {
+        peak_extra_bytes: m.peak_extra_bytes,
+        peak_learned_at: m.peak_learned_at.clone(),
+        peak: match m.peak_extra_bytes {
             Some(p) => format!(
                 "one generation needed {} above idle (learned {}); admission keeps that much \
                  free for it while it is resident",
@@ -806,7 +810,7 @@ pub(super) fn image_model_get(
                      account for it."
                 .to_string(),
         },
-        "command_line": command_line_preview(state, Class::Image, &m.model_id),
-        "problems": image_model_problems(&models_dir, m),
-    })))
+        command_line: command_line_preview(state, Class::Image, &m.model_id),
+        problems: image_model_problems(&models_dir, m),
+    }))
 }

@@ -1,0 +1,4 @@
+# Count of json!( uses in non-test code per directory under crates/lmgw-core/src/.
+# Enforced by ci/json_ratchet.py: may only fall, and falls must lower it here.
+web = 135
+ops = 131

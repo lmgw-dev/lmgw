@@ -5,7 +5,6 @@
 
 use leptos::prelude::*;
 use lmgw_api_types::SearchTraceView;
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::widgets::{use_toasts, Section};
@@ -13,35 +12,7 @@ use crate::widgets::{use_toasts, Section};
 use super::knowledge::use_kb;
 use super::knowledge_source::{SourceModal, SourceRef};
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-struct Excerpt {
-    kb: String,
-    file_id: i64,
-    file: String,
-    page: Option<i64>,
-    chunk_id: String,
-    heading_path: String,
-    text: String,
-    score: f64,
-    tokens: u64,
-    span_start: i64,
-    span_end: i64,
-    file_sha: String,
-    /// The reranker did not score it: `score` is its fused score.
-    rerank_skipped: bool,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct Retrieval {
-    excerpts: Vec<Excerpt>,
-    tokens: u64,
-    dropped: u64,
-    notes: Vec<String>,
-    ms: f64,
-    traces: Vec<SearchTraceView>,
-}
+use lmgw_api_types::knowledge::{KnowledgeExcerpt as Excerpt, KnowledgeSearchResult as Retrieval};
 
 #[component]
 pub fn SearchTab() -> impl IntoView {

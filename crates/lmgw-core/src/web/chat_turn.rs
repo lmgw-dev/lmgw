@@ -20,7 +20,7 @@ use std::future::Future;
 
 use axum::http::StatusCode;
 use axum::response::Response;
-use serde_json::json;
+use lmgw_api_types::chat_frames as frames;
 use tokio::sync::mpsc;
 
 use super::agentchat::{self, ToolPlan, ADMIN_KIND};
@@ -354,12 +354,16 @@ impl Turn {
             Stopped::Superseded => {
                 let msg = "a newer turn of this thread started (or the thread went away), so \
                            this reply was stopped and is not saved";
-                let data = json!({ "message": msg, "code": "superseded" }).to_string();
-                let _ = tx.send(TurnFrame::new("error", data)).await;
+                let error = frames::ErrorFrame {
+                    message: msg.into(),
+                    code: Some("superseded".into()),
+                };
+                let _ = tx.send(TurnFrame::of("error", &error)).await;
             }
         }
-        let done = json!({ "aborted": true }).to_string();
-        let _ = tx.send(TurnFrame::new("done", done)).await;
+        let _ = tx
+            .send(TurnFrame::of("done", &frames::DoneFrame::aborted()))
+            .await;
     }
 
     /// The persist step: insert the reply as a new row, or append it to the
@@ -909,10 +913,12 @@ async fn start_turn_inner(
     );
     let tx = Events::new(out, feed.observer());
     if let Some(id) = user_message_id {
-        let data = json!({ "user_message_id": id }).to_string();
         // Room was checked before `begin`; a closed channel is a reader
         // gone, which the turn hears itself.
-        let _ = tx.try_send(TurnFrame::new("turn", data));
+        let started = frames::TurnStarted {
+            user_message_id: id,
+        };
+        let _ = tx.try_send(TurnFrame::of("turn", &started));
     }
     let turn = Turn {
         repo,
@@ -964,7 +970,7 @@ async fn start_turn_inner(
             let ran = turn
                 .or_stop(
                     &tx,
-                    chat_knowledge::run_auto(
+                    Box::pin(chat_knowledge::run_auto(
                         &state,
                         turn.caller(),
                         (repo, thread.id),
@@ -972,7 +978,7 @@ async fn start_turn_inner(
                         auto,
                         turn.ticket(),
                         &tx,
-                    ),
+                    )),
                 )
                 .await;
             if let Err(why) = ran {
@@ -995,7 +1001,7 @@ async fn start_turn_inner(
             }
             rendered
         };
-        let rendered = match turn.or_stop(&tx, render).await {
+        let rendered = match turn.or_stop(&tx, Box::pin(render)).await {
             Ok(r) => r,
             Err(why) => {
                 turn.report_stop(why, &tx).await;
@@ -1004,7 +1010,10 @@ async fn start_turn_inner(
             }
         };
         drop(attachments);
-        let language = match turn.or_stop(&tx, out::heard(language, heard)).await {
+        let language = match turn
+            .or_stop(&tx, Box::pin(out::heard(language, heard)))
+            .await
+        {
             Ok(l) => l,
             Err(why) => {
                 turn.report_stop(why, &tx).await;
@@ -1026,10 +1035,13 @@ async fn start_turn_inner(
         drop(spoken);
         // A resumed turn settles its decided calls in the tool loop, even
         // if the thread's tools went meanwhile.
+        // Boxed: the turn's futures are large in a debug build (the tool loop's
+        // alone is a third of a megabyte of stack when polled inline), and a
+        // test thread's 2 MiB is what the whole chain down to the gate shares.
         if plan.is_empty() && !turn.is_resume() {
-            run_send(state, turn, ir, tx).await;
+            Box::pin(run_send(state, turn, ir, tx)).await;
         } else {
-            agentchat::run_send(state, turn, ir, plan, tx).await;
+            Box::pin(agentchat::run_send(state, turn, ir, plan, tx)).await;
         }
     });
     Ok(())

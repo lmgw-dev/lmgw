@@ -5,10 +5,9 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    AliasView, AudioModel, AuxModel, GgufFiles, Params, ReasoningControl, SettingsFull,
-    UpstreamModelEntry, UpstreamModelsResponse, UpstreamsResponse,
+    AliasView, AudioModel, AuxModel, GgufFiles, ImageModelDetail, Params, ReasoningControl,
+    SettingsFull, UpstreamModelEntry, UpstreamModelsResponse, UpstreamsResponse,
 };
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::catalog::CatalogEntry;
@@ -816,20 +815,6 @@ const AUDIO_TASKS: [&str; 14] = [
     "midi",
 ];
 
-/// `GET /audio-lab/api/refs` response — just enough to list stored voice
-/// clips as copy-paste hints under the voice-presets field.
-#[derive(Deserialize, Default, Clone)]
-struct AudioRefsResponse {
-    #[serde(default)]
-    clips: Vec<AudioRefClip>,
-}
-
-#[derive(Deserialize, Clone)]
-struct AudioRefClip {
-    server_path: String,
-    size: u64,
-}
-
 /// Parse a JSON-object textarea into a map; blank text is an empty map
 /// (clears the field), matching the "always send the form's full state"
 /// convention the rest of this file uses.
@@ -1016,7 +1001,7 @@ fn AudioForm(
     // presets — the same directory `/audio-lab` uploads into. Hidden
     // entirely if the endpoint errors or the dir isn't configured.
     let refs = LocalResource::new(|| async {
-        crate::api::get::<AudioRefsResponse>("/audio-lab/api/refs")
+        crate::api::get::<lmgw_api_types::audio_lab::ClipList>("/audio-lab/api/refs")
             .await
             .ok()
     });
@@ -1565,26 +1550,6 @@ fn image_arg_value(raw: &str) -> Value {
         Ok(v @ (Value::Number(_) | Value::Bool(_))) => v,
         _ => Value::from(raw),
     }
-}
-
-/// `GET /api/local-model?target=image&model_id=…` — the parts of the image
-/// arm of `ops::local_model_get` this form reads.
-#[derive(Deserialize, Default, Clone)]
-struct ImageModelDetail {
-    #[serde(default)]
-    files_present: serde_json::Map<String, Value>,
-    #[serde(default)]
-    endpoints: Vec<String>,
-    #[serde(default)]
-    problems: Vec<String>,
-    #[serde(default)]
-    command_line: String,
-    /// Already grouped one option-plus-its-values per line by the server
-    /// (`argv::args_to_lines`), which is the shape the textarea wants —
-    /// the raw token list on the models payload would print `--device` and
-    /// `nvidia.com/gpu=all` on two lines.
-    #[serde(default)]
-    extra_run_args: Option<String>,
 }
 
 #[component]
@@ -2501,7 +2466,7 @@ fn ImageFileField(
         present
             .get()
             .flatten()
-            .and_then(|d| d.files_present.get(&k).and_then(Value::as_bool))
+            .and_then(|d| d.files_present.get(&k).copied())
             == Some(false)
     };
     view! {

@@ -19,6 +19,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
+use lmgw_api_types::audio_lab::TranscriptProvenance;
 
 use super::{clip_entries, read_prompt_text, safe_clip_name, voice_name, voices_dir};
 use super::{write_prompt_text, PROMPT_TEXT_FILE};
@@ -63,13 +64,13 @@ pub(crate) struct Written {
 
 impl Written {
     /// The answer's fields about who wrote the transcript.
-    pub(crate) fn provenance(&self) -> serde_json::Value {
-        serde_json::json!({
-            "transcript_source": self.source,
-            "answered_by": self.answered_by.as_ref().map(|(f, _)| f),
-            "fallback_reason": self.answered_by.as_ref().map(|(_, r)| r),
-            "by": self.by,
-        })
+    pub(crate) fn provenance(&self) -> TranscriptProvenance {
+        TranscriptProvenance {
+            transcript_source: self.source.clone(),
+            answered_by: self.answered_by.as_ref().map(|(f, _)| f.clone()),
+            fallback_reason: self.answered_by.as_ref().map(|(_, r)| r.to_string()),
+            by: self.by.clone(),
+        }
     }
 }
 
@@ -154,8 +155,8 @@ fn clip_file(dir: &Path, name: &str) -> Result<String, ClipError> {
     }
     clip_entries(dir)
         .iter()
-        .find(|e| e["voice"].as_str() == Some(name.as_str()))
-        .and_then(|e| e["name"].as_str().map(str::to_string))
+        .find(|e| e.voice == name)
+        .map(|e| e.name.clone())
         .ok_or_else(|| ClipError::Clip(format!("no clip named {name} in the voice library")))
 }
 
@@ -163,8 +164,8 @@ fn clip_file(dir: &Path, name: &str) -> Result<String, ClipError> {
 pub(crate) fn clips_without_transcript(dir: &Path) -> Vec<String> {
     clip_entries(dir)
         .iter()
-        .filter(|e| e["transcript"].as_str().is_none_or(|t| t.trim().is_empty()))
-        .filter_map(|e| e["name"].as_str().map(str::to_string))
+        .filter(|e| e.transcript.trim().is_empty())
+        .map(|e| e.name.clone())
         .collect()
 }
 

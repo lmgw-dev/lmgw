@@ -13,6 +13,40 @@ pub struct ApiError {
     pub message: String,
 }
 
+/// The OpenAI-shaped error envelope `/v1` answers failures in (and the lab
+/// routes that relay or imitate it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OpenAiError {
+    pub error: OpenAiErrorBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OpenAiErrorBody {
+    pub message: String,
+    /// e.g. `invalid_request_error`, `api_error`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Always null: lmgw does not attribute an error to one request field.
+    pub param: Option<String>,
+    /// lmgw's own machine-readable code, not the HTTP status.
+    pub code: String,
+}
+
+impl OpenAiError {
+    pub fn new(message: impl Into<String>, kind: &str, code: &str) -> Self {
+        Self {
+            error: OpenAiErrorBody {
+                message: message.into(),
+                kind: kind.into(),
+                param: None,
+                code: code.into(),
+            },
+        }
+    }
+}
+
 /// `GET /api/version` — build identity, also serves as the liveness probe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -58,27 +92,29 @@ pub struct RuntimeStatus {
     pub last_used_age_seconds: u64,
     /// Non-fatal problems this model's start found.
     /// Empty for a clean one, and absent from a frame older than the class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// What an image container reported about its loaded pipeline. `None` for
     /// every other class, and for an image container whose capabilities route
     /// answered anything but a 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_capabilities: Option<ImageCapabilities>,
     /// What a llama-server container said about itself in `GET /props`.
     /// `None` for every other engine, and when the
     /// read failed — `warnings` then says why.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llama_props: Option<LlamaProps>,
     /// The rung this container runs. `None` for a row
     /// without a ladder, and `#[serde(default)]` so a frame from before this
     /// field existed still decodes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rung: Option<RungStatus>,
     /// A climb in progress: to which rung, why, and what it is doing now.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub climbing: Option<ClimbStatus>,
     /// Sends in flight as the ladder gate counts them — what a climb drains.
     /// Only ladder sends are counted, so this is zero on every other row.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub sends: u32,
     /// Whom the container runs for:
     /// `"background"` when a background candidate alias started it and
@@ -87,16 +123,16 @@ pub struct RuntimeStatus {
     /// alias's, every warm, boot or operator start, and lmgw's own in-process
     /// callers. That is every container of an install without background
     /// traffic.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// A foreground admission is waiting for room, and background traffic takes
     /// no new work on this model until it is over. Absent = false.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draining_for_owner: bool,
     /// `"cpu"` for an audio container started on the CPU (the per-row CPU
     /// switch): no VRAM, not stopped by the GPU hold. `None` — absent from
     /// the frame — is the GPU, every other container.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<String>,
 }
 
@@ -230,10 +266,9 @@ impl<'de> Deserialize<'de> for ImageAsset {
     }
 }
 
-/// Hand-written rather than derived (api-docs design §3.1): the wire shape is
-/// the `Deserialize` impl above's tolerance, a bare string *or* `{name}`,
-/// which `#[derive(JsonSchema)]` on the struct's one field could not state —
-/// it only ever sees the object half.
+/// Hand-written rather than derived: the reader accepts a bare string as well
+/// as `{name}` (the `Deserialize` impl above), but the gateway only ever
+/// sends the object, and this schema describes what is sent.
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for ImageAsset {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -242,13 +277,9 @@ impl schemars::JsonSchema for ImageAsset {
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "oneOf": [
-                { "type": "string" },
-                {
-                    "type": "object",
-                    "properties": { "name": { "type": "string" } },
-                },
-            ],
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } },
         })
     }
 }
@@ -594,4 +625,8 @@ pub struct RowPricing {
     pub price_per_mchar: Option<f64>,
     pub price_per_image: Option<f64>,
     pub price_per_request: Option<f64>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }

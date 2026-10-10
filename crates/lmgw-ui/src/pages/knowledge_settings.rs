@@ -5,7 +5,6 @@
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::fmt::grouped;
@@ -14,13 +13,7 @@ use crate::widgets::{use_toasts, ConfirmButton, Section};
 use super::knowledge::use_kb;
 use super::knowledge_form::{KbFields, KbForm};
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct EditOutcome {
-    reembed_job: Option<i64>,
-    ingest_job: Option<i64>,
-    rechunk_files: u64,
-}
+use lmgw_api_types::knowledge::KnowledgeBaseEdited as EditOutcome;
 
 /// What the toast says the edit started, read from the edit response. A model
 /// change starts ONE job whose first stage measures the stored chunks against
@@ -201,6 +194,7 @@ mod tests {
             reembed_job: reembed,
             ingest_job: ingest,
             rechunk_files: files,
+            ..Default::default()
         }
     }
 

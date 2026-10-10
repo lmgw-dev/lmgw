@@ -11,12 +11,13 @@ use std::collections::HashSet;
 
 use bytes::Bytes;
 use quickdoc_core::embed::Embedder;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::jobs::{JobKind, JobView, Spawn};
 use crate::quickdoc::{alias_for_identity, InProcessEmbedder, InProcessReranker};
 use crate::state::SharedState;
+
+use lmgw_api_types::knowledge::{self as api, UploadVerdict};
 
 use super::store::{self, Kb, KbCounts, KbEdit, KbFile, NewKb, NewKbFile};
 use super::{ingest, job_key, originals, reembed, sections};
@@ -26,10 +27,10 @@ pub const DEFAULT_CHUNK_TOKENS: i64 = 512;
 /// `chunk_overlap` when a new base names none (§13).
 pub const DEFAULT_CHUNK_OVERLAP: i64 = 64;
 
-/// A base as the list, the detail page and `kb__list` show it.
-#[derive(Debug, Clone, Serialize)]
+/// A base as the list, the detail page and `kb__list` show it; the wire form
+/// is [`super::wire::base`].
+#[derive(Debug, Clone)]
 pub struct KbView {
-    #[serde(flatten)]
     pub kb: Kb,
     /// `upstream/model (Nd)` — the pin, as a docs corpus shows its own.
     pub embed_identity: String,
@@ -55,50 +56,10 @@ pub struct KbView {
     pub notes: Vec<String>,
 }
 
-/// `POST /api/knowledge/bases`.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CreateKb {
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    pub embed_alias: String,
-    #[serde(default)]
-    pub rerank_alias: Option<String>,
-    #[serde(default)]
-    pub vision_alias: Option<String>,
-    #[serde(default)]
-    pub chunk_tokens: Option<i64>,
-    #[serde(default)]
-    pub chunk_overlap: Option<i64>,
-    #[serde(default)]
-    pub mcp_visible: Option<bool>,
-}
-
-/// `POST /api/knowledge/bases/{id}/settings`: every field optional; an empty
-/// `rerank_alias` / `vision_alias` clears it.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EditKbRequest {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    /// A different model re-pins the base and re-embeds every chunk.
-    #[serde(default)]
-    pub embed_alias: Option<String>,
-    #[serde(default)]
-    pub rerank_alias: Option<String>,
-    #[serde(default)]
-    pub vision_alias: Option<String>,
-    /// A change re-chunks (re-ingests) every file.
-    #[serde(default)]
-    pub chunk_tokens: Option<i64>,
-    #[serde(default)]
-    pub chunk_overlap: Option<i64>,
-    #[serde(default)]
-    pub mcp_visible: Option<bool>,
-}
+/// `POST /api/knowledge/bases`'s body and `…/settings`'s: the wire types.
+pub use lmgw_api_types::knowledge::{
+    CreateKnowledgeBase as CreateKb, EditKnowledgeBase as EditKbRequest,
+};
 
 async fn kb_or_err(state: &SharedState, id: i64) -> Result<Kb, String> {
     store::get_kb(&state.knowledge.pool, id)
@@ -233,7 +194,7 @@ pub async fn create(state: &SharedState, req: CreateKb) -> Result<KbView, String
 }
 
 /// What an edit changed besides the row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct EditOutcome {
     pub kb: KbView,
     /// The re-embed a model change started.
@@ -429,10 +390,15 @@ pub async fn start_ingest(state: &SharedState, kb: &Kb) -> Result<Option<i64>, S
 /// was refused by the model as larger than one input, whatever the
 /// measurement said (a tokenizer's error). Then the files holding chunks
 /// without a vector — and only those — are re-chunked.
-pub async fn resume(state: &SharedState, kb_id: i64) -> Result<Value, String> {
+pub async fn resume(state: &SharedState, kb_id: i64) -> Result<api::ResumeResult, String> {
     let kb = kb_or_err(state, kb_id).await?;
     if let Some(j) = live_job(state, kb.id) {
-        return Ok(json!({ "job": j.id, "kind": j.kind, "already_running": true }));
+        return Ok(api::ResumeResult {
+            job: Some(j.id),
+            kind: Some(j.kind),
+            already_running: Some(true),
+            ..Default::default()
+        });
     }
     let pool = &state.knowledge.pool;
     let unembedded = store::count_unembedded(pool, kb.id, store::Unembedded::Live)
@@ -468,55 +434,64 @@ pub async fn resume(state: &SharedState, kb_id: i64) -> Result<Value, String> {
                 .map_err(|e| e.to_string())?;
             if n > 0 {
                 let s = ingest::spawn(state, &kb).await?;
-                return Ok(json!({
-                    "job": s.id(),
-                    "kind": JobKind::KbIngest.as_str(),
-                    "rechunk": why,
-                    "message": format!(
+                return Ok(api::ResumeResult {
+                    job: Some(s.id()),
+                    kind: Some(JobKind::KbIngest.as_str().to_string()),
+                    message: Some(format!(
                         "re-chunking {n} file(s) for {}: {why}",
                         kb.embed_alias
-                    ),
-                }));
+                    )),
+                    rechunk: Some(why),
+                    ..Default::default()
+                });
             }
         }
         let s = reembed::spawn(state, &kb, None, unembedded > 0).await?;
-        return Ok(json!({
-            "job": s.id(),
-            "kind": JobKind::KbReembed.as_str(),
-            "message": if unembedded > 0 {
-                "measuring the stored chunks against the model first — the files that do not \
-                 fit are re-chunked, the rest re-embedded"
-            } else {
-                "clearing the re-embed mark"
-            },
-        }));
+        return Ok(api::ResumeResult {
+            job: Some(s.id()),
+            kind: Some(JobKind::KbReembed.as_str().to_string()),
+            message: Some(
+                if unembedded > 0 {
+                    "measuring the stored chunks against the model first — the files that do \
+                     not fit are re-chunked, the rest re-embedded"
+                } else {
+                    "clearing the re-embed mark"
+                }
+                .to_string(),
+            ),
+            ..Default::default()
+        });
     }
     if pending == 0 {
-        return Ok(json!({
-            "job": null,
-            "message": format!("{} has nothing waiting — no job started", kb.label()),
-        }));
+        return Ok(api::ResumeResult {
+            message: Some(format!(
+                "{} has nothing waiting — no job started",
+                kb.label()
+            )),
+            ..Default::default()
+        });
     }
     let s = ingest::spawn(state, &kb).await?;
-    Ok(json!({
-        "job": s.id(),
-        "kind": JobKind::KbIngest.as_str(),
-        "already_running": matches!(s, Spawn::AlreadyRunning(_)),
-    }))
+    Ok(api::ResumeResult {
+        job: Some(s.id()),
+        kind: Some(JobKind::KbIngest.as_str().to_string()),
+        already_running: Some(matches!(s, Spawn::AlreadyRunning(_))),
+        ..Default::default()
+    })
 }
 
-pub async fn cancel(state: &SharedState, kb_id: i64) -> Result<Value, String> {
+pub async fn cancel(state: &SharedState, kb_id: i64) -> Result<api::CancelResult, String> {
     let kb = kb_or_err(state, kb_id).await?;
     let Some(j) = live_job(state, kb.id) else {
         return Err(format!("{} has no job running", kb.label()));
     };
     let message = crate::jobs::cancel(state, j.id).await?;
-    Ok(json!({ "job": j.id, "message": message }))
+    Ok(api::CancelResult { job: j.id, message })
 }
 
 /// Delete a base: its files, chunks and — where nothing else uses them —
 /// originals.
-pub async fn delete(state: &SharedState, kb_id: i64) -> Result<Value, String> {
+pub async fn delete(state: &SharedState, kb_id: i64) -> Result<api::KnowledgeBaseDeleted, String> {
     let kb = kb_or_err(state, kb_id).await?;
     if let Some(j) = live_job(state, kb.id) {
         let _ = crate::jobs::cancel(state, j.id).await;
@@ -534,26 +509,25 @@ pub async fn delete(state: &SharedState, kb_id: i64) -> Result<Value, String> {
     for sha in &unique {
         originals::remove_if_unused(&state.knowledge.pool, &state.data_dir, sha).await;
     }
-    Ok(json!({
-        "deleted": kb.id,
-        "name": kb.name,
-        "files": counts.files,
-        "chunks": counts.chunks,
-    }))
+    Ok(api::KnowledgeBaseDeleted {
+        deleted: kb.id,
+        name: kb.name,
+        files: counts.files,
+        chunks: counts.chunks,
+    })
 }
 
 /// One uploaded file's fate.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct UploadItem {
     pub name: String,
-    /// `added` | `replaced` | `unchanged` | `duplicate` | `refused`.
-    pub outcome: &'static str,
+    pub outcome: UploadVerdict,
     pub file: Option<KbFile>,
     /// Why it was not added, or what it replaced.
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct UploadOutcome {
     pub items: Vec<UploadItem>,
     /// The ingest job the upload started or joined.
@@ -579,7 +553,7 @@ pub async fn upload(
         let name = clean_name(&raw_name);
         let refuse = |reason: String| UploadItem {
             name: name.clone(),
-            outcome: "refused",
+            outcome: UploadVerdict::Refused,
             file: None,
             reason: Some(reason),
         };
@@ -623,7 +597,7 @@ pub async fn upload(
                 queued = true;
                 items.push(UploadItem {
                     name: name.clone(),
-                    outcome: "replaced",
+                    outcome: UploadVerdict::Replaced,
                     reason: Some(format!(
                         "the earlier attempt to ingest these bytes failed ({why}) — queued again"
                     )),
@@ -635,7 +609,11 @@ pub async fn upload(
             }
             items.push(UploadItem {
                 name: name.clone(),
-                outcome: if same_name { "unchanged" } else { "duplicate" },
+                outcome: if same_name {
+                    UploadVerdict::Unchanged
+                } else {
+                    UploadVerdict::Duplicate
+                },
                 reason: Some(if same_name && existing.status != "ready" {
                     "the same file is already queued for ingestion — skipped".to_string()
                 } else if same_name {
@@ -677,7 +655,7 @@ pub async fn upload(
                 drop(held);
                 originals::remove_if_unused(pool, &state.data_dir, &old.sha256).await;
                 (
-                    "replaced",
+                    UploadVerdict::Replaced,
                     old.id,
                     Some(format!(
                         "replaced the earlier '{name}' ({} bytes); its chunks stay searchable \
@@ -696,7 +674,7 @@ pub async fn upload(
                     .await
                     .map_err(|e| e.to_string())?;
                 drop(held);
-                ("added", id, None)
+                (UploadVerdict::Added, id, None)
             }
         };
         queued = true;
@@ -726,7 +704,10 @@ fn clean_name(raw: &str) -> String {
     }
 }
 
-pub async fn delete_file(state: &SharedState, file_id: i64) -> Result<Value, String> {
+pub async fn delete_file(
+    state: &SharedState,
+    file_id: i64,
+) -> Result<api::KnowledgeFileDeleted, String> {
     let file = file_or_err(state, file_id).await?;
     if file.status == "ingesting" {
         return Err(format!(
@@ -738,16 +719,19 @@ pub async fn delete_file(state: &SharedState, file_id: i64) -> Result<Value, Str
         .await
         .map_err(|e| e.to_string())?;
     originals::remove_if_unused(&state.knowledge.pool, &state.data_dir, &file.sha256).await;
-    Ok(json!({
-        "deleted": file.id,
-        "name": file.name,
-        "chunks": file.chunk_count,
-    }))
+    Ok(api::KnowledgeFileDeleted {
+        deleted: file.id,
+        name: file.name,
+        chunks: file.chunk_count,
+    })
 }
 
 /// Queue one file again — after its base gained a vision model, say, or
 /// after it failed.
-pub async fn reingest_file(state: &SharedState, file_id: i64) -> Result<Value, String> {
+pub async fn reingest_file(
+    state: &SharedState,
+    file_id: i64,
+) -> Result<api::KnowledgeFileRequeued, String> {
     let file = file_or_err(state, file_id).await?;
     if file.status == "ingesting" {
         return Err(format!("'{}' is being ingested right now", file.name));
@@ -757,7 +741,7 @@ pub async fn reingest_file(state: &SharedState, file_id: i64) -> Result<Value, S
         .await
         .map_err(|e| e.to_string())?;
     let job = start_ingest(state, &kb).await?;
-    Ok(json!({ "file": file.id, "job": job }))
+    Ok(api::KnowledgeFileRequeued { file: file.id, job })
 }
 
 pub async fn get(state: &SharedState, kb_id: i64) -> Result<KbView, String> {

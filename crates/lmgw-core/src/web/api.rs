@@ -445,14 +445,14 @@ fn aliases_sorted(mut aliases: Vec<dto::AliasView>) -> Vec<dto::AliasView> {
 pub(crate) struct LocalModelQuery {
     id: Option<i64>,
     model_id: Option<String>,
-    /// `chat` | `aux`; absent looks in chat first, then aux.
+    /// `chat` | `aux` | `image` | `audio`; absent looks in chat first, then aux, image and audio.
     target: Option<String>,
 }
 
 async fn local_model(State(st): State<SharedState>, Query(q): Query<LocalModelQuery>) -> Response {
-    ops_result(
+    ops_result(crate::ops::backends::to_json(
         crate::ops::local_model_get(&st, q.id, q.model_id.as_deref(), q.target.as_deref()).await,
-    )
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -465,7 +465,9 @@ async fn local_model_check(
     State(st): State<SharedState>,
     Query(q): Query<ModelIdQuery>,
 ) -> Response {
-    ops_result(crate::ops::local_model_check(&st, q.model_id.as_deref(), q.target.as_deref()).await)
+    ops_result(crate::ops::backends::to_json(
+        crate::ops::local_model_check(&st, q.model_id.as_deref(), q.target.as_deref()).await,
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -488,7 +490,9 @@ pub(crate) struct FlagsQuery {
 }
 
 async fn llama_flags(State(st): State<SharedState>, Query(q): Query<FlagsQuery>) -> Response {
-    ops_result(crate::ops::llama_flags(&st, q.search.as_deref(), q.model.as_deref()).await)
+    ops_result(crate::ops::backends::to_json(
+        crate::ops::llama_flags(&st, q.search.as_deref(), q.model.as_deref()).await,
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -501,7 +505,9 @@ pub(crate) struct InspectQuery {
 }
 
 async fn model_inspect(State(st): State<SharedState>, Query(q): Query<InspectQuery>) -> Response {
-    ops_result(crate::modelinfo::model_inspect(&st, &q.path, q.probe, q.target.as_deref()).await)
+    ops_result(crate::ops::backends::to_json(
+        crate::modelinfo::model_inspect(&st, &q.path, q.probe, q.target.as_deref()).await,
+    ))
 }
 
 async fn local_model_plan(
@@ -1062,15 +1068,17 @@ async fn op(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let tail = args.get("tail").and_then(Value::as_i64);
-            ops::container(
-                &st,
-                target.as_deref(),
-                model.as_deref(),
-                &action,
-                force,
-                tail,
+            ops::backends::to_json(
+                ops::container(
+                    &st,
+                    target.as_deref(),
+                    model.as_deref(),
+                    &action,
+                    force,
+                    tail,
+                )
+                .await,
             )
-            .await
         }
         // The GPU hold (gpu-hold design §6). An op, not a settings patch:
         // engaging it stops containers, which a generic settings save must not
@@ -1082,9 +1090,9 @@ async fn op(
         "audio_catalog" => audio_catalog_op(&st, &args).await,
         // Voice-library transcripts by a speech-to-text model
         // (audio-class gap 5); shared with `lmgw__voice_transcribe`.
-        "voice_transcribe" => {
-            ops::voice_transcribe(&st, arg_str(&args, "clip"), arg_str(&args, "alias")).await
-        }
+        "voice_transcribe" => ops::backends::to_json(
+            ops::voice_transcribe(&st, arg_str(&args, "clip"), arg_str(&args, "alias")).await,
+        ),
         // "Add from recipe" for the image class (image-generation design
         // §7.2), the audio catalog's sibling with a compiled-in source.
         // Shared with `lmgw__image_recipes` / `lmgw__image_recipe_add`.
@@ -1096,7 +1104,9 @@ async fn op(
         "local_model_test" => {
             let model_id = arg_str(&args, "model_id").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").map(String::from);
-            crate::modelinfo::local_model_test(&st, &model_id, target.as_deref()).await
+            ops::backends::to_json(
+                crate::modelinfo::local_model_test(&st, &model_id, target.as_deref()).await,
+            )
         }
         // The Backends page (container-builds §15): each op takes its §15
         // argument type and answers with its §15 response type. Cancel is
@@ -1175,16 +1185,15 @@ async fn audio_catalog_op(st: &SharedState, args: &Args) -> Result<Value, String
     // The same function `lmgw__audio_catalog` calls; its `list` is this
     // plane's `GET /api/audio/catalog`, so the op takes the other two only.
     match arg_str(args, "action").unwrap_or_default() {
-        action @ ("refresh" | "download") => {
-            crate::ops::audio_catalog(
+        action @ ("refresh" | "download") => crate::ops::backends::to_json(
+            crate::ops::audio_catalog_act(
                 st,
                 action,
                 arg_str(args, "family"),
                 arg_str(args, "package"),
-                None,
             )
-            .await
-        }
+            .await,
+        ),
         other => Err(format!("unknown action '{other}' (refresh, download)")),
     }
 }

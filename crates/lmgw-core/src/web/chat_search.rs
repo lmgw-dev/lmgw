@@ -14,15 +14,19 @@ use super::chat_extract::ChatQuery;
 use crate::state::SharedState;
 use crate::store::{self, SearchArchived, SEARCH_MIN_CHARS};
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, schemars::JsonSchema)]
 pub struct SearchQuery {
+    /// The words to find: at least two characters. Words match as prefixes
+    /// and all must match; a `"quoted phrase"` matches as a phrase.
     #[serde(default)]
     q: String,
     /// `0` (default) active threads, `1` archived only, `all` both.
     #[serde(default)]
     archived: String,
+    /// Only threads in this folder.
     #[serde(default)]
     folder: Option<i64>,
+    /// How many threads to skip: the previous page's `next_offset`.
     #[serde(default)]
     offset: Option<i64>,
 }

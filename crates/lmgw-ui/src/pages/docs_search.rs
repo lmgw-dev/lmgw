@@ -124,7 +124,7 @@ pub fn Playground() -> impl IntoView {
                 if raw.trim().is_empty() {
                     None
                 } else {
-                    Some(parse_num::<u32>(budget, "budget_tokens")?).filter(|b| *b > 0)
+                    Some(parse_num::<u64>(budget, "budget_tokens")?).filter(|b| *b > 0)
                 }
             },
         })

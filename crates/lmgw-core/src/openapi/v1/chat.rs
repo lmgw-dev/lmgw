@@ -145,9 +145,13 @@ pub(crate) fn request(g: &mut SchemaGenerator) -> Schema {
     )
 }
 
-fn choice_message() -> Value {
+/// A choice's `message` (`complete`: role and content always there) or a
+/// stream frame's `delta` (every key optional: the finish frame's is `{}`).
+fn choice_message(complete: bool) -> Value {
+    let required: &[&str] = if complete { &["role", "content"] } else { &[] };
     json!({
         "type": "object",
+        "required": required,
         "properties": {
             "role": {"type": "string", "enum": ["assistant"]},
             "content": {"type": ["string", "null"]},
@@ -160,6 +164,7 @@ fn choice_message() -> Value {
 fn usage_schema() -> Value {
     json!({
         "type": "object",
+        "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
         "properties": {
             "prompt_tokens": {"type": "integer"},
             "completion_tokens": {"type": "integer"},
@@ -177,6 +182,7 @@ fn usage_schema() -> Value {
             },
             "completion_tokens_details": {
                 "type": "object",
+                "required": ["reasoning_tokens"],
                 "properties": {"reasoning_tokens": {"type": "integer"}},
                 "description": "Present only when the upstream reported reasoning tokens."
             }
@@ -196,6 +202,7 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
         "ChatCompletion",
         schemars::json_schema!({
             "type": "object",
+            "required": ["id", "object", "created", "model", "choices", "usage"],
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["chat.completion"]},
@@ -205,9 +212,10 @@ pub(crate) fn response(g: &mut SchemaGenerator) -> Schema {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "required": ["index", "message", "finish_reason"],
                         "properties": {
                             "index": {"type": "integer"},
-                            "message": choice_message(),
+                            "message": choice_message(true),
                             "finish_reason": {"type": ["string", "null"]}
                         }
                     }
@@ -239,6 +247,7 @@ pub(crate) fn stream_chunk(g: &mut SchemaGenerator) -> Schema {
         "ChatCompletionChunk",
         schemars::json_schema!({
             "type": "object",
+            "required": ["id", "object", "created", "model", "choices"],
             "properties": {
                 "id": {"type": "string"},
                 "object": {"type": "string", "enum": ["chat.completion.chunk"]},
@@ -248,9 +257,10 @@ pub(crate) fn stream_chunk(g: &mut SchemaGenerator) -> Schema {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "required": ["index", "delta", "finish_reason"],
                         "properties": {
                             "index": {"type": "integer"},
-                            "delta": choice_message(),
+                            "delta": choice_message(false),
                             "finish_reason": {"type": ["string", "null"]}
                         }
                     }
@@ -261,6 +271,41 @@ pub(crate) fn stream_chunk(g: &mut SchemaGenerator) -> Schema {
                 literal `data: [DONE]`."
         }),
     )
+}
+
+/// The error frame an upstream that fails after the stream began is reported
+/// with: `data: {"error": {...}}` on the unnamed event, in place of a chunk
+/// (the HTTP status is already 200 by then). The stream ends after it.
+fn stream_error(g: &mut SchemaGenerator) -> Schema {
+    schemas::named(
+        g,
+        "ChatCompletionStreamError",
+        schemars::json_schema!({
+            "type": "object",
+            "required": ["error"],
+            "properties": {
+                "error": {
+                    "type": "object",
+                    "required": ["message", "type", "code"],
+                    "properties": {
+                        "message": {"type": "string"},
+                        "type": {"type": "string", "enum": ["api_error"]},
+                        "code": {"type": "string", "enum": ["upstream"]}
+                    }
+                }
+            },
+            "description": "The frame a stream carries instead of a chunk when the upstream \
+                fails after the first byte was sent."
+        }),
+    )
+}
+
+/// What one `data:` line of a `stream: true` answer holds: a
+/// [`stream_chunk`], or the [`stream_error`] frame.
+pub(crate) fn stream_frame(g: &mut SchemaGenerator) -> Schema {
+    let chunk = stream_chunk(g);
+    let error = stream_error(g);
+    schemars::json_schema!({"anyOf": [chunk, error]})
 }
 
 /// `model` is `"<pick a model>"`: the tester replaces it with

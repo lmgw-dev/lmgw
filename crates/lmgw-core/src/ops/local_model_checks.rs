@@ -4,7 +4,7 @@
 //! `local_model_get`/`local_model_set`) and `lmgw__llama_flags`, which
 //! answers the same question for a caller directly.
 
-use serde_json::{json, Map, Value};
+use lmgw_api_types as dto;
 
 use crate::config::Snapshot;
 use crate::runtime::descriptor::model_runtime;
@@ -300,7 +300,7 @@ pub async fn llama_flags(
     state: &SharedState,
     search: Option<&str>,
     model_or_image: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::LlamaFlags, String> {
     let snap = state.snapshot();
     let (image, run_args) = resolve_flag_image(&snap, model_or_image)?;
     let help = state
@@ -315,25 +315,26 @@ pub async fn llama_flags(
             .is_none_or(|n| f.to_ascii_lowercase().contains(n))
     };
 
-    let flags: Vec<&String> = caps.flags.iter().filter(|f| keep(f)).collect();
-    let enums: Map<String, Value> = caps
+    let flags: Vec<String> = caps.flags.iter().filter(|f| keep(f)).cloned().collect();
+    let enums = caps
         .enums
         .iter()
         .filter(|(f, _)| keep(f))
-        .map(|(f, v)| (f.clone(), json!(v)))
+        .map(|(f, v)| (f.clone(), v.clone()))
         .collect();
-    let removed: Vec<&String> = caps.removed.iter().filter(|f| keep(f)).collect();
-    Ok(json!({
-        "image": image,
-        "flag_count": caps.flags.len(),
-        "flags": flags,
-        "allowed_values": enums,
-        "removed": removed,
-        "note": "The vocabulary is the image's, not lmgw's: a model on a different \
-                 image can accept different flags — pass model=<id> to ask about that \
-                 one. Flags with a dedicated lmgw__local_model_set field should be set \
-                 there, not through extra_args.",
-    }))
+    let removed: Vec<String> = caps.removed.iter().filter(|f| keep(f)).cloned().collect();
+    Ok(dto::LlamaFlags {
+        image,
+        flag_count: caps.flags.len(),
+        flags,
+        allowed_values: enums,
+        removed,
+        note: "The vocabulary is the image's, not lmgw's: a model on a different \
+               image can accept different flags — pass model=<id> to ask about that \
+               one. Flags with a dedicated lmgw__local_model_set field should be set \
+               there, not through extra_args."
+            .to_string(),
+    })
 }
 
 /// `model_or_image` → an image reference, and the `podman run` args its

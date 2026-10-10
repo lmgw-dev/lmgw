@@ -616,7 +616,7 @@ async fn a_gpu_hold_stops_the_ingest_and_leaves_files_pending() {
 
     // Resume under the hold stops the same way — nothing is lost.
     let v = ops::resume(&state, id).await.unwrap();
-    let row = wait_job(&state, v["job"].as_i64().unwrap()).await;
+    let row = wait_job(&state, v.job.unwrap()).await;
     assert_eq!(row.status, "failed");
     assert_eq!(
         kstore::files_in_status(&state.knowledge.pool, id, "pending")

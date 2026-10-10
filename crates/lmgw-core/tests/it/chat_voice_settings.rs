@@ -541,10 +541,11 @@ async fn a_temporary_thread_holds_its_voice_and_keep_copies_it() {
     assert_eq!(msgs[0]["voice"]["asr_ms"], 98);
     assert_eq!(msgs[1]["voice"], Value::Null, "a typed reply");
 
-    // A send may not claim to be a realtime turn, nor carry reply fields.
-    for bad in [
-        json!({ "via": "realtime" }),
-        json!({ "via": "dictation", "unheard": "x" }),
+    // A send may not claim to be a realtime turn (400), nor carry reply
+    // fields (the request type refuses them: 422, as any malformed body).
+    for (bad, want) in [
+        (json!({ "via": "realtime" }), 400),
+        (json!({ "via": "dictation", "unheard": "x" }), 422),
     ] {
         let (status, res) = post(
             &gw,
@@ -552,7 +553,7 @@ async fn a_temporary_thread_holds_its_voice_and_keep_copies_it() {
             json!({ "content": "x", "voice": bad.clone() }),
         )
         .await;
-        assert_eq!(status, 400, "{bad} -> {res}");
+        assert_eq!(status, want, "{bad} -> {res}");
     }
 
     let (status, kept) = post(&gw, &format!("/chat/api/threads/{tid}/persist"), json!({})).await;

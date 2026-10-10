@@ -157,7 +157,13 @@ pub struct ImageRecipeRow {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schema",
+    schemars(transform = crate::openapi_ext::require_all)
+)]
 pub struct AudioCatalogInstall {
+    /// Always `true`.
+    #[cfg_attr(feature = "schema", schemars(extend("const" = true)))]
     pub ok: bool,
     pub family: String,
     pub package: String,

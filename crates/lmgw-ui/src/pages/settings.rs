@@ -3214,18 +3214,14 @@ fn ClassApplyButton(target: &'static str, #[prop(into)] unsaved: Signal<bool>) -
             return;
         }
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<lmgw_api_types::ContainerAnswer, _>(
                 "/api/op/container",
                 &json!({ "target": target, "action": "apply" }),
             )
             .await;
             ops.finish(&key);
             match res {
-                Ok(v) => toasts.ok(v
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("applied")
-                    .to_string()),
+                Ok(v) => toasts.ok(v.message().unwrap_or("applied").to_string()),
                 Err(e) => toasts.err(e.to_string()),
             }
         });

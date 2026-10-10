@@ -13,6 +13,7 @@ use super::super::schemas;
 fn pricing() -> serde_json::Value {
     json!({
         "type": "object",
+        "required": ["prompt", "completion"],
         "properties": {
             "prompt": {"type": "string", "description": "USD per prompt token, as a decimal \
                 string; \"0\" for a local model."},
@@ -25,10 +26,12 @@ fn lmgw_block(g: &mut SchemaGenerator) -> serde_json::Value {
     let headers = g.subschema_for::<std::collections::BTreeMap<String, String>>();
     json!({
         "type": "object",
+        "required": ["version", "endpoints", "headers", "notes"],
         "properties": {
             "version": {"type": "string"},
             "endpoints": {
                 "type": "object",
+                "required": ["openai", "anthropic", "other"],
                 "properties": {
                     "openai": {"type": "array", "items": {"type": "string"}},
                     "anthropic": {"type": "array", "items": {"type": "string"}},

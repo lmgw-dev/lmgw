@@ -40,9 +40,10 @@ fn members(list: &Value) -> Vec<String> {
 }
 
 async fn verb(f: &Fixture, target: Option<&str>, model: Option<&str>, action: &str) -> Value {
-    lmgw_core::ops::container(&f.state, target, model, action, false, None)
+    let answer = lmgw_core::ops::container(&f.state, target, model, action, false, None)
         .await
-        .unwrap_or_else(|e| panic!("{action} on {target:?}/{model:?}: {e}"))
+        .unwrap_or_else(|e| panic!("{action} on {target:?}/{model:?}: {e}"));
+    crate::common::container_wire(answer)
 }
 
 /// Under the hold: a group start starts only the CPU member and names the

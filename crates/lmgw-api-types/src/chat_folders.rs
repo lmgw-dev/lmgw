@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::chat::present;
+
 /// The `ongoing` field of a folder: `null` for a folder that is not an
 /// ongoing conversation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +113,117 @@ pub struct CurrentThread {
 pub struct AppliedToCurrent {
     pub thread_id: i64,
     pub fields: Vec<String>,
+}
+
+/// `POST /chat/api/folders/{id}`'s body: a **patch**. An absent field is
+/// unchanged. Unknown fields are a 422 bad_request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FolderPatch {
+    /// The new name; names need not be unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The folder's place in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<i64>,
+    /// Replaces the folder's defaults whole (`{}` clears them). Not beside
+    /// `defaults_patch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<crate::chat::ThreadDefaults>")
+    )]
+    pub defaults: Option<serde_json::Value>,
+    /// Changes the defaults field by field instead: each field given
+    /// replaces the stored one (`null` unsets it), the others stay as
+    /// stored, so a save of the fields one client changed never writes back
+    /// what another changed meanwhile. `voice` is laid field by field the
+    /// same way (`voice: null` unsets the whole voice). Not beside
+    /// `defaults`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<crate::chat::ThreadDefaults>")
+    )]
+    pub defaults_patch: Option<serde_json::Value>,
+    /// An object marks the folder as one ongoing conversation (or changes
+    /// its idle minutes; its defaults must name a model); `null` ends that.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ongoing: Option<Option<OngoingInput>>,
+    /// The folder's own retention in days before an inactive thread is
+    /// archived; `null` goes back to the Chat's setting, `0` never. A device
+    /// key cannot set it (403 `forbidden`).
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub archive_days: Option<Option<i64>>,
+    /// Days after archiving before a thread is deleted; as `archive_days`.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub purge_days: Option<Option<i64>>,
+    /// `false` shows a folder that a device's delete hid from devices to
+    /// them again; the owner's alone. `true` is refused (400): a device's
+    /// delete is what hides a folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices_hidden: Option<bool>,
+    /// For an ongoing folder: also apply the defaults' changes to its
+    /// current thread. Default `true`.
+    #[serde(default = "apply_by_default", skip_serializing_if = "is_true")]
+    pub apply_to_current: bool,
+}
+
+fn apply_by_default() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+impl Default for FolderPatch {
+    fn default() -> Self {
+        Self {
+            name: None,
+            sort: None,
+            defaults: None,
+            defaults_patch: None,
+            ongoing: None,
+            archive_days: None,
+            purge_days: None,
+            devices_hidden: None,
+            apply_to_current: true,
+        }
+    }
+}
+
+/// What a folder delete does with the threads in the folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ThreadsFate {
+    /// The threads stay, in no folder.
+    Keep,
+    /// The threads are deleted with the folder.
+    Delete,
+}
+
+/// `POST /chat/api/folders/{id}/delete`'s body. The choice is required:
+/// there is no default for destroying conversations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FolderDelete {
+    pub threads: ThreadsFate,
 }
 
 /// `POST /chat/api/folders/{id}`'s answer: the folder as the list carries

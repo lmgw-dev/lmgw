@@ -92,6 +92,10 @@ pub(crate) enum Resp {
     /// A download or a media type with no useful schema; the content types it
     /// may answer with.
     Binary(&'static [&'static str]),
+    /// A download whose body in some media type is a documented JSON
+    /// format: each content type with the schema of its body, or `None`
+    /// for a binary or free-text one.
+    Download(&'static [(&'static str, Option<SchemaFn>)]),
     /// `text/event-stream`, `{event name: schema fn}` (`x-lmgw-sse-events`).
     Sse(&'static [(&'static str, SchemaFn)]),
     /// Both `application/json` and `text/event-stream` on the one 200 (WP4
@@ -132,6 +136,9 @@ pub(crate) enum Dialect {
     LlamaCpp,
     JsonRpc,
     Dashboard,
+    /// The Audio lab's own routes: the dashboard's dialect, but a failure is
+    /// `{"error": "...", "code"?}` ([`lmgw_api_types::audio_lab::LabError`]).
+    Lab,
 }
 
 impl Dialect {
@@ -142,6 +149,7 @@ impl Dialect {
             Self::LlamaCpp => lmgw_api_types::openapi_ext::dialect::LLAMACPP,
             Self::JsonRpc => lmgw_api_types::openapi_ext::dialect::JSONRPC,
             Self::Dashboard => lmgw_api_types::openapi_ext::dialect::DASHBOARD,
+            Self::Lab => lmgw_api_types::openapi_ext::dialect::LAB,
         }
     }
 
@@ -154,6 +162,7 @@ impl Dialect {
             Self::LlamaCpp => "LlamaCppError",
             Self::JsonRpc => "JsonRpcError",
             Self::Dashboard => "ApiError",
+            Self::Lab => "LabError",
         }
     }
 }
@@ -163,7 +172,11 @@ impl Dialect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Group {
     Inference,
+    /// The gateway itself: its version and API description.
+    Gateway,
     DashboardApi,
+    /// The Chat API a paired device uses.
+    DeviceApi,
     Ops,
     AgentRuntime,
 }
@@ -172,7 +185,9 @@ impl Group {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inference => "Inference",
+            Self::Gateway => "Gateway",
             Self::DashboardApi => "Dashboard API",
+            Self::DeviceApi => "Device API",
             Self::Ops => "Ops",
             Self::AgentRuntime => "Agent runtime",
         }
@@ -186,7 +201,10 @@ pub(crate) fn all_routes() -> Vec<DocRoute> {
     routes.extend(super::planes::dashboard::routes());
     routes.extend(super::planes::usage::routes());
     routes.extend(super::planes::docs::routes());
+    routes.extend(super::planes::knowledge::routes());
     routes.extend(super::planes::agents::routes());
+    routes.extend(super::planes::audio_lab::routes());
+    routes.extend(super::planes::image_lab::routes());
     routes.extend(super::planes::session::routes());
     routes.extend(super::planes::chat::routes());
     routes

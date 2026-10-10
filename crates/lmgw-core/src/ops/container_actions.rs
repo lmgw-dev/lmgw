@@ -2,20 +2,56 @@
 //! `lmgw__container` dispatch -- plus the GPU-hold helpers
 //! (`hold_refusal`, `start_model`, ...) they share with `hold::hold_set`.
 
-use serde_json::{json, Value};
+use lmgw_api_types as dto;
 
 use crate::config::{AudioModel, ImageModel, LocalModel, Snapshot};
 use crate::runtime::descriptor::{model_runtime, model_runtimes};
-use crate::runtime::registry::{PassWait, RuntimeError};
+use crate::runtime::registry::{PassWait, RuntimeError, RuntimeView};
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
 use crate::store::NewLocalModel;
-use crate::vram::Fit;
+use crate::vram::{Fit, VramView};
 
 use super::*;
 
 mod unheld;
 use unheld::model_stop_unheld;
+
+/// The answer of the `container` op, with the gateway's own views for the
+/// runtime rows and the GPU ledger.
+pub type ContainerAnswer = dto::ContainerAnswer<RuntimeView, VramView>;
+
+/// A `{class, model_id}` pair for the answers' lists.
+fn named(class: Class, model_id: &str) -> dto::ContainerModel {
+    dto::ContainerModel {
+        class: class.as_str().to_string(),
+        model_id: model_id.to_string(),
+    }
+}
+
+/// A model and its port.
+fn ported(class: Class, model_id: &str, port: u16) -> dto::ContainerPort {
+    dto::ContainerPort {
+        class: class.as_str().to_string(),
+        model_id: model_id.to_string(),
+        port,
+    }
+}
+
+/// One model's finished action: `ok`, the model and the sentence, with the
+/// optional fields of `apply` left unset.
+fn done(class: Class, model_id: &str, ok: bool, message: String) -> dto::ModelDone {
+    dto::ModelDone {
+        ok,
+        class: class.as_str().to_string(),
+        model_id: model_id.to_string(),
+        port: None,
+        applied: None,
+        running: None,
+        held: None,
+        message,
+    }
+}
 
 /// The refusal `container` gives `start` and `restart` while the hold is on
 /// (gpu-hold design §2).
@@ -129,7 +165,11 @@ async fn start_model(state: &SharedState, class: Class, model_id: &str) -> Resul
 
 // Per-model actions
 
-async fn model_status(state: &SharedState, class: Class, model_id: &str) -> Result<Value, String> {
+async fn model_status(
+    state: &SharedState,
+    class: Class,
+    model_id: &str,
+) -> Result<ContainerAnswer, String> {
     let snap = state.snapshot();
     let rt = model_runtime(&snap, class, model_id);
     let runtime_view = state
@@ -137,27 +177,36 @@ async fn model_status(state: &SharedState, class: Class, model_id: &str) -> Resu
         .list()
         .into_iter()
         .find(|v| v.class == class && v.model_id == model_id);
-    Ok(json!({
-        "ok": true,
-        "class": class.as_str(),
-        "model_id": model_id,
-        "engine": class.engine(),
-        "enabled": rt.as_ref().map(|r| r.enabled),
-        "warm_start": rt.as_ref().map(|r| r.warm_start),
-        "idle_seconds": rt.as_ref().map(|r| r.idle_seconds),
-        "image": rt.as_ref().map(|r| r.image.clone()),
+    Ok(ContainerAnswer::Status(dto::ModelStatus {
+        ok: true,
+        class: class.as_str().to_string(),
+        model_id: model_id.to_string(),
+        engine: class.engine().to_string(),
+        enabled: rt.as_ref().map(|r| r.enabled),
+        warm_start: rt.as_ref().map(|r| r.warm_start),
+        idle_seconds: rt.as_ref().map(|r| r.idle_seconds),
+        image: rt.as_ref().map(|r| r.image.clone()),
         // `null` when nothing has ever started this model in this process —
         // distinct from a `stopped` entry, which the registry never keeps
         // around (§3.2: absent means "not running", not "unknown").
-        "runtime": runtime_view,
+        runtime: runtime_view,
     }))
 }
 
-async fn model_start(state: &SharedState, class: Class, model_id: &str) -> Result<Value, String> {
+async fn model_start(
+    state: &SharedState,
+    class: Class,
+    model_id: &str,
+) -> Result<ContainerAnswer, String> {
     match start_model(state, class, model_id).await {
-        Ok(port) => Ok(json!({
-            "ok": true, "class": class.as_str(), "model_id": model_id, "port": port,
-            "message": format!("'{model_id}' ({class}) is up on port {port}"),
+        Ok(port) => Ok(ContainerAnswer::Done(dto::ModelDone {
+            port: Some(port),
+            ..done(
+                class,
+                model_id,
+                true,
+                format!("'{model_id}' ({class}) is up on port {port}"),
+            )
         })),
         Err(e) => Err(format!("starting '{model_id}' ({class}) failed: {e}")),
     }
@@ -171,7 +220,7 @@ async fn model_stop(
     class: Class,
     model_id: &str,
     force: bool,
-) -> Result<Value, String> {
+) -> Result<ContainerAnswer, String> {
     // No entry is not "nothing running": a container the registry lost track
     // of runs under the name this model renders (`registry/unheld.rs`), and
     // only podman can say. Stopped by that name, and said so.
@@ -179,10 +228,12 @@ async fn model_stop(
         return model_stop_unheld(state, class, model_id).await;
     }
     match state.runtime().stop(class, model_id, force).await {
-        Ok(()) => Ok(json!({
-            "ok": true, "class": class.as_str(), "model_id": model_id,
-            "message": format!("'{model_id}' ({class}) stopped"),
-        })),
+        Ok(()) => Ok(ContainerAnswer::Done(done(
+            class,
+            model_id,
+            true,
+            format!("'{model_id}' ({class}) stopped"),
+        ))),
         Err(RuntimeError::Busy { in_flight, .. }) => Err(format!(
             "'{model_id}' ({class}) is still serving {in_flight} request(s) — not stopping it; \
              pass override=true to force"
@@ -197,7 +248,11 @@ async fn model_stop(
 /// then start it with freshly rendered arguments. A refusal to stop (still
 /// serving requests) leaves the container exactly as it was, running the
 /// previous configuration, rather than being forced.
-async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Result<Value, String> {
+async fn model_apply(
+    state: &SharedState,
+    class: Class,
+    model_id: &str,
+) -> Result<ContainerAnswer, String> {
     if !state.runtime().contains(class, model_id) {
         // §3.6: "running → stop + start (fresh argv); **not running → no-op**".
         // There is no drift to correct — argv is rendered from the current
@@ -209,26 +264,33 @@ async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Resul
         if model_runtime(&snap, class, model_id).is_none() {
             return Err(format!("no {class} model '{model_id}' is configured"));
         }
-        return Ok(json!({
-            "ok": true, "class": class.as_str(), "model_id": model_id,
-            "applied": false, "running": false,
-            "message": format!(
-                "'{model_id}' ({class}) is not running — nothing to apply; its arguments are \
-                 rendered fresh at every start, so the next start uses the current \
-                 configuration. Use action=start to bring it up now."
-            ),
+        return Ok(ContainerAnswer::Done(dto::ModelDone {
+            applied: Some(false),
+            running: Some(false),
+            ..done(
+                class,
+                model_id,
+                true,
+                format!(
+                    "'{model_id}' ({class}) is not running — nothing to apply; its arguments are \
+                     rendered fresh at every start, so the next start uses the current \
+                     configuration. Use action=start to bring it up now."
+                ),
+            )
         }));
     }
     let stopped = state.runtime().stop(class, model_id, false).await;
     if let Err(RuntimeError::Busy { in_flight, .. }) = &stopped {
-        return Ok(json!({
-            "ok": false, "class": class.as_str(), "model_id": model_id,
-            "message": format!(
+        return Ok(ContainerAnswer::Done(done(
+            class,
+            model_id,
+            false,
+            format!(
                 "'{model_id}' ({class}) is still serving {in_flight} request(s) — its \
                  container keeps running the previous configuration; stop it (with \
                  override=true if needed) to apply the change"
             ),
-        }));
+        )));
     }
     // Per model: a row on the CPU is not held, and starts again (§2 of the
     // gpu-hold design, by `gpu_block_for`). The dispatch refuses `apply`
@@ -243,17 +305,23 @@ async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Resul
     // would be simply false.
     if held {
         if let Err(e) = &stopped {
-            return Ok(json!({
-                "ok": false, "class": class.as_str(), "model_id": model_id,
-                "applied": true, "running": false, "held": true,
-                "message": format!(
-                    "'{model_id}' ({class}) could NOT be stopped ({e}), and lmgw is holding the \
-                     GPU so it is not started again either — its container may still be holding \
-                     GPU memory. lmgw retries a container it started on later reaper ticks, \
-                     backing off while the stop keeps failing; `podman stop` it if it stays. \
-                     The new configuration takes effect at the first start after the hold is \
-                     released."
-                ),
+            return Ok(ContainerAnswer::Done(dto::ModelDone {
+                applied: Some(true),
+                running: Some(false),
+                held: Some(true),
+                ..done(
+                    class,
+                    model_id,
+                    false,
+                    format!(
+                        "'{model_id}' ({class}) could NOT be stopped ({e}), and lmgw is holding \
+                         the GPU so it is not started again either — its container may still be \
+                         holding GPU memory. lmgw retries a container it started on later reaper \
+                         ticks, backing off while the stop keeps failing; `podman stop` it if it \
+                         stays. The new configuration takes effect at the first start after the \
+                         hold is released."
+                    ),
+                )
             }));
         }
     }
@@ -263,22 +331,33 @@ async fn model_apply(state: &SharedState, class: Class, model_id: &str) -> Resul
     // because it was — the row is what a start renders argv from, and the next
     // start is the one that will.
     if held {
-        return Ok(json!({
-            "ok": true, "class": class.as_str(), "model_id": model_id,
-            "applied": true, "running": false, "held": true,
-            "message": format!(
-                "'{model_id}' ({class}) was stopped, and not started again — lmgw is holding \
-                 the GPU. The new configuration takes effect at the first start after the hold \
-                 is released."
-            ),
+        return Ok(ContainerAnswer::Done(dto::ModelDone {
+            applied: Some(true),
+            running: Some(false),
+            held: Some(true),
+            ..done(
+                class,
+                model_id,
+                true,
+                format!(
+                    "'{model_id}' ({class}) was stopped, and not started again — lmgw is \
+                     holding the GPU. The new configuration takes effect at the first start \
+                     after the hold is released."
+                ),
+            )
         }));
     }
     match start_model(state, class, model_id).await {
-        Ok(port) => Ok(json!({
-            "ok": true, "class": class.as_str(), "model_id": model_id, "port": port,
-            "message": format!(
-                "'{model_id}' ({class}) is up on port {port} with the current configuration"
-            ),
+        Ok(port) => Ok(ContainerAnswer::Done(dto::ModelDone {
+            port: Some(port),
+            ..done(
+                class,
+                model_id,
+                true,
+                format!(
+                    "'{model_id}' ({class}) is up on port {port} with the current configuration"
+                ),
+            )
         })),
         Err(e) => Err(format!("starting '{model_id}' ({class}) failed: {e}")),
     }
@@ -289,7 +368,7 @@ async fn model_logs(
     class: Class,
     model_id: &str,
     tail: i64,
-) -> Result<Value, String> {
+) -> Result<ContainerAnswer, String> {
     let tail = if tail <= 0 { 60usize } else { tail as usize };
     let snap = state.snapshot();
     // The live entry's own name when there is one; otherwise the name this
@@ -306,9 +385,13 @@ async fn model_logs(
             crate::runtime::container_name(&snap.settings.container_prefix, class, model_id)
         });
     let text = state.runtime().logs_tail(&name, tail).await?;
-    Ok(json!({
-        "ok": true, "class": class.as_str(), "model_id": model_id,
-        "container": name, "tail": tail, "logs": text,
+    Ok(ContainerAnswer::Logs(dto::ModelLogs {
+        ok: true,
+        class: class.as_str().to_string(),
+        model_id: model_id.to_string(),
+        container: name,
+        tail,
+        logs: text,
     }))
 }
 
@@ -501,7 +584,7 @@ async fn recreate_one(state: &SharedState, class: Class, model_id: &str, held: b
 
 /// Recreate every currently running member of `class_filter` (`None` = every
 /// class), concurrently. Returns `(recreated, busy, errors, held)`, each a
-/// `Value` list ready to embed in a response — `held` is populated only while
+/// typed list ready to embed in a response — `held` is populated only while
 /// the GPU hold is on, with the members it holds (a row on the CPU is not
 /// held, and is recreated): for `apply` "recreate" means "stop, and start at
 /// release"; a `restart` (`keep_held`) leaves them running untouched, since
@@ -510,7 +593,7 @@ async fn recreate_running(
     state: &SharedState,
     class_filter: Option<Class>,
     keep_held: bool,
-) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
+) -> Recreation {
     let snap = state.snapshot();
     type Members = Vec<(Class, String)>;
     let (running, kept): (Members, Members) = state
@@ -532,39 +615,57 @@ async fn recreate_running(
     let mut stopped_held = Vec::new();
     for ((class, model_id), outcome) in running.iter().zip(outcomes) {
         match outcome {
-            Recreated::Ok(port) => recreated
-                .push(json!({ "class": class.as_str(), "model_id": model_id, "port": port })),
-            Recreated::Busy(in_flight) => busy.push(
-                json!({ "class": class.as_str(), "model_id": model_id, "in_flight": in_flight }),
-            ),
-            Recreated::Failed(message) => errors
-                .push(json!({ "class": class.as_str(), "model_id": model_id, "error": message })),
-            Recreated::Held => {
-                stopped_held.push(json!({ "class": class.as_str(), "model_id": model_id }))
-            }
+            Recreated::Ok(port) => recreated.push(ported(*class, model_id, port)),
+            Recreated::Busy(in_flight) => busy.push(dto::ContainerBusy {
+                class: class.as_str().to_string(),
+                model_id: model_id.clone(),
+                in_flight,
+            }),
+            Recreated::Failed(message) => errors.push(dto::ContainerFailure {
+                class: class.as_str().to_string(),
+                model_id: model_id.clone(),
+                error: message,
+            }),
+            Recreated::Held => stopped_held.push(named(*class, model_id)),
         }
     }
     for (class, model_id) in kept {
-        stopped_held.push(json!({ "class": class.as_str(), "model_id": model_id }));
+        stopped_held.push(named(class, &model_id));
     }
-    (recreated, busy, errors, stopped_held)
+    Recreation {
+        recreated,
+        busy,
+        errors,
+        held: stopped_held,
+    }
 }
 
-async fn group_status(state: &SharedState, class_filter: Option<Class>) -> Result<Value, String> {
+/// What [`recreate_running`] did, member by member.
+struct Recreation {
+    recreated: Vec<dto::ContainerPort>,
+    busy: Vec<dto::ContainerBusy>,
+    errors: Vec<dto::ContainerFailure>,
+    held: Vec<dto::ContainerModel>,
+}
+
+async fn group_status(
+    state: &SharedState,
+    class_filter: Option<Class>,
+) -> Result<ContainerAnswer, String> {
     let runtime: Vec<_> = state
         .runtime()
         .list()
         .into_iter()
         .filter(|v| class_filter.is_none_or(|c| v.class == c))
         .collect();
-    Ok(json!({
-        "ok": true,
-        "target": target_label(class_filter),
-        "runtime": runtime,
+    Ok(ContainerAnswer::GroupStatus(dto::GroupStatus {
+        ok: true,
+        target: target_label(class_filter).to_string(),
+        runtime,
         // One GPU behind every class, so the ledger is reported whole even
         // when the caller asked about a single group (design §8: "one
         // scheduler view, no third shape").
-        "vram": state.vram.view(state).await,
+        vram: state.vram.view(state).await,
     }))
 }
 
@@ -572,7 +673,10 @@ async fn group_status(state: &SharedState, class_filter: Option<Class>) -> Resul
 /// every configured model, which could ask for more VRAM than the box has
 /// (design §8's documented restraint; a caller wanting a specific *other*
 /// model up front uses `model=<id>`).
-async fn group_start(state: &SharedState, class_filter: Option<Class>) -> Result<Value, String> {
+async fn group_start(
+    state: &SharedState,
+    class_filter: Option<Class>,
+) -> Result<ContainerAnswer, String> {
     let snap = state.snapshot();
     let registry = state.runtime();
     let candidates: Vec<_> = model_runtimes(&snap)
@@ -580,10 +684,10 @@ async fn group_start(state: &SharedState, class_filter: Option<Class>) -> Result
         .filter(|r| r.enabled && r.warm_start)
         .filter(|r| class_filter.is_none_or(|c| r.class == c))
         .collect();
-    let already_running: Vec<Value> = candidates
+    let already_running: Vec<dto::ContainerModel> = candidates
         .iter()
         .filter(|r| registry.contains(r.class, &r.model_id))
-        .map(|r| json!({ "class": r.class.as_str(), "model_id": r.model_id }))
+        .map(|r| named(r.class, &r.model_id))
         .collect();
     // Under the GPU hold only the models on the CPU start; the rest are
     // named, not attempted (the dispatch refuses a group start under a
@@ -592,10 +696,7 @@ async fn group_start(state: &SharedState, class_filter: Option<Class>) -> Result
         .into_iter()
         .filter(|r| !registry.contains(r.class, &r.model_id))
         .partition(|r| snap.gpu_block_for(r.class, &r.model_id).is_none());
-    let held: Vec<Value> = held
-        .iter()
-        .map(|r| json!({ "class": r.class.as_str(), "model_id": r.model_id }))
-        .collect();
+    let held: Vec<dto::ContainerModel> = held.iter().map(|r| named(r.class, &r.model_id)).collect();
 
     let outcomes = futures::future::join_all(
         to_start
@@ -608,22 +709,25 @@ async fn group_start(state: &SharedState, class_filter: Option<Class>) -> Result
     let mut errors = Vec::new();
     for (r, outcome) in to_start.iter().zip(outcomes) {
         match outcome {
-            Ok(port) => started
-                .push(json!({ "class": r.class.as_str(), "model_id": r.model_id, "port": port })),
-            Err(e) => errors
-                .push(json!({ "class": r.class.as_str(), "model_id": r.model_id, "error": e })),
+            Ok(port) => started.push(ported(r.class, &r.model_id, port)),
+            Err(e) => errors.push(dto::ContainerFailure {
+                class: r.class.as_str().to_string(),
+                model_id: r.model_id.clone(),
+                error: e,
+            }),
         }
     }
-    Ok(json!({
-        "ok": errors.is_empty(),
-        "target": target_label(class_filter),
-        "started": started,
-        "already_running": already_running,
-        "held": held,
-        "errors": errors,
-        "note": "Group start only starts models flagged warm_start — starting every configured \
-                 model in a class could ask for more VRAM than the box has. Start any other \
-                 model on demand with model=<id> action=start.",
+    Ok(ContainerAnswer::GroupStart(dto::GroupStarted {
+        ok: errors.is_empty(),
+        target: target_label(class_filter).to_string(),
+        started,
+        already_running,
+        held,
+        errors,
+        note: "Group start only starts models flagged warm_start — starting every configured \
+               model in a class could ask for more VRAM than the box has. Start any other \
+               model on demand with model=<id> action=start."
+            .to_string(),
     }))
 }
 
@@ -634,7 +738,7 @@ async fn group_stop(
     state: &SharedState,
     class_filter: Option<Class>,
     force: bool,
-) -> Result<Value, String> {
+) -> Result<ContainerAnswer, String> {
     let running: Vec<(Class, String)> = state
         .runtime()
         .list()
@@ -651,13 +755,17 @@ async fn group_stop(
     let mut errors = Vec::new();
     for ((class, model_id), outcome) in running.iter().zip(outcomes) {
         match outcome {
-            Ok(()) => stopped.push(json!({ "class": class.as_str(), "model_id": model_id })),
-            Err(RuntimeError::Busy { in_flight, .. }) => busy.push(
-                json!({ "class": class.as_str(), "model_id": model_id, "in_flight": in_flight }),
-            ),
-            Err(e) => errors.push(
-                json!({ "class": class.as_str(), "model_id": model_id, "error": e.to_string() }),
-            ),
+            Ok(()) => stopped.push(named(*class, model_id)),
+            Err(RuntimeError::Busy { in_flight, .. }) => busy.push(dto::ContainerBusy {
+                class: class.as_str().to_string(),
+                model_id: model_id.clone(),
+                in_flight,
+            }),
+            Err(e) => errors.push(dto::ContainerFailure {
+                class: class.as_str().to_string(),
+                model_id: model_id.clone(),
+                error: e.to_string(),
+            }),
         }
     }
     let message = if busy.is_empty() {
@@ -669,13 +777,13 @@ async fn group_stop(
             busy.len()
         )
     };
-    Ok(json!({
-        "ok": errors.is_empty(),
-        "target": target_label(class_filter),
-        "stopped": stopped,
-        "busy": busy,
-        "errors": errors,
-        "message": message,
+    Ok(ContainerAnswer::GroupStop(dto::GroupStopped {
+        ok: errors.is_empty(),
+        target: target_label(class_filter).to_string(),
+        stopped,
+        busy,
+        errors,
+        message,
     }))
 }
 
@@ -683,10 +791,18 @@ async fn group_stop(
 /// (design §8: apply and restart differ at group granularity even though
 /// they are identical at the per-model one, because apply additionally
 /// reports the static checks).
-async fn group_restart(state: &SharedState, class_filter: Option<Class>) -> Result<Value, String> {
+async fn group_restart(
+    state: &SharedState,
+    class_filter: Option<Class>,
+) -> Result<ContainerAnswer, String> {
     // Under the hold only the members on the CPU are restarted; the rest
     // are left running untouched and named in `held`.
-    let (recreated, busy, errors, held) = recreate_running(state, class_filter, true).await;
+    let Recreation {
+        recreated,
+        busy,
+        errors,
+        held,
+    } = recreate_running(state, class_filter, true).await;
     let held_note = if held.is_empty() {
         String::new()
     } else {
@@ -696,14 +812,17 @@ async fn group_restart(state: &SharedState, class_filter: Option<Class>) -> Resu
             held.len()
         )
     };
-    Ok(json!({
-        "ok": errors.is_empty(),
-        "target": target_label(class_filter),
-        "restarted": recreated,
-        "busy": busy,
-        "held": held,
-        "errors": errors,
-        "message": format!("restarted {} running container(s){held_note}", recreated.len()),
+    Ok(ContainerAnswer::GroupRestart(dto::GroupRestarted {
+        ok: errors.is_empty(),
+        target: target_label(class_filter).to_string(),
+        message: format!(
+            "restarted {} running container(s){held_note}",
+            recreated.len()
+        ),
+        restarted: recreated,
+        busy,
+        held,
+        errors,
     }))
 }
 
@@ -719,11 +838,14 @@ async fn group_restart(state: &SharedState, class_filter: Option<Class>) -> Resu
 /// ("if not tracked, recreate all running members — state which you did"),
 /// apply recreates **every** running member of the group unconditionally —
 /// stated in the response's `message`, not left implicit.
-async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result<Value, String> {
+async fn group_apply(
+    state: &SharedState,
+    class_filter: Option<Class>,
+) -> Result<ContainerAnswer, String> {
     let snap = state.snapshot();
     let mut models_enabled = 0usize;
-    let mut problems: Vec<Value> = Vec::new();
-    let mut advisories: Vec<Value> = Vec::new();
+    let mut problems: Vec<dto::ContainerProblems> = Vec::new();
+    let mut advisories: Vec<dto::ContainerAdvisories> = Vec::new();
 
     if class_filter.is_none_or(|c| c == Class::Chat) {
         let dir = snap.settings.router.models_dir.clone();
@@ -731,14 +853,18 @@ async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result
             models_enabled += 1;
             let checks = chat_model_problems(&dir, m).await;
             if !checks.problems.is_empty() {
-                problems.push(
-                    json!({ "class": "chat", "model_id": m.model_id, "issues": checks.problems }),
-                );
+                problems.push(dto::ContainerProblems {
+                    class: "chat".into(),
+                    model_id: m.model_id.clone(),
+                    issues: checks.problems,
+                });
             }
             if !checks.advisories.is_empty() {
-                advisories.push(json!({
-                    "class": "chat", "model_id": m.model_id, "advisories": checks.advisories,
-                }));
+                advisories.push(dto::ContainerAdvisories {
+                    class: "chat".into(),
+                    model_id: m.model_id.clone(),
+                    advisories: checks.advisories,
+                });
             }
         }
     }
@@ -748,7 +874,11 @@ async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result
             models_enabled += 1;
             let issues = aux_model_problems(&dir, m).await;
             if !issues.is_empty() {
-                problems.push(json!({ "class": "aux", "model_id": m.model_id, "issues": issues }));
+                problems.push(dto::ContainerProblems {
+                    class: "aux".into(),
+                    model_id: m.model_id.clone(),
+                    issues,
+                });
             }
         }
     }
@@ -758,8 +888,11 @@ async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result
             models_enabled += 1;
             let issues = audio_model_problems(&dir, m);
             if !issues.is_empty() {
-                problems
-                    .push(json!({ "class": "audio", "model_id": m.model_id, "issues": issues }));
+                problems.push(dto::ContainerProblems {
+                    class: "audio".into(),
+                    model_id: m.model_id.clone(),
+                    issues,
+                });
             }
         }
     }
@@ -769,13 +902,21 @@ async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result
             models_enabled += 1;
             let issues = image_model_problems(&dir, m);
             if !issues.is_empty() {
-                problems
-                    .push(json!({ "class": "image", "model_id": m.model_id, "issues": issues }));
+                problems.push(dto::ContainerProblems {
+                    class: "image".into(),
+                    model_id: m.model_id.clone(),
+                    issues,
+                });
             }
         }
     }
 
-    let (recreated, busy, errors, held) = recreate_running(state, class_filter, false).await;
+    let Recreation {
+        recreated,
+        busy,
+        errors,
+        held,
+    } = recreate_running(state, class_filter, false).await;
     let held_note = if held.is_empty() {
         String::new()
     } else {
@@ -785,29 +926,30 @@ async fn group_apply(state: &SharedState, class_filter: Option<Class>) -> Result
             held.len()
         )
     };
-    Ok(json!({
-        "ok": errors.is_empty(),
-        "target": target_label(class_filter),
-        "held": held,
-        "models_enabled": models_enabled,
-        "models_with_problems": problems.len(),
-        "problems": problems,
+    Ok(ContainerAnswer::GroupApply(dto::GroupApplied {
+        ok: errors.is_empty(),
+        target: target_label(class_filter).to_string(),
+        held,
+        models_enabled,
+        models_with_problems: problems.len(),
+        problems,
         // Models that start but misbehave under some input; never counted as
         // problems.
-        "models_with_advisories": advisories.len(),
-        "advisories": advisories,
-        "recreated": recreated,
-        "busy": busy,
-        "errors": errors,
-        "message": format!(
+        models_with_advisories: advisories.len(),
+        advisories,
+        message: format!(
             "recreated {} running container(s) — argv isn't tracked per running container, so \
              apply recreates every member currently up rather than only the ones whose \
              configuration actually changed.{held_note}",
             recreated.len()
         ),
-        "note": "The problems list is static checks only — a clean result does not prove a \
-                 model loads. Run lmgw__local_model_test to confirm. 'advisories' are not \
-                 problems: those models start, but misbehave under some input.",
+        recreated,
+        busy,
+        errors,
+        note: "The problems list is static checks only — a clean result does not prove a \
+               model loads. Run lmgw__local_model_test to confirm. 'advisories' are not \
+               problems: those models start, but misbehave under some input."
+            .to_string(),
     }))
 }
 
@@ -831,7 +973,7 @@ pub async fn container(
     action: &str,
     force: bool,
     tail: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<ContainerAnswer, String> {
     let snap = state.snapshot();
     let model = model.map(str::trim).filter(|s| !s.is_empty());
     let target = target.map(str::trim).filter(|s| !s.is_empty());

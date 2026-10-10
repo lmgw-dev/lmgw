@@ -85,7 +85,7 @@ fn golden(name: &str, body: &str) {
 
 /// A reasoning model's streamed answer with llama.cpp timings and usage:
 /// every frame a plain turn can relay.
-const FULL_SSE: &str = concat!(
+pub(crate) const FULL_SSE: &str = concat!(
     "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Let me think.\"}}]}\n\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
@@ -94,12 +94,12 @@ const FULL_SSE: &str = concat!(
     "data: [DONE]\n\n"
 );
 
-fn sse_reply(body: impl Into<String>) -> ResponseTemplate {
+pub(crate) fn sse_reply(body: impl Into<String>) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_raw(body.into(), "text/event-stream")
 }
 
 /// Mount `bodies` as the answers to successive `/chat/completions` calls.
-async fn mount_in_order(mock: &MockServer, bodies: &[String]) {
+pub(crate) async fn mount_in_order(mock: &MockServer, bodies: &[String]) {
     for (i, body) in bodies.iter().enumerate() {
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -111,7 +111,7 @@ async fn mount_in_order(mock: &MockServer, bodies: &[String]) {
     }
 }
 
-async fn thread(gw: &Gw, extra: Value) -> i64 {
+pub(crate) async fn thread(gw: &Gw, extra: Value) -> i64 {
     let mut body = json!({"model_alias": "m"});
     body.as_object_mut()
         .unwrap()
@@ -126,13 +126,13 @@ async fn thread(gw: &Gw, extra: Value) -> i64 {
 }
 
 /// POST `route` and read the whole SSE body.
-async fn stream(gw: &Gw, route: &str, body: Value) -> String {
+pub(crate) async fn stream(gw: &Gw, route: &str, body: Value) -> String {
     let r = post(gw, route, body).await;
     assert_eq!(r.status(), 200, "{route}");
     r.text().await.unwrap()
 }
 
-async fn send(gw: &Gw, tid: i64, content: &str) -> String {
+pub(crate) async fn send(gw: &Gw, tid: i64, content: &str) -> String {
     stream(
         gw,
         &format!("/chat/api/threads/{tid}/send"),

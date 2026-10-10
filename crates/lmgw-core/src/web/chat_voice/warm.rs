@@ -28,10 +28,11 @@ use std::convert::Infallible;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use serde::Deserialize;
+use lmgw_api_types::chat_frames::WarmDone;
+use lmgw_api_types::chat_turn::WarmRequest;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::audio::language::SpeechLanguage;
@@ -45,22 +46,16 @@ use super::super::chat::err_json;
 use super::super::chat_caller::Caller;
 use super::super::chat_extract::{ChatJson, ChatPath};
 use super::super::chat_repo::ChatRepo;
+use super::super::chat_turn::TurnFrame;
 use super::resolve::{resolve, VoiceConfig};
 use super::speech::{style_of, thread_seed, voice_of};
-
-/// The body: which stages to warm.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct WarmBody {
-    stages: Vec<String>,
-}
 
 /// `POST /chat/api/threads/{id}/voice/warm` (module doc).
 pub(crate) async fn warm(
     State(state): State<SharedState>,
     caller: Caller,
     ChatPath(id): ChatPath<i64>,
-    ChatJson(body): ChatJson<WarmBody>,
+    ChatJson(body): ChatJson<WarmRequest>,
 ) -> Response {
     let repo = ChatRepo::of(id);
     let Some(thread) = repo.thread_as(&state, &caller, id).await.ok().flatten() else {
@@ -91,12 +86,10 @@ pub(crate) async fn warm(
     tokio::spawn(async move {
         warm_group(&st, &label, WarmMode::Admit, &models, &report).await;
     });
-    let frames = UnboundedReceiverStream::new(rx).map(|s| {
-        let data = serde_json::to_string(&s).unwrap_or_default();
-        Ok::<_, Infallible>(Event::default().event("state").data(data))
-    });
+    let frames = UnboundedReceiverStream::new(rx)
+        .map(|s| Ok::<_, Infallible>(TurnFrame::of("state", &s).into_sse()));
     let done = futures::stream::once(async {
-        Ok::<_, Infallible>(Event::default().event("done").data("{}"))
+        Ok::<_, Infallible>(TurnFrame::of("done", &WarmDone {}).into_sse())
     });
     Sse::new(caller.sse(&state, frames.chain(done)))
         .keep_alive(KeepAlive::default())

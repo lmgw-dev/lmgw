@@ -139,11 +139,13 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
-            description: "One local model's full definition, by id or model_id, chat or aux \
-                class. target=image answers a different, UI-private shape this document does \
-                not model.",
+            description: "One local model's full definition, by id or model_id. Row ids are \
+                per table, so pass target together with id; without target a model_id is \
+                searched in the chat table first, then aux, image and audio. target narrows \
+                the lookup to one table. The answer's class \
+                field says which of the four shapes it is.",
             query: Some(|g| g.root_schema_for::<LocalModelQuery>()),
-            response: Resp::Json(|g| g.root_schema_for::<dto::LocalModelDetail>()),
+            response: Resp::Json(|g| g.root_schema_for::<dto::LocalModelRead>()),
             ..base(
                 "GET",
                 "/api/local-model",
@@ -156,7 +158,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 port already in use, and the like) — the same read lmgw__local_model_check \
                 answers.",
             query: Some(|g| g.root_schema_for::<ModelIdQuery>()),
-            response: Resp::Untyped("no DTO; read by the lmgw__local_model_check self-admin tool"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::LocalModelCheck>()),
             ..base(
                 "GET",
                 "/api/local-model-check",
@@ -180,7 +182,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "Reads a GGUF file's metadata, optionally probing it — the same read \
                 lmgw__model_inspect answers.",
             query: Some(|g| g.root_schema_for::<InspectQuery>()),
-            response: Resp::Untyped("no DTO; read by the lmgw__model_inspect self-admin tool"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::ModelInspect>()),
             ..base("GET", "/api/model-inspect", "models", "Inspect a GGUF file")
         },
         DocRoute {
@@ -212,7 +214,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "The llama-server flags a model (or a search over models) would \
                 start with — the same read lmgw__llama_flags answers.",
             query: Some(|g| g.root_schema_for::<FlagsQuery>()),
-            response: Resp::Untyped("no DTO; read by the lmgw__llama_flags self-admin tool"),
+            response: Resp::Json(|g| g.root_schema_for::<dto::LlamaFlags>()),
             ..base(
                 "GET",
                 "/api/llama-flags",

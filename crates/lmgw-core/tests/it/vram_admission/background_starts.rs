@@ -48,16 +48,18 @@ async fn a_background_start_that_does_not_fit_is_refused_instead_of_evicting() {
     s.vram.enabled = false;
     store::save_settings(&f.state.db, &s).await.unwrap();
     f.state.reload_snapshot().await.unwrap();
-    lmgw_core::ops::container(
-        &f.state,
-        Some("aux"),
-        Some("embed-model"),
-        "start",
-        false,
-        None,
-    )
-    .await
-    .expect("an inactive scheduler arbitrates nothing");
+    crate::common::container_wire(
+        lmgw_core::ops::container(
+            &f.state,
+            Some("aux"),
+            Some("embed-model"),
+            "start",
+            false,
+            None,
+        )
+        .await
+        .expect("an inactive scheduler arbitrates nothing"),
+    );
     assert_eq!(
         f.runs(),
         vec!["chat-model".to_string(), "embed-model".to_string()]
