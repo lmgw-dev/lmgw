@@ -26,7 +26,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use async_trait::async_trait;
 use quickdoc_core::embed::Embedder;
 use quickdoc_core::retrieve::{
     apply_budget, fts_stage, knn_stage, rank_candidates, Candidates, FtsWeights, Hit, SearchModels,
@@ -40,6 +39,7 @@ use quickdoc_core::embed::Reranker;
 use quickdoc_core::error::QuickdocError;
 
 use super::retrieve_guard::{BoundedEmbedder, BoundedReranker, Notes};
+use crate::erased::Erased;
 use crate::quickdoc::embed::refuse_if_held;
 use crate::quickdoc::query::{default_params, TiktokenCounter};
 use crate::quickdoc::{InProcessEmbedder, InProcessReranker};
@@ -480,7 +480,6 @@ struct KbSource {
     kbs: Vec<(Kb, Arc<VectorMatrix>)>,
 }
 
-#[async_trait]
 impl SearchSource for KbSource {
     type Doc = KbChunk;
 
@@ -506,23 +505,25 @@ impl SearchSource for KbSource {
 
     /// One FTS5 index holds every base, so BM25 scores of different bases are
     /// on one scale: the per-base lists merge by score.
-    async fn fts(
-        &self,
-        expr: &str,
-        w: &FtsWeights,
+    fn fts<'a>(
+        &'a self,
+        expr: &'a str,
+        w: &'a FtsWeights,
         k: usize,
-    ) -> quickdoc_core::Result<Vec<(String, f32)>> {
-        let mut all = Vec::new();
-        for (kb, _) in &self.kbs {
-            all.extend(store::fts(&self.pool, kb.id, expr, w, k).await?);
-        }
-        all.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        all.truncate(k);
-        Ok(all)
+    ) -> Erased<'a, quickdoc_core::Result<Vec<(String, f32)>>> {
+        Box::pin(async move {
+            let mut all = Vec::new();
+            for (kb, _) in &self.kbs {
+                all.extend(store::fts(&self.pool, kb.id, expr, w, k).await?);
+            }
+            all.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            all.truncate(k);
+            Ok(all)
+        })
     }
 
     /// Every base's matrix scanned, the best `k` of all of them kept: exact,
@@ -544,8 +545,11 @@ impl SearchSource for KbSource {
         Ok(all)
     }
 
-    async fn fetch(&self, ids: &[String]) -> quickdoc_core::Result<HashMap<String, KbChunk>> {
-        Ok(store::get_chunks(&self.pool, ids).await?)
+    fn fetch<'a>(
+        &'a self,
+        ids: &'a [String],
+    ) -> Erased<'a, quickdoc_core::Result<HashMap<String, KbChunk>>> {
+        Box::pin(async move { Ok(store::get_chunks(&self.pool, ids).await?) })
     }
 
     fn doc_id(&self, doc: &KbChunk) -> String {

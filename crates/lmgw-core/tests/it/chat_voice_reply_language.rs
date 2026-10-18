@@ -304,14 +304,11 @@ async fn the_reply_language_is_checked_on_every_save_path() {
     .await
     .unwrap();
     assert!(
-        res["changed"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("chat_voice_reply_language")),
-        "{res}"
+        res.changed.iter().any(|c| c == "chat_voice_reply_language"),
+        "{res:?}"
     );
     assert_eq!(state.snapshot().settings.chat_voice_reply_language, "en");
-    let read = lmgw_core::ops::settings(&state).await.unwrap();
+    let read = lmgw_core::ops::backends::to_json(lmgw_core::ops::settings(&state).await).unwrap();
     assert_eq!(read["chat_voice_reply_language"], "en");
     let full = get_json(&gw, "/api/settings-full").await;
     assert_eq!(full["chat_voice_reply_language"], "en");

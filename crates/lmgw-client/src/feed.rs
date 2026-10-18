@@ -13,12 +13,42 @@
 //!
 //! A dead link is the client's to time: `hello.keepalive_s` says how often
 //! a keep-alive comes ([`FeedReader::keepalive_s`]), and every byte that
-//! arrives is a sign of life.
+//! arrives is a sign of life. A client may ask for its own interval
+//! ([`crate::requests::feed`]'s `keepalive_s`, [`FeedReader::asking`]), as a
+//! phone holding the feed in the background does.
+//!
+//! **The open approvals** (device link design §7.3): [`FeedReader`] keeps
+//! the calls waiting for a decision ([`FeedReader::open_approvals`]) and
+//! yields each change as [`FeedItem::Approvals`]: the whole set at
+//! `caught_up` ([`ApprovalsChange::Open`]), then what is added and
+//! withdrawn, by `approval.*` events and by the set every `state` carries
+//! again. A reader lives for one connection, so `Open` comes again at
+//! every reconnect and is the set to reconcile what is shown against; a
+//! reader made with [`FeedReader::knowing`] does that itself (`open`'s
+//! module doc).
+//!
+//! **Messages** (client-apps design §2.2, WP10): `message.added` and
+//! `message.updated` carry the messages whole, as
+//! `GET /chat/api/threads/{id}` lists them, with the thread's title
+//! ([`MessagesChanged`]), so a client keeps an open conversation current,
+//! or builds a notification, from the event alone; `message.deleted` names
+//! the ids that went ([`MessagesDeleted`]). Apply them by message id: two
+//! events may carry the same state, and a catch-up renders each as it is
+//! now.
+//!
+//! **A turn's stream** (`POST /chat/api/threads/{id}/send` and the other
+//! turn routes) is SSE too: [`SseDecoder`] decodes it, and
+//! `lmgw_api_types::chat_frames::TurnEvent::parse` types each frame by its
+//! name (`turn`, `delta`, `tool`, `done`, …).
 
 pub use lmgw_api_types::chat_feed::{
-    ApprovalDecided, ApprovalRequested, Cursor, DeviceRevoked, FeedEvent, FeedEventError,
-    FeedPrincipal, FeedProfile, FolderNow, Hello, TaskDone, TaskStarted, ThreadNow, EVENTS,
+    ApprovalDecided, ApprovalRequested, CaughtUp, Cursor, DeviceRevoked, FeedEvent, FeedEventError,
+    FeedPrincipal, FeedProfile, FolderNow, Hello, MessagesChanged, MessagesDeleted, TaskDone,
+    TaskStarted, ThreadNow, EVENTS,
 };
+
+mod open;
+pub use open::ApprovalsChange;
 
 /// One SSE record: its `event:` (`message` when it names none), its
 /// `data:` lines joined with `\n`, and the `id:` it carried.
@@ -170,15 +200,33 @@ pub enum FeedItem {
     /// it, so what it was about — a thread, a folder, what is live — may now
     /// be shown stale: reload what you show, as for `resync`.
     Unreadable { event: String, data: String },
+    /// The open approvals changed (module doc), right after the event that
+    /// changed them.
+    Approvals(ApprovalsChange),
 }
 
-/// The feed of one connection: typed events, and the cursor to resume
-/// from after it ends.
+/// The feed of one connection: typed events, the cursor to resume from
+/// after it ends, and the calls waiting for a decision (module doc).
 #[derive(Debug, Clone, Default)]
 pub struct FeedReader {
     sse: SseDecoder,
     cursor: Option<String>,
     keepalive_s: Option<u32>,
+    /// The keep-alive the connection asked for, asked again by
+    /// [`Self::resume`].
+    asked: Option<u32>,
+    /// The calls waiting for a decision (`open`).
+    approvals: open::OpenSet,
+    /// What `hello` said about the device itself (device link design §7.2).
+    device: HelloFacts,
+}
+
+/// `hello`'s facts about the device, as the client keeps them.
+#[derive(Debug, Clone, Default)]
+struct HelloFacts {
+    urls: Option<crate::pairing::Urls>,
+    cert: Option<crate::requests::CertDates>,
+    dashboard_url: Option<String>,
 }
 
 impl FeedReader {
@@ -188,6 +236,28 @@ impl FeedReader {
             cursor: resume.filter(|c| !c.is_empty()).map(str::to_string),
             ..Default::default()
         }
+    }
+
+    /// The same reader for a connection that asked for a keep-alive every
+    /// `keepalive_s` seconds ([`crate::requests::feed`]): [`Self::resume`]
+    /// asks for it again.
+    pub fn asking(mut self, keepalive_s: Option<u32>) -> Self {
+        self.asked = keepalive_s;
+        self
+    }
+
+    /// The same reader for a client that already shows, or was told to
+    /// forget, the approvals `known` (by `approval_request_id`: the ones it
+    /// notified for on an earlier connection and the ones the user
+    /// dismissed). At `caught_up` it yields, instead of the whole set
+    /// ([`ApprovalsChange::Open`]), [`ApprovalsChange::Withdrawn`] with the
+    /// known ids the set lacks (decided while the link was down) and
+    /// [`ApprovalsChange::Added`] for each call of the set it does not
+    /// know, so a reconnect neither re-raises nor leaves a stale
+    /// notification.
+    pub fn knowing(mut self, known: impl IntoIterator<Item = String>) -> Self {
+        self.approvals.known = Some(known.into_iter().collect());
+        self
     }
 
     /// Feed `bytes`; the events they complete, in order.
@@ -211,9 +281,22 @@ impl FeedReader {
                         Ok(ev) => {
                             if let FeedEvent::Hello(h) = &ev {
                                 self.keepalive_s = Some(h.keepalive_s);
+                                self.device = HelloFacts {
+                                    urls: crate::pairing::refresh_urls(&h.urls),
+                                    cert: crate::requests::CertDates::of_hello(h.cert.as_ref()),
+                                    dashboard_url: h.dashboard_url.clone(),
+                                };
                                 self.moved(h.cursor.clone());
                             }
+                            if let FeedEvent::CaughtUp(c) = &ev {
+                                // Every stored event up to here was
+                                // delivered or passed: a cursor to resume
+                                // from, as a keep-alive's `id:` is.
+                                self.moved(c.cursor.clone());
+                            }
+                            let changes = self.approvals.apply(&ev);
                             out.push(FeedItem::Event(ev));
+                            out.extend(changes.into_iter().map(FeedItem::Approvals));
                         }
                         Err(_) => out.push(FeedItem::Unreadable {
                             event: f.event,
@@ -232,6 +315,17 @@ impl FeedReader {
         }
     }
 
+    /// The calls waiting for a decision, oldest first (module doc):
+    /// `hello`'s, changed by the events after `caught_up`.
+    pub fn open_approvals(&self) -> &[ApprovalRequested] {
+        &self.approvals.open
+    }
+
+    /// Whether `caught_up` came on this connection: the catch-up is over.
+    pub fn caught_up(&self) -> bool {
+        self.approvals.caught_up
+    }
+
     /// The cursor to resume from: `Last-Event-ID` of the next connection.
     pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
@@ -242,9 +336,31 @@ impl FeedReader {
         self.keepalive_s
     }
 
-    /// The request that resumes this feed.
+    /// `hello.urls` as the device keeps its list ([`refresh_urls`]: the
+    /// `https` ones, each once); `None` before `hello`, and when it holds
+    /// none usable: the client keeps the list it has.
+    ///
+    /// [`refresh_urls`]: crate::pairing::refresh_urls
+    pub fn urls(&self) -> Option<&crate::pairing::Urls> {
+        self.device.urls.as_ref()
+    }
+
+    /// `hello.cert`, once `hello` came with one: the dates the app shows
+    /// the certificate's notice from ([`crate::requests::CertDates::state`]).
+    pub fn certificate(&self) -> Option<crate::requests::CertDates> {
+        self.device.cert
+    }
+
+    /// `hello.dashboard_url`: where lmgw's dashboard is for this device,
+    /// when lmgw offers one ("Open in lmgw").
+    pub fn dashboard_url(&self) -> Option<&str> {
+        self.device.dashboard_url.as_deref()
+    }
+
+    /// The request that resumes this feed, asking for the keep-alive this
+    /// connection asked for ([`Self::asking`]).
     pub fn resume(&self) -> crate::requests::Request {
-        crate::requests::feed(self.cursor())
+        crate::requests::feed(self.cursor(), self.asked)
     }
 }
 
@@ -360,6 +476,39 @@ mod tests {
         assert_eq!(r.cursor(), Some("e:4:aa"));
     }
 
+    /// `message.*` (WP10): stored events, typed, that move the cursor; the
+    /// messages come whole with the thread's title, a delete as the ids
+    /// that went.
+    #[test]
+    fn message_events_carry_the_messages_whole_or_their_ids() {
+        let mut r = FeedReader::new(Some("e:20:aa"));
+        let got = r.push(
+            b"id: e:21:bb\nevent: message.added\ndata: {\"thread_id\":7,\"thread_title\":\"Kai\",\"by\":\"the dashboard\",\"messages\":[{\"id\":41,\"thread_id\":7,\"role\":\"assistant\",\"content\":\"It is late.\",\"reasoning\":\"\",\"kb_refs\":[],\"attachments\":[],\"created_at\":\"2026-10-14 20:00:00\"}]}\n\n\
+              id: e:22:cc\nevent: message.deleted\ndata: {\"thread_id\":7,\"message_ids\":[41],\"by\":null}\n\n",
+        );
+        let [FeedItem::Event(FeedEvent::MessageAdded(added)), FeedItem::Event(FeedEvent::MessageDeleted(gone))] =
+            got.as_slice()
+        else {
+            panic!("{got:?}")
+        };
+        assert_eq!((added.thread_id, added.thread_title.as_str()), (7, "Kai"));
+        assert_eq!(added.by.as_deref(), Some("the dashboard"));
+        let m = &added.messages[0];
+        assert_eq!(
+            (m.id, m.role.as_str(), m.content.as_str()),
+            (41, "assistant", "It is late.")
+        );
+        assert_eq!(
+            gone,
+            &MessagesDeleted {
+                thread_id: 7,
+                message_ids: vec![41],
+                by: None,
+            }
+        );
+        assert_eq!(r.cursor(), Some("e:22:cc"));
+    }
+
     /// A deleted device (MCP Tasks design §4.1): a stored event, typed,
     /// that moves the cursor; its device reads as a principal, whose `by`
     /// is what that device's changes carried.
@@ -384,6 +533,37 @@ mod tests {
         );
         assert_eq!(d.device.by(), "device 'phone'");
         assert_eq!(r.cursor(), Some("e:12:ab"));
+    }
+
+    #[test]
+    fn hello_s_device_facts_are_read() {
+        use crate::requests::CredentialState::{Lapsed, Notice, Valid};
+        let mut r = FeedReader::new(None);
+        assert_eq!(
+            (r.urls(), r.certificate(), r.dashboard_url()),
+            (None, None, None)
+        );
+        let hello = serde_json::json!({"epoch": "e", "cursor": "e:4:77aa", "keepalive_s": 15,
+            "retention_days": 7, "principal": {"kind": "device", "name": "desktop"},
+            "urls": ["http://h:1", "https://192.0.2.1:8788/", "https://192.0.2.1:8788"],
+            "cert": {"not_after": "2027-10-14T14:03:11Z", "notice_after": "2027-06-14T14:03:11Z"},
+            "dashboard_url": "http://127.0.0.1:8001/"});
+        r.push(format!("event: hello\ndata: {hello}\n\n").as_bytes());
+        assert_eq!(r.urls().unwrap().as_slice(), ["https://192.0.2.1:8788"]);
+        let c = r.certificate().unwrap();
+        assert_eq!(c.not_after_ms, 1_823_522_591_000);
+        assert_eq!(c.state(c.notice_after_ms - 1), Valid);
+        assert_eq!(c.state(c.notice_after_ms), Notice);
+        assert_eq!(c.state(c.not_after_ms), Lapsed);
+        assert_eq!(r.dashboard_url(), Some("http://127.0.0.1:8001/"));
+        // A later connection's `hello` without them replaces them.
+        let bare = serde_json::json!({"epoch": "e", "cursor": "e:4:77aa", "keepalive_s": 15,
+            "urls": ["http://only-plain"], "cert": null, "dashboard_url": null});
+        r.push(format!("event: hello\ndata: {bare}\n\n").as_bytes());
+        assert_eq!(
+            (r.urls(), r.certificate(), r.dashboard_url()),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -445,5 +625,19 @@ mod tests {
             .headers
             .iter()
             .any(|h| h.name == "Last-Event-ID" && h.value == "e:10:5eed"));
+        assert_eq!(req.path, "/chat/api/feed", "asked for no keep-alive");
+    }
+
+    /// Device link §7.1: a reader for a feed that asked for its keep-alive
+    /// asks for it again when it resumes.
+    #[test]
+    fn a_resume_asks_for_the_same_keepalive() {
+        let r = FeedReader::new(Some("e:3:aa")).asking(Some(120));
+        let req = r.resume();
+        assert_eq!(req.path, "/chat/api/feed?keepalive_s=120");
+        assert!(req
+            .headers
+            .iter()
+            .any(|h| h.name == "Last-Event-ID" && h.value == "e:3:aa"));
     }
 }

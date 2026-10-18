@@ -146,7 +146,17 @@ pub(crate) fn embeddings_response(g: &mut SchemaGenerator) -> Schema {
                         }
                     }
                 },
-                "usage": {"type": "object", "additionalProperties": true}
+                "usage": {
+                    "type": "object",
+                    "required": ["prompt_tokens", "total_tokens"],
+                    "properties": {
+                        "prompt_tokens": {"type": "integer", "minimum": 0,
+                            "description": "What the model reported; 0 when it reported \
+                                nothing."},
+                        "total_tokens": {"type": "integer", "minimum": 0,
+                            "description": "The same number: embedding generates nothing."}
+                    }
+                }
             }
         }),
     )
@@ -188,19 +198,34 @@ pub(crate) fn rerank_response(g: &mut SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "object",
             "description": "Jina's results shape, regardless of which request spelling was \
-                sent.",
-            "required": ["results"],
+                sent. Built by lmgw from the model's scores, never relayed: no result \
+                carries its document.",
+            "required": ["object", "model", "results", "usage"],
             "properties": {
+                "object": {"type": "string", "enum": ["list"]},
+                "model": {"type": "string",
+                    "description": "The model as the request named it."},
                 "results": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "required": ["index", "relevance_score"],
                         "properties": {
-                            "index": {"type": "integer"},
-                            "relevance_score": {"type": "number"},
-                            "document": {"type": ["object", "null"], "additionalProperties": true}
+                            "index": {"type": "integer", "minimum": 0,
+                                "description": "The document's position in the request."},
+                            "relevance_score": {"type": "number"}
                         }
+                    }
+                },
+                "usage": {
+                    "type": "object",
+                    "required": ["prompt_tokens", "total_tokens"],
+                    "properties": {
+                        "prompt_tokens": {"type": "integer", "minimum": 0,
+                            "description": "What the model reported; 0 when it reported \
+                                nothing."},
+                        "total_tokens": {"type": "integer", "minimum": 0,
+                            "description": "The same number: reranking generates nothing."}
                     }
                 }
             }

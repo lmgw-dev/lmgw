@@ -277,6 +277,31 @@ async fn full_lists_every_tool() {
     }
 }
 
+/// `extra_run_args` is a list of strings wherever a tool takes it: one `podman
+/// run` argument per entry, the type the dashboard's answers use.
+#[tokio::test]
+async fn extra_run_args_is_a_list_of_strings_on_every_tool_input() {
+    let base = serve_with(state_with_mode(SelfAdmin::Full).await).await;
+    let sid = initialize(&base).await;
+    let tools = list_tools(&base, &sid).await;
+    for name in [
+        "lmgw__aux_model_set",
+        "lmgw__image_model_set",
+        "lmgw__audio_model_set",
+        "lmgw__mcp_server_set",
+    ] {
+        let schema = &tool(&tools, name)["inputSchema"]["properties"]["extra_run_args"];
+        assert_eq!(schema["type"], "array", "{name}: {schema}");
+        assert_eq!(schema["items"]["type"], "string", "{name}: {schema}");
+    }
+    // The llama-server flags of the chat and aux rows are lists too.
+    for name in ["lmgw__local_model_set", "lmgw__aux_model_set"] {
+        let schema = &tool(&tools, name)["inputSchema"]["properties"]["extra_args"];
+        assert_eq!(schema["type"], "array", "{name}: {schema}");
+        assert_eq!(schema["items"]["type"], "string", "{name}: {schema}");
+    }
+}
+
 /// The ladder design (§6, §8 WP6): `local_model_set` gains a `ladder`
 /// property and `clear` names it, `local_model_get`/`local_model_test`
 /// describe the per-rung behaviour, and `status`/`logs` name the rung.
@@ -649,6 +674,7 @@ async fn hold_set_flips_the_hold_and_every_read_tool_sees_it() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -860,7 +886,8 @@ async fn upstreams_never_returns_an_api_key() {
         "the API key leaked into the tool output: {raw}"
     );
     let p: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(p["upstreams"][0]["api_key"], "<set>");
+    assert_eq!(p["upstreams"][0]["has_api_key"], true);
+    assert!(p["upstreams"][0].get("api_key").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,7 +1226,8 @@ async fn the_access_settings_are_no_tool_s_to_change() {
         json!({ "auth_enabled": true }),
         json!({ "self_admin": "off" }),
         json!({ "bind_addr": "0.0.0.0:8787" }),
-        json!({ "agent_origin_suffix": "lmgw.lan" }),
+        json!({ "agent_origin_suffix": "lmgw.example" }),
+        json!({ "devices": { "token_minutes": 60 } }),
     ] {
         let key = args.as_object().unwrap().keys().next().unwrap().clone();
         let refused = call(&base, &sid, "lmgw__settings_set", args).await;
@@ -1215,6 +1243,7 @@ async fn the_access_settings_are_no_tool_s_to_change() {
     let s = inspect.snapshot().settings.clone();
     assert!(!s.auth_enabled);
     assert_eq!(s.self_admin, SelfAdmin::Full);
+    assert_eq!(s.devices.token_minutes, 10);
 }
 
 #[tokio::test]
@@ -1912,7 +1941,7 @@ async fn a_pool_guarded_row_with_no_image_bound_gets_an_advisory() {
         "lmgw__local_model_set",
         json!({
             "action": "update", "model_id": "guarded",
-            "extra_args": "--image-max-tokens 1280",
+            "extra_args": ["--image-max-tokens", "1280"],
         }),
     )
     .await;
@@ -2247,7 +2276,7 @@ async fn a_short_kv_unified_alias_in_extra_args_is_still_validated() {
         "lmgw__local_model_set",
         json!({
             "action": "create", "model_id": "short-alias-bypass", "gguf_path": "m.gguf",
-            "extra_args": "-kvu", "parallel": 2
+            "extra_args": ["-kvu"], "parallel": 2
         }),
     )
     .await;
@@ -2419,6 +2448,7 @@ async fn alias_capabilities_override_round_trips_and_clears() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -2940,7 +2970,7 @@ async fn clear_names_a_whole_field_and_never_a_substring_of_one() {
         "action": "create", "model_id": "z",
         "files": format!("diffusion_model = {DIT}"),
         "args": "steps = 8\ncfg_scale = 1.0",
-        "extra_run_args": "--device nvidia.com/gpu=all",
+        "extra_run_args": ["--device", "nvidia.com/gpu=all"],
     }))
     .await;
     assert_eq!(r["ok"], true, "{r}");
@@ -3574,6 +3604,41 @@ async fn profile_set_refuses_what_the_routes_refuse_in_words() {
             text_of(&r).to_lowercase().contains(needle),
             "{args}: {}",
             text_of(&r)
+        );
+    }
+}
+
+/// The pre-rename `embed` for the aux class is not accepted anywhere a tool
+/// takes a target or a models kind (alpha: no compat): each refusal names the
+/// values that are valid.
+#[tokio::test]
+async fn the_old_embed_spelling_of_aux_is_refused_naming_the_valid_values() {
+    let base = serve_with(state_with_mode(SelfAdmin::Full).await).await;
+    let sid = initialize(&base).await;
+    for (tool, args, valid) in [
+        (
+            "lmgw__container",
+            json!({ "target": "embed", "action": "status" }),
+            "aux",
+        ),
+        (
+            "lmgw__hf_add",
+            json!({ "repo": "o/r", "file": "m.gguf", "target": "embed" }),
+            "chat, aux, audio, image",
+        ),
+        (
+            "lmgw__gguf_files",
+            json!({ "target": "embed" }),
+            "chat|aux|audio|image",
+        ),
+        ("lmgw__models", json!({ "kind": "embed" }), "aux"),
+    ] {
+        let result = call(&base, &sid, tool, args).await;
+        assert!(is_error(&result), "{tool} accepted embed: {result}");
+        let msg = text_of(&result);
+        assert!(
+            msg.contains("embed") && msg.contains(valid),
+            "{tool}: {msg}"
         );
     }
 }

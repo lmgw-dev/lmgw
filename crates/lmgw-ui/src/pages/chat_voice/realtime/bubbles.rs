@@ -14,15 +14,18 @@
 //!   text, the greyed rest, the timing; `removed` takes the bubble out;
 //!   `skipped` keeps the text whole and adds a small note.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use leptos::prelude::*;
+use lmgw_api_types::chat_frames::ToolFrame;
 use lmgw_client::realtime::ChatReply;
 use serde_json::Value;
 
 use super::super::super::chat::{in_owner, new_msg, scroll_down, Msg};
 use super::super::super::chat_reply::Finished;
-use super::super::super::chat_stream::{frame as parse_frame, ChatEvent};
+use super::super::super::chat_stream::{frame as parse_frame, ChatEvent, ToolEvent, VoiceEvent};
 use super::super::super::chat_turn::apply_tool_frame;
 use super::super::spoken::MsgVoice;
 use super::live::Live;
@@ -52,7 +55,7 @@ pub(super) fn user(
     l: &Rc<Live>,
     message_id: i64,
     content: String,
-    voice: &Value,
+    voice: &lmgw_api_types::chat_threads::MessageVoice,
     response_id: Option<&str>,
 ) {
     if !here(l) {
@@ -62,7 +65,7 @@ pub(super) fn user(
         return;
     };
     m.db_id.set(Some(message_id));
-    m.voice.set(MsgVoice::of_value(voice));
+    m.voice.set(MsgVoice::of_typed(voice));
     // Its response's reply may already stream: the turn goes before it.
     let reply = response_id.and_then(|rid| l.bubbles.borrow().get(rid).map(|r| r.key));
     l.rt().parts.msgs.try_update(|v| {
@@ -92,14 +95,36 @@ fn reply_bubble(l: &Rc<Live>, rid: &str) -> Option<Msg> {
     Some(m)
 }
 
+/// A relayed frame read into the page's event. The one frame that is not
+/// read and still counts is a `done` that is not a whole `DoneFrame` (a
+/// gateway that sent it a key this page does not know, say, on a tab left
+/// open across an upgrade): in voice mode only `done` (or the stored
+/// `reply`) clears `streaming`, so without this the bubble would spin for
+/// good. It ends the bubble's streaming state and applies nothing else,
+/// as `run_turn` ends its own at the end of the stream whatever was read.
+fn read_frame(
+    bubbles: &RefCell<HashMap<String, Msg>>,
+    rid: &str,
+    event: &str,
+    data: Value,
+) -> Option<ChatEvent> {
+    let ev = parse_frame(event, data);
+    if ev.is_none() && event == "done" {
+        if let Some(m) = bubbles.borrow().get(rid) {
+            m.streaming.set(false);
+        }
+    }
+    ev
+}
+
 pub(super) fn frame(l: &Rc<Live>, rid: &str, event: &str, data: Value) {
-    let Some(ev) = parse_frame(event, data) else {
+    let Some(ev) = read_frame(&l.bubbles, rid, event, data) else {
         return;
     };
     // A model's state is the status line's: the gateway sends every chat
     // turn's `state` frame as `lmgw.model.state` too (`thread/hooks.rs`,
     // `bound_frame`), which the session applies (review NIT 12).
-    if let ChatEvent::Voice("state", _) = &ev {
+    if let ChatEvent::Voice(VoiceEvent::State(_)) = &ev {
         return;
     }
     // The user's own message is `lmgw.chat.user`'s.
@@ -115,15 +140,14 @@ pub(super) fn frame(l: &Rc<Live>, rid: &str, event: &str, data: Value) {
             scroll_down(false);
         }
         ChatEvent::Reasoning(text) => m.reasoning.update(|r| r.push_str(&text)),
-        ChatEvent::Tool(v) => {
-            apply_tool_frame(m.tools, &v);
+        ChatEvent::Tool(step) => {
+            apply_tool_frame(m.tools, &step);
             // The running tool shows on the status line; the visualisation
             // is `thinking` once the preamble played (§8.5, `machine.rs`).
-            match v["event"].as_str().unwrap_or_default() {
-                "start" | "ready" => {
-                    l.tool(Some(v["name"].as_str().unwrap_or("a tool").to_string()));
-                }
-                "result" => l.tool(None),
+            match &step {
+                ToolEvent::Frame(ToolFrame::Start(f)) => l.tool(Some(f.name.clone())),
+                ToolEvent::Frame(ToolFrame::Ready(f)) => l.tool(Some(f.name.clone())),
+                ToolEvent::Frame(ToolFrame::Result(_)) => l.tool(None),
                 _ => {}
             }
             scroll_down(false);
@@ -196,7 +220,7 @@ pub(super) fn reply(l: &Rc<Live>, r: &ChatReply) {
         msgs.update(|v| v.retain(|x| x.key != m.key));
         return;
     }
-    let mut voice = MsgVoice::of_value(&r.voice);
+    let mut voice = r.voice.as_ref().and_then(MsgVoice::of_typed);
     if let Some(why) = r.skipped.as_deref() {
         let mut v = voice
             .or_else(|| m.voice.get_untracked())
@@ -215,5 +239,63 @@ pub(super) fn reply(l: &Rc<Live>, r: &ChatReply) {
     }
     if voice.is_some() {
         m.voice.set(voice);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Response `r1`'s bubble, streaming, in an owner of its own.
+    fn streaming_bubble() -> (RefCell<HashMap<String, Msg>>, Msg) {
+        let m = new_msg(1, "assistant", String::new());
+        m.streaming.set(true);
+        let bubbles = RefCell::new(HashMap::from([("r1".to_string(), m.clone())]));
+        (bubbles, m)
+    }
+
+    #[test]
+    fn a_done_that_does_not_read_still_ends_the_bubbles_streaming() {
+        Owner::new().with(|| {
+            // An `aborted` frame a newer gateway gave a key: more than
+            // `aborted` that is not a whole saved part is not a `DoneFrame`.
+            let unread = json!({"aborted": true, "reason": "a newer gateway's key"});
+            let (bubbles, m) = streaming_bubble();
+            m.content.set("kept".into());
+            assert!(read_frame(&bubbles, "r1", "done", unread).is_none());
+            assert!(!m.streaming.get_untracked());
+            // Nothing else was applied.
+            assert_eq!(m.content.get_untracked(), "kept");
+            assert_eq!(m.db_id.get_untracked(), None);
+            assert!(!m.unsaved.get_untracked());
+        });
+    }
+
+    #[test]
+    fn only_a_done_ends_the_streaming_of_a_frame_that_does_not_read() {
+        Owner::new().with(|| {
+            let (bubbles, m) = streaming_bubble();
+            // Another event that does not read leaves the bubble streaming,
+            // and so does a `done` of another response.
+            assert!(read_frame(&bubbles, "r1", "retrieval", json!({"hits": "x"})).is_none());
+            assert!(read_frame(&bubbles, "r2", "done", json!({"aborted": 1})).is_none());
+            assert!(m.streaming.get_untracked());
+            // A `done` with no bubble yet makes none.
+            let none = RefCell::new(HashMap::new());
+            assert!(read_frame(&none, "r1", "done", json!({"aborted": 1})).is_none());
+            assert!(none.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_done_that_reads_is_left_to_the_frame_handler() {
+        Owner::new().with(|| {
+            let (bubbles, m) = streaming_bubble();
+            let ev = read_frame(&bubbles, "r1", "done", json!({"aborted": true}));
+            assert!(matches!(ev, Some(ChatEvent::Done(_))));
+            // `frame` applies it, with the model and the tools; the read does not.
+            assert!(m.streaming.get_untracked());
+        });
     }
 }

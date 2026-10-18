@@ -258,11 +258,11 @@ mod tests {
 
         let t = Timings {
             prompt_n: 10,
-            prompt_ms: 1.0,
-            prompt_per_second: 1.0,
+            prompt_ms: Some(1.0),
+            prompt_per_second: Some(1.0),
             predicted_n: 7,
-            predicted_ms: 1.0,
-            predicted_per_second: 1.0,
+            predicted_ms: Some(1.0),
+            predicted_per_second: Some(1.0),
             cache_n: Some(5),
             draft_n: None,
             draft_n_accepted: None,

@@ -397,6 +397,19 @@ catalog says nothing about modalities; the model-name hints (`-tts`,
 `-image`, `native-audio`) are not promoted to facts — the note says "the
 provider catalog does not state input modalities".
 
+*(rev 2026-10-14, decision-models design §6.2)* The OpenAI-protocol `task`
+row has grown: an entry whose `output_modalities` name no `text` takes the
+task of the first of `decisions` → `decision`, `rerank` → `rerank`,
+`speech` → `tts`, `transcription` → `asr`, `image` → `image_generation`,
+`video` → `video_generation` it names; `[embedding]` and OpenRouter's
+`[embeddings]` stay `embedding`, and everything else with stated outputs is
+`chat`. The catalog of an `openai` upstream of kind `generic` is read with
+`?output_modalities=all` (per-upstream `catalog_all_modalities`), without
+which OpenRouter lists none of those non-text models. A cloud
+`image_generation` or `video_generation` entry publishes no `endpoints`,
+with a note: no lmgw route is verified to reach it (OpenRouter documents
+`POST /images` and `POST /videos`).
+
 *(rev 2026-10-02, realtime live run 3 D1)* **One exception, for `task` on
 the OpenAI protocol.** A stock `api.openai.com` list states no modalities at
 all, so every entry was `chat`: `gpt-4o-mini-tts` and

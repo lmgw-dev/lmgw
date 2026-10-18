@@ -91,6 +91,7 @@ pub(super) async fn world(base: &str, kind: &str) -> (SharedState, ChatThread, i
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

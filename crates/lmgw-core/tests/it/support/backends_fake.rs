@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use lmgw_core::agents::container::{Exit, KillHandle, Signal, Spawned, Spawner};
 use lmgw_core::backends::run;
 use lmgw_core::backends::validate::validate_build;
 use lmgw_core::backends::{BuildRun, BuildSpec, Engine, Forge};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store;
@@ -345,20 +345,24 @@ impl FakePodman {
     }
 }
 
-#[async_trait]
 impl CommandRunner for FakePodman {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        let a: Vec<&str> = args.iter().map(String::as_str).collect();
-        if program == "nvidia-smi" {
-            return Ok(match a.as_slice() {
-                [] => ok("| NVIDIA-SMI 615.71   Driver Version: 615.71   CUDA Version: 13.1 |"),
-                _ => ok("8.9\n"),
-            });
-        }
-        assert_eq!(program, "podman");
-        let mut w = self.world();
-        w.calls.push(args.to_vec());
-        Ok(match a.as_slice() {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            let a: Vec<&str> = args.iter().map(String::as_str).collect();
+            if program == "nvidia-smi" {
+                return Ok(match a.as_slice() {
+                    [] => ok("| NVIDIA-SMI 550.00   Driver Version: 550.00   CUDA Version: 12.4 |"),
+                    _ => ok("8.9\n"),
+                });
+            }
+            assert_eq!(program, "podman");
+            let mut w = self.world();
+            w.calls.push(args.to_vec());
+            Ok(match a.as_slice() {
             ["image", "inspect", "--format", fmt, r] => match w.find(r) {
                 None => fail(125, "Error: failed to find image x: image not known"),
                 Some(i) => {
@@ -510,136 +514,148 @@ impl CommandRunner for FakePodman {
             }
             _ => ok(""),
         })
+        })
     }
 }
 
-#[async_trait]
 impl Spawner for FakePodman {
-    async fn spawn(&self, program: &str, args: &[String]) -> std::io::Result<Spawned> {
-        self.spawn_env(program, args, &[]).await
+    fn spawn<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move { self.spawn_env(program, args, &[]).await })
     }
 
-    async fn spawn_env(
-        &self,
-        program: &str,
-        args: &[String],
-        env: &[(String, String)],
-    ) -> std::io::Result<Spawned> {
-        assert_eq!(program, "podman");
-        if args.first().map(String::as_str) == Some("pull") {
-            return Ok(self.pull(args));
-        }
-        let argv = args.to_vec();
-        let flag = |f: &str| {
-            argv.iter()
-                .position(|a| a == f)
-                .map(|i| argv[i + 1].clone())
-                .unwrap_or_default()
-        };
-        let labels: HashMap<String, String> = argv
-            .windows(2)
-            .filter(|w| w[0] == "--label")
-            .filter_map(|w| w[1].split_once('='))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let (tag, iid) = (flag("-t"), flag("--iidfile"));
-        self.0.spawns.lock().unwrap().push(Spawn {
-            containerfile: std::fs::read_to_string(flag("-f")).unwrap_or_default(),
-            ignorefile: std::fs::read_to_string(flag("--ignorefile")).unwrap_or_default(),
-            argv: argv.clone(),
-            env: env.to_vec(),
-        });
-        // What a build leaves behind while it runs (§14.2): a working
-        // container, and buildah's scratch dir under `$TMPDIR` (`/var/tmp`
-        // without one). And, as happens on a live machine, a model container
-        // `podman run --replace` recreated meanwhile — which is not the
-        // build's and must survive its cleanup.
-        {
-            let mut w = self.world();
-            w.external.push(FakeExternal::new(
-                "new1",
-                "cuda-working-container",
-                "storage",
-            ));
-            w.external.push(FakeExternal::new(
-                "model2",
-                "lmgw-chat-qwen-a1b2c3",
-                "running",
-            ));
-        }
-        let scratch_root = env
-            .iter()
-            .find(|(k, _)| k == "TMPDIR")
-            .map(|(_, v)| PathBuf::from(v))
-            .unwrap_or_else(|| self.0.buildah_tmp.clone());
-        let scratch = scratch_root.join("buildah222");
-        std::fs::create_dir_all(&scratch).unwrap();
-
-        let behavior = *self.0.behavior.lock().unwrap();
-        let (kill, mut signals) = KillHandle::channel();
-        let (out_tx, stdout) = mpsc::channel(64);
-        let (err_tx, stderr) = mpsc::channel(64);
-        let (done_tx, done_rx) = oneshot::channel();
-        let me = self.clone();
-        tokio::spawn(async move {
-            for l in PROGRESS {
-                let _ = out_tx.send(l.to_string()).await;
+    fn spawn_env<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            if args.first().map(String::as_str) == Some("pull") {
+                return Ok(self.pull(args));
             }
-            let _ = err_tx.send("a warning on stderr".to_string()).await;
-            let exit = match behavior {
-                Behavior::Succeed => Exit::Code(0),
-                Behavior::HoldThenSucceed => {
-                    me.0.release.notified().await;
-                    Exit::Code(0)
-                }
-                Behavior::HoldUntilSignal => {
-                    let sig = signals.recv().await.expect("a signal");
-                    me.0.signals.lock().unwrap().push(sig);
-                    Exit::Code(1)
-                }
-                Behavior::HoldThenFinishOnSignal => {
-                    let sig = signals.recv().await.expect("a signal");
-                    me.0.signals.lock().unwrap().push(sig);
-                    Exit::Code(0)
-                }
+            let argv = args.to_vec();
+            let flag = |f: &str| {
+                argv.iter()
+                    .position(|a| a == f)
+                    .map(|i| argv[i + 1].clone())
+                    .unwrap_or_default()
             };
-            if exit == Exit::Code(0) {
-                let id = {
-                    let mut w = me.world();
-                    w.next += 1;
-                    let id = format!("{:0>64x}", 0xb000 + w.next);
-                    for img in &mut w.images {
-                        img.names.retain(|n| *n != tag);
-                    }
-                    w.images.push(FakeImage {
-                        id: id.clone(),
-                        names: vec![tag.clone()],
-                        labels,
-                        size: 2_500_000_000,
-                        digests: Vec::new(),
-                    });
-                    // A finished build leaves nothing behind.
-                    w.external.retain(|c| c.id != "new1");
-                    id
-                };
-                let _ = std::fs::remove_dir_all(&scratch);
-                std::fs::write(&iid, format!("sha256:{id}")).unwrap();
-                let _ = out_tx.send(format!("[2/2] COMMIT {tag}")).await;
+            let labels: HashMap<String, String> = argv
+                .windows(2)
+                .filter(|w| w[0] == "--label")
+                .filter_map(|w| w[1].split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let (tag, iid) = (flag("-t"), flag("--iidfile"));
+            self.0.spawns.lock().unwrap().push(Spawn {
+                containerfile: std::fs::read_to_string(flag("-f")).unwrap_or_default(),
+                ignorefile: std::fs::read_to_string(flag("--ignorefile")).unwrap_or_default(),
+                argv: argv.clone(),
+                env: env.to_vec(),
+            });
+            // What a build leaves behind while it runs (§14.2): a working
+            // container, and buildah's scratch dir under `$TMPDIR` (`/var/tmp`
+            // without one). And, as happens on a live machine, a model container
+            // `podman run --replace` recreated meanwhile — which is not the
+            // build's and must survive its cleanup.
+            {
+                let mut w = self.world();
+                w.external.push(FakeExternal::new(
+                    "new1",
+                    "cuda-working-container",
+                    "storage",
+                ));
+                w.external.push(FakeExternal::new(
+                    "model2",
+                    "lmgw-chat-qwen-a1b2c3",
+                    "running",
+                ));
             }
-            drop(out_tx);
-            drop(err_tx);
-            let _ = done_tx.send(exit);
-        });
-        Ok(Spawned {
-            stdout,
-            stderr,
-            kill,
-            status: Box::pin(async move { Ok(done_rx.await.unwrap_or(Exit::Code(-1))) }),
+            let scratch_root = env
+                .iter()
+                .find(|(k, _)| k == "TMPDIR")
+                .map(|(_, v)| PathBuf::from(v))
+                .unwrap_or_else(|| self.0.buildah_tmp.clone());
+            let scratch = scratch_root.join("buildah222");
+            std::fs::create_dir_all(&scratch).unwrap();
+
+            let behavior = *self.0.behavior.lock().unwrap();
+            let (kill, mut signals) = KillHandle::channel();
+            let (out_tx, stdout) = mpsc::channel(64);
+            let (err_tx, stderr) = mpsc::channel(64);
+            let (done_tx, done_rx) = oneshot::channel();
+            let me = self.clone();
+            tokio::spawn(async move {
+                for l in PROGRESS {
+                    let _ = out_tx.send(l.to_string()).await;
+                }
+                let _ = err_tx.send("a warning on stderr".to_string()).await;
+                let exit = match behavior {
+                    Behavior::Succeed => Exit::Code(0),
+                    Behavior::HoldThenSucceed => {
+                        me.0.release.notified().await;
+                        Exit::Code(0)
+                    }
+                    Behavior::HoldUntilSignal => {
+                        let sig = signals.recv().await.expect("a signal");
+                        me.0.signals.lock().unwrap().push(sig);
+                        Exit::Code(1)
+                    }
+                    Behavior::HoldThenFinishOnSignal => {
+                        let sig = signals.recv().await.expect("a signal");
+                        me.0.signals.lock().unwrap().push(sig);
+                        Exit::Code(0)
+                    }
+                };
+                if exit == Exit::Code(0) {
+                    let id = {
+                        let mut w = me.world();
+                        w.next += 1;
+                        let id = format!("{:0>64x}", 0xb000 + w.next);
+                        for img in &mut w.images {
+                            img.names.retain(|n| *n != tag);
+                        }
+                        w.images.push(FakeImage {
+                            id: id.clone(),
+                            names: vec![tag.clone()],
+                            labels,
+                            size: 2_500_000_000,
+                            digests: Vec::new(),
+                        });
+                        // A finished build leaves nothing behind.
+                        w.external.retain(|c| c.id != "new1");
+                        id
+                    };
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    std::fs::write(&iid, format!("sha256:{id}")).unwrap();
+                    let _ = out_tx.send(format!("[2/2] COMMIT {tag}")).await;
+                }
+                drop(out_tx);
+                drop(err_tx);
+                let _ = done_tx.send(exit);
+            });
+            Ok(Spawned {
+                stdout,
+                stderr,
+                kill,
+                status: Box::pin(async move { Ok(done_rx.await.unwrap_or(Exit::Code(-1))) }),
+            })
         })
     }
 
-    async fn run(&self, _program: &str, _args: &[String]) -> std::io::Result<CmdOutput> {
-        panic!("the build executor runs buffered podman verbs through the registry's runner");
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            panic!("the build executor runs buffered podman verbs through the registry's runner");
+        })
     }
 }
 

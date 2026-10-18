@@ -85,8 +85,8 @@ custom URL), then:
 | `ref` | Branch, tag or full 40-hex commit. A branch/tag is re-resolved on every run; a commit never updates. |
 | `extras` | Ordered list merged on top of `ref`: `{kind: pr, number, pin?}` (a PR/MR of `repo_url`) or `{kind: ref, remote_url, ref, pin?}` (a branch/tag/commit of another remote — a fork branch, or an upstream llama.cpp PR applied on top of ik via `refs/pull/N/head`). No pin follows the head; a pin is a full SHA. |
 | `backend` | **GPU backend** in the UI (labelled that way so it doesn't collide with "backend" meaning the page's own subject): `cuda` (default) \| `vulkan` \| `rocm` \| `cpu`. |
-| `cuda_version` | Default `13.0.0` for every engine (works on driver 615.71; shares base images across engines so audio/sd don't pull their own 10 GB CUDA base). The editor warns if you ask for more than the driver supports. |
-| `arch` | Default **auto**: this host's GPUs' `compute_cap` values (`89` on an RTX 4090). Settable to another list for a different machine. |
+| `cuda_version` | Default `13.0.0` for every engine (works on a 615-series driver; shares base images across engines so audio/sd don't pull their own 10 GB CUDA base). The editor warns if you ask for more than the driver supports. |
+| `arch` | Default **auto**: this host's GPUs' `compute_cap` values (`89` on an Ada-generation GPU). Settable to another list for a different machine. |
 | `dockerfile`, `target` | Default auto (the preset's candidates for the engine+backend). Chosen **at the base commit**, before any extras are merged — see §16. |
 | `edits` | Starts as the preset's Dockerfile edits, shown and editable (find/replace, `required` flag, a `role` so switches like `ccache` off can drop every edit of that role even if you customized it). |
 | `ccache` | On by default. `ccache_max_size` defaults to `10G`. |
@@ -208,7 +208,7 @@ Outcomes:
 - **`--layers=false` by default** — no multi-GB intermediate stages left
   behind; a rebuild's speed comes from ccache/npm-cache and the up-to-date
   short-circuit, not from podman's layer cache.
-- **Measured (2026-09-26 spike + e2e, sm_89, RTX 4090):** cold builds ~350 s
+- **Measured (2026-09-26 spike + e2e, sm_89, a 24 GB GPU):** cold builds ~350 s
   (official), ~404 s (ik), ~362 s (audio), ~248 s (sd) — the design doc's
   headline "~4–7 min" cold, "~40–130 s" cache-hit range. A cache-hit rebuild
   of official measured 123 s wall / 13 s compile (609/610 ccache hits); the
@@ -502,7 +502,7 @@ on it, report back": `lmgw__build_set` → `lmgw__build_run` → poll
   or append the edit, then rebuild and re-apply the audio containers.
 - **audio.cpp and stable-diffusion.cpp default to CUDA 13.0.0**, not their
   own upstream Dockerfile defaults — chosen because 13.0.0 is what works on
-  driver 615.71 for all four engines and shares a base image, at the cost of
+  a 615-series driver for all four engines and shares a base image, at the cost of
   not matching what a `git clone && docker build` of those repos alone would
   give you.
 

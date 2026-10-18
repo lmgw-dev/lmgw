@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lmgw_core::config::LlamaParams;
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::argv::LlamaArgs;
 use lmgw_core::runtime::descriptor::{ModelRuntime, RungPos};
 use lmgw_core::runtime::registry::{
@@ -53,31 +54,36 @@ fn ok() -> CmdOutput {
     }
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Fake {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args[0].as_str() {
-            "run" => {
-                let gate = self.run_gate.lock().unwrap().clone();
-                parked(gate).await;
-                if std::mem::take(&mut *self.fail_next_run.lock().unwrap()) {
-                    return Ok(CmdOutput {
-                        status: 125,
-                        stdout: String::new(),
-                        stderr: "Error: the weights are not there\n".into(),
-                    });
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args[0].as_str() {
+                "run" => {
+                    let gate = self.run_gate.lock().unwrap().clone();
+                    parked(gate).await;
+                    if std::mem::take(&mut *self.fail_next_run.lock().unwrap()) {
+                        return Ok(CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr: "Error: the weights are not there\n".into(),
+                        });
+                    }
+                    Ok(ok())
                 }
-                Ok(ok())
+                "wait" => {
+                    let gate = self.wait_gate.lock().unwrap().clone();
+                    parked(gate).await;
+                    Ok(ok())
+                }
+                _ => Ok(ok()),
             }
-            "wait" => {
-                let gate = self.wait_gate.lock().unwrap().clone();
-                parked(gate).await;
-                Ok(ok())
-            }
-            _ => Ok(ok()),
-        }
+        })
     }
 }
 

@@ -38,9 +38,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ir::{
     ChatRequest, Completion, ContentPart, FinishReason, Message, Role, StreamDelta, ToolDef,
@@ -239,9 +239,8 @@ impl ToolOutcome {
 
 /// Runs the tools the loop owns. Split from the loop so tests drive it with a
 /// fake and so the MCP wiring (and later an Admin plane) stays out of here.
-#[async_trait]
 pub trait ToolExecutor: Send + Sync {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome;
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome>;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,20 +309,20 @@ pub enum LoopEvent {
 /// Sink for [`LoopEvent`]s. Returning `false` aborts the run — that is how a
 /// disconnected client stops the loop (and any further tool calls) instead of
 /// leaving it burning GPU on a response nobody will read.
-#[async_trait]
 pub trait EventSink: Send {
-    async fn emit(&mut self, ev: LoopEvent) -> bool;
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool>;
 }
 
 /// Collects every event; the non-streaming path and the tests use it.
 #[derive(Debug, Default)]
 pub struct CollectSink(pub Vec<LoopEvent>);
 
-#[async_trait]
 impl EventSink for CollectSink {
-    async fn emit(&mut self, ev: LoopEvent) -> bool {
-        self.0.push(ev);
-        true
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+        Box::pin(async move {
+            self.0.push(ev);
+            true
+        })
     }
 }
 
@@ -432,9 +431,10 @@ impl TurnAccumulator {
 
 /// Receives one turn's raw IR deltas as the upstream produces them.
 ///
-/// A named trait rather than `dyn FnMut(&StreamDelta)`: under `async_trait` the
-/// closure form loses its higher-ranked lifetime and every caller is forced to
-/// keep each delta alive for the whole call.
+/// A named trait rather than `dyn FnMut(&StreamDelta)`: a sink is more than
+/// its delta callback — it can stop the call, close what it holds open and
+/// hear what the call billed (below). Any `FnMut(&StreamDelta)` is one, with
+/// the defaults.
 pub trait DeltaSink: Send {
     fn on_delta(&mut self, d: &StreamDelta);
 
@@ -483,14 +483,13 @@ impl<F: FnMut(&StreamDelta) + Send> DeltaSink for F {
 ///
 /// The `sink` receives the turn's raw IR deltas as they arrive; a non-streaming
 /// implementation may simply not call it.
-#[async_trait]
 pub trait TurnRunner: Send + Sync {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError>;
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>>;
 }
 
 /// Everything one run needs beyond the conversation itself.
@@ -1123,57 +1122,57 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl TurnRunner for ScriptedRunner {
-        async fn run_turn(
-            &self,
-            ir: &ChatRequest,
+        fn run_turn<'a>(
+            &'a self,
+            ir: &'a ChatRequest,
             _deadline: Duration,
-            sink: &mut dyn DeltaSink,
-        ) -> Result<Completion, GatewayError> {
-            self.seen.lock().unwrap().push(ir.clone());
-            let mut turns = self.turns.lock().unwrap();
-            if turns.is_empty() {
-                return Err(GatewayError::Internal("scripted runner exhausted".into()));
-            }
-            let c = turns.remove(0);
-            if self.streaming {
-                let mut idx = 0;
-                for p in &c.content {
-                    match p {
-                        ContentPart::Text { text } => {
-                            for ch in text.split_inclusive(' ') {
-                                sink.on_delta(&StreamDelta::TextDelta(ch.to_string()));
-                            }
-                        }
-                        ContentPart::ToolUse { id, name, args } => {
-                            sink.on_delta(&StreamDelta::ToolCallStart {
-                                index: idx,
-                                id: id.clone(),
-                                name: name.clone(),
-                            });
-                            sink.on_delta(&StreamDelta::ToolCallArgsDelta {
-                                index: idx,
-                                fragment: args.to_string(),
-                            });
-                            idx += 1;
-                        }
-                        _ => {}
-                    }
+            sink: &'a mut dyn DeltaSink,
+        ) -> Erased<'a, Result<Completion, GatewayError>> {
+            Box::pin(async move {
+                self.seen.lock().unwrap().push(ir.clone());
+                let mut turns = self.turns.lock().unwrap();
+                if turns.is_empty() {
+                    return Err(GatewayError::Internal("scripted runner exhausted".into()));
                 }
-                sink.on_delta(&StreamDelta::Usage(c.usage));
-                sink.on_delta(&StreamDelta::Stop(c.finish_reason.clone()));
-            }
-            Ok(c)
+                let c = turns.remove(0);
+                if self.streaming {
+                    let mut idx = 0;
+                    for p in &c.content {
+                        match p {
+                            ContentPart::Text { text } => {
+                                for ch in text.split_inclusive(' ') {
+                                    sink.on_delta(&StreamDelta::TextDelta(ch.to_string()));
+                                }
+                            }
+                            ContentPart::ToolUse { id, name, args } => {
+                                sink.on_delta(&StreamDelta::ToolCallStart {
+                                    index: idx,
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                });
+                                sink.on_delta(&StreamDelta::ToolCallArgsDelta {
+                                    index: idx,
+                                    fragment: args.to_string(),
+                                });
+                                idx += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    sink.on_delta(&StreamDelta::Usage(c.usage));
+                    sink.on_delta(&StreamDelta::Stop(c.finish_reason.clone()));
+                }
+                Ok(c)
+            })
         }
     }
 
     struct EchoExec;
 
-    #[async_trait]
     impl ToolExecutor for EchoExec {
-        async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-            ToolOutcome::ok(ToolResultBlock::one(format!("{name}:{args}")))
+        fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+            Box::pin(async move { ToolOutcome::ok(ToolResultBlock::one(format!("{name}:{args}"))) })
         }
     }
 
@@ -1480,10 +1479,9 @@ mod tests {
     #[tokio::test]
     async fn a_failing_tool_is_reported_to_the_model_and_the_run_continues() {
         struct FailExec;
-        #[async_trait]
         impl ToolExecutor for FailExec {
-            async fn call(&self, _name: &str, _args: &Value) -> ToolOutcome {
-                ToolOutcome::error("upstream server is down")
+            fn call<'a>(&'a self, _name: &'a str, _args: &'a Value) -> Erased<'a, ToolOutcome> {
+                Box::pin(async move { ToolOutcome::error("upstream server is down") })
             }
         }
         let runner = ScriptedRunner::new(
@@ -1523,11 +1521,12 @@ mod tests {
     #[tokio::test]
     async fn a_sink_that_gives_up_aborts_the_run() {
         struct DeadSink(usize);
-        #[async_trait]
         impl EventSink for DeadSink {
-            async fn emit(&mut self, _ev: LoopEvent) -> bool {
-                self.0 = self.0.saturating_sub(1);
-                self.0 > 0
+            fn emit<'a>(&'a mut self, _ev: LoopEvent) -> Erased<'a, bool> {
+                Box::pin(async move {
+                    self.0 = self.0.saturating_sub(1);
+                    self.0 > 0
+                })
             }
         }
         let runner = ScriptedRunner::new(
@@ -1561,14 +1560,15 @@ mod tests {
     async fn parallel_tool_calls_false_runs_them_one_at_a_time() {
         /// Records enter/exit around a yield point, so overlap is visible.
         struct TraceExec(Mutex<Vec<String>>);
-        #[async_trait]
         impl ToolExecutor for TraceExec {
-            async fn call(&self, _name: &str, args: &Value) -> ToolOutcome {
-                let tag = args["q"].to_string();
-                self.0.lock().unwrap().push(format!("enter{tag}"));
-                tokio::task::yield_now().await;
-                self.0.lock().unwrap().push(format!("exit{tag}"));
-                ToolOutcome::ok(ToolResultBlock::one("ok"))
+            fn call<'a>(&'a self, _name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+                Box::pin(async move {
+                    let tag = args["q"].to_string();
+                    self.0.lock().unwrap().push(format!("enter{tag}"));
+                    tokio::task::yield_now().await;
+                    self.0.lock().unwrap().push(format!("exit{tag}"));
+                    ToolOutcome::ok(ToolResultBlock::one("ok"))
+                })
             }
         }
 
@@ -1675,15 +1675,16 @@ mod tests {
     /// Records who each call's approval scope names.
     struct ApproverExec(Mutex<Vec<(String, Option<approval::Approver>)>>);
 
-    #[async_trait]
     impl ToolExecutor for ApproverExec {
-        async fn call(&self, name: &str, _args: &Value) -> ToolOutcome {
-            tokio::task::yield_now().await;
-            self.0
-                .lock()
-                .unwrap()
-                .push((name.to_string(), approval::approved_by()));
-            ToolOutcome::ok(ToolResultBlock::one("ok"))
+        fn call<'a>(&'a self, name: &'a str, _args: &'a Value) -> Erased<'a, ToolOutcome> {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), approval::approved_by()));
+                ToolOutcome::ok(ToolResultBlock::one("ok"))
+            })
         }
     }
 

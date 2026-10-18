@@ -40,11 +40,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent::{ResolvedTool, ToolExecutor, ToolOutcome};
 use crate::config::Snapshot;
+use crate::erased::Erased;
 use crate::ir::{ToolDef, ToolResultBlock};
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
@@ -81,16 +81,68 @@ pub fn server_label(s: &crate::config::McpServer) -> String {
     }
 }
 
+pub use lmgw_api_types::chat_frames::LabelCode;
+
+/// One label that resolved to no tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failed {
+    /// The label as the entry wrote it.
+    pub label: String,
+    /// Why, in a sentence.
+    pub why: String,
+    /// What kind of failure: what a Chat `error` frame's `code` says for a
+    /// label a thread or folder attached. A caller-supplied label that is
+    /// answered as nonexistent ([`resolve`]) is `Unknown`, whatever kept it
+    /// out.
+    pub code: LabelCode,
+    /// The label's tools are missing for a reason that never refuses a
+    /// Chat turn by itself (client-apps design §5.3, as changed 2026-10-15):
+    /// its device is offline, or it is a paired device's hosted tools this
+    /// caller is not granted. Any other failure is something to fix, and a
+    /// turn left with no tool by one is refused.
+    pub absent: bool,
+}
+
+impl Failed {
+    fn new(label: &str, code: LabelCode, why: impl Into<String>) -> Self {
+        Self {
+            label: label.to_string(),
+            why: why.into(),
+            code,
+            absent: false,
+        }
+    }
+
+    /// [`Failed::absent`].
+    fn absent(mut self) -> Self {
+        self.absent = true;
+        self
+    }
+}
+
+/// Who wrote the `{"type":"mcp"}` entries a run resolves, which decides how
+/// much a failure may say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The caller itself: a `/v1/responses` or realtime client's tool spec.
+    /// A server it can never use is answered as one that does not exist, so
+    /// a scoped key cannot map the inventory by probing.
+    Supplied,
+    /// The thread or its folder (the owner, or a device writing within its
+    /// reach), or an agent's manifest the owner installed: every failure
+    /// says its real reason (client-apps design §5.3, 2026-10-15).
+    Attached,
+}
+
 /// Tools resolved for one run, plus what to report per server.
 pub struct Resolved {
     pub tools: Vec<ResolvedTool>,
     /// `(label, tools)` per successfully listed server → `mcp_list_tools`.
     pub listed: Vec<(String, Vec<ToolDef>)>,
-    /// `(label, error)` for a server that could not be resolved or listed.
-    pub failed: Vec<(String, String)>,
-    /// The labels among `failed` that failed only because their device is
-    /// offline (client-apps design §5.3): a turn is never refused for them.
-    pub offline: Vec<String>,
+    /// Each label that could not be resolved or listed, with why. One that
+    /// failed only because its device is offline (`LabelCode::Offline`,
+    /// client-apps design §5.3) never refuses a turn by itself.
+    pub failed: Vec<Failed>,
     /// Names resolved from a **built-in** toolset. The run's executor routes
     /// exactly these in-process; anything else goes to the southbound manager.
     /// An explicit set rather than a prefix test, so a run that never attached
@@ -115,12 +167,43 @@ pub struct Resolved {
 /// An unknown label is reported per-server rather than failing the request: the
 /// other servers can still do useful work, and the client sees a failed
 /// `mcp_list_tools` item naming what was available instead of a bare 400.
+///
+/// For entries the **caller** wrote (`/v1/responses`, realtime): a server it
+/// can never use is answered like one that does not exist. Entries a thread,
+/// its folder or an agent's manifest attached go through
+/// [`resolve_attached`].
 pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolScope) -> Resolved {
+    resolve_as(state, specs, scope, Origin::Supplied).await
+}
+
+/// [`resolve`] for entries a Chat thread or its folder attached, or an
+/// agent's manifest the owner installed: each failure says its real reason
+/// and carries its [`LabelCode`] (client-apps design §5.3, 2026-10-15) — a
+/// paired device's hosted tools the caller is not granted, an offline host, a
+/// disabled server, a label nothing registers. Nothing is learned by probing
+/// here: whoever attached the label was allowed to (the owner, a device
+/// granted it, the agent's installer), so the reason, host's name included,
+/// reveals nothing the attacher did not already choose. A device writing a
+/// thread's `mcp_tools` is checked on the write path instead, which names
+/// the label but not its host.
+pub async fn resolve_attached(
+    state: &SharedState,
+    specs: &[McpToolSpec],
+    scope: &ToolScope,
+) -> Resolved {
+    resolve_as(state, specs, scope, Origin::Attached).await
+}
+
+async fn resolve_as(
+    state: &SharedState,
+    specs: &[McpToolSpec],
+    scope: &ToolScope,
+    origin: Origin,
+) -> Resolved {
     let mut out = Resolved {
         tools: Vec::new(),
         listed: Vec::new(),
         failed: Vec::new(),
-        offline: Vec::new(),
         builtin: Vec::new(),
         servers: HashMap::new(),
         ui_resources: HashMap::new(),
@@ -193,41 +276,39 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
                     }));
                     out.listed.push((label.to_string(), defs));
                 }
-                Err(why) => out.failed.push((spec.server_label.clone(), why)),
+                Err((code, why)) => out.failed.push(Failed::new(&spec.server_label, code, why)),
             }
             continue;
         }
         // A server this caller can never use is answered like one that does
-        // not exist, so a scoped key cannot map the inventory by probing. A
-        // bare server has no namespace for `may_reach` to read — it was only
+        // not exist when the caller named it, so a scoped key cannot map the
+        // inventory by probing; a label the thread attached says why. A bare
+        // server has no namespace for `may_reach` to read — it was only
         // worth connecting — so it is known now, by what it lists: one that
         // offers this caller nothing is not there for it either.
-        let Some(server) = find_server(&snap, &spec.server_label)
+        let found = find_server(&snap, &spec.server_label);
+        let Some(server) = found
             .filter(|s| scope.may_reach(s))
             .filter(|s| !s.tool_prefix.trim().is_empty() || shown_to(s, &agg, scope))
         else {
-            out.failed.push((
-                spec.server_label.clone(),
-                format!(
-                    "no MCP server with label '{}' is registered on this gateway \
-                     (available: {}). lmgw resolves server_label against its own \
-                     servers and does not dial a server_url.",
-                    spec.server_label,
-                    available_labels(&snap, &agg, scope)
-                ),
-            ));
+            out.failed
+                .push(unreached(&snap, &agg, scope, spec, found, origin));
             continue;
         };
         if !server.enabled {
-            out.failed.push((
-                spec.server_label.clone(),
+            out.failed.push(Failed::new(
+                &spec.server_label,
+                LabelCode::Disabled,
                 format!("MCP server '{}' is disabled", server.name),
             ));
             continue;
         }
         if leaves_nothing(spec) {
-            out.failed
-                .push((spec.server_label.clone(), ALLOWED_LEFT_NOTHING.into()));
+            out.failed.push(Failed::new(
+                &spec.server_label,
+                LabelCode::Failed,
+                ALLOWED_LEFT_NOTHING,
+            ));
             continue;
         }
 
@@ -308,35 +389,48 @@ pub async fn resolve(state: &SharedState, specs: &[McpToolSpec], scope: &ToolSco
             // An offline device's label is reported at once, and is no
             // reason to refuse a turn (client-apps design §5.3).
             if server.is_device() && !state.mcp.is_ready(server.id).await {
-                out.failed.push((
-                    spec.server_label.clone(),
-                    state.mcp.offline_words(server).await,
-                ));
-                out.offline.push(spec.server_label.clone());
+                out.failed.push(
+                    Failed::new(
+                        &spec.server_label,
+                        LabelCode::Offline,
+                        state.mcp.offline_words(server).await,
+                    )
+                    .absent(),
+                );
                 continue;
             }
             // Prefer the connection's own error — "container image not found"
             // is a far better answer than "the server exposed no tools".
-            let detail = match state.mcp.status_view(server.id, &snap).await {
+            let (code, detail) = match state.mcp.status_view(server.id, &snap).await {
                 Some(v) if v.detail.as_ref().is_some_and(|d| !d.is_empty()) => {
-                    v.detail.unwrap_or_default()
+                    (LabelCode::Failed, v.detail.unwrap_or_default())
                 }
-                _ if scoped_out > 0 => format!(
-                    "none of the tools this server offers are within the tool scope of {}",
-                    scope.describe()
+                _ if scoped_out > 0 => (
+                    LabelCode::Unreachable,
+                    format!(
+                        "none of the tools this server offers are within the tool scope of {}",
+                        scope.describe()
+                    ),
                 ),
-                _ if app_only > 0 => {
+                _ if app_only > 0 => (
+                    LabelCode::Failed,
                     "the tools this server offers here are for its app views only (MCP \
                     Apps _meta.ui.visibility without \"model\"): a model is offered none of \
                     them"
-                        .to_string()
-                }
-                _ => match &spec.allowed_tools {
-                    Some(a) => format!("none of allowed_tools {a:?} are exposed by this server"),
-                    None => "the server exposed no tools".to_string(),
-                },
+                        .to_string(),
+                ),
+                _ => (
+                    LabelCode::Failed,
+                    match &spec.allowed_tools {
+                        Some(a) => {
+                            format!("none of allowed_tools {a:?} are exposed by this server")
+                        }
+                        None => "the server exposed no tools".to_string(),
+                    },
+                ),
             };
-            out.failed.push((spec.server_label.clone(), detail));
+            out.failed
+                .push(Failed::new(&spec.server_label, code, detail));
             continue;
         }
 
@@ -360,6 +454,63 @@ fn find_server<'a>(snap: &'a Snapshot, label: &str) -> Option<&'a crate::config:
         // A server addressed by its name even though it has a prefix is a near
         // miss worth honoring rather than a 400 the user has to decode.
         .or_else(|| snap.mcp_servers.values().find(|s| s.name == label))
+}
+
+/// Why `spec`'s label resolves to no server this caller may use: `found` is
+/// the server it names, if any.
+///
+/// A caller's own entry ([`Origin::Supplied`]) hears that no such server is
+/// registered, whatever kept it out, with what it could attach and how lmgw
+/// reads a label. A thread's ([`Origin::Attached`]) hears the real reason:
+/// a paired device's hosted tools its key is not granted, a server its tool
+/// scope keeps whole out, or a label nothing registers.
+fn unreached(
+    snap: &Snapshot,
+    agg: &super::Aggregate,
+    scope: &ToolScope,
+    spec: &McpToolSpec,
+    found: Option<&crate::config::McpServer>,
+    origin: Origin,
+) -> Failed {
+    let label = spec.server_label.as_str();
+    let unknown = || {
+        format!(
+            "no MCP server with label '{label}' is registered on this gateway (available: {})",
+            available_labels(snap, agg, scope)
+        )
+    };
+    match (origin, found) {
+        (Origin::Supplied, _) => Failed::new(
+            label,
+            LabelCode::Unknown,
+            format!(
+                "{}. lmgw resolves server_label against its own servers and does not dial a \
+                 server_url.",
+                unknown()
+            ),
+        ),
+        (Origin::Attached, None) => Failed::new(label, LabelCode::Unknown, unknown()),
+        (Origin::Attached, Some(s)) if scope.holds_back(s) => Failed::new(
+            label,
+            LabelCode::Unreachable,
+            format!(
+                "this device may not use the tools of device '{}' (label {}): grant it under \
+                 the device's policy (Device tools)",
+                crate::devices::short_name(&s.name),
+                server_label(s)
+            ),
+        )
+        .absent(),
+        (Origin::Attached, Some(s)) => Failed::new(
+            label,
+            LabelCode::Unreachable,
+            format!(
+                "none of the tools of MCP server '{}' are within the tool scope of {}",
+                s.name,
+                scope.describe()
+            ),
+        ),
+    }
 }
 
 /// The labels this caller could attach: a scoped caller is not told about a
@@ -468,16 +619,17 @@ fn resolve_builtin(
     label: &'static str,
     spec: &McpToolSpec,
     scope: &ToolScope,
-) -> Result<Vec<ToolDef>, String> {
+) -> Result<Vec<ToolDef>, (LabelCode, String)> {
     // Who asks, before what the Setting allows: an answer about the mode would
     // tell a client key how to get the configuration API, and no mode does.
     if label == SELF_ADMIN_LABEL && !scope.self_admin() {
-        return Err(
+        return Err((
+            LabelCode::Unreachable,
             "the 'lmgw' self-admin toolset needs an owner credential: a client key, an agent \
              token or a device not allowed lmgw's admin tools does not reach the gateway's \
              configuration. Present an owner key (Usage → Keys), or use /mcp/admin."
                 .to_string(),
-        );
+        ));
     }
     // The self-admin mode gate is applied by `selfadmin::list` itself, so
     // attaching the label can never widen what the Setting allows.
@@ -488,9 +640,12 @@ fn resolve_builtin(
         _ => docs::list(),
     };
     if entries.is_empty() {
-        return Err(format!(
-            "the '{label}' toolset offers nothing right now: the self-admin tools are \
-             switched off (Self-admin tools, under Settings → Network & access)"
+        return Err((
+            LabelCode::Disabled,
+            format!(
+                "the '{label}' toolset offers nothing right now: the self-admin tools are \
+                 switched off (Self-admin tools, under Settings → Network & access)"
+            ),
         ));
     }
     let offered: Vec<ToolDef> = entries.iter().map(tool_def).collect();
@@ -506,22 +661,31 @@ fn resolve_builtin(
         .cloned()
         .collect();
     if in_scope.is_empty() && !defs.is_empty() {
-        return Err(format!(
-            "none of the '{label}' toolset's tools are within the tool scope of {}",
-            scope.describe()
+        return Err((
+            LabelCode::Unreachable,
+            format!(
+                "none of the '{label}' toolset's tools are within the tool scope of {}",
+                scope.describe()
+            ),
         ));
     }
     let defs = in_scope;
     if defs.is_empty() {
         let names: Vec<&str> = offered.iter().map(|d| d.name.as_str()).collect();
         return Err(match &spec.allowed_tools {
-            Some(a) if a.is_empty() => ALLOWED_LEFT_NOTHING.to_string(),
-            Some(a) => format!(
-                "none of allowed_tools {a:?} are offered by the '{label}' toolset \
-                 (it has: {})",
-                names.join(", ")
+            Some(a) if a.is_empty() => (LabelCode::Failed, ALLOWED_LEFT_NOTHING.to_string()),
+            Some(a) => (
+                LabelCode::Failed,
+                format!(
+                    "none of allowed_tools {a:?} are offered by the '{label}' toolset \
+                     (it has: {})",
+                    names.join(", ")
+                ),
             ),
-            _ => format!("every tool in the '{label}' toolset is disabled by the owner"),
+            _ => (
+                LabelCode::Disabled,
+                format!("every tool in the '{label}' toolset is disabled by the owner"),
+            ),
         });
     }
     Ok(defs)
@@ -624,73 +788,74 @@ impl McpExecutor {
     }
 }
 
-#[async_trait]
 impl ToolExecutor for McpExecutor {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        let started = Instant::now();
-        let arguments = match args {
-            Value::Object(m) => Some(m.clone()),
-            // The model emitted something that isn't an object. Pass nothing and
-            // let the tool's own schema validation explain — better than a
-            // gateway-authored guess at what it meant.
-            _ => None,
-        };
-        let snap = self.state.snapshot();
-        // A tool the owner switched off is refused inside `McpManager::call`,
-        // by name — hiding it from `tools/list` is not enough, because a model
-        // working from an earlier list still reaches here. It arrives as a tool
-        // error carrying the reason, like any other routing failure.
-        //
-        // Only a name the run offered is called, on the server it was offered
-        // from (`with_listed`); never routed by the aggregate as it stands.
-        let routed = match self.listed.get(name) {
-            Some(&server) => Ok(self
-                .state
-                .mcp
-                .call_listed(&snap, name, server, arguments, &self.call_from())
-                .await),
-            None => Err(not_offered(name)),
-        };
-        let (server_name, outcome) = match routed {
-            Err(why) => (None, ToolOutcome::error(why)),
-            Ok(routed) => match routed {
-                Ok((result, server)) => {
-                    let is_error = result.is_error == Some(true);
-                    (
-                        Some(server),
-                        ToolOutcome {
-                            blocks: blocks_from_result(&result),
-                            is_error,
-                            structured: result.structured_content.clone(),
-                            content: Some(content::of_result(&result)),
-                        },
-                    )
-                }
-                // A routing/transport failure is still the *model's* to
-                // recover from — it can try another tool or answer without
-                // one — so it comes back as a tool error rather than aborting
-                // the run.
-                Err(e) => (
-                    e.server().map(str::to_string),
-                    ToolOutcome::error(e.to_string()),
-                ),
-            },
-        };
-        super::ingress::record_tool_call(
-            &self.state,
-            &self.ctx,
-            self.proto,
-            name,
-            server_name,
-            started,
-            if outcome.is_error {
-                Some(preview(&outcome.blocks))
-            } else {
-                None
-            },
-        )
-        .await;
-        outcome
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let arguments = match args {
+                Value::Object(m) => Some(m.clone()),
+                // The model emitted something that isn't an object. Pass nothing and
+                // let the tool's own schema validation explain — better than a
+                // gateway-authored guess at what it meant.
+                _ => None,
+            };
+            let snap = self.state.snapshot();
+            // A tool the owner switched off is refused inside `McpManager::call`,
+            // by name — hiding it from `tools/list` is not enough, because a model
+            // working from an earlier list still reaches here. It arrives as a tool
+            // error carrying the reason, like any other routing failure.
+            //
+            // Only a name the run offered is called, on the server it was offered
+            // from (`with_listed`); never routed by the aggregate as it stands.
+            let routed = match self.listed.get(name) {
+                Some(&server) => Ok(self
+                    .state
+                    .mcp
+                    .call_listed(&snap, name, server, arguments, &self.call_from())
+                    .await),
+                None => Err(not_offered(name)),
+            };
+            let (server_name, outcome) = match routed {
+                Err(why) => (None, ToolOutcome::error(why)),
+                Ok(routed) => match routed {
+                    Ok((result, server)) => {
+                        let is_error = result.is_error == Some(true);
+                        (
+                            Some(server),
+                            ToolOutcome {
+                                blocks: blocks_from_result(&result),
+                                is_error,
+                                structured: result.structured_content.clone(),
+                                content: Some(content::of_result(&result)),
+                            },
+                        )
+                    }
+                    // A routing/transport failure is still the *model's* to
+                    // recover from — it can try another tool or answer without
+                    // one — so it comes back as a tool error rather than aborting
+                    // the run.
+                    Err(e) => (
+                        e.server().map(str::to_string),
+                        ToolOutcome::error(e.to_string()),
+                    ),
+                },
+            };
+            super::ingress::record_tool_call(
+                &self.state,
+                &self.ctx,
+                self.proto,
+                name,
+                server_name,
+                started,
+                if outcome.is_error {
+                    Some(preview(&outcome.blocks))
+                } else {
+                    None
+                },
+            )
+            .await;
+            outcome
+        })
     }
 }
 
@@ -758,52 +923,53 @@ impl SelfAdminExecutor {
     }
 }
 
-#[async_trait]
 impl ToolExecutor for SelfAdminExecutor {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        let started = Instant::now();
-        let arguments = match args {
-            Value::Object(m) => Some(m.clone()),
-            _ => None,
-        };
-        let snap = self.state.snapshot();
-        let call = if snap.tool_disabled(name) {
-            Ok(selfadmin::err_result(&super::disabled_message(name)))
-        } else {
-            // A device's own level caps what its calls may do (the
-            // pre-merge review's P-3), read as stored when the call is made,
-            // and nobody changes the access settings through a tool (L5's
-            // notes, 2026-10-07).
-            let caller = selfadmin::Caller::of(&self.ctx.principal);
-            selfadmin::call_capped(&self.state, name, arguments, caller).await
-        };
-        let outcome = match call {
-            Ok(v) => ToolOutcome {
-                blocks: ToolResultBlock::one(builtin_text(&v)),
-                is_error: v.get("isError") == Some(&Value::Bool(true)),
-                structured: None,
-                content: None,
-            },
-            // An unknown name reaches the model as a tool error it can correct,
-            // not as a failed run: the model picked the name, and it is the one
-            // that has to pick a different one.
-            Err(e) => ToolOutcome::error(e.to_string()),
-        };
-        super::ingress::record_tool_call(
-            &self.state,
-            &self.ctx,
-            self.proto,
-            name,
-            Some(SELF_ADMIN_SERVER.to_string()),
-            started,
-            if outcome.is_error {
-                Some(preview(&outcome.blocks))
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let arguments = match args {
+                Value::Object(m) => Some(m.clone()),
+                _ => None,
+            };
+            let snap = self.state.snapshot();
+            let call = if snap.tool_disabled(name) {
+                Ok(selfadmin::err_result(&super::disabled_message(name)))
             } else {
-                None
-            },
-        )
-        .await;
-        outcome
+                // A device's own level caps what its calls may do (the
+                // pre-merge review's P-3), read as stored when the call is made,
+                // and nobody changes the access settings through a tool (L5's
+                // notes, 2026-10-07).
+                let caller = selfadmin::Caller::of(&self.ctx.principal);
+                selfadmin::call_capped(&self.state, name, arguments, caller).await
+            };
+            let outcome = match call {
+                Ok(v) => ToolOutcome {
+                    blocks: ToolResultBlock::one(builtin_text(&v)),
+                    is_error: v.get("isError") == Some(&Value::Bool(true)),
+                    structured: None,
+                    content: None,
+                },
+                // An unknown name reaches the model as a tool error it can correct,
+                // not as a failed run: the model picked the name, and it is the one
+                // that has to pick a different one.
+                Err(e) => ToolOutcome::error(e.to_string()),
+            };
+            super::ingress::record_tool_call(
+                &self.state,
+                &self.ctx,
+                self.proto,
+                name,
+                Some(SELF_ADMIN_SERVER.to_string()),
+                started,
+                if outcome.is_error {
+                    Some(preview(&outcome.blocks))
+                } else {
+                    None
+                },
+            )
+            .await;
+            outcome
+        })
     }
 }
 
@@ -856,51 +1022,52 @@ impl DocsExecutor {
     }
 }
 
-#[async_trait]
 impl ToolExecutor for DocsExecutor {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        let started = Instant::now();
-        let arguments = match args {
-            Value::Object(m) => Some(m.clone()),
-            _ => None,
-        };
-        let call = if self.state.snapshot().tool_disabled(name) {
-            Ok(selfadmin::err_result(&super::disabled_message(name)))
-        } else {
-            let charged = self.charged.as_ref();
-            docs::call(
-                &self.state,
-                name,
-                arguments,
-                self.client.as_deref(),
-                charged,
-            )
-            .await
-        };
-        let outcome = match call {
-            Ok(v) => ToolOutcome {
-                blocks: ToolResultBlock::one(builtin_text(&v)),
-                is_error: v.get("isError") == Some(&Value::Bool(true)),
-                structured: None,
-                content: None,
-            },
-            Err(e) => ToolOutcome::error(e.to_string()),
-        };
-        super::ingress::record_tool_call(
-            &self.state,
-            &self.ctx,
-            self.proto,
-            name,
-            Some(DOCS_SERVER.to_string()),
-            started,
-            if outcome.is_error {
-                Some(preview(&outcome.blocks))
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let arguments = match args {
+                Value::Object(m) => Some(m.clone()),
+                _ => None,
+            };
+            let call = if self.state.snapshot().tool_disabled(name) {
+                Ok(selfadmin::err_result(&super::disabled_message(name)))
             } else {
-                None
-            },
-        )
-        .await;
-        outcome
+                let charged = self.charged.as_ref();
+                docs::call(
+                    &self.state,
+                    name,
+                    arguments,
+                    self.client.as_deref(),
+                    charged,
+                )
+                .await
+            };
+            let outcome = match call {
+                Ok(v) => ToolOutcome {
+                    blocks: ToolResultBlock::one(builtin_text(&v)),
+                    is_error: v.get("isError") == Some(&Value::Bool(true)),
+                    structured: None,
+                    content: None,
+                },
+                Err(e) => ToolOutcome::error(e.to_string()),
+            };
+            super::ingress::record_tool_call(
+                &self.state,
+                &self.ctx,
+                self.proto,
+                name,
+                Some(DOCS_SERVER.to_string()),
+                started,
+                if outcome.is_error {
+                    Some(preview(&outcome.blocks))
+                } else {
+                    None
+                },
+            )
+            .await;
+            outcome
+        })
     }
 }
 
@@ -966,50 +1133,51 @@ impl KbExecutor {
     }
 }
 
-#[async_trait]
 impl ToolExecutor for KbExecutor {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        let started = Instant::now();
-        let arguments = match args {
-            Value::Object(m) => Some(m.clone()),
-            _ => None,
-        };
-        let call = if self.state.snapshot().tool_disabled(name) {
-            Ok(selfadmin::err_result(&super::disabled_message(name)))
-        } else {
-            kb::call(
-                &self.state,
-                name,
-                arguments,
-                &self.access,
-                (self.default_budget, self.charged.as_ref()),
-            )
-            .await
-        };
-        let outcome = match call {
-            Ok(v) => ToolOutcome {
-                blocks: ToolResultBlock::one(builtin_text(&v)),
-                is_error: v.get("isError") == Some(&Value::Bool(true)),
-                structured: None,
-                content: None,
-            },
-            Err(e) => ToolOutcome::error(e.to_string()),
-        };
-        super::ingress::record_tool_call(
-            &self.state,
-            &self.ctx,
-            self.proto,
-            name,
-            Some(KB_SERVER.to_string()),
-            started,
-            if outcome.is_error {
-                Some(preview(&outcome.blocks))
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let arguments = match args {
+                Value::Object(m) => Some(m.clone()),
+                _ => None,
+            };
+            let call = if self.state.snapshot().tool_disabled(name) {
+                Ok(selfadmin::err_result(&super::disabled_message(name)))
             } else {
-                None
-            },
-        )
-        .await;
-        outcome
+                kb::call(
+                    &self.state,
+                    name,
+                    arguments,
+                    &self.access,
+                    (self.default_budget, self.charged.as_ref()),
+                )
+                .await
+            };
+            let outcome = match call {
+                Ok(v) => ToolOutcome {
+                    blocks: ToolResultBlock::one(builtin_text(&v)),
+                    is_error: v.get("isError") == Some(&Value::Bool(true)),
+                    structured: None,
+                    content: None,
+                },
+                Err(e) => ToolOutcome::error(e.to_string()),
+            };
+            super::ingress::record_tool_call(
+                &self.state,
+                &self.ctx,
+                self.proto,
+                name,
+                Some(KB_SERVER.to_string()),
+                started,
+                if outcome.is_error {
+                    Some(preview(&outcome.blocks))
+                } else {
+                    None
+                },
+            )
+            .await;
+            outcome
+        })
     }
 }
 
@@ -1078,19 +1246,20 @@ impl SplitExecutor {
     }
 }
 
-#[async_trait]
 impl ToolExecutor for SplitExecutor {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        if !self.builtin_names.contains(name) {
-            return self.mcp.call(name, args).await;
-        }
-        if selfadmin::owns(name) {
-            self.admin.call(name, args).await
-        } else if kb::owns(name) {
-            self.kb.call(name, args).await
-        } else {
-            self.docs.call(name, args).await
-        }
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            if !self.builtin_names.contains(name) {
+                return self.mcp.call(name, args).await;
+            }
+            if selfadmin::owns(name) {
+                self.admin.call(name, args).await
+            } else if kb::owns(name) {
+                self.kb.call(name, args).await
+            } else {
+                self.docs.call(name, args).await
+            }
+        })
     }
 }
 

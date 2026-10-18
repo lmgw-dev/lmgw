@@ -55,7 +55,7 @@ mod results;
 mod speech;
 mod voice;
 
-pub(crate) use voice::{Binder, TakenBy, VoiceBinding};
+pub(crate) use voice::{Binder, TakenBy, VoiceBinding, VoiceRelease};
 
 /// Every thread's live turn and generation. `state.chat_live`.
 #[derive(Default)]
@@ -95,6 +95,10 @@ struct Slot {
     /// Serialises the thread's history rewrites with a reply's save.
     write: Arc<tokio::sync::Mutex<()>>,
     state: Mutex<SlotState>,
+    /// Moves each time the thread's voice binding changes hands or starts
+    /// to end ([`voice`]'s release signal): what a bind waiting for the
+    /// thread wakes on.
+    voice_changed: watch::Sender<u64>,
 }
 
 struct SlotState {
@@ -165,6 +169,7 @@ impl Inner {
             .or_insert_with(|| {
                 Arc::new(Slot {
                     write: Arc::new(tokio::sync::Mutex::new(())),
+                    voice_changed: watch::channel(0).0,
                     state: Mutex::new(SlotState {
                         generation: self.next(),
                         live: None,

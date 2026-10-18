@@ -310,7 +310,7 @@ async fn key(w: &World, name: &str, mode: &str, patterns: &str) -> reqwest::Clie
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    bearer(v["plaintext"].as_str().unwrap())
+    bearer(v["key"].as_str().unwrap())
 }
 
 /// A key that denies `lookup` reaches neither tool a collision moved from
@@ -390,6 +390,14 @@ async fn a_switch_set_on_the_moved_name_holds_after_the_collision() {
     );
     let (_, v) = op(&w, "tool_set", json!({"name": "lookup", "enabled": true})).await;
     assert!(v["message"].as_str().unwrap().contains("still off"), "{v}");
+    assert_eq!(
+        v,
+        json!({
+            "ok": true,
+            "message": "'lookup' is still off: it is switched off as 'alpha__lookup', another \
+                        name of the same tool — switch 'alpha__lookup' on to offer it",
+        })
+    );
     let (_, v) = op(
         &w,
         "tool_set",

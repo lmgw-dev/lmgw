@@ -146,7 +146,7 @@ pub(crate) async fn cloud_asr(state: &SharedState, name: &str, text: &str) -> Mo
 
 /// A provider's speech-to-text alias `name` that answers every upload with
 /// a 500.
-async fn failing_cloud_asr(state: &SharedState, name: &str) -> MockServer {
+pub(crate) async fn failing_cloud_asr(state: &SharedState, name: &str) -> MockServer {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
@@ -174,6 +174,7 @@ async fn cloud_alias(state: &SharedState, name: &str, mock: MockServer) -> MockS
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -466,8 +467,8 @@ pub(crate) async fn audio_rows(state: &SharedState) -> Vec<Row> {
 /// Review M1 (§4.4): the provider a fallback sent the mic audio to is
 /// named even when it fails — the audio left this machine although no text
 /// came back. Under the hold, a GPU row whose provider fallback answers 500:
-/// the error says so in its body and the gate's headers, and the row says
-/// it was the hold's fallback.
+/// the error is a plain `{code, message}` and the gate's headers say so, and
+/// the row says it was the hold's fallback.
 #[tokio::test]
 async fn a_failed_transcription_still_names_the_fallback_that_had_the_audio() {
     let (g, gw) = world(10 * GIB, 2).await;
@@ -483,7 +484,7 @@ async fn a_failed_transcription_still_names_the_fallback_that_had_the_audio() {
     let (status, fallback, v) = transcribe_with(&gw, tid, Some("audio/wav"), recording(1)).await;
     assert!(status >= 500, "{status} {v}");
     assert_eq!(v["code"], "upstream", "{v}");
-    assert_eq!(v["asr_answered_by"], "cloud-asr", "{v}");
+    assert_eq!(v.as_object().unwrap().len(), 2, "{v}");
     assert_eq!(fallback.as_deref(), Some("cloud-asr"));
     assert!(g.runs().is_empty(), "nothing local started: {:?}", g.runs());
     let rows = audio_rows(&g.state).await;

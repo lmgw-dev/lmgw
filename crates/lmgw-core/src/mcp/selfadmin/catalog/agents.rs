@@ -91,9 +91,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                  cheap way to see what the agent would work on. `classify` also makes one \
                  structured model call per row. Both are **read-only**: nothing an agent writes \
                  happens until a person presses Apply on the dashboard, and apply is not \
-                 startable from here. The run is a job: poll it with lmgw__status or \
-                 GET /api/agents/runs/<job_id>, which carries the rows. One run per agent at a \
-                 time; starting a second returns the one already in flight.",
+                 startable from here. lmgw__agent_get shows the run while it runs (live_job) and its \
+                 outcome after (last_run); its rows are read and applied on the dashboard. One run per agent at a time; starting a second returns the one already \
+                 in flight, with that run's phase.",
             props: vec![
                 ("id", str_p("Agent id, from lmgw__agents.")),
                 (
@@ -111,8 +111,8 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: true,
             description: "Remove an agent from the catalog. A shipped agent stays deleted across \
                  restarts; the `agents_restore` op on the dashboard is the deliberate way back. \
-                 Export it first (GET /api/agents/<id>/export) if it was hand-written — the \
-                 manifest is the only copy.",
+                 If it was hand-written, read its manifest with lmgw__agent_get first — that \
+                 is the only copy.",
             props: vec![("id", str_p("Agent id, from lmgw__agents."))],
             required: &["id"],
         },

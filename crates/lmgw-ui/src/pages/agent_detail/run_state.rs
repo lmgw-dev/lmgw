@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{AgentBatchShape, AgentRunDetail, AgentRunSummary};
+use lmgw_api_types::{
+    AgentBatchShape, AgentRowSet, AgentRunDetail, AgentRunStarted, AgentRunSummary,
+};
 use serde_json::{json, Value};
 
 use crate::scope::Scope;
@@ -34,6 +36,11 @@ pub struct ReviewRow {
     /// and outlives this struct, which is rebuilt from the server on every
     /// progress frame.
     pub answers: Vec<(String, String)>,
+    /// The question set that classified the row (labs-store design §4),
+    /// `None` for the model call. It travels to Apply in the row as sent,
+    /// and "Save as labelled set" is offered on an apply run whose rows
+    /// carry one.
+    pub set: Option<AgentRowSet>,
     raw_row: Value,
 }
 
@@ -177,6 +184,7 @@ pub fn review_rows(rows: &[Value], shape: &AgentBatchShape) -> Vec<ReviewRow> {
                     (f.field.clone(), current)
                 })
                 .collect(),
+            set: serde_json::from_value(row["set"].clone()).ok(),
             raw_row: row.clone(),
         })
         .collect()
@@ -380,22 +388,18 @@ impl RunState {
         // go of the surface here.
         me.pinned.set(None);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/agent_run", &args).await;
+            let res = crate::api::post::<AgentRunStarted, _>("/api/op/agent_run", &args).await;
             me.busy.set(false);
             match res {
-                Ok(v) => {
-                    if v["already_running"].as_bool().unwrap_or(false) {
+                Ok(started) => {
+                    if started.already_running {
                         // Amber, not red: the run exists, it is just not a new
                         // one — "one live run per agent" (§2.4).
-                        toasts.warn(
-                            v["message"]
-                                .as_str()
-                                .unwrap_or("a run is already in flight")
-                                .to_string(),
-                        );
+                        toasts.warn(started.message);
                     }
-                    if let Some(job_id) = v["job_id"].as_i64() {
-                        me.load(job_id);
+                    // Job ids start at 1; `0` is a body without one.
+                    if started.job_id > 0 {
+                        me.load(started.job_id);
                     } else {
                         me.error
                             .set(Some(format!("no job id came back for '{id}'")));

@@ -3,8 +3,8 @@
 //!
 //! Every entry is the shared `download(href, name)` click on a `<a download>`:
 //! the routes answer with `Content-Disposition: attachment`, so a browser
-//! saves the file under the server's name. In the Tauri window the app's
-//! `on_download` handler saves it to the Downloads folder and tells the page
+//! saves the file under the server's name. In the Tauri window the shell
+//! asks where to save it, the server's name filled in, and tells the page
 //! (`lmgw-downloaded`, toasted by `ToastHost`).
 
 use leptos::prelude::*;

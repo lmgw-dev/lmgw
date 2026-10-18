@@ -32,6 +32,16 @@
 //! writes its last turns now). Such a binding is taken over, its fence
 //! kept, so the new journal still writes after the old one drained.
 //!
+//! **A bind that waits** (realtime calls design §2.8, `takeover=ask`): a
+//! call finds its thread held when its channel opens and asks its user
+//! first. [`LiveTurns::bind_voice_or_wait`] refuses as a `takeover=never`
+//! bind does, and hands back the thread's release signal
+//! ([`VoiceRelease`]), subscribed under the slot's lock with the look at
+//! the binding: it wakes once that binding starts to end
+//! ([`VoiceBinding::closing`]) or goes, or another bind takes the thread,
+//! so the call binds by itself when the holder ends, or names the new
+//! holder. Nothing between the look and the subscription is missed.
+//!
 //! **A device's session leaves with its thread's reach, after the write**
 //! (client-apps design L3; §1.6's close-code note, 2026-10-07). A session a
 //! device bound closes with `chat_thread_not_found`, then the neutral 4004,
@@ -53,6 +63,10 @@ use std::sync::Arc;
 use super::{lock, Inner, LiveTurns, Slot, SlotState};
 use crate::proxy::{stop_pair, StopHandle, StopSignal};
 use crate::web::chat_feed::{Ending, VoiceEnd, VoiceWatch};
+
+mod release;
+
+pub(crate) use release::VoiceRelease;
 
 /// One bound session's hold on its thread (module doc).
 pub(crate) struct VoiceBinding {
@@ -92,8 +106,17 @@ impl VoiceBinding {
     /// holding the thread.
     pub(crate) fn closing(&self) {
         if let Some(slot) = &self.slot {
-            if let Some(held) = lock(&slot.state).voice.as_mut().filter(|h| h.id == self.id) {
-                held.closing = true;
+            let marked = {
+                let mut st = lock(&slot.state);
+                st.voice
+                    .as_mut()
+                    .filter(|h| h.id == self.id)
+                    .map(|held| held.closing = true)
+                    .is_some()
+            };
+            // A bind waiting for the thread binds now (module doc).
+            if marked {
+                release::changed(slot);
             }
         }
     }
@@ -109,6 +132,29 @@ pub(crate) struct VoiceBind {
     /// The binding this one took over, raised once it is gone; `None` when
     /// there was none.
     pub fence: Option<StopSignal>,
+}
+
+/// A bind that found its thread held ([`LiveTurns::bind_voice_or_wait`]):
+/// who holds it, and the thread's release signal.
+pub(crate) struct Waiting {
+    /// The holder, named as its binder was ("device 'desktop'", "the
+    /// dashboard").
+    pub holder: String,
+    /// Wakes once the holder starts to end or goes, or another bind takes
+    /// the thread (module doc).
+    pub release: VoiceRelease,
+}
+
+/// How a bind meets a thread another session holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// It takes the thread over.
+    TakeOver,
+    /// It is refused, naming the holder (`takeover=never`).
+    Refuse,
+    /// It is refused, naming the holder, with the thread's release signal
+    /// (`takeover=ask`).
+    Wait,
 }
 
 /// Who took a binding over (client-apps design §1.7): written by the bind
@@ -201,7 +247,7 @@ impl LiveTurns {
 
     /// [`Self::bind_voice`] for `binder`.
     pub(crate) fn bind_voice_as(&self, thread_id: i64, binder: Binder<'_>) -> VoiceBind {
-        match self.bind(thread_id, binder, true) {
+        match self.bind(thread_id, binder, Mode::TakeOver) {
             Ok(bind) => bind,
             Err(_) => unreachable!("a bind that takes over is never refused"),
         }
@@ -215,15 +261,47 @@ impl LiveTurns {
         thread_id: i64,
         binder: Binder<'_>,
     ) -> Result<VoiceBind, String> {
-        self.bind(thread_id, binder, false)
+        self.bind(thread_id, binder, Mode::Refuse)
+            .map_err(|(holder, _)| holder)
     }
 
+    /// [`Self::bind_voice_unless_bound`] for a bind that waits (module
+    /// doc): `Err` names the holder and carries the thread's release
+    /// signal, subscribed under the lock the binding was looked at under.
+    /// Bind again once it wakes.
+    pub(crate) fn bind_voice_or_wait(
+        &self,
+        thread_id: i64,
+        binder: Binder<'_>,
+    ) -> Result<VoiceBind, Waiting> {
+        self.bind(thread_id, binder, Mode::Wait)
+            .map_err(|(holder, release)| Waiting {
+                holder,
+                release: release.expect("a bind that waits subscribes"),
+            })
+    }
+
+    /// Who holds `thread_id` against a `takeover=never` bind with `key_id`
+    /// now ([`Self::bind_voice_unless_bound`]'s rule), without binding: a
+    /// call's handshake refuses at its POST with it, binding only once its
+    /// channel opens (realtime calls design §2.8).
+    pub(crate) fn voice_held_against(&self, thread_id: i64, key_id: Option<i64>) -> Option<String> {
+        let slot = lock(&self.inner.threads).get(&thread_id).cloned()?;
+        let st = lock(&slot.state);
+        st.voice
+            .as_ref()
+            .filter(|h| h.holds_against(key_id))
+            .map(|h| h.by.clone())
+    }
+
+    /// The bind: `Err` names the holder, with the thread's release signal
+    /// for [`Mode::Wait`].
     fn bind(
         &self,
         thread_id: i64,
         binder: Binder<'_>,
-        takeover: bool,
-    ) -> Result<VoiceBind, String> {
+        mode: Mode,
+    ) -> Result<VoiceBind, (String, Option<VoiceRelease>)> {
         let by = binder.by;
         let slot = self.inner.slot(thread_id);
         let id = self.inner.next();
@@ -238,13 +316,21 @@ impl LiveTurns {
             if let Some(held) = st
                 .voice
                 .as_ref()
-                .filter(|h| !takeover && h.holds_against(binder.key_id))
+                .filter(|h| mode != Mode::TakeOver && h.holds_against(binder.key_id))
             {
                 let holder = held.by.clone();
+                // Under the lock: whatever changes after this look wakes it.
+                let release = (mode == Mode::Wait).then(|| slot.voice_changed.subscribe());
                 drop(st);
-                drop(slot);
-                self.inner.release(thread_id);
-                return Err(holder);
+                let release = match release {
+                    Some(rx) => Some(VoiceRelease::new(self.inner.clone(), thread_id, slot, rx)),
+                    None => {
+                        drop(slot);
+                        self.inner.release(thread_id);
+                        None
+                    }
+                };
+                return Err((holder, release));
             }
             let watch = self.inner.feed.voice_bound(thread_id, by, binder.level);
             let previous = st.voice.replace(Held {
@@ -263,6 +349,8 @@ impl LiveTurns {
             (previous, watch)
         };
         let (previous, watch) = previous;
+        // A bind waiting for the thread names the new holder (module doc).
+        release::changed(&slot);
         let fence = previous.map(|older| {
             // Named before it is woken, so it reads who as it closes. Out of
             // the lock: raising the stop wakes the older session. One that
@@ -459,6 +547,11 @@ impl Drop for VoiceBinding {
                     .take_if(|held| held.id == self.id)
                     .map(|held| held.stop)
             };
+            // The thread is free: a bind waiting for it binds now (module
+            // doc).
+            if mine.is_some() {
+                release::changed(&slot);
+            }
             drop(mine);
             drop(slot);
             self.inner.release(self.thread_id);
@@ -544,6 +637,107 @@ mod tests {
         );
         assert!(desktop.fence.is_some(), "its journal waits for the drain");
         drop(again);
+        drop(desktop);
+        assert_eq!(live.slots(), 0);
+    }
+
+    /// Realtime calls design §2.8: a bind that waits is refused as a
+    /// `takeover=never` bind is, and its release signal wakes once the
+    /// holder starts to end — then the bind goes through.
+    #[tokio::test]
+    async fn a_waiting_bind_wakes_when_the_holder_starts_to_end() {
+        use futures::FutureExt;
+        let live = LiveTurns::default();
+        let desktop = live.bind_voice_as(5, binder("device 'desktop'", Some(1)));
+        let Err(mut waiting) = live.bind_voice_or_wait(5, binder("device 'phone'", Some(2))) else {
+            panic!("the thread is held");
+        };
+        assert_eq!(waiting.holder, "device 'desktop'");
+        assert_eq!(waiting.release.thread_id(), 5);
+        assert!(!desktop.taken.is_raised(), "the holder goes on");
+        assert!(!waiting.release.has_changed());
+        assert!(waiting.release.changed().now_or_never().is_none());
+        // The desktop's session leaves its loop: it holds nothing now.
+        desktop.guard.closing();
+        assert!(waiting.release.has_changed());
+        assert!(waiting.release.changed().now_or_never().is_some());
+        let phone = live
+            .bind_voice_or_wait(5, binder("device 'phone'", Some(2)))
+            .ok()
+            .expect("an ending session holds nothing against it");
+        assert!(desktop.taken.is_raised());
+        assert!(phone.fence.is_some(), "its journal waits for the drain");
+        drop(waiting);
+        drop(desktop);
+        drop(phone);
+        assert_eq!(live.slots(), 0, "nothing left behind");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_bind_wakes_when_the_holder_goes_or_changes() {
+        use futures::FutureExt;
+        let live = LiveTurns::default();
+        let desktop = live.bind_voice_as(6, binder("device 'desktop'", Some(1)));
+        let Err(mut waiting) = live.bind_voice_or_wait(6, binder("device 'phone'", Some(2))) else {
+            panic!("the thread is held");
+        };
+        // A third client takes the thread over: the waiter wakes, and finds
+        // the new holder.
+        let laptop = live.bind_voice_as(6, binder("device 'laptop'", Some(3)));
+        assert!(waiting.release.changed().now_or_never().is_some());
+        let Err(mut again) = live.bind_voice_or_wait(6, binder("device 'phone'", Some(2))) else {
+            panic!("the laptop holds it");
+        };
+        assert_eq!(again.holder, "device 'laptop'");
+        drop(waiting);
+        // The desktop's binding, taken over, goes: the thread did not
+        // change hands, so the waiter is not woken.
+        drop(desktop);
+        assert!(!again.release.has_changed());
+        // The laptop's goes: the thread is free.
+        drop(laptop);
+        assert!(again.release.changed().now_or_never().is_some());
+        assert!(!live.voice_bound(6));
+        let phone = live
+            .bind_voice_or_wait(6, binder("device 'phone'", Some(2)))
+            .ok()
+            .expect("a free thread binds at once");
+        assert!(phone.fence.is_none(), "nothing to wait for");
+        drop(again);
+        drop(phone);
+        assert_eq!(live.slots(), 0, "nothing left behind");
+    }
+
+    /// A waiter whose signal drops leaves nothing behind, and one on a
+    /// thread nobody else refers to keeps its slot until then.
+    #[tokio::test]
+    async fn a_dropped_release_signal_frees_the_slot() {
+        let live = LiveTurns::default();
+        let desktop = live.bind_voice_as(7, binder("device 'desktop'", Some(1)));
+        let Err(waiting) = live.bind_voice_or_wait(7, binder("device 'phone'", Some(2))) else {
+            panic!("the thread is held");
+        };
+        drop(desktop);
+        assert_eq!(live.slots(), 1, "the waiter keeps the slot");
+        drop(waiting);
+        assert_eq!(live.slots(), 0);
+    }
+
+    /// The call's POST asks without binding: who holds the thread against a
+    /// `takeover=never` bind with this key.
+    #[tokio::test]
+    async fn the_holder_is_told_without_binding() {
+        let live = LiveTurns::default();
+        assert_eq!(live.voice_held_against(8, Some(2)), None);
+        let desktop = live.bind_voice_as(8, binder("device 'desktop'", Some(1)));
+        assert_eq!(
+            live.voice_held_against(8, Some(2)).as_deref(),
+            Some("device 'desktop'")
+        );
+        assert_eq!(live.voice_held_against(8, Some(1)), None, "its own key");
+        assert!(!desktop.taken.is_raised(), "nothing was taken");
+        desktop.guard.closing();
+        assert_eq!(live.voice_held_against(8, Some(2)), None, "an ending one");
         drop(desktop);
         assert_eq!(live.slots(), 0);
     }

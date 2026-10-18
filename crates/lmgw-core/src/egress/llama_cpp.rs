@@ -8,9 +8,9 @@
 //! switch), the token count (`count`'s `/tokenize` and `/apply-template`)
 //! and how a tool result's media is sent ([`tool_results`], §8: as images
 //! where the route's frozen decision lets them go). Parsing, the stream
-//! decoder, embeddings, the Jina-shape rerank and the error mapping — the
-//! `exceed_context_size_error` refusal first — are the shared ones. [`props`]
-//! reads what a server says it can do.
+//! decoder, embeddings, the Jina-shape rerank, System One and the error
+//! mapping — the `exceed_context_size_error` refusal first — are the shared
+//! ones. [`props`] reads what a server says it can do.
 
 pub(crate) mod count;
 pub mod props;
@@ -131,6 +131,16 @@ impl Egress for LlamaCppEgress {
 
     fn parse_rerank(&self, body: &[u8]) -> Result<RerankResponse, GatewayError> {
         openai_wire::parse_rerank(body)
+    }
+
+    fn build_systemone(
+        &self,
+        http: &reqwest::Client,
+        up: &Upstream,
+        model: &str,
+        body: &openai_wire::SystemOneBody,
+    ) -> Result<reqwest::RequestBuilder, GatewayError> {
+        openai_wire::build_systemone(http, up, model, body)
     }
 
     /// llama-server's native `/tokenize` at the server root (not under

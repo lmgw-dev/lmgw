@@ -80,6 +80,7 @@ pub(super) fn chat_route(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
@@ -170,17 +171,40 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             summary: "Follow the Chat's changes",
             description: "One SSE stream per client. `hello` first: the \
             epoch, the cursor the stream continues from, the keep-alive interval and the \
-            retention, who the feed is for, the hold, and the turns and voice sessions live \
-            now. Then stored events (thread.*, folder.*, folder.current, profile.*, approval.*, \
-            task.*, device.revoked), each \
+            retention, who the feed is for, the hold, the turns and voice sessions live \
+            now, and open_approvals: every call still waiting for a decision at that cursor \
+            in a thread the reader may see (a thread's last reply's open calls), each as \
+            approval.requested renders it. For a device, hello also carries its own facts: \
+            urls (its row's lmgw URLs, https, in the owner's order: replace the stored \
+            list with them), cert ({not_after, notice_after}, RFC 3339 UTC, the dates of \
+            its certificate: show the notice from them) and dashboard_url (where the \
+            dashboard is, as a URL derived from bind_addr: sent to a device paired as this \
+            computer, and to any other only when bind_addr is not loopback; null \
+            otherwise). A device's feed also sets TCP_USER_TIMEOUT on its connection to its \
+            keep-alive, so a keep-alive a vanished device never acknowledges ends the \
+            stream within one more interval. Then stored events (thread.*, folder.*, folder.current, message.*, profile.*, \
+            approval.*, task.*, device.revoked), each \
             with an `id:` \
             that is its cursor \"<epoch>:<seq>:<tag>\" (opaque: hand it back as it came), \
             rendered as the thread or folder is when it \
-            is delivered (a profile.* event names the profile's id and name as its write left \
+            is delivered (message.added and message.updated carry the thread's id, its title \
+            now (thread_title) and the messages the change wrote, whole, as \
+            GET /chat/api/threads/{id} lists them now — a user message as stored, a reply \
+            once saved (never while it streams), a task result entering the thread, an edit, \
+            a continue, a resumed turn, a spoken reply cut to what was heard or annotated, a \
+            stored retrieval, a call a reply waits on decided — so a client shows the message \
+            or a notification without a fetch; a message gone by delivery is left out, and an \
+            event whose messages or thread are all gone is not sent; message.deleted names \
+            the ids that went (a delete, the cut of an edit's resend or a regenerate, a spoken \
+            reply nobody heard); a thread deleted whole is thread.deleted alone; a \
+            profile.* event names the profile's id and name as its write left \
             them; every reader receives it, devices included; approval.requested and \
             approval.decided name a call a turn waits on and its decision, with the call's \
             call_id as the turn's ready, approval and result frames carry it, rendered from \
-            the reply, and are not delivered once the reply is gone; task.started names an MCP task a \
+            the reply (approval.requested with the thread's title now, thread_title, so a \
+            client shows it or a notification without a fetch), and are not delivered once \
+            the reply is gone (approval.requested neither once its call is decided: the \
+            decision follows); task.started names an MCP task a \
             turn's tool call started, task.done its result entering the thread as a message of \
             role tool, both as their write left them; device.revoked names a paired device \
             whose key was deleted, as {kind: device, name}, so a client running work it \
@@ -188,7 +212,22 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             one, a device only one about a device the feed showed it changes of, or that \
             started a task it hosts that was still running; a disable, a rotate or an expiry \
             is no delete and says nothing); and live events (turn.*, \
-            voice.*, hold, state), which have no id. \
+            voice.*, hold, state, caught_up), which have no id. \
+            caught_up {cursor} comes once per stream, when every stored event up to the \
+            cursor hello named has been delivered (or passed as not for this reader): right \
+            after hello, and the resync and profile list a cursor may owe, when there was \
+            nothing to catch up, else right after the catch-up's last event. The approval.* \
+            events before it are already reflected in hello.open_approvals; from caught_up \
+            on, approval.requested adds to that set and approval.decided removes from it, \
+            as does the deletion of its thread or its reply. Every `state` carries \
+            open_approvals again, read when it is sent, and replaces that set, matched by \
+            approval_request_id (null when lmgw could not read it for a state sent for another \
+            reason: keep the set you have; one sent because the set moved ends the stream \
+            instead, and the reconnect's hello carries it); \
+            the feed sends one after any move of what a device may see, after a thread or \
+            folder came into a device's reach (its *.created), and after a resync that passed \
+            records — before caught_up when the retention pruned past a stream still \
+            catching up, so caught_up hands over the true set. \
             Open the feed first, then load the list: a turn in `hello` may name a thread \
             whose thread.created follows in the catch-up. Resume with ?since=<cursor> or \
             Last-Event-ID (which wins: a browser reconnects with the URL it opened). A cursor \
@@ -200,8 +239,13 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             `resync` is followed by the whole profile list again, as profile.created events \
             without an id. A client that reads live events slower than they \
             happen, past the live buffer, gets `state` instead of the events it missed. \
-            Keep-alive comments every keepalive_s seconds; one may carry an `id:` and no \
-            data, which only moves the cursor. When the key is disabled, rotated, deleted or \
+            Keep-alive comments every keepalive_s seconds: the stream's own when the request \
+            asks for one (?keepalive_s=, from 1 to chat_feed_keepalive_max_s, Settings → \
+            Chat → Change feed → Longest keep-alive, default 900; outside that a 400 \
+            bad_request naming the bound and the setting), else the gateway's \
+            chat_feed_keepalive_s; hello.keepalive_s says which. Only the comments follow \
+            it: stored events are never held back by a long one. One may carry an `id:` and \
+            no data, which only moves the cursor. When the key is disabled, rotated, deleted or \
             expires, `revoked` and the end. When the gateway shuts down, the stream ends \
             without an event: reconnect with the last cursor once it is back. A device key never \
             receives an event about an Admin Chat thread, nor about a folder a device deleted \
@@ -246,6 +290,15 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 ("folder.current", |g| {
                     g.root_schema_for::<feed::FolderCurrent>()
                 }),
+                ("message.added", |g| {
+                    g.root_schema_for::<feed::MessagesChanged>()
+                }),
+                ("message.updated", |g| {
+                    g.root_schema_for::<feed::MessagesChanged>()
+                }),
+                ("message.deleted", |g| {
+                    g.root_schema_for::<feed::MessagesDeleted>()
+                }),
                 ("profile.created", |g| {
                     g.root_schema_for::<feed::FeedProfile>()
                 }),
@@ -274,12 +327,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 ("state", |g| g.root_schema_for::<feed::LiveState>()),
                 ("resync", |g| g.root_schema_for::<feed::Resync>()),
                 ("revoked", |g| g.root_schema_for::<feed::Revoked>()),
+                ("caught_up", |g| g.root_schema_for::<feed::CaughtUp>()),
             ]),
             dialect: Dialect::Dashboard,
             endpoints: &[],
             model_task: None,
             confirm_note: None,
             writes: None,
+            errors: &[],
             example: None,
         },
         // The device MCP host link (client-apps design §5): a Chat-capability
@@ -327,9 +382,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  realtime session's token and sentence (device_disabled, key_expired, \
                  key_unknown); the hosting grant cleared or the row switched off closes 1000; \
                  a stopping gateway closes 1001. Who may call the hosted tools: the owner, \
-                 the gateway's own runs, the device itself, and keys, devices and agents \
-                 whose tool scope or manifest names the label explicitly — never an anonymous \
-                 caller, an all or a deny scope.",
+                 the gateway's own runs, the device itself, keys and devices whose policy's \
+                 device_tools grants the label (their tool scope then filtering its tools as \
+                 any server's), and agents whose manifest names it — never an anonymous \
+                 caller, and never a key through its tool scope alone.",
             )
         },
     ];

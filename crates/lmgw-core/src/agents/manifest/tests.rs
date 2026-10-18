@@ -1274,3 +1274,6 @@ fn an_allow_list_naming_this_agents_own_provided_tools_is_refused() {
     ok["tools"] = json!([{ "label": "board", "allowed": ["board__pin"] }]);
     load_v(&ok).unwrap();
 }
+
+/// `decide` (labs-store design §4).
+mod decide;

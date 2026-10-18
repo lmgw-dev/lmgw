@@ -53,24 +53,40 @@ use crate::vram::LocalHold;
 /// pass the same check before anything is sent to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteCheck {
-    /// No check: an in-process caller (MCP sampling, agent runs, the
-    /// dashboard chats) whose route choice is already a chat model's.
+    /// An in-process caller (MCP sampling, agent runs, the dashboard chats,
+    /// a profile's Try) whose route choice is already a chat model's: only
+    /// the decision guard, which reads the snapshot and nothing else, so a
+    /// decision row a setting names is refused before its container starts
+    /// ([`crate::proxy::refuse_decision_row`], decision-models design §2.2).
     None,
-    /// A text endpoint (`/v1/chat/completions`, `/v1/responses`,
-    /// `/v1/count_tokens`, …): an image or audio model is refused by name
-    /// before its container starts ([`crate::proxy::refuse_media_route`]).
+    /// A generation endpoint (`/v1/chat/completions`, `/v1/messages`,
+    /// `/v1/responses`, realtime): an image or audio model is refused by name
+    /// before its container starts ([`crate::proxy::refuse_media_route`]),
+    /// and so is a local **decision** row, which cannot generate
+    /// ([`crate::proxy::refuse_decision_row`], decision-models design §2.2).
     Text(&'static str),
-    /// Legacy `/v1/completions`: a text endpoint that also only speaks to an
-    /// openai-protocol upstream, since the body is forwarded as it came.
+    /// A token counter (`/tokenize`, `/v1/count_tokens`,
+    /// `/v1/messages/count_tokens`): only the media guard. A decision row
+    /// counts tokens like any llama-server, and `/tokenize` is how a client
+    /// sizes a state against its ubatch (decision-models design §2.2).
+    Count(&'static str),
+    /// Legacy `/v1/completions`: [`Self::Text`] on an endpoint that also only
+    /// speaks to an openai-protocol upstream, since the body is forwarded as
+    /// it came.
     LegacyCompletions,
-    /// `/v1/embeddings`: a text endpoint, and a local **rerank** row is
-    /// refused — llama-server answers it with an all-zero vector
-    /// ([`crate::proxy::refuse_reranker_for_embeddings`]).
+    /// `/v1/embeddings`: a text endpoint, and a local **rerank** or
+    /// **decision** row is refused — llama-server answers a reranker with an
+    /// all-zero vector ([`crate::proxy::refuse_reranker_for_embeddings`]).
     Embeddings,
-    /// `/v1/rerank`: a text endpoint, and a local **embedding** row is
-    /// refused — it has no head to score with
+    /// `/v1/rerank`: a text endpoint, and a local **embedding** or
+    /// **decision** row is refused — neither has a head to score with
     /// ([`crate::proxy::refuse_embedder_for_rerank`]).
     Rerank,
+    /// `/v1/systemone`: a local aux row of kind decision, or an `openai` or
+    /// `llama_cpp` upstream whose catalog does not rule the model out; every
+    /// other route is a `501` ([`crate::proxy::decision_route_guard`],
+    /// decision-models design §2.2).
+    Decision,
     /// `/v1/audio/*` and `/v1/tasks/*`: byte-level passthroughs of OpenAI's
     /// audio shape, so an openai-protocol upstream
     /// ([`crate::proxy::require_openai_audio`]).
@@ -141,10 +157,19 @@ impl RouteCheck {
             names_route: true,
         };
         match self {
-            Self::None => Ok(()),
-            Self::Text(endpoint) => Ok(crate::proxy::refuse_media_route(route, alias, endpoint)?),
+            Self::None => {
+                crate::proxy::refuse_decision_row(snap, route, alias, None).map_err(on_route)
+            }
+            Self::Text(endpoint) => {
+                crate::proxy::refuse_media_route(route, alias, endpoint)?;
+                crate::proxy::refuse_decision_row(snap, route, alias, Some(endpoint))
+                    .map_err(on_route)
+            }
+            Self::Count(endpoint) => Ok(crate::proxy::refuse_media_route(route, alias, endpoint)?),
             Self::LegacyCompletions => {
                 crate::proxy::refuse_media_route(route, alias, "/v1/completions")?;
+                crate::proxy::refuse_decision_row(snap, route, alias, Some("/v1/completions"))
+                    .map_err(on_route)?;
                 // llama-server serves /v1/completions as well.
                 if route.upstream.protocol.speaks_openai_http() {
                     Ok(())
@@ -171,6 +196,14 @@ impl RouteCheck {
             Self::Image(endpoint) => {
                 Ok(crate::proxy::image_route_guard(state, snap, route, alias, endpoint).await?)
             }
+            // A refusal about a local aux row names it, as the aux section
+            // guards' do; one about any other route does not.
+            Self::Decision => crate::proxy::decision_route_guard(state, snap, route, alias)
+                .await
+                .map_err(|error| Refusal {
+                    error,
+                    names_route: snap.aux_model_for(route).is_some(),
+                }),
         }
     }
 }
@@ -456,65 +489,71 @@ pub struct OpenFailed {
 
 /// Stages 1–3 of the per-request half: the candidate pick, the hold swap and
 /// the site's route check. Nothing is started here.
-pub async fn resolve(
-    state: &SharedState,
-    alias: &str,
+///
+/// Erased ([`crate::erased`]), with admission ([`admit_or_fall_back`]): the
+/// candidate pick, the route checks and VRAM admission behind one future,
+/// which some twenty trait methods await.
+pub fn resolve<'a>(
+    state: &'a SharedState,
+    alias: &'a str,
     check: RouteCheck,
-) -> Result<Routed, OpenFailed> {
-    let snap = state.snapshot();
-    let refused = |error| OpenFailed {
-        route: None,
-        headers: GateHeaders::default(),
-        error,
-    };
-    let picked = match pick_candidate(state, &snap, alias).await {
-        Some(picked) => picked.map_err(refused)?,
-        None => {
-            let mut r = snap.resolve_for_request(alias).map_err(refused)?;
-            // A row switched to the CPU is not held, but a container of its
-            // still running on the GPU is: its fallback answers, as it did
-            // before the switch.
-            if r.fallback.is_none() {
-                if let Some((fallback, route)) =
-                    crate::vram::held_container_fallback(state, &snap, &r.route)
-                {
-                    r.route = route;
-                    r.fallback = Some(fallback);
+) -> crate::erased::Erased<'a, Result<Routed, OpenFailed>> {
+    futures::FutureExt::boxed(async move {
+        let snap = state.snapshot();
+        let refused = |error| OpenFailed {
+            route: None,
+            headers: GateHeaders::default(),
+            error,
+        };
+        let picked = match pick_candidate(state, &snap, alias).await {
+            Some(picked) => picked.map_err(refused)?,
+            None => {
+                let mut r = snap.resolve_for_request(alias).map_err(refused)?;
+                // A row switched to the CPU is not held, but a container of its
+                // still running on the GPU is: its fallback answers, as it did
+                // before the switch.
+                if r.fallback.is_none() {
+                    if let Some((fallback, route)) =
+                        crate::vram::held_container_fallback(state, &snap, &r.route)
+                    {
+                        r.route = route;
+                        r.fallback = Some(fallback);
+                    }
+                }
+                let mut headers = GateHeaders::default();
+                if let Some(fallback) = r.fallback {
+                    // The same snapshot answered the swap, so it names the reason:
+                    // the hold, or a benchmark's lease (benchmark design §3.2).
+                    let reason = snap
+                        .gpu_block()
+                        .map_or(FallbackReason::Hold, |b| b.fallback_reason());
+                    headers.fall_back(fallback, reason);
+                }
+                Picked {
+                    route: r.route,
+                    headers,
+                    candidate: None,
                 }
             }
-            let mut headers = GateHeaders::default();
-            if let Some(fallback) = r.fallback {
-                // The same snapshot answered the swap, so it names the reason:
-                // the hold, or a benchmark's lease (benchmark design §3.2).
-                let reason = snap
-                    .gpu_block()
-                    .map_or(FallbackReason::Hold, |b| b.fallback_reason());
-                headers.fall_back(fallback, reason);
-            }
-            Picked {
-                route: r.route,
-                headers,
-                candidate: None,
-            }
+        };
+        if let Err(r) = check.run(state, &snap, &picked.route, alias).await {
+            return Err(if r.names_route {
+                OpenFailed {
+                    route: Some(Box::new(picked.route)),
+                    headers: picked.headers,
+                    error: r.error,
+                }
+            } else {
+                refused(r.error)
+            });
         }
-    };
-    if let Err(r) = check.run(state, &snap, &picked.route, alias).await {
-        return Err(if r.names_route {
-            OpenFailed {
-                route: Some(Box::new(picked.route)),
-                headers: picked.headers,
-                error: r.error,
-            }
-        } else {
-            refused(r.error)
-        });
-    }
-    Ok(Routed {
-        route: picked.route,
-        headers: picked.headers,
-        alias: alias.to_string(),
-        check,
-        candidate: picked.candidate,
+        Ok(Routed {
+            route: picked.route,
+            headers: picked.headers,
+            alias: alias.to_string(),
+            check,
+            candidate: picked.candidate,
+        })
     })
 }
 
@@ -607,40 +646,44 @@ pub(super) enum AtAdmission {
 /// A **candidate alias** walks its list instead ([`super::candidate`]),
 /// unless the hold's swap in `resolve` already answered; a pinned caller is
 /// refused ([`Routed::admit_pinned`]).
-async fn admit_or_fall_back(
+///
+/// Erased ([`crate::erased`]), for the reason [`resolve`] is.
+fn admit_or_fall_back(
     state: &SharedState,
     routed: Routed,
     at: AtAdmission,
-) -> Result<Opened, OpenFailed> {
-    let Routed {
-        route,
-        headers,
-        alias,
-        check,
-        candidate,
-    } = routed;
-    if candidate.is_some() {
-        if at == AtAdmission::Pinned {
-            return Err(OpenFailed {
-                route: None,
-                headers: GateHeaders::default(),
-                error: GatewayError::Unsupported(format!(
-                    "'{alias}' is a candidate alias, which answers each request from whichever \
-                     of its models is loaded — this caller sizes or embeds with one model's own \
-                     tokenizer, so it has to name that model"
-                )),
-            });
+) -> crate::erased::Erased<'_, Result<Opened, OpenFailed>> {
+    futures::FutureExt::boxed(async move {
+        let Routed {
+            route,
+            headers,
+            alias,
+            check,
+            candidate,
+        } = routed;
+        if candidate.is_some() {
+            if at == AtAdmission::Pinned {
+                return Err(OpenFailed {
+                    route: None,
+                    headers: GateHeaders::default(),
+                    error: GatewayError::Unsupported(format!(
+                        "'{alias}' is a candidate alias, which answers each request from whichever \
+                         of its models is loaded — this caller sizes or embeds with one model's own \
+                         tokenizer, so it has to name that model"
+                    )),
+                });
+            }
+            if headers.fallback().is_some() {
+                return Ok(Opened {
+                    route,
+                    hold: None,
+                    headers,
+                });
+            }
+            return candidate::walk(state, &alias, None, check, Vec::new(), None).await;
         }
-        if headers.fallback().is_some() {
-            return Ok(Opened {
-                route,
-                hold: None,
-                headers,
-            });
-        }
-        return candidate::walk(state, &alias, None, check, Vec::new(), None).await;
-    }
-    admit_route(state, route, headers, &alias, check, at, None).await
+        admit_route(state, route, headers, &alias, check, at, None).await
+    })
 }
 
 /// [`admit_or_fall_back`] for one route: stage 5 as its doc comment says —

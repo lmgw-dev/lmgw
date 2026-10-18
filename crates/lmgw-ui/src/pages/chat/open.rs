@@ -27,7 +27,7 @@ use serde_json::json;
 
 use super::super::chat_sync::{self, ListRead, Opened, OwnEdits, Rescue};
 use super::super::chat_temp;
-use super::{scroll_down, sync_url, ChatThread, Msg, Stats, ThreadDetail};
+use super::{post_thread, scroll_down, sync_url, ChatThread, Msg, Stats, ThreadDetail};
 use crate::scope::Scope;
 use crate::widgets::Toasts;
 use order::Opens;
@@ -380,7 +380,7 @@ impl Opener {
             json!({ "model_alias": alias, "kind": kind })
         };
         spawn_local(async move {
-            match crate::api::post::<ChatThread, _>("/chat/api/threads", &body).await {
+            match post_thread("/chat/api/threads", &body).await {
                 Ok(t) => {
                     let id = t.id;
                     // The page was left before the answer: nothing will show

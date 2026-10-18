@@ -93,15 +93,14 @@ pub const DIVERGENCES: &[Divergence] = &[
     },
     Divergence {
         op: "audio_model_set",
-        note: "the four option maps, the voice presets and `extra_run_args`: the tool takes \
-               them as text (JSON strings, shell-quoted args — every self-admin argument is a \
-               flat scalar); the op takes the real JSON objects and the argv array.",
+        note: "the four option maps and the voice presets: the tool takes them as text (JSON \
+               strings — every self-admin argument is a flat scalar or a list of strings); the \
+               op takes the real JSON objects.",
         props: &[
             "load_options",
             "session_options",
             "default_request_options",
             "voice_presets",
-            "extra_run_args",
         ],
     },
     Divergence {

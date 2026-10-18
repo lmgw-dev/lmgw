@@ -39,11 +39,11 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base64::Engine;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use quickdoc_core::embed::{validate_vector, EmbedIdentity, Embedder, Reranker};
+use quickdoc_core::BoxFut;
 use quickdoc_core::QuickdocError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -881,31 +881,35 @@ impl GatewayEmbedder {
     }
 }
 
-#[async_trait]
 impl Embedder for GatewayEmbedder {
     fn identity(&self) -> EmbedIdentity {
         self.identity.clone()
     }
 
-    async fn embed(&self, texts: &[String]) -> quickdoc_core::Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let out = self
-            .gateway
-            .embeddings(&self.alias, texts)
-            .await
-            .map_err(|e| to_quickdoc(&e))?;
-        if out.len() != texts.len() {
-            return Err(QuickdocError::EmbedCount {
-                want: texts.len(),
-                got: out.len(),
-            });
-        }
-        for (i, v) in out.iter().enumerate() {
-            validate_vector(&self.identity.model, i, v, self.identity.dims)?;
-        }
-        Ok(out)
+    fn embed<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> BoxFut<'a, quickdoc_core::Result<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            if texts.is_empty() {
+                return Ok(Vec::new());
+            }
+            let out = self
+                .gateway
+                .embeddings(&self.alias, texts)
+                .await
+                .map_err(|e| to_quickdoc(&e))?;
+            if out.len() != texts.len() {
+                return Err(QuickdocError::EmbedCount {
+                    want: texts.len(),
+                    got: out.len(),
+                });
+            }
+            for (i, v) in out.iter().enumerate() {
+                validate_vector(&self.identity.model, i, v, self.identity.dims)?;
+            }
+            Ok(out)
+        })
     }
 }
 
@@ -916,7 +920,6 @@ pub struct GatewayReranker {
     model: String,
 }
 
-#[async_trait]
 impl Reranker for GatewayReranker {
     fn model(&self) -> String {
         self.model.clone()
@@ -932,52 +935,58 @@ impl Reranker for GatewayReranker {
     /// excerpts. By then they have reached that alias — lmgw routed the
     /// request before anything here could see it — which is what the
     /// question's note says ([`crate::chat::search`]).
-    async fn rerank(&self, query: &str, documents: &[String]) -> quickdoc_core::Result<Vec<f32>> {
-        if documents.is_empty() {
-            return Ok(Vec::new());
-        }
-        let g = &self.gateway;
-        let url = format!("{}/rerank", g.api_base());
-        let body = json!({ "model": self.model, "query": query, "documents": documents });
-        let resp = g
-            .send(&url, g.http.post(&url).json(&body))
-            .await
-            .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
-        if let Some(fb) = resp.headers().get(FALLBACK_HEADER) {
-            return Err(QuickdocError::Reranker(format!(
-                "{RERANK_FALLBACK_PREFIX}{}{RERANK_FALLBACK_SUFFIX}",
-                fb.to_str().unwrap_or("(not text)")
-            )));
-        }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| QuickdocError::Reranker(format!("{url}: not JSON: {e}")))?;
-        let rows = v
-            .get("results")
-            .and_then(Value::as_array)
-            .ok_or_else(|| QuickdocError::Reranker(format!("{url}: no 'results' array")))?;
-        let mut scores: Vec<Option<f32>> = vec![None; documents.len()];
-        for r in rows {
-            let i = r.get("index").and_then(Value::as_u64).map(|i| i as usize);
-            let s = r
-                .get("relevance_score")
-                .or_else(|| r.get("score"))
-                .and_then(Value::as_f64);
-            if let (Some(i), Some(s)) = (i, s) {
-                if let Some(slot) = scores.get_mut(i) {
-                    *slot = Some(s as f32);
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFut<'a, quickdoc_core::Result<Vec<f32>>> {
+        Box::pin(async move {
+            if documents.is_empty() {
+                return Ok(Vec::new());
+            }
+            let g = &self.gateway;
+            let url = format!("{}/rerank", g.api_base());
+            let body = json!({ "model": self.model, "query": query, "documents": documents });
+            let resp = g
+                .send(&url, g.http.post(&url).json(&body))
+                .await
+                .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
+            if let Some(fb) = resp.headers().get(FALLBACK_HEADER) {
+                return Err(QuickdocError::Reranker(format!(
+                    "{RERANK_FALLBACK_PREFIX}{}{RERANK_FALLBACK_SUFFIX}",
+                    fb.to_str().unwrap_or("(not text)")
+                )));
+            }
+            let v: Value = resp
+                .json()
+                .await
+                .map_err(|e| QuickdocError::Reranker(format!("{url}: not JSON: {e}")))?;
+            let rows = v
+                .get("results")
+                .and_then(Value::as_array)
+                .ok_or_else(|| QuickdocError::Reranker(format!("{url}: no 'results' array")))?;
+            let mut scores: Vec<Option<f32>> = vec![None; documents.len()];
+            for r in rows {
+                let i = r.get("index").and_then(Value::as_u64).map(|i| i as usize);
+                let s = r
+                    .get("relevance_score")
+                    .or_else(|| r.get("score"))
+                    .and_then(Value::as_f64);
+                if let (Some(i), Some(s)) = (i, s) {
+                    if let Some(slot) = scores.get_mut(i) {
+                        *slot = Some(s as f32);
+                    }
                 }
             }
-        }
-        let got = scores.iter().filter(|s| s.is_some()).count();
-        if got != documents.len() {
-            return Err(QuickdocError::RerankCount {
-                want: documents.len(),
-                got,
-            });
-        }
-        Ok(scores.into_iter().flatten().collect())
+            let got = scores.iter().filter(|s| s.is_some()).count();
+            if got != documents.len() {
+                return Err(QuickdocError::RerankCount {
+                    want: documents.len(),
+                    got,
+                });
+            }
+            Ok(scores.into_iter().flatten().collect())
+        })
     }
 }
 

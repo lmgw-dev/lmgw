@@ -212,7 +212,7 @@ impl GpuProbe for NvmlProbe {
         self.nvml.as_ref().map(|_| ()).map_err(Clone::clone)
     }
 
-    /// Measured 2026-09-29 (RTX 4090, driver 615.71.09): every reading
+    /// Measured 2026-09-29 (a 24 GB GPU, a 615-series driver): every reading
     /// answers — see `live_nvml_power_readings` below for the check.
     fn power(&self) -> Result<Vec<GpuPower>, String> {
         use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
@@ -243,7 +243,7 @@ impl GpuProbe for NvmlProbe {
 
     /// NVML's running-process lists, compute and graphics, per device.
     ///
-    /// Measured 2026-09-27 (RTX 4090, driver 615.71.09, rootless podman): a
+    /// Measured 2026-09-27 (a 24 GB GPU, a 615-series driver, rootless podman): a
     /// llama-server container's host PID — what `podman inspect` reports as
     /// `State.Pid` — is listed as a compute process with its own allocation,
     /// within a second of its first answer. The desktop's processes (kwin,

@@ -97,7 +97,7 @@ pub async fn list_label(
     let snap = state.snapshot();
     let label = spec.server_label.as_str();
     let server = find_server(&snap, label).filter(|_| builtin_label(label).is_none());
-    if let Some((_, why)) = resolved.failed.into_iter().next() {
+    if let Some(super::Failed { why, .. }) = resolved.failed.into_iter().next() {
         // Judged on what the connect left listed: a server whose every tool
         // this caller's scope keeps out is not one it may use.
         let agg = state.mcp.aggregate(&snap).await;

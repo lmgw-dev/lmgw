@@ -30,7 +30,7 @@ pub struct McpServerView {
     pub env: String,
     pub cwd: Option<String>,
     pub container_image: Option<String>,
-    pub extra_run_args: String,
+    pub extra_run_args: Vec<String>,
     pub url: Option<String>,
     /// `Name: value` lines, as stored — an HTTP server's bearer lives here.
     #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::secret))]
@@ -41,6 +41,10 @@ pub struct McpServerView {
     pub idle_seconds: i64,
     pub allow_sampling: bool,
     pub sampling_alias: Option<String>,
+    /// Set for an agent's own registration (container-runtime §3.3), so the
+    /// MCP page can say who owns a row it must not offer to edit; `null` for
+    /// every row an owner made.
+    pub agent_id: Option<String>,
     /// `ready | connecting | error | stopped` at list time; live updates come
     /// from the SSE `mcp` frame.
     pub status: String,
@@ -76,4 +80,25 @@ pub struct McpToolView {
     /// The server's own name for it, shown when a prefix hides it.
     pub upstream_name: String,
     pub description: Option<String>,
+}
+
+/// A write to a southbound MCP server, or its connection test:
+/// `POST /api/op/mcp_server_set` (and `lmgw__mcp_server_set`) for every
+/// action. A refusal, or a test that cannot connect, is an error answer
+/// instead.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct McpServerSaved {
+    /// Always `true`; a refusal is an error answer instead.
+    pub ok: bool,
+    /// The row's id: the new row's for `create`.
+    pub id: i64,
+    /// `test`: how many tools the server listed. Absent for every other
+    /// action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub tool_count: Option<u64>,
+    /// What was done, for a person to read.
+    pub message: String,
 }

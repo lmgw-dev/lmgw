@@ -41,6 +41,107 @@ fn the_session_says_its_turn_detection_and_thread() {
 }
 
 #[test]
+fn a_bound_session_says_its_turn_mode() {
+    let session = |lmgw: Value| {
+        let ev = json!({"type": "session.updated", "session": {"type": "realtime", "lmgw": lmgw}});
+        let Some(ServerEvent::SessionUpdated(f)) = parse(&ev.to_string()) else {
+            panic!("a session")
+        };
+        f.turn_mode
+    };
+    assert_eq!(
+        session(json!({"turn_mode": "push_to_talk"})),
+        Some(TurnMode::PushToTalk)
+    );
+    assert_eq!(
+        session(json!({"turn_mode": "automatic"})),
+        Some(TurnMode::Automatic)
+    );
+    assert_eq!(
+        session(json!({"turn_mode": "hybrid"})),
+        Some(TurnMode::Unknown("hybrid".into())),
+        "a newer gateway's mode reads, as sent"
+    );
+    // Unbound, or from a gateway before the field.
+    assert_eq!(session(json!({"half_duplex": false})), None);
+    assert_eq!(session(json!({"turn_mode": null})), None);
+}
+
+#[test]
+fn a_call_s_events_are_read() {
+    for (kind, read) in [
+        (
+            "output_audio_buffer.started",
+            ServerEvent::OutputAudioBufferStarted {
+                response_id: "resp_1".into(),
+            },
+        ),
+        (
+            "output_audio_buffer.stopped",
+            ServerEvent::OutputAudioBufferStopped {
+                response_id: "resp_1".into(),
+            },
+        ),
+        (
+            "output_audio_buffer.cleared",
+            ServerEvent::OutputAudioBufferCleared {
+                response_id: "resp_1".into(),
+            },
+        ),
+    ] {
+        let ev = json!({"type": kind, "event_id": "evt_3", "response_id": "resp_1"});
+        assert_eq!(parse(&ev.to_string()), Some(read), "{kind}");
+    }
+    let ev = json!({"type": "lmgw.output_audio.starved", "event_id": "e", "response_id": "resp_1",
+        "starved": true});
+    assert_eq!(
+        parse(&ev.to_string()),
+        Some(ServerEvent::Starved(OutputAudioStarved {
+            response_id: "resp_1".into(),
+            starved: true
+        }))
+    );
+    let ev = json!({"type": "lmgw.session.bind_pending", "event_id": "e",
+        "held_by": "device 'desktop'"});
+    assert_eq!(
+        parse(&ev.to_string()),
+        Some(ServerEvent::BindPending(BindPending {
+            held_by: "device 'desktop'".into()
+        }))
+    );
+    let ev = json!({"type": "lmgw.session.closed", "event_id": "e", "kind": "thread_bound",
+        "by": "device 'desktop'", "message": "voice stayed on device 'desktop'"});
+    let Some(ServerEvent::SessionClosed(c)) = parse(&ev.to_string()) else {
+        panic!("a close")
+    };
+    assert_eq!(c.kind, ClosedKind::ThreadBound);
+    let end = call_close(&c);
+    assert_eq!(
+        (end.kind, end.by.as_deref()),
+        (CloseKind::ThreadBound, Some("device 'desktop'"))
+    );
+    // A newer gateway's kind reads, and keeps its token for the log.
+    let ev = json!({"type": "lmgw.session.closed", "kind": "moved_away", "by": null,
+        "message": "m"});
+    let Some(ServerEvent::SessionClosed(c)) = parse(&ev.to_string()) else {
+        panic!("a close")
+    };
+    assert_eq!(c.kind.as_str(), "moved_away");
+    assert_eq!(call_close(&c).kind, CloseKind::Other { code: None });
+    // Fields that do not read: the event as sent.
+    for ev in [
+        json!({"type": "lmgw.output_audio.starved", "response_id": "r"}),
+        json!({"type": "lmgw.session.bind_pending"}),
+        json!({"type": "lmgw.session.closed", "kind": "closed"}),
+    ] {
+        assert!(
+            matches!(parse(&ev.to_string()), Some(ServerEvent::Unknown { .. })),
+            "{ev}"
+        );
+    }
+}
+
+#[test]
 fn only_the_echo_of_the_last_update_is_the_session_s_word() {
     let mut u = Updates::default();
     u.sent();
@@ -121,21 +222,24 @@ fn the_extension_events_are_read() {
         "content": "Heard", "unheard": "rest", "voice": {"via": "realtime"}});
     assert_eq!(
         parse(&ev.to_string()),
-        Some(ServerEvent::ChatReply(ChatReply {
+        Some(ServerEvent::ChatReply(Box::new(ChatReply {
             message_id: 812,
             content: Some("Heard".into()),
             unheard: Some("rest".into()),
-            voice: json!({"via": "realtime"}),
+            voice: Some(MessageVoice {
+                via: "realtime".into(),
+                ..Default::default()
+            }),
             removed: false,
             skipped: None,
-        }))
+        })))
     );
     let ev = json!({"type": "lmgw.chat.reply", "message_id": 9, "removed": true});
     let Some(ServerEvent::ChatReply(r)) = parse(&ev.to_string()) else {
         panic!()
     };
     assert!(r.removed);
-    assert_eq!((r.content, r.voice), (None, Value::Null));
+    assert_eq!((r.content, r.voice), (None, None));
     let ev = json!({"type": "lmgw.chat.reply", "message_id": 9, "skipped": "no audio heard"});
     let Some(ServerEvent::ChatReply(r)) = parse(&ev.to_string()) else {
         panic!()
@@ -157,9 +261,10 @@ fn the_extension_events_are_read() {
         "models": {}});
     assert_eq!(
         parse(&ev.to_string()),
-        Some(ServerEvent::Timing(
-            json!({"response_id": "r", "models": {}})
-        ))
+        Some(ServerEvent::Timing(Box::new(VoiceTiming {
+            response_id: Some("r".into()),
+            ..Default::default()
+        })))
     );
     let ev = json!({"type": "lmgw.chat.thread", "chat_thread": {"id": 4, "title": "T",
         "temporary": false, "admin_tools": false}});
@@ -178,7 +283,10 @@ fn the_extension_events_are_read() {
         Some(ServerEvent::ChatUser {
             message_id: 7,
             content: "Hallo".into(),
-            voice: json!({"via": "realtime"}),
+            voice: Box::new(MessageVoice {
+                via: "realtime".into(),
+                ..Default::default()
+            }),
             response_id: Some("r1".into()),
         })
     );

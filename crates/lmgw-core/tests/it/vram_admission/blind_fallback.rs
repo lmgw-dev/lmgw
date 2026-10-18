@@ -256,6 +256,7 @@ async fn native_blind(f: &Fixture, cloud: &MockServer) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: true,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -456,6 +457,7 @@ async fn count_tokens_counts_what_a_blind_fallback_is_sent() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

@@ -5,7 +5,8 @@
 //! credential it was handed itself (`web/session.rs`'s own module doc).
 
 use super::super::registry::{Dialect, DocRoute, Req, Resp};
-use crate::web::session::{LoginQuery, SessionView, SignIn};
+use crate::web::session::{LoginQuery, SignIn};
+use lmgw_api_types::SessionView;
 
 fn base(method: &'static str, path: &'static str, summary: &'static str) -> DocRoute {
     DocRoute {
@@ -24,6 +25,7 @@ fn base(method: &'static str, path: &'static str, summary: &'static str) -> DocR
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }

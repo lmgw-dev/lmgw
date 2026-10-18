@@ -161,9 +161,11 @@ async fn a_refused_save_is_reported_not_shown_as_saved() {
         content: "edited by hand".into(),
         ..Default::default()
     };
-    assert!(store::update_chat_message(&state.db, tid, rid, &update)
-        .await
-        .unwrap());
+    assert!(
+        store::update_chat_message(&state.db, tid, rid, &update, None)
+            .await
+            .unwrap()
+    );
 
     let body = cont.await.unwrap();
     let events = sse_events(&body);
@@ -358,6 +360,7 @@ async fn hanging_gateway(up: &HangingFirst) -> (lmgw_core::state::SharedState, G
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

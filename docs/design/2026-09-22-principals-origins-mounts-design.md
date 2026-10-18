@@ -550,9 +550,9 @@ http://<id>.<agent_origin_suffix>:<bind port>/
   `local` (mDNS cannot answer arbitrary names under it) — refused with
   `origin_suffix_shadows_gateway` when it **is** a name the gateway itself
   answers on, or shares a parent domain of two or more labels with one: a
-  dashboard at `myhost.lmgw.lan` refuses a suffix of `apps.lmgw.lan`, because a
-  page under that suffix could set a cookie for `lmgw.lan` and overwrite —
-  never read — the dashboard's session; `agents.lan` is fine. The gateway's own
+  dashboard at `myhost.lmgw.example` refuses a suffix of `apps.lmgw.example`, because a
+  page under that suffix could set a cookie for `lmgw.example` and overwrite —
+  never read — the dashboard's session; `agents.example` is fine. The gateway's own
   names are `net::reachable_urls(bind_addr)`, the machine's host name,
   `<hostname>.local`, and `<hostname>.<search domain>` for each of the
   resolver's search domains. The check runs again at boot; a stored suffix
@@ -780,7 +780,7 @@ on **success only** — a failed start answers the plane's ordinary error text
 
 `agent_origin_suffix` exists for one reason: a gateway bound to a real address
 and opened from another machine. Set it to a zone with a wildcard record
-(`*.lmgw.lan → <host>`) and every agent origin becomes `<id>.lmgw.lan:<port>`.
+(`*.lmgw.example → <host>`) and every agent origin becomes `<id>.lmgw.example:<port>`.
 
 Origins are computed per request, so nothing needs resyncing on a suffix
 change — but every running app container holds `LMGW_APP_ORIGIN` in its

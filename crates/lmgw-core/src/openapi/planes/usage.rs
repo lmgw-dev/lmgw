@@ -29,6 +29,7 @@ fn base(method: &'static str, path: &'static str, summary: &'static str) -> DocR
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }

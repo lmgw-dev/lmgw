@@ -3,7 +3,7 @@
 //! (audio model rows) and `lmgw__voice_transcribe` (voice-library clip
 //! transcripts, audio-class gap 5). Their dispatch is `selfadmin/audio.rs`.
 
-use crate::mcp::selfadmin::{bool_p, enum_p, int_p, str_p, Builtin};
+use crate::mcp::selfadmin::{bool_p, enum_p, int_p, str_p, strs_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -284,9 +284,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "extra_run_args",
-                    str_p(
-                        "'podman run' args override, as shell-quoted text (one option per \
-                         line is fine). Empty or absent leaves it unchanged; name it in \
+                    strs_p(
+                        "'podman run' args override, one argument per entry. Absent leaves \
+                         it unchanged; name it in \
                          'clear' to revert to the class default — which carries the GPU and \
                          SELinux flags, so override it only knowingly. An override with no \
                          args is never stored: it is the class default. A row on the CPU runs \

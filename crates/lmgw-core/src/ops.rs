@@ -77,6 +77,8 @@ mod chat_voice_settings;
 pub use chat_voice_settings::*;
 mod chat_feed_settings;
 pub use chat_feed_settings::*;
+mod devices_settings;
+pub use devices_settings::*;
 /// Personality profiles' CRUD (personality-profiles design D12), shared by
 /// the `/chat/api/profiles*` routes and the self-admin tools.
 mod chat_profiles;

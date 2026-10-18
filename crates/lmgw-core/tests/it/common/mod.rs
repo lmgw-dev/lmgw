@@ -155,15 +155,15 @@ pub async fn serve(state: SharedState) -> Gw {
 pub async fn serve_on(listener: tokio::net::TcpListener, app: axum::Router) {
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app.into_make_service_with_connect_info::<lmgw_core::server::Conn>(),
     )
     .await
     .unwrap()
 }
 
 /// Guards the handful of suites that mutate a process-wide environment
-/// variable (`HF_ENDPOINT`, `LMGW_AUDIO_CATALOG_ENDPOINT`) to point the code
-/// under test at a mock server. Each used to be its own test binary, so
+/// variable (`HF_ENDPOINT`, `LMGW_AUDIO_CATALOG_ENDPOINT`, `LMGW_UPDATE_ENDPOINT`)
+/// to point the code under test at a mock server. Each used to be its own test binary, so
 /// owning the process for the duration of the mutation was safe; folded into
 /// one `tests/it` binary, two of them running at once would stomp on each
 /// other's endpoint — and a suite that expects the *unset* default (a live
@@ -172,13 +172,17 @@ pub async fn serve_on(listener: tokio::net::TcpListener, app: axum::Router) {
 /// Every such test fn — the ones that set the var and the ones that rely on
 /// it being unset — takes this guard as its first statement and holds it for
 /// its whole body, so at most one of them ever touches the variable at a
-/// time. Dropping the guard puts both variables back as it found them, on a
+/// time. Dropping the guard puts the variables back as it found them, on a
 /// panic too, so a failing suite cannot leave a dead mock endpoint behind for
 /// the rest of the run.
 static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The variables [`process_env_lock`] guards and restores.
-const GUARDED_ENV: [&str; 2] = ["HF_ENDPOINT", "LMGW_AUDIO_CATALOG_ENDPOINT"];
+const GUARDED_ENV: [&str; 3] = [
+    "HF_ENDPOINT",
+    "LMGW_AUDIO_CATALOG_ENDPOINT",
+    "LMGW_UPDATE_ENDPOINT",
+];
 
 pub struct EnvGuard {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,

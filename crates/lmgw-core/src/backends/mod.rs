@@ -53,20 +53,30 @@ pub use lmgw_api_types::builds::ForgePr;
 /// state is then *unknown* — it is merged rather than skipped
 /// (`merged_upstream = false`), and a squash-apply takes its fork point from
 /// git — and the reason goes into the run log.
-#[async_trait::async_trait]
 pub trait ForgeLookup: Send + Sync {
-    async fn pr(&self, repo_url: &str, forge: Forge, number: u64) -> Result<ForgePr, String>;
+    fn pr<'a>(
+        &'a self,
+        repo_url: &'a str,
+        forge: Forge,
+        number: u64,
+    ) -> crate::erased::Erased<'a, Result<ForgePr, String>>;
 }
 
 /// The lookup a gateway has before a forge client is installed: it knows
 /// nothing, and says so.
 pub struct NoForgeLookup;
 
-#[async_trait::async_trait]
 impl ForgeLookup for NoForgeLookup {
-    async fn pr(&self, _repo_url: &str, _forge: Forge, number: u64) -> Result<ForgePr, String> {
-        Err(format!(
+    fn pr<'a>(
+        &'a self,
+        _repo_url: &'a str,
+        _forge: Forge,
+        number: u64,
+    ) -> crate::erased::Erased<'a, Result<ForgePr, String>> {
+        Box::pin(async move {
+            Err(format!(
             "no forge client is installed, so PR #{number}'s state (merged upstream?) is unknown"
         ))
+        })
     }
 }

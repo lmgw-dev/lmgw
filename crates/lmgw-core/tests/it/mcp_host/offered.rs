@@ -279,18 +279,14 @@ async fn a_device_turn_on_a_thread_holding_another_device_s_label() {
     let phone = pair(
         &w,
         "phone",
-        json!({"tool_scope_mode": "allow", "tool_scope_patterns": "desktop__*\nweb__*"}),
+        json!({"tool_scope_mode": "allow", "tool_scope_patterns": "desktop__*\nweb__*",
+               "device_tools": ["desktop"]}),
     )
     .await;
     let tid = chat_thread(&w, &phone.client, "chatty").await;
     attach(&w, &phone.client, tid, &["desktop", "web"]).await;
-    // The owner narrows the phone: the label stays on its thread.
-    let (s, v) = op(
-        &w,
-        "key_set",
-        json!({"id": phone.id, "tool_scope_patterns": "web__*"}),
-    )
-    .await;
+    // The owner takes the grant back: the label stays on its thread.
+    let (s, v) = op(&w, "key_set", json!({"id": phone.id, "device_tools": []})).await;
     assert_eq!(s, 200, "{v}");
 
     w.chat
@@ -314,6 +310,7 @@ async fn a_device_turn_on_a_thread_holding_another_device_s_label() {
             .is_some_and(|m| m.starts_with("MCP server 'desktop'")),
         "{said:?}"
     );
+    assert_eq!(error.1["code"], "tool_unreachable", "{said:?}");
     // The model was offered `web`'s tool and not the desktop's.
     let offered: Vec<String> = w.chat.seen.chat(0)["tools"]
         .as_array()

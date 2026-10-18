@@ -19,7 +19,8 @@ use lmgw_api_types::chat_voice::{turn_detection_label, TURN_DETECTIONS};
 use lmgw_api_types::SettingsFull;
 
 use super::{
-    new_seed, source_label, Named, StageResolved, VoiceDraft, VoiceProblem, VoiceResolved,
+    new_seed, source_label, AudioInputResolved, Named, StageResolved, VoiceDraft, VoiceProblem,
+    VoiceResolved, VoiceSource,
 };
 use crate::widgets::voice_picker::{use_voices, VoiceInput};
 use crate::widgets::{ModelPicker, Select};
@@ -30,7 +31,10 @@ fn stage_line(s: &StageResolved) -> String {
     let Some(alias) = &s.alias else {
         return "in effect: none".to_string();
     };
-    let mut line = format!("in effect: {alias} · {}", source_label(s.source.as_deref()));
+    let mut line = format!(
+        "in effect: {alias} · {}",
+        source_label(s.source.as_ref().map(VoiceSource::as_str))
+    );
     match s.local {
         // Off this machine: a provider, or a server elsewhere.
         Some(false) => line.push_str(" · remote"),
@@ -57,7 +61,10 @@ fn stage_line(s: &StageResolved) -> String {
 /// chain deciding from its default voice, or the model's own.
 fn voice_line(v: &Named) -> String {
     match (&v.name, &v.inherits) {
-        (Some(n), _) => format!("in effect: {n} · {}", source_label(v.source.as_deref())),
+        (Some(n), _) => format!(
+            "in effect: {n} · {}",
+            source_label(v.source.as_ref().map(VoiceSource::as_str))
+        ),
         (None, Some(d)) => format!(
             "in effect: realtime's default voice {d}, checked against the model when it speaks \
              · Settings → Realtime"
@@ -73,8 +80,8 @@ fn voice_placeholder(r: Option<&VoiceResolved>) -> String {
     let Some(r) = r else {
         return "inherit".to_string();
     };
-    match (&r.voice.name, r.voice.source.as_deref(), &r.voice.inherits) {
-        (Some(n), Some("chat"), _) => format!("inherits {n}"),
+    match (&r.voice.name, r.voice.source.as_ref(), &r.voice.inherits) {
+        (Some(n), Some(VoiceSource::Chat), _) => format!("inherits {n}"),
         (Some(_), _, _) => "inherit".to_string(),
         (None, _, Some(d)) => format!("realtime's default {d}"),
         (None, _, None) => "the model's default".to_string(),
@@ -233,7 +240,7 @@ pub(in crate::pages) fn VoiceSection(
                     {effect(resolved, |r| format!(
                         "in effect: {} · {}",
                         if r.read_aloud.value { "on" } else { "off" },
-                        source_label(r.read_aloud.source.as_deref())
+                        source_label(r.read_aloud.source.as_ref().map(VoiceSource::as_str))
                     ))}
                 </div>
                 <div class="field">
@@ -241,8 +248,8 @@ pub(in crate::pages) fn VoiceSection(
                     <Select value=turn options=turn_opts/>
                     {effect(resolved, |r| format!(
                         "in effect: {} · {}",
-                        turn_detection_label(&r.turn_detection.value),
-                        source_label(r.turn_detection.source.as_deref())
+                        turn_detection_label(r.turn_detection.value.as_str()),
+                        source_label(r.turn_detection.source.as_ref().map(VoiceSource::as_str))
                     ))}
                 </div>
             </div>
@@ -260,6 +267,7 @@ pub(in crate::pages) fn VoiceSection(
                 {move || {
                     resolved.and_then(|r| r.get()).and_then(|r| r.audio_input).map(|a| {
                         // The live block, as the voice-mode chip reads it.
+                        let a = AudioInputResolved::from(&a);
                         let a = block.and_then(|b| a.blocked(b.get())).unwrap_or(a);
                         view! {
                             <div class="field-hint">{a.effect_line()}</div>
@@ -292,7 +300,7 @@ pub(in crate::pages) fn VoiceSection(
                     } else {
                         format!("\u{201c}{}\u{201d}", r.speech_style.text)
                     };
-                    format!("in effect: {text} · {}", source_label(r.speech_style.source.as_deref()))
+                    format!("in effect: {text} · {}", source_label(Some(r.speech_style.source.as_str())))
                 })}
             </div>
             <Show when=move || for_thread>
@@ -351,16 +359,16 @@ pub(in crate::pages) fn VoiceSection(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{FallbackResolved, FallbackUnusable};
     use super::*;
+    use lmgw_api_types::voice_resolved::{Fallback, FallbackUnusable};
 
     #[test]
     fn a_stage_line_names_source_place_and_hold_fallback() {
         let s = StageResolved {
             alias: Some("pocket".into()),
-            source: Some("realtime".into()),
+            source: Some(VoiceSource::Realtime),
             local: Some(true),
-            fallback: Some(FallbackResolved {
+            fallback: Some(Fallback {
                 alias: "openai/tts".into(),
                 local: false,
             }),
@@ -373,7 +381,7 @@ mod tests {
         );
         let cpu = StageResolved {
             alias: Some("parakeet".into()),
-            source: Some("thread".into()),
+            source: Some(VoiceSource::Thread),
             local: Some(true),
             cpu: true,
             ..Default::default()
@@ -384,7 +392,7 @@ mod tests {
         );
         let unusable = StageResolved {
             alias: Some("asr".into()),
-            source: Some("chat".into()),
+            source: Some(VoiceSource::Chat),
             local: Some(true),
             fallback_unusable: Some(FallbackUnusable {
                 alias: "audio/other".into(),
@@ -397,7 +405,7 @@ mod tests {
         ));
         let remote = StageResolved {
             alias: Some("lan-tts".into()),
-            source: Some("chat".into()),
+            source: Some(VoiceSource::Chat),
             local: Some(false),
             ..Default::default()
         };
@@ -412,12 +420,12 @@ mod tests {
     fn the_voice_line_and_placeholder_never_name_an_inherited_default_as_the_voice() {
         let named = Named {
             name: Some("alba".into()),
-            source: Some("chat".into()),
+            source: Some(VoiceSource::Chat),
             ..Default::default()
         };
         assert_eq!(voice_line(&named), "in effect: alba · Settings → Chat");
         let inherited = Named {
-            source: Some("realtime".into()),
+            source: Some(VoiceSource::Realtime),
             inherits: Some("M5".into()),
             ..Default::default()
         };
@@ -442,7 +450,7 @@ mod tests {
         );
         let own = Named {
             name: Some("own".into()),
-            source: Some("thread".into()),
+            source: Some(VoiceSource::Thread),
             ..Default::default()
         };
         assert_eq!(voice_placeholder(Some(&with(own))), "inherit");

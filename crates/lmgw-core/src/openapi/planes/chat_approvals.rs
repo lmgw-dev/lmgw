@@ -80,7 +80,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  outside-VRAM fallback, also in x-lmgw-fallback), the call's time, the \
                  recording's length (WAV only) and the language heard. The body is bounded by \
                  max_body_mb (413 body_limit naming it). 400 empty_audio, 422 \
-                 asr_not_configured, 503 gpu_hold, and a device key's own refusals.",
+                 asr_not_configured, 503 gpu_hold, and a device key's own refusals. A failure \
+                 of the transcription itself names the fallback that had the audio in \
+                 x-lmgw-fallback: the audio may have left this machine although nothing \
+                 came back.",
             )
         },
     ]

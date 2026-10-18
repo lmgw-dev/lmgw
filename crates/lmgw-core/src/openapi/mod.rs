@@ -14,7 +14,9 @@
 //! in — everything here already works over an empty registry, so each lands
 //! as a pure data change, not a structural one.
 
+mod answer_defaults;
 mod build;
+mod descriptions;
 mod endpoints;
 mod exclusions;
 mod headers;

@@ -10,9 +10,13 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    AliasView, AudioModel, AuxModel, CandidateAliasView, ImageModel, ModelsFull, RuntimeStatus,
+    AliasView, AudioModel, AuxModel, CandidateAliasView, ImageModel, ModelTest, ModelsFull,
+    OpOutcome, RuntimeStatus,
 };
 use serde_json::{json, Value};
+
+mod aux_row;
+mod licence;
 
 use crate::catalog::use_model_catalog;
 use crate::fmt::{age, grouped, hue_for, human_bytes, of};
@@ -130,6 +134,11 @@ fn blank_aux_model() -> AuxModel {
         kind: "embed".into(),
         pooling: None,
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: Vec::new(),
         idle_seconds: 300,
         enabled: true,
@@ -270,7 +279,7 @@ impl Class {
     fn facet(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
-            Self::Aux => "Embed",
+            Self::Aux => "Aux",
             Self::Audio => "Audio",
             Self::Image => "Image",
             Self::Alias => "Aliases",
@@ -281,7 +290,7 @@ impl Class {
     fn title(self) -> &'static str {
         match self {
             Self::Chat => "Local · chat",
-            Self::Aux => "Local · embeddings + rerank",
+            Self::Aux => "Local · embeddings, rerank + decisions",
             Self::Audio => "Local · audio",
             Self::Image => "Local · image",
             Self::Alias => "Cloud aliases",
@@ -317,10 +326,12 @@ impl Class {
 
     /// What `local_model_test` does for the class, for the Test tooltip.
     /// Audio models are exercised in the Audio lab; aliases have no container.
+    /// An aux row's own kind says which probe it gets
+    /// ([`aux_row::probe_of`]).
     fn probe(self) -> Option<&'static str> {
         match self {
             Self::Chat => Some("generates one token"),
-            Self::Aux => Some("embeds or reranks a probe input"),
+            Self::Aux => Some("embeds, reranks or asks a decision question"),
             Self::Image => Some("draws one small image"),
             Self::Audio | Self::Alias | Self::Candidate => None,
         }
@@ -373,6 +384,10 @@ struct Row {
     /// A candidate alias's `gpu_deferred` count over the last 24 h (§6);
     /// always `None` for every other class.
     deferrals_24h: Option<u64>,
+    /// The licence the row's GGUF states, for the chip beside the kind;
+    /// `None` for a row whose header says nothing (and for every class
+    /// without a GGUF header to read).
+    licence: Option<Box<licence::Chip>>,
 }
 
 impl Row {
@@ -381,8 +396,13 @@ impl Row {
             return true;
         }
         let hay = format!(
-            "{} {} {} {} {}",
-            self.name, self.model_id, self.kind_title, self.note, self.file_title
+            "{} {} {} {} {} {}",
+            self.name,
+            self.model_id,
+            self.kind_title,
+            self.note,
+            self.file_title,
+            self.licence.as_deref().map_or("", licence::Chip::haystack),
         )
         .to_lowercase();
         words.iter().all(|w| hay.contains(w.as_str()))
@@ -441,6 +461,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             enabled: l.enabled,
             problems: 0,
             deferrals_24h: None,
+            licence: v.licence.as_ref().and_then(licence::Chip::of).map(Box::new),
         });
     }
     for v in &m.aux {
@@ -451,18 +472,21 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             model_id: a.model_id.clone(),
             name: v.public_name.clone(),
             kind: a.kind.clone(),
-            kind_title: match &a.pooling {
-                Some(p) => format!("{} · pooling {p}", a.kind),
-                None => format!("{} · pooling from the GGUF", a.kind),
+            kind_title: match (a.kind.as_str(), &a.pooling) {
+                ("decision", _) => "decision · answers /v1/systemone".into(),
+                ("rerank", _) => "rerank · answers /v1/rerank".into(),
+                (_, Some(p)) => format!("{} · pooling {p}", a.kind),
+                (_, None) => format!("{} · pooling from the GGUF", a.kind),
             },
             note: String::new(),
-            file: file_name(&a.gguf_path),
-            file_title: a.gguf_path.clone(),
+            file: aux_row::file(v),
+            file_title: aux_row::file_title(v),
             copy: a.gguf_path.clone(),
             ctx: a.ctx_size,
             enabled: a.enabled,
             problems: 0,
             deferrals_24h: None,
+            licence: v.licence.as_ref().and_then(licence::Chip::of).map(Box::new),
         });
     }
     for v in &m.audio {
@@ -501,6 +525,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             enabled: a.enabled,
             problems: 0,
             deferrals_24h: None,
+            licence: None,
         });
     }
     for v in &m.image {
@@ -562,6 +587,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             enabled: i.enabled,
             problems: 0,
             deferrals_24h: None,
+            licence: None,
         });
     }
     for a in &m.aliases {
@@ -599,6 +625,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             enabled: a.enabled,
             problems: 0,
             deferrals_24h: None,
+            licence: None,
         });
     }
     for c in &m.candidate_aliases {
@@ -646,6 +673,7 @@ fn rows_of(m: &ModelsFull) -> Vec<Row> {
             enabled: c.enabled,
             problems: c.problems.len(),
             deferrals_24h: c.deferrals_24h,
+            licence: None,
         });
     }
     out
@@ -720,14 +748,11 @@ impl PageCtx {
     /// on every update/enable/disable.
     fn op(self, name: &'static str, args: Value) {
         spawn_local(async move {
-            match crate::api::post::<Value, _>(format!("/api/op/{name}"), &args).await {
+            match crate::api::post::<OpOutcome, _>(format!("/api/op/{name}"), &args).await {
                 Ok(v) => {
-                    let msg = v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("done")
-                        .to_string();
-                    self.toasts.ok(msg);
+                    // Every class's save answers `message`; they share nothing
+                    // else (`AuxModelSaved`, `CandidateAliasSaved`, ...).
+                    self.toasts.ok(v.message.unwrap_or_else(|| "done".into()));
                     bump(self.reload);
                 }
                 Err(e) => self.toasts.err(e.to_string()),
@@ -784,7 +809,7 @@ impl PageCtx {
 /// `local_model_test` for one row, toasting what it found. A test that
 /// reached the model but failed answers 200 with `ok: false`, the error and
 /// a hint — that is bad news too, not a success.
-fn run_test(toasts: Toasts, class: Class, model_id: String, kind: String, testing: RwSignal<bool>) {
+fn run_test(toasts: Toasts, class: Class, model_id: String, testing: RwSignal<bool>) {
     if testing.get_untracked() {
         return;
     }
@@ -796,58 +821,33 @@ fn run_test(toasts: Toasts, class: Class, model_id: String, kind: String, testin
         _ => {}
     }
     spawn_local(async move {
-        let res = crate::api::post::<Value, _>("/api/op/local_model_test", &body).await;
+        let res = crate::api::post::<ModelTest, _>("/api/op/local_model_test", &body).await;
         testing.set(false);
-        let v = match res {
-            Ok(v) => v,
+        let found = match res {
+            Ok(found) => found,
             Err(e) => return toasts.err(e.to_string()),
         };
-        if v.get("ok").and_then(Value::as_bool) == Some(false) {
-            let err = v
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("load test failed");
-            let hint = v.get("hint").and_then(Value::as_str).unwrap_or_default();
-            return toasts.err(if hint.is_empty() {
-                err.to_string()
+        let ms = |latency_ms: u64| format!(" in {latency_ms} ms");
+        match found {
+            ModelTest::Failed(failed) => toasts.err(if failed.hint.is_empty() {
+                failed.error
             } else {
-                format!("{err} — {hint}")
-            });
+                format!("{} — {}", failed.error, failed.hint)
+            }),
+            ModelTest::Ladder(ladder) if !ladder.ok => toasts.err("load test failed"),
+            ModelTest::Ladder(_) => toasts.ok(format!("{model_id}: loads and generates")),
+            ModelTest::Passed(passed) => toasts.ok(aux_row::passed(&model_id, &passed)),
+            ModelTest::ImagePassed(drew) => toasts.ok(format!(
+                "{model_id}: drew {}{} — {}",
+                drew.size,
+                ms(drew.latency_ms),
+                human_bytes(drew.bytes as u64)
+            )),
+            ModelTest::ChatPassed(passed) => toasts.ok(format!(
+                "{model_id}: loads and generates{}",
+                ms(passed.base.latency_ms)
+            )),
         }
-        let ms = v
-            .get("latency_ms")
-            .and_then(Value::as_u64)
-            .map(|ms| format!(" in {ms} ms"))
-            .unwrap_or_default();
-        toasts.ok(match class {
-            Class::Aux => {
-                let dims = v
-                    .get("dimensions")
-                    .and_then(Value::as_u64)
-                    .map(|d| format!(" ({d} dimensions)"))
-                    .unwrap_or_default();
-                let verb = if kind == "rerank" {
-                    "reranks"
-                } else {
-                    "embeds"
-                };
-                format!("{model_id}: loads and {verb}{dims}{ms}")
-            }
-            Class::Image => {
-                let bytes = v
-                    .get("bytes")
-                    .and_then(Value::as_u64)
-                    .map(human_bytes)
-                    .unwrap_or_else(|| "no image".into());
-                let size = v.get("size").and_then(Value::as_str).unwrap_or_default();
-                format!("{model_id}: drew {size}{ms} — {bytes}")
-            }
-            _ => v
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("{model_id}: loads and generates{ms}")),
-        });
     });
 }
 
@@ -1290,7 +1290,7 @@ fn group_actions(
         Class::Aux => view! {
             <button
                 class="btn ghost sm"
-                title="Wire up an embedding or rerank GGUF that is already in the aux models dir"
+                title="Wire up an embedding, rerank or decision GGUF that is already in the aux models dir; Fill from plan reads its header"
                 on:click=move |_| editors.aux.set(Some(blank_aux_model()))
             >
                 "New"
@@ -1503,7 +1503,6 @@ fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
     let id = r.id;
     let enabled = r.enabled;
     let mid = StoredValue::new(r.model_id.clone());
-    let kind = StoredValue::new(r.kind.clone());
     let name_for_delete = StoredValue::new(r.name.clone());
     let hue = hue_for(&r.name);
     let testing = RwSignal::new(false);
@@ -1621,7 +1620,11 @@ fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
         v
     });
 
-    let test = class.probe().map(|probe| {
+    let probe = match class {
+        Class::Aux => Some(aux_row::probe_of(&r.kind)),
+        other => other.probe(),
+    };
+    let test = probe.map(|probe| {
         view! {
             <button
                 class="btn sm"
@@ -1633,7 +1636,7 @@ fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
                 } else {
                     "Enable it first: a disabled model is not served, so there is nothing to test".to_string()
                 }
-                on:click=move |_| run_test(page.toasts, class, mid.get_value(), kind.get_value(), testing)
+                on:click=move |_| run_test(page.toasts, class, mid.get_value(), testing)
             >
                 {move || if testing.get() { "Testing…" } else { "Test" }}
             </button>
@@ -1647,6 +1650,7 @@ fn ModelRow(r: Row, page: PageCtx) -> impl IntoView {
                 <span class="type-badge" title=r.kind_title.clone()>
                     {r.kind.clone()}
                 </span>
+                {r.licence.clone().map(|chip| view! { <licence::LicenceChip chip=*chip/> })}
                 {(!r.note.is_empty()).then(|| view! { <span class="dim cell-note">{r.note.clone()}</span> })}
             </td>
             <td class="clip mono-sm dim" title=r.file_title.clone()>

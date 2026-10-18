@@ -56,12 +56,12 @@ pub fn parse_headers(raw: &str) -> Result<Vec<(String, String)>, String> {
 /// A host → secret map with every value replaced by [`REDACTED`] — which hosts
 /// have a token, never what it is. The `forge_tokens` setting's read shape on
 /// every surface (container-builds §7).
-pub fn redact_map(map: &std::collections::BTreeMap<String, String>) -> Value {
-    Value::Object(
-        map.keys()
-            .map(|host| (host.clone(), Value::from(REDACTED)))
-            .collect(),
-    )
+pub fn redact_map(
+    map: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    map.keys()
+        .map(|host| (host.clone(), REDACTED.to_string()))
+        .collect()
 }
 
 /// Render pairs back out with their values redacted, in the same
@@ -252,13 +252,13 @@ pub(super) fn parse_upstream_kind(s: &str) -> Result<UpstreamKind, String> {
     }
 }
 
-/// `target` as the tools spell it (`chat` | `aux` | `audio`, plus the old
-/// `embed` for aux) to a class, or `None` when absent.
+/// `target` as the tools spell it (`chat` | `aux` | `audio` | `image`; the old
+/// `embed` for aux is refused) to a class, or `None` when absent.
 pub(crate) fn parse_class_target(target: Option<&str>) -> Result<Option<Class>, String> {
     match target.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(None),
         Some("chat") => Ok(Some(Class::Chat)),
-        Some("aux") | Some("embed") => Ok(Some(Class::Aux)),
+        Some("aux") => Ok(Some(Class::Aux)),
         Some("audio") => Ok(Some(Class::Audio)),
         Some("image") => Ok(Some(Class::Image)),
         Some(other) => Err(format!("unknown target '{other}' (chat|aux|audio|image)")),
@@ -409,7 +409,7 @@ pub(super) fn candidate_alias_name_taken(
     if snap
         .aux_models
         .iter()
-        .any(|m| snap.aux_public_name(&m.model_id).eq_ignore_ascii_case(name))
+        .any(|m| snap.aux_public_name(m).eq_ignore_ascii_case(name))
     {
         return Some("an aux model");
     }

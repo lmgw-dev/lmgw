@@ -21,9 +21,13 @@
 //! [`ChatRepo::save_reply`] / [`ChatRepo::save_continue`], under the lock the
 //! turn's ticket holds.
 //!
-//! Every message write of a stored thread that went through marks the thread
-//! ([`marked`]): the dashboard's `chat` frame names it, so a Chat page open
-//! on it reads its messages again (`chat_feed::dashboard`).
+//! Every message write of a stored thread records its `message.*` change in
+//! the change feed's table, in the write's own transaction (the store's
+//! `feed::record_messages`, client-apps design §2.2, WP10), `by` its author;
+//! once it went through, the seam wakes the open feeds ([`recorded`]). A
+//! device's feed renders the messages whole, and the dashboard's `chat`
+//! frame names the thread, so a Chat page open on it reads its messages
+//! again (`chat_feed::dashboard`). A temporary thread records nothing (L7).
 
 use super::chat_caller::Caller;
 use super::chat_live::{HistoryWrite, SaveGuard};
@@ -81,13 +85,13 @@ fn gone() -> GatewayError {
     GatewayError::NotFound("this temporary chat was discarded or kept meanwhile".into())
 }
 
-/// A message write of stored thread `thread_id`, passed through: once it
-/// went through, the thread is marked for the dashboard's `chat` frame
-/// (`chat_feed::Feed::messages_changed`). A write that matched nothing marks
-/// it too; the page that reads it again finds it as it was.
-fn marked<T>(s: &AppState, thread_id: i64, written: DbResult<T>) -> DbResult<T> {
+/// A message write of a stored thread, passed through: it recorded its
+/// `message.*` change in its own transaction, so once it went through the
+/// open feeds read the table (`chat_feed::Feed::wake`). A write that
+/// matched nothing recorded nothing, and the wake finds nothing new.
+fn recorded<T>(s: &AppState, written: DbResult<T>) -> DbResult<T> {
     if written.is_ok() {
-        s.chat_feed.messages_changed(thread_id);
+        s.chat_feed.wake();
     }
     written
 }
@@ -484,7 +488,6 @@ impl ChatRepo {
                         s.chat_live.delete_failed(&mut held);
                         return Err(e);
                     }
-                    s.chat_feed.threads_deleted(&[id]);
                     s.chat_feed.wake();
                     super::chat_tasks::threads_gone(&s);
                 }
@@ -580,9 +583,8 @@ impl ChatRepo {
                     &caller.decider(),
                 )
                 .ok_or_else(gone),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
                 store::send_user_message_by(
                     &s.db,
                     thread_id,
@@ -623,9 +625,8 @@ impl ChatRepo {
                     &caller.decider(),
                 )
                 .ok_or_else(gone),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
                 store::append_user_message_by(
                     &s.db,
                     thread_id,
@@ -654,9 +655,8 @@ impl ChatRepo {
         self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => s.chat_temp.append_reply(thread_id, r).ok_or_else(gone),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
                 store::append_chat_reply_by(&s.db, thread_id, r, Some(&caller.named())).await,
             ),
         }
@@ -677,9 +677,8 @@ impl ChatRepo {
                 .chat_temp
                 .decide_approvals(thread_id, verdicts, by)
                 .ok_or_else(gone),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
                 store::claim_approvals(&s.db, thread_id, verdicts, by).await,
             ),
         }
@@ -687,7 +686,8 @@ impl ChatRepo {
 
     /// Close the approved calls `approved` of reply `id` whose turn never
     /// started (client-apps design §6.6, `store::close_unrun`); the bound
-    /// sessions are woken.
+    /// sessions are woken. The gateway's own write: its `message.updated`
+    /// names no author.
     pub(super) async fn close_never_run(
         self,
         s: &AppState,
@@ -698,11 +698,7 @@ impl ChatRepo {
         let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.close_never_run(thread_id, id, approved)),
-            Self::Db => marked(
-                s,
-                thread_id,
-                store::close_unrun(&s.db, thread_id, id, approved).await,
-            ),
+            Self::Db => recorded(s, store::close_unrun(&s.db, thread_id, id, approved).await),
         }
     }
 
@@ -721,9 +717,8 @@ impl ChatRepo {
         self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => Ok(s.chat_temp.resume_reply(thread_id, id, r)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
                 store::resume_chat_reply(&s.db, thread_id, id, r, Some(&caller.named())).await,
             ),
         }
@@ -747,21 +742,23 @@ impl ChatRepo {
         self.still_reachable(s, caller, thread_id).await?;
         match self {
             Self::Temp => Ok(s.chat_temp.continue_reply(thread_id, id, prefix, r)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::continue_chat_reply(&s.db, thread_id, id, prefix, r).await,
+                store::continue_chat_reply(&s.db, thread_id, id, prefix, r, Some(&caller.named()))
+                    .await,
             ),
         }
     }
 
-    /// Rewrite a message in place; `false` when it is not in this thread.
+    /// Rewrite a message in place, as `by`; `false` when it is not in this
+    /// thread.
     pub(super) async fn update_message(
         self,
         s: &AppState,
         thread_id: i64,
         id: i64,
         m: &ChatMessageUpdate,
+        by: &Caller,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
         // The gated reply may go or lose its calls with this: a session
@@ -769,10 +766,9 @@ impl ChatRepo {
         let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.update_message(thread_id, id, m)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::update_chat_message(&s.db, thread_id, id, m).await,
+                store::update_chat_message(&s.db, thread_id, id, m, Some(&by.named())).await,
             ),
         }
     }
@@ -799,17 +795,25 @@ impl ChatRepo {
             Self::Temp => Ok(s
                 .chat_temp
                 .rewrite_user_message(thread_id, id, content, kb_refs)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::rewrite_chat_user_message(&s.db, thread_id, id, content, kb_refs).await,
+                store::rewrite_chat_user_message(
+                    &s.db,
+                    thread_id,
+                    id,
+                    content,
+                    kb_refs,
+                    Some(&caller.named()),
+                )
+                .await,
             ),
         }
     }
 
     /// Set a message's `kb_refs` and its stored retrieval (`context`)
     /// together; `false` when it is not in this thread. Not a rewrite of the
-    /// history: a turn's own retrieval stores itself with this.
+    /// history: a turn's own retrieval stores itself with this, `by` the
+    /// turn's starter.
     pub(super) async fn set_message_knowledge(
         self,
         s: &AppState,
@@ -817,26 +821,35 @@ impl ChatRepo {
         id: i64,
         kb_refs: &[i64],
         context: Option<&ChatContext>,
+        by: &Caller,
     ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s
                 .chat_temp
                 .set_message_knowledge(thread_id, id, kb_refs, context)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::set_chat_message_knowledge(&s.db, thread_id, id, kb_refs, context).await,
+                store::set_chat_message_knowledge(
+                    &s.db,
+                    thread_id,
+                    id,
+                    kb_refs,
+                    context,
+                    Some(&by.named()),
+                )
+                .await,
             ),
         }
     }
 
-    /// Delete one message and its attachments; `false` when it is not in
-    /// this thread.
+    /// Delete one message and its attachments, as `by`; `false` when it is
+    /// not in this thread.
     pub(super) async fn delete_message(
         self,
         s: &AppState,
         thread_id: i64,
         id: i64,
+        by: &Caller,
     ) -> DbResult<bool> {
         let _write = s.chat_live.write(thread_id).await;
         // The gated reply may go or lose its calls with this: a session
@@ -844,36 +857,38 @@ impl ChatRepo {
         let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::delete_chat_message(&s.db, thread_id, id).await,
+                store::delete_chat_message(&s.db, thread_id, id, Some(&by.named())).await,
             ),
         }
     }
 
     /// Annotate a spoken reply (chat-voice design §8.3): its `voice` alone.
     /// Not a rewrite of the history: no generation moves, no turn is
-    /// cancelled. `false` when it is not in this thread.
+    /// cancelled. `false` when it is not in this thread. `by`: the session
+    /// whose journal writes it.
     pub(super) async fn set_message_voice(
         self,
         s: &AppState,
         thread_id: i64,
         id: i64,
         voice: &MessageVoice,
+        by: &Caller,
     ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s.chat_temp.set_message_voice(thread_id, id, voice)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::set_chat_message_voice(&s.db, thread_id, id, voice).await,
+                store::set_chat_message_voice(&s.db, thread_id, id, voice, Some(&by.named())).await,
             ),
         }
     }
 
     /// Cut a spoken reply to what was heard (§8.3), under the thread's
-    /// conditional write `_proof` (`LiveTurns::write_if`).
+    /// conditional write `_proof` (`LiveTurns::write_if`). `by`: as for
+    /// [`Self::set_message_voice`].
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn cut_reply(
         self,
         s: &AppState,
@@ -882,45 +897,47 @@ impl ChatRepo {
         id: i64,
         content: &str,
         voice: &MessageVoice,
+        by: &Caller,
     ) -> DbResult<bool> {
         match self {
             Self::Temp => Ok(s.chat_temp.cut_reply(thread_id, id, content, voice)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::cut_chat_reply(&s.db, thread_id, id, content, voice).await,
+                store::cut_chat_reply(&s.db, thread_id, id, content, voice, Some(&by.named()))
+                    .await,
             ),
         }
     }
 
     /// Delete a spoken reply nobody heard (§8.3), under the thread's
-    /// conditional write `_proof`.
+    /// conditional write `_proof`. `by`: as for [`Self::set_message_voice`].
     pub(super) async fn delete_unheard(
         self,
         s: &AppState,
         _proof: &HistoryWrite,
         thread_id: i64,
         id: i64,
+        by: &Caller,
     ) -> DbResult<bool> {
         let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.delete_message(thread_id, id)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::delete_chat_message(&s.db, thread_id, id).await,
+                store::delete_chat_message(&s.db, thread_id, id, Some(&by.named())).await,
             ),
         }
     }
 
     /// Delete every message after `id` (and `id` itself when `inclusive`),
-    /// with their attachments; how many went.
+    /// with their attachments, as `by`; how many went.
     pub(super) async fn truncate(
         self,
         s: &AppState,
         thread_id: i64,
         id: i64,
         inclusive: bool,
+        by: &Caller,
     ) -> DbResult<u64> {
         let _write = s.chat_live.write(thread_id).await;
         // The gated reply may go or lose its calls with this: a session
@@ -928,10 +945,10 @@ impl ChatRepo {
         let _wake = WakeApprovals(s, thread_id);
         match self {
             Self::Temp => Ok(s.chat_temp.truncate(thread_id, id, inclusive)),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
-                store::truncate_chat_messages(&s.db, thread_id, id, inclusive).await,
+                store::truncate_chat_messages(&s.db, thread_id, id, inclusive, Some(&by.named()))
+                    .await,
             ),
         }
     }
@@ -949,9 +966,8 @@ impl ChatRepo {
     ) -> DbResult<Option<store::mcp_tasks::Delivered>> {
         match self {
             Self::Temp => Ok(None),
-            Self::Db => marked(
+            Self::Db => recorded(
                 s,
-                thread_id,
                 store::mcp_tasks::deliver_result(
                     &s.db,
                     id,
@@ -1115,7 +1131,7 @@ impl ChatRepo {
 }
 
 #[cfg(test)]
-mod marks_tests;
+mod records_tests;
 
 #[cfg(test)]
 mod tests {

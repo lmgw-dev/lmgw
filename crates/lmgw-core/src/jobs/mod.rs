@@ -22,6 +22,7 @@
 //! units total (when knowable), and what stage it is in.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -29,6 +30,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::erased::Erased;
 use crate::state::SharedState;
 use crate::store;
 
@@ -76,10 +78,14 @@ pub enum JobKind {
     /// Re-embed a knowledge base (§9.2): key `kb:<id>` too — the knowledge
     /// ops keep the two kinds from running on one base at once.
     KbReembed,
+    /// A Decision lab set run (labs-store design §3.3): key `lab-batch:<id>`,
+    /// so one live job per run. The items and their answers are the lab
+    /// store's; the job only answers them, and its row may be pruned.
+    LabBatch,
 }
 
 impl JobKind {
-    pub const ALL: [JobKind; 11] = [
+    pub const ALL: [JobKind; 12] = [
         Self::HfDownload,
         Self::Ingest,
         Self::ReEmbed,
@@ -91,6 +97,7 @@ impl JobKind {
         Self::Benchmark,
         Self::KbIngest,
         Self::KbReembed,
+        Self::LabBatch,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -111,6 +118,9 @@ impl JobKind {
             Self::Benchmark => lmgw_api_types::bench_ops::JOB_KIND,
             Self::KbIngest => "kb_ingest",
             Self::KbReembed => "kb_reembed",
+            // `lmgw_api_types::decision_lab::batch::JOB_KIND`, which the
+            // dashboard filters the live feed by.
+            Self::LabBatch => lmgw_api_types::decision_lab::batch::JOB_KIND,
         }
     }
 
@@ -263,6 +273,7 @@ pub struct JobCtx {
     pub state: SharedState,
     pub id: i64,
     cancel: Arc<AtomicBool>,
+    abort: tokio::sync::watch::Receiver<bool>,
 }
 
 impl JobCtx {
@@ -282,9 +293,33 @@ impl JobCtx {
         self.cancel.clone()
     }
 
+    /// Resolves once [`JobManager::request_abort`] asked this job to drop
+    /// the work it has in flight, not only to stop taking more: what an
+    /// executor whose calls can hang races them against. Cancellation is
+    /// still the executor's to carry out; an abort raises the cancel flag
+    /// too.
+    pub fn aborted(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut rx = self.abort.clone();
+        async move {
+            if rx.wait_for(|a| *a).await.is_err() {
+                // The job is no longer live: nothing will ask any more.
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
     pub async fn progress(&self, p: JobProgress) {
         let state = self.state.clone();
-        state.jobs.note_progress(&state, self.id, p).await;
+        state.jobs.note_progress(&state, self.id, p, false).await;
+    }
+
+    /// [`Self::progress`] that bypasses the [`PUBLISH_INTERVAL`] throttle: the
+    /// frame goes out at once. For news that must not wait for the next
+    /// report, which a hanging call may never make (a raised cancel flag);
+    /// the caller sends it once per piece of news.
+    pub async fn progress_now(&self, p: JobProgress) {
+        let state = self.state.clone();
+        state.jobs.note_progress(&state, self.id, p, true).await;
     }
 
     /// Re-report the job's **current** counters with a new `detail`.
@@ -314,12 +349,16 @@ impl JobCtx {
     /// holds, so cancellation stays exercisable.
     #[cfg(test)]
     pub(crate) fn detached(state: SharedState, id: i64, cancel: Arc<AtomicBool>) -> Self {
-        Self { state, id, cancel }
+        Self {
+            state,
+            id,
+            cancel,
+            abort: tokio::sync::watch::channel(false).1,
+        }
     }
 }
 
 /// What a job kind actually does.
-#[async_trait::async_trait]
 pub trait JobExecutor: Send + Sync + 'static {
     fn kind(&self) -> JobKind;
 
@@ -330,12 +369,13 @@ pub trait JobExecutor: Send + Sync + 'static {
 
     /// `input` is the payload passed to [`spawn`], the executor's own type.
     /// Returning `Err` marks the job failed with that message.
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String>;
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>>;
 }
 
 struct Live {
     view: JobView,
     cancel: Arc<AtomicBool>,
+    abort: tokio::sync::watch::Sender<bool>,
     last_publish: Instant,
 }
 
@@ -368,6 +408,7 @@ impl JobManager {
         m.register(Arc::new(crate::bench::BenchmarkExecutor));
         m.register(Arc::new(crate::knowledge::ingest::KbIngestExecutor));
         m.register(Arc::new(crate::knowledge::reembed::KbReembedExecutor));
+        m.register(Arc::new(crate::labs::batch::LabBatchExecutor));
         m
     }
 
@@ -432,18 +473,43 @@ impl JobManager {
         }
     }
 
+    /// Whether job `id`'s cancel flag is up; `None` when it is not running
+    /// here.
+    pub fn cancel_requested(&self, id: i64) -> Option<bool> {
+        self.live
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|l| l.cancel.load(Ordering::Relaxed))
+    }
+
+    /// Raise the cancel flag and ask the job to drop the work it has in
+    /// flight ([`JobCtx::aborted`]); `false` when no job with that id is
+    /// running here. An executor that never races its work against it only
+    /// sees the cancel.
+    pub fn request_abort(&self, id: i64) -> bool {
+        match self.live.lock().unwrap().get(&id) {
+            Some(l) => {
+                l.cancel.store(true, Ordering::Relaxed);
+                l.abort.send_replace(true);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn broadcast(&self, state: &SharedState) {
         state.telemetry.jobs(self.live());
     }
 
-    async fn note_progress(&self, state: &SharedState, id: i64, p: JobProgress) {
+    async fn note_progress(&self, state: &SharedState, id: i64, p: JobProgress, force: bool) {
         let due = {
             let mut live = self.live.lock().unwrap();
             let Some(entry) = live.get_mut(&id) else {
                 return;
             };
             entry.view.apply(&p);
-            let due = entry.last_publish.elapsed() >= PUBLISH_INTERVAL;
+            let due = force || entry.last_publish.elapsed() >= PUBLISH_INTERVAL;
             if due {
                 entry.last_publish = Instant::now();
             }
@@ -468,7 +534,7 @@ impl JobManager {
             p.detail = detail;
             p
         };
-        self.note_progress(state, id, p).await;
+        self.note_progress(state, id, p, false).await;
     }
 
     async fn persist_progress(&self, state: &SharedState, id: i64, p: &JobProgress) {
@@ -534,6 +600,7 @@ pub async fn spawn(
         .ok_or_else(|| format!("job {id} vanished between insert and start"))?;
 
     let cancel = Arc::new(AtomicBool::new(false));
+    let (abort, abort_rx) = tokio::sync::watch::channel(false);
     exec.going_live(state, id);
     {
         let mut live = state.jobs.live.lock().unwrap();
@@ -542,6 +609,7 @@ pub async fn spawn(
             Live {
                 view: JobView::from_row(&row),
                 cancel: cancel.clone(),
+                abort,
                 // Backdated so the executor's first progress report publishes
                 // at once — that is the one carrying the total.
                 last_publish: Instant::now()
@@ -558,6 +626,7 @@ pub async fn spawn(
             state: st.clone(),
             id,
             cancel,
+            abort: abort_rx,
         };
         let (status, result, error) = match exec.run(ctx, input).await {
             Ok(JobOutcome::Done(v)) => (

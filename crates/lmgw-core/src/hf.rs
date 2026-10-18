@@ -29,13 +29,13 @@ pub const HF_BASE: &str = "https://huggingface.co";
 /// ([`accepted_extensions`]); everything else about a transfer is identical.
 pub const TARGETS: [&str; 4] = ["chat", "aux", "audio", "image"];
 
-/// Canonical target name, accepting the pre-rename `embed` spelling for the
-/// aux container. Anything else is an error rather than a silent fall back to
-/// `chat`: a typo used to write the file into the wrong models dir and only
-/// show up as a missing GGUF at apply time.
+/// Canonical target name. Anything unknown (the pre-rename `embed` for `aux`
+/// included) is an error naming the valid targets rather than a silent fall
+/// back to `chat`: a typo used to write the file into the wrong models dir and
+/// only show up as a missing GGUF at apply time.
 pub fn normalize_target(target: &str) -> Result<&'static str, String> {
     match target.trim() {
-        "embed" | "aux" => Ok("aux"),
+        "aux" => Ok("aux"),
         "chat" => Ok("chat"),
         "audio" => Ok("audio"),
         "image" => Ok("image"),
@@ -81,7 +81,7 @@ pub fn accepted_extensions_phrase(target: &str) -> String {
 /// the chat router's dir.
 pub fn models_dir_for_target(settings: &crate::config::Settings, target: &str) -> String {
     match target {
-        "aux" | "embed" => settings.aux_router.models_dir.clone(),
+        "aux" => settings.aux_router.models_dir.clone(),
         "audio" => settings.audio.models_dir.clone(),
         "image" => settings.image.models_dir.clone(),
         _ => settings.router.models_dir.clone(),
@@ -93,7 +93,7 @@ pub fn models_dir_for_target(settings: &crate::config::Settings, target: &str) -
 /// Where the dashboard sets that directory: its Settings → Runtimes section.
 pub fn runtimes_section(target: &str) -> &'static str {
     match target {
-        "aux" | "embed" => "Aux",
+        "aux" => "Aux",
         "audio" => "Audio",
         "image" => "Image",
         _ => "Chat",
@@ -102,7 +102,7 @@ pub fn runtimes_section(target: &str) -> &'static str {
 
 pub fn models_dir_setting(target: &str) -> &'static str {
     match target {
-        "aux" | "embed" => "aux_router.models_dir",
+        "aux" => "aux_router.models_dir",
         "audio" => "audio.models_dir",
         "image" => "image.models_dir",
         _ => "router.models_dir",

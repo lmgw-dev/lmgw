@@ -11,12 +11,14 @@
 //! Children: [`protocol`] (the GA event types), [`merge`] (the session object
 //! and `session.update`), [`resolve`] (which alias answers), [`ids`],
 //! `handshake` (header rules and limits), `policy`, `session` (the core's
-//! loop), `inbox` (the socket's reader), `conversation` (the items),
+//! loop), `link` (the transport seam: the link's reader, its sending half
+//! and its closes, and the WebSocket behind them), `conversation` (the items),
 //! [`render`] (items → the chat request), `lifecycle` (one response at a
 //! time), `responder` (a response's model call), `output` (a response's GA
 //! event sequence), `writer` and `liveness` (pings, their round trip, and
 //! the end of a session nobody reads), `thread` (a session bound to a Chat
-//! thread, chat-voice design §8). Audio in:
+//! thread, chat-voice design §8), `calls` (WebRTC calls: the media plane and
+//! a call's Opus in and out, calls design §3 to §5). Audio in:
 //! [`asr`] (which ASR alias transcribes), `audio_in` (the input buffer and
 //! its turn detector), `input` (the buffer's events in the core),
 //! `transcribe` (an ASR call per committed turn), `scorer` (Smart Turn on
@@ -34,13 +36,11 @@ use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json};
+use axum::response::Response;
+use axum::Extension;
 use serde::Deserialize;
 
-use crate::ingress::ClientProto;
 use crate::policy::SlotHandover;
-use crate::principal::Principal;
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 
@@ -48,15 +48,16 @@ pub mod advertise;
 pub mod asr;
 pub mod audio;
 mod audio_in;
+pub mod calls;
 pub mod clauses;
 mod conversation;
 pub(crate) mod expressive;
 mod handshake;
 pub mod heard;
 pub mod ids;
-mod inbox;
 mod input;
 mod lifecycle;
+mod link;
 mod liveness;
 mod mcp_tools;
 pub mod merge;
@@ -89,10 +90,13 @@ pub use tts::is_tts_alias;
 /// credential to (§10.1).
 pub const PATH: &str = "/v1/realtime";
 
-/// The handshake's query string. `call_id`, which the Python SDK sometimes
-/// appends, belongs to the sideband surface and is ignored.
+pub use calls::route::{is_hangup, PATH as CALLS_PATH};
+
+/// The handshake's query string.
 // `JsonSchema`-derived so the API docs describe the parameter from this
-// type rather than restating it. Sideband: realtime design §19.
+// type rather than restating it. Shared with the WebRTC calls' POST
+// (realtime calls design §2.2), which reads the same parameters with the
+// same rules ([`RealtimeQuery::binding`], [`RealtimeQuery::sideband`]).
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct RealtimeQuery {
     /// The chat model: a `realtime.model_map` name, an OpenAI Realtime name
@@ -111,17 +115,50 @@ pub(crate) struct RealtimeQuery {
     /// the thread's aliases pass its scope and budget first.
     #[serde(default)]
     chat_thread: Option<i64>,
-    /// With `chat_thread`: whether this bind may take the thread from a
-    /// session already bound to it. Left out, it does — the other session
-    /// closes with 4000, naming who took it. `never`: it does not — while
-    /// another session is bound to the thread the upgrade is refused, 409
-    /// chat_thread_bound naming who holds it ("voice is in use on device
-    /// 'phone'"), and nothing is taken over. For a client's own automatic
-    /// rebinds (after a conversation moved to a new thread), so it never
-    /// takes the voice from another device that followed the same move; a
-    /// user's explicit choice to talk here binds without it.
+    /// A voice mode bound to an ongoing folder's current thread: the bind
+    /// decides the thread by the rules of `POST
+    /// /chat/api/folders/{id}/current` and binds it in one step, under the
+    /// folder's lock — the current thread, or a new one from the folder's
+    /// defaults when there is none, when it is out of the caller's reach,
+    /// when it idled past the folder's idle minutes, or with `new=true`
+    /// (unless it has no message yet). A new thread is recorded as
+    /// `folder.current` on the Chat feed with its reason. The thread bound
+    /// is reported in `session.lmgw.resolved.chat_thread`, and is then as
+    /// with `chat_thread`. Refused beside `chat_thread` (400 invalid_value)
+    /// and beside `model` (400 owned_by_thread); 404 chat_folder_not_found
+    /// for a folder the caller cannot see, 409 not_ongoing for one that is
+    /// no ongoing conversation, 409 folder_no_model for one whose defaults
+    /// name no model, then the thread's own refusals.
+    #[serde(default)]
+    chat_folder: Option<i64>,
+    /// With `chat_folder`: start a new conversation — a new thread unless
+    /// the folder's current one has no message yet. Refused without
+    /// `chat_folder` (400 invalid_value).
+    #[serde(default)]
+    new: Option<bool>,
+    /// With `chat_thread` or `chat_folder`: whether this bind may take the
+    /// thread from a session already bound to it. Left out, it does — the
+    /// other session closes (a WebSocket with 4000), naming who took it.
+    /// `never`: it does not — while another session is bound to the thread
+    /// the request is refused, 409 chat_thread_bound naming who holds it
+    /// ("voice is in use on device 'phone'", and as `error.held_by`), and
+    /// nothing is taken over; a WebRTC call whose thread is taken between
+    /// its POST and its channel's open ends with lmgw.session.closed
+    /// {kind: thread_bound}. For a client's own automatic rebinds (after a
+    /// conversation moved to a new thread), so it never takes the voice
+    /// from another device that followed the same move; a user's explicit
+    /// choice to talk binds without it. `ask` is a WebRTC call's own (POST
+    /// /v1/realtime/calls): a thread held when the call's channel opens is
+    /// asked about, lmgw.session.bind_pending; on GET /v1/realtime it is
+    /// 400 invalid_value. Without `chat_thread` or `chat_folder`, 400
+    /// invalid_value.
     #[serde(default)]
     takeover: Option<Takeover>,
+    /// OpenAI's sideband connection: a server-side WebSocket attached to a
+    /// WebRTC call's session. lmgw serves none, so it is refused, 400
+    /// sideband_unsupported, rather than opening an unrelated session.
+    #[serde(default)]
+    call_id: Option<String>,
 }
 
 /// `?takeover=`: whether a bind may take its thread from another session.
@@ -132,6 +169,70 @@ pub(crate) enum Takeover {
     Always,
     /// Never: refuse while another session is bound to the thread.
     Never,
+    /// Ask first (WebRTC calls only, realtime calls design §2.8): a thread
+    /// held when the call's channel opens makes the call wait,
+    /// `lmgw.session.bind_pending`, for the client's
+    /// `lmgw.session.take_over` or the holder's end.
+    Ask,
+}
+
+impl RealtimeQuery {
+    /// `?call_id=` refused (realtime calls design §2.7): with calls served,
+    /// a sideband attach that silently opened an unrelated session would be
+    /// a trap.
+    pub(crate) fn sideband(&self) -> Result<(), Response> {
+        match &self.call_id {
+            None => Ok(()),
+            Some(_) => Err(handshake::http_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "sideband_unsupported",
+                "lmgw serves no sideband connection to a call: call_id attaches a server-side \
+                 WebSocket to a WebRTC call's session in OpenAI's API, which lmgw does not \
+                 serve — leave call_id out to open a session of its own"
+                    .into(),
+            )),
+        }
+    }
+
+    /// What the query binds, and how: `None` for an unbound session. The
+    /// parameter rules (realtime calls design §2.5), each 400
+    /// `invalid_value`: `chat_folder` beside `chat_thread`, `new` without
+    /// `chat_folder`, `takeover` with neither. `model` beside a target is
+    /// the bind's own check (`owned_by_thread`, after the capability).
+    pub(crate) fn binding(&self) -> Result<Option<(thread::Target, Takeover)>, thread::Refused> {
+        let invalid = |message: &str| {
+            thread::Refused::new(StatusCode::BAD_REQUEST, "invalid_value", message.into())
+        };
+        let target = match (self.chat_thread, self.chat_folder) {
+            (Some(_), Some(_)) => {
+                return Err(invalid(
+                    "chat_thread and chat_folder cannot both be given: bind a thread, or a \
+                     folder's current thread",
+                ))
+            }
+            (Some(id), None) => Some(thread::Target::Thread(id)),
+            (None, Some(id)) => Some(thread::Target::Folder {
+                id,
+                new: self.new.unwrap_or(false),
+            }),
+            (None, None) => None,
+        };
+        if self.new.is_some() && self.chat_folder.is_none() {
+            return Err(invalid(
+                "new applies to a session bound to a folder's current thread: give chat_folder \
+                 with it, or leave it out",
+            ));
+        }
+        match (target, self.takeover) {
+            (None, Some(_)) => Err(invalid(
+                "takeover applies to a session bound to a chat thread: give chat_thread or \
+                 chat_folder with it, or leave it out",
+            )),
+            (None, None) => Ok(None),
+            (Some(t), takeover) => Ok(Some((t, takeover.unwrap_or(Takeover::Always)))),
+        }
+    }
 }
 
 /// `GET /v1/realtime` — the handshake.
@@ -148,60 +249,62 @@ pub(crate) async fn upgrade(
         Ok(ws) => ws,
         Err(why) => return handshake::upgrade_required(&why.body_text()),
     };
-    if handshake::is_beta_client(&headers) {
-        return handshake::http_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "beta_protocol_unsupported",
-            "lmgw speaks the GA Realtime protocol, and `OpenAI-Beta: realtime=v1` marks a beta \
-             client, whose events are not wire-compatible — use the SDK's GA client \
-             (`client.realtime.connect()` in openai-python) and drop the header"
-                .into(),
-        );
+    let door = handshake::Door::Upgrade;
+    if let Some(refused) = handshake::door(&state, &ctx, &headers, door).await {
+        return refused;
     }
-    // With **Require API key** off, an anonymous upgrade is legal — and CORS
-    // is permissive, so any page the owner visits could open a voice session
-    // against their models. A page announces itself with `Origin`; an SDK
-    // client sends none and is unaffected (§10.1).
-    if ctx.principal == Principal::Anonymous {
-        if let Some(origin) = handshake::foreign_origin(&headers) {
-            let e = crate::error::GatewayError::Refused {
-                status: 403,
-                code: "cross_origin_refused",
-                message: format!(
-                    "an anonymous realtime session may only be opened from this gateway's own \
-                     origin, and this upgrade came from '{origin}' — present an API key (the \
-                     openai-insecure-api-key subprotocol in a browser), or open it from the \
-                     dashboard"
-                ),
-            };
-            crate::proxy::record_middleware_refusal(&state, &ctx, &e, ClientProto::Realtime).await;
-            return (e.http_status(), Json(e.to_openai_json())).into_response();
-        }
-    }
-    let (requested, chat_thread, takeover) = match query {
-        Ok(Query(q)) => (q.model, q.chat_thread, q.takeover),
-        Err(why) => {
+    let query = match handshake::query(query) {
+        Ok(q) => q,
+        Err(refused) => return refused,
+    };
+    let binding = match query.binding() {
+        Ok(b) => b,
+        Err(refused) => return refused.into_response(),
+    };
+    let requested = query.model;
+
+    // A session bound to a chat thread starts bound (chat-voice §8.1): its
+    // models are the thread's, and realtime's own resolution is skipped.
+    // The checks and the bind run back to back, before the 101 (realtime
+    // calls design §2.8).
+    if let Some((target, takeover)) = binding {
+        if takeover == Takeover::Ask {
             return handshake::http_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 "invalid_value",
-                format!("the query string did not parse: {}", why.body_text()),
-            )
+                "takeover=ask applies to WebRTC calls: a WebSocket session binds before its \
+                 upgrade, with no channel to ask on — leave takeover out to take the thread \
+                 over, or send never"
+                    .into(),
+            );
         }
-    };
-
-    // A session bound to a chat thread starts bound (chat-voice §8.1): its
-    // models are the thread's, and realtime's own resolution is skipped.
-    if let Some(id) = chat_thread {
-        let takeover = takeover != Some(Takeover::Never);
-        let bind = match thread::handshake(&state, &ctx, id, requested.is_some(), takeover).await {
-            Ok(b) => b,
-            Err(refused) => return refused,
+        let checked = thread::check(&state, &ctx, target, requested.is_some(), takeover);
+        let checked = match checked.await {
+            Ok(c) => c,
+            Err(refused) => return refused.into_response(),
         };
+        let bind = match thread::bind(&state, &ctx, checked, takeover).await {
+            Ok(thread::Outcome::Bound(b)) => *b,
+            // Only `ask` waits, and it is refused above.
+            Ok(thread::Outcome::Pending(p)) => {
+                tracing::error!(
+                    "realtime: a WebSocket bind of chat thread {} came back pending",
+                    p.thread_id()
+                );
+                return thread::Refused::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "the bind came back pending on a WebSocket".into(),
+                )
+                .into_response();
+            }
+            Err(refused) => return refused.into_response(),
+        };
+        let limits = Limits::from_settings(&state.snapshot().settings.realtime);
         let init = session::SessionInit {
             running: Some(state.stops.running_at(state.stops.at_or_now(ctx.served_at))),
-            limits: Limits::from_settings(&state.snapshot().settings.realtime),
+            transport: link::Transport::WebSocket(limits),
             state,
             ctx,
             requested_model: None,
@@ -210,60 +313,21 @@ pub(crate) async fn upgrade(
             speech: bind.speech,
             slot: slot.and_then(|Extension(h)| h.take()),
             bound: Some(bind.binding),
+            call: None,
         };
-        return open(ws, init);
+        return open(ws, limits, init);
     }
 
-    if takeover.is_some() {
-        return handshake::http_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "invalid_value",
-            "takeover applies to a session bound to a chat thread: give chat_thread with it, \
-             or leave it out"
-                .into(),
-        );
-    }
-    let snap = state.snapshot();
-    let chat = match resolve::resolve_chat(&snap, requested.as_deref()) {
-        Ok(r) => r,
-        Err(e) => {
-            // The row names what the client asked for, so "which model did
-            // it want" is answerable from Logs.
-            crate::proxy::record_request_failure(
-                &state,
-                &ctx,
-                ClientProto::Realtime.as_str(),
-                requested.as_deref().unwrap_or_default(),
-                None,
-                None,
-                std::time::Instant::now(),
-                &e,
-            )
-            .await;
-            return (e.http_status(), Json(e.to_openai_json())).into_response();
-        }
-    };
-    // No transcription model is named at the handshake: the default chain,
-    // which never refuses — a text session needs no ASR (§5.2).
-    let asr = match asr::resolve_asr(&state, None).await {
-        Ok(a) => a,
-        Err(e) => return (e.http_status(), Json(e.to_openai_json())).into_response(),
-    };
-    // The TTS setting and the voice a session starts with: also never a
-    // refusal — a text session never speaks (§5.3).
-    let speech = match session::speech::initial(&state).await {
-        Ok(s) => s,
-        Err(e) => return (e.http_status(), Json(e.to_openai_json())).into_response(),
-    };
-    if let Err(e) = policy::check_session(&state, &ctx, &chat, &asr, &speech.tts).await {
-        return (e.http_status(), Json(e.to_openai_json())).into_response();
-    }
+    let handshake::Unbound { chat, asr, speech } =
+        match handshake::unbound(&state, &ctx, requested.as_deref()).await {
+            Ok(u) => u,
+            Err(refused) => return refused,
+        };
 
     // Everything passed: the session takes the key's slot from the gate and
     // holds it until it ends (§10.3, `SlotHandover` says why the gate cannot).
     let slot = slot.and_then(|Extension(h)| h.take());
-    let limits = Limits::from_settings(&snap.settings.realtime);
+    let limits = Limits::from_settings(&state.snapshot().settings.realtime);
     let init = session::SessionInit {
         // Before the 101 (`SessionInit::running`).
         running: Some(state.stops.running_at(state.stops.at_or_now(ctx.served_at))),
@@ -274,20 +338,24 @@ pub(crate) async fn upgrade(
         asr,
         speech,
         slot,
-        limits,
+        transport: link::Transport::WebSocket(limits),
         bound: None,
+        call: None,
     };
-    open(ws, init)
+    open(ws, limits, init)
 }
 
-/// The 101, and the session on the upgraded socket.
-fn open(ws: WebSocketUpgrade, init: session::SessionInit) -> Response {
-    let limits = init.limits;
+/// The 101, bounded by `limits` (the session's transport's), and the
+/// session on the upgraded socket.
+fn open(ws: WebSocketUpgrade, limits: Limits, init: session::SessionInit) -> Response {
     ws.protocols([REALTIME_PROTOCOL])
         // Explicit, from the settings, so the ceilings are visible ones
         // rather than tungstenite's built-in defaults (§10.4).
         .max_message_size(limits.max_message)
         .max_frame_size(limits.max_frame)
         .on_failed_upgrade(|e| tracing::info!("realtime: the WebSocket upgrade failed: {e}"))
-        .on_upgrade(move |socket| session::run(socket, init))
+        .on_upgrade(move |socket| {
+            let (sink, reader) = link::ws::split(socket, &limits);
+            session::run(sink, reader, init)
+        })
 }

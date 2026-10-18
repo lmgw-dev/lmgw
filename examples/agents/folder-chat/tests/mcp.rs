@@ -296,7 +296,7 @@ async fn the_mcp_face_is_not_address_checked_and_the_app_face_cannot_reach_it() 
         }
         r.send()
     };
-    for client in [Some("192.168.1.20"), Some("192.168.1.21"), None] {
+    for client in [Some("198.51.100.20"), Some("198.51.100.21"), None] {
         let r = send("mcp", client).await.unwrap();
         assert_eq!(r.status(), 200, "{client:?}");
     }

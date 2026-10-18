@@ -6,11 +6,54 @@
 //! that make it legible: a size, a one-line outline of what a response
 //! contains, the tool calls waiting on approval, and the eviction rules stated
 //! as a sentence rather than two numbers to combine. The reads themselves live
-//! in [`super::api`]; automatic eviction is [`crate::store::gc_responses`].
+//! in [`super::api`], which builds the document's rows with the two `From`
+//! impls below; automatic eviction is [`crate::store::gc_responses`].
 
+use lmgw_api_types as dto;
 use serde_json::Value;
 
-pub(crate) fn human_bytes(n: i64) -> String {
+use crate::store::{ResponseChain, StoredResponse};
+
+/// A conversation as the manager tab's list shows it.
+impl From<&ResponseChain> for dto::ChainRow {
+    fn from(c: &ResponseChain) -> Self {
+        Self {
+            chain_id: c.chain_id.clone(),
+            head_id: c.head_id.clone(),
+            model: c.model.clone(),
+            status: c.status.clone(),
+            responses: c.responses,
+            first_at: c.first_at.clone(),
+            last_at: c.last_at.clone(),
+            input_tokens: c.input_tokens,
+            output_tokens: c.output_tokens,
+            size: human_bytes(c.bytes),
+            awaiting_approval: c.awaiting_approval,
+        }
+    }
+}
+
+/// One stored response as the conversation view shows it: its body is read
+/// for the outline and the text, and kept pretty-printed (a body that is not
+/// JSON reads as `null`).
+impl From<&StoredResponse> for dto::ResponseItem {
+    fn from(r: &StoredResponse) -> Self {
+        let body: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+        Self {
+            id: r.id.clone(),
+            created_at: r.created_at.clone(),
+            status: r.status.clone(),
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            outline: outline(&body),
+            text: crate::ingress::responses::output_text(&body),
+            pending: pending_names(r.pending.as_deref()),
+            body: serde_json::to_string_pretty(&body).unwrap_or_default(),
+        }
+    }
+}
+
+fn human_bytes(n: i64) -> String {
     const KIB: f64 = 1024.0;
     let n = n.max(0) as f64;
     if n < KIB {
@@ -23,7 +66,7 @@ pub(crate) fn human_bytes(n: i64) -> String {
 }
 
 /// `2 mcp_call, message` — the shape of a response at a glance.
-pub(crate) fn outline(body: &Value) -> String {
+fn outline(body: &Value) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     for item in body["output"].as_array().into_iter().flatten() {
         let ty = item["type"].as_str().unwrap_or("?").to_string();
@@ -39,7 +82,7 @@ pub(crate) fn outline(body: &Value) -> String {
         .join(", ")
 }
 
-pub(crate) fn pending_names(raw: Option<&str>) -> Vec<String> {
+fn pending_names(raw: Option<&str>) -> Vec<String> {
     let Some(raw) = raw else { return Vec::new() };
     serde_json::from_str::<Vec<crate::agent::PendingCall>>(raw)
         .unwrap_or_default()

@@ -5,8 +5,9 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    AliasView, AudioModel, AuxModel, GgufFiles, ImageModelDetail, Params, ReasoningControl,
-    SettingsFull, UpstreamModelEntry, UpstreamModelsResponse, UpstreamsResponse,
+    AliasView, AudioModel, AudioModelSaved, GgufFiles, ImageModelDetail, ImageModelSaved, Params,
+    ReasoningControl, RowSaved, SettingsFull, UpstreamModelEntry, UpstreamModelsResponse,
+    UpstreamsResponse,
 };
 use serde_json::{json, Map, Value};
 
@@ -14,12 +15,17 @@ use crate::catalog::CatalogEntry;
 use crate::model_ops::ContainerStatusRow;
 
 mod audio_placement;
+mod aux;
+mod aux_fields;
+pub(super) mod aux_plan;
+mod aux_save;
 mod run_args_note;
 use crate::widgets::model_picker::ListStatus;
 use crate::widgets::{
     use_toasts, ImageClass, ImagePicker, MenuItem, Modal, ModalFooter, ModalSize, ModelPicker,
     RowMenu, Select,
 };
+pub use aux::AuxEditor;
 
 fn num_field<T: std::str::FromStr>(label: &str, raw: &str) -> Result<Option<T>, String> {
     let raw = raw.trim();
@@ -180,6 +186,18 @@ fn AliasForm(
     let temperature = RwSignal::new(o.temperature.map(|v| v.to_string()).unwrap_or_default());
     let top_p = RwSignal::new(o.top_p.map(|v| v.to_string()).unwrap_or_default());
     let top_k = RwSignal::new(o.top_k.map(|v| v.to_string()).unwrap_or_default());
+    let min_p = RwSignal::new(o.min_p.map(|v| v.to_string()).unwrap_or_default());
+    let repeat_penalty = RwSignal::new(o.repeat_penalty.map(|v| v.to_string()).unwrap_or_default());
+    let presence_penalty = RwSignal::new(
+        o.presence_penalty
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let frequency_penalty = RwSignal::new(
+        o.frequency_penalty
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
     let max_tokens = RwSignal::new(o.max_tokens.map(|v| v.to_string()).unwrap_or_default());
     let seed = RwSignal::new(o.seed.map(|v| v.to_string()).unwrap_or_default());
     let stop = RwSignal::new(o.stop.join(", "));
@@ -331,9 +349,14 @@ fn AliasForm(
                 temperature: num_field("temperature", &temperature.get_untracked())?,
                 top_p: num_field("top-p", &top_p.get_untracked())?,
                 top_k: num_field("top-k", &top_k.get_untracked())?,
+                min_p: num_field("min-p", &min_p.get_untracked())?,
+                repeat_penalty: num_field("repeat penalty", &repeat_penalty.get_untracked())?,
                 max_tokens: num_field("max tokens", &max_tokens.get_untracked())?,
-                presence_penalty: None,
-                frequency_penalty: None,
+                presence_penalty: num_field("presence penalty", &presence_penalty.get_untracked())?,
+                frequency_penalty: num_field(
+                    "frequency penalty",
+                    &frequency_penalty.get_untracked(),
+                )?,
                 seed: num_field("seed", &seed.get_untracked())?,
                 reasoning,
                 stop: stop
@@ -373,15 +396,11 @@ fn AliasForm(
         });
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/alias_set", &args).await;
+            let res = crate::api::post::<RowSaved, _>("/api/op/alias_set", &args).await;
             saving.set(false);
             match res {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                Ok(saved) => {
+                    toasts.ok(saved.message);
                     open.set(false);
                     on_saved();
                 }
@@ -472,6 +491,10 @@ fn AliasForm(
                     {text("Temperature", temperature)}
                     {text("Top-p", top_p)}
                     {text("Top-k", top_k)}
+                    {text("Min-p", min_p)}
+                    {text("Repeat penalty", repeat_penalty)}
+                    {text("Presence penalty", presence_penalty)}
+                    {text("Frequency penalty", frequency_penalty)}
                     {text("Max tokens", max_tokens)}
                     {text("Seed", seed)}
                     {text("Stop sequences (comma-separated)", stop)}
@@ -508,294 +531,6 @@ fn AliasForm(
             </button>
             <button class="btn primary" disabled=move || saving.get() on:click=save>
                 {move || if saving.get() { "Saving…" } else { "Save alias" }}
-            </button>
-        </ModalFooter>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Aux model editor (embeddings + rerank)
-// ---------------------------------------------------------------------------
-
-#[component]
-pub fn AuxEditor(
-    editing: RwSignal<Option<AuxModel>>,
-    on_saved: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let open = RwSignal::new(false);
-    // Guarded both ways: an unconditional set would notify even when the
-    // value is unchanged and the two effects would ping-pong forever.
-    Effect::new(move |_| {
-        let want = editing.get().is_some();
-        if open.get_untracked() != want {
-            open.set(want);
-        }
-    });
-    Effect::new(move |_| {
-        if !open.get() && editing.get_untracked().is_some() {
-            editing.set(None);
-        }
-    });
-    view! {
-        <Modal open=open title="Aux model (embedding / rerank)" size=ModalSize::Wide guard=true>
-            {move || {
-                editing
-                    .get()
-                    .map(|m| view! { <AuxForm m=m open=open on_saved=on_saved/> }.into_any())
-            }}
-        </Modal>
-    }
-}
-
-#[component]
-fn AuxForm(
-    m: AuxModel,
-    open: RwSignal<bool>,
-    on_saved: impl Fn() + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    let toasts = use_toasts();
-    let create = m.id == 0;
-    let id = m.id;
-    let model_id = RwSignal::new(m.model_id.clone());
-    let gguf_path = RwSignal::new(m.gguf_path.clone());
-    let kind = RwSignal::new(m.kind.clone());
-    let pooling = RwSignal::new(m.pooling.clone().unwrap_or_default());
-    let ctx_size = RwSignal::new(m.ctx_size.map(|v| v.to_string()).unwrap_or_default());
-    let idle = RwSignal::new(m.idle_seconds.to_string());
-    let args = RwSignal::new(m.args.join("\n"));
-    // Per-model container overrides (per-model-containers §3.1) — empty
-    // inherits the aux class settings (Settings → Runtimes → Aux).
-    let image = RwSignal::new(m.image.clone().unwrap_or_default());
-    let extra_run_args = RwSignal::new(
-        m.extra_run_args
-            .clone()
-            .map(|a| a.join("\n"))
-            .unwrap_or_default(),
-    );
-    let warm_start = RwSignal::new(m.warm_start);
-    let (hold_mode, hold_alias) = hold_signals(&m.hold_fallback_mode, &m.hold_fallback);
-    let saved_model_id = RwSignal::new(if create {
-        String::new()
-    } else {
-        m.model_id.clone()
-    });
-    let class_settings =
-        LocalResource::new(|| crate::api::get::<SettingsFull>("/api/settings-full"));
-    let saving = RwSignal::new(false);
-    // A reranker takes no pooling at all — `reranking = true` selects rank
-    // pooling itself and a second key breaks it — so the control disappears
-    // rather than offering a value the server will reject.
-    let is_rerank = move || kind.get() == "rerank";
-    let kind_opts = Signal::derive(|| {
-        [("embed", "embedding"), ("rerank", "rerank")]
-            .into_iter()
-            .map(|(v, l)| (v.to_string(), l.to_string()))
-            .collect::<Vec<_>>()
-    });
-    let pooling_opts = Signal::derive(|| {
-        [
-            ("", "model default"),
-            ("none", "none"),
-            ("mean", "mean"),
-            ("cls", "cls"),
-            ("last", "last"),
-            ("rank", "rank"),
-        ]
-        .into_iter()
-        .map(|(v, l)| (v.to_string(), l.to_string()))
-        .collect::<Vec<_>>()
-    });
-
-    let save = move |_| {
-        if saving.get_untracked() {
-            return;
-        }
-        let ctx: Option<i64> = match num_field("context size", &ctx_size.get_untracked()) {
-            Ok(v) => v,
-            Err(e) => {
-                toasts.err(e);
-                return;
-            }
-        };
-        let idle_v: i64 = match idle.get_untracked().trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                toasts.err("idle seconds must be an integer");
-                return;
-            }
-        };
-        let arg_lines: Vec<String> = args
-            .get_untracked()
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect();
-        let era_lines: Vec<String> = extra_run_args
-            .get_untracked()
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect();
-        let era_empty = era_lines.is_empty();
-        let (hf_mode, hf_alias) = match hold_body(hold_mode, hold_alias) {
-            Ok(h) => h,
-            Err(e) => {
-                toasts.err(e);
-                return;
-            }
-        };
-        let body = json!({
-            "action": if create { "create" } else { "update" },
-            "id": if create { Value::Null } else { json!(id) },
-            "model_id": model_id.get_untracked().trim(),
-            "gguf_path": gguf_path.get_untracked().trim(),
-            "kind": kind.get_untracked(),
-            "pooling": if is_rerank() { String::new() } else { pooling.get_untracked() },
-            "ctx_size": ctx,
-            "hold_fallback_mode": hf_mode,
-            "hold_fallback": hf_alias,
-            "args": arg_lines,
-            "idle_seconds": idle_v,
-            "image": image.get_untracked().trim(),
-            // Empty inherits the class settings, whose run args carry the GPU
-            // and SELinux flags: no list is sent, and the field is named in
-            // `clear` so an override saved before goes too.
-            "extra_run_args": if era_empty { Value::Null } else { json!(era_lines) },
-            "warm_start": warm_start.get_untracked(),
-            "clear": if era_empty { "extra_run_args" } else { "" },
-        });
-        saving.set(true);
-        spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/aux_model_set", &body).await;
-            saving.set(false);
-            match res {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
-                    open.set(false);
-                    on_saved();
-                }
-                Err(e) => toasts.err(e.to_string()),
-            }
-        });
-    };
-
-    view! {
-        <div class="card-flow editor-flow">
-            <section class="card edit-section">
-                <h3>"Model"</h3>
-                <div class="field-grid">
-                    <div class="field">
-                        <label>"Model id"</label>
-                        <input class="input mono"
-                            prop:value=move || model_id.get()
-                            on:input=move |ev| model_id.set(event_target_value(&ev))/>
-                    </div>
-                    <div class="field">
-                        <label>"Served as"</label>
-                        <Select value=kind options=kind_opts/>
-                    </div>
-                    <div class="field wide">
-                        <label>"GGUF path" <span class="field-unit">"relative to the aux models dir"</span></label>
-                        <input class="input mono"
-                            prop:value=move || gguf_path.get()
-                            on:input=move |ev| gguf_path.set(event_target_value(&ev))/>
-                    </div>
-                    <Show when=move || !is_rerank()>
-                        <div class="field">
-                            <label>"Pooling"</label>
-                            <Select value=pooling options=pooling_opts/>
-                        </div>
-                    </Show>
-                    <div class="field">
-                        <label>"Context size"</label>
-                        <input class="input mono" prop:value=move || ctx_size.get()
-                            on:input=move |ev| ctx_size.set(event_target_value(&ev))/>
-                    </div>
-                    <div class="field">
-                        <label>"Idle seconds" <span class="field-unit">"0 = never sleep"</span></label>
-                        <input class="input mono" prop:value=move || idle.get()
-                            on:input=move |ev| idle.set(event_target_value(&ev))/>
-                    </div>
-                </div>
-                <div class="field">
-                    <label>"Extra llama-server flags (one per line)"</label>
-                    <textarea class="input mono ta" prop:value=move || args.get()
-                        on:input=move |ev| args.set(event_target_value(&ev))></textarea>
-                </div>
-            </section>
-            <section class="card edit-section">
-                <h3>"Container"</h3>
-                <label class="row dim" style="gap:5px">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || warm_start.get()
-                        on:change=move |ev| warm_start.set(event_target_checked(&ev))
-                    />
-                    "start at boot (warm start)"
-                </label>
-                <div class="field">
-                    <label>"Hold fallback"</label>
-                    <HoldFallback
-                        mode=hold_mode
-                        alias=hold_alias
-                        inherit_label="Inherit · none"
-                        tasks=&["embedding", "rerank"]
-                    />
-                </div>
-                <p class="dim mini-note">
-                    "Where this model's requests go while a GPU hold (Settings → GPU → Hold) is "
-                    "active. Embedding/rerank models never inherit the global fallback — a "
-                    "different one silently corrupts a vector index — so \"Inherit\" here means "
-                    "the same as \"None\": refuse with a 503."
-                </p>
-                <div class="field">
-                    <label>"Image override"</label>
-                    <ImagePicker
-                        value=image
-                        class=ImageClass::Aux
-                        clearable=true
-                        placeholder=Signal::derive(move || {
-                            class_settings
-                                .get()
-                                .and_then(|r| r.ok())
-                                .map(|s| s.aux_router.image)
-                                .unwrap_or_default()
-                        })
-                    />
-                </div>
-                <div class="field">
-                    <label>"Extra podman run args override (one per line)"</label>
-                    <textarea
-                        class="input mono ta"
-                        placeholder=move || {
-                            class_settings
-                                .get()
-                                .and_then(|r| r.ok())
-                                .map(|s| s.aux_router.extra_run_args.join("\n"))
-                                .unwrap_or_default()
-                        }
-                        prop:value=move || extra_run_args.get()
-                        on:input=move |ev| extra_run_args.set(event_target_value(&ev))
-                    ></textarea>
-                </div>
-                <p class="dim mini-note">
-                    "Blank image/args inherit the aux class settings (Settings → Runtimes → Aux)." " " {run_args_note::OVERRIDE_REPLACES}
-                </p>
-                <ContainerStatusRow class="aux" model_id=saved_model_id/>
-            </section>
-        </div>
-        <ModalFooter>
-            <button class="btn ghost" on:click=move |_| open.set(false)>
-                "Cancel"
-            </button>
-            <button class="btn primary" disabled=move || saving.get() on:click=save>
-                {move || if saving.get() { "Saving…" } else { "Save model" }}
             </button>
         </ModalFooter>
     }
@@ -993,7 +728,7 @@ fn AudioForm(
             .families
             .into_iter()
             .find(|f| f.family == want)
-            .map(|f| f.options)
+            .and_then(|f| f.options)
             .filter(|o| !(o.load.is_empty() && o.session.is_empty() && o.request.is_empty()))
     };
 
@@ -1131,15 +866,12 @@ fn AudioForm(
         });
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/audio_model_set", &body).await;
+            let res =
+                crate::api::post::<AudioModelSaved, _>("/api/op/audio_model_set", &body).await;
             saving.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     open.set(false);
                     on_saved();
                 }
@@ -1343,7 +1075,7 @@ fn AudioForm(
                     />
                 </div>
                 <div class="field">
-                    <label>"Extra podman run args override (one per line)"</label>
+                    <label>"Extra podman run args override (one argument per line)"</label>
                     <textarea
                         class="input mono ta"
                         placeholder=move || {
@@ -1811,7 +1543,7 @@ fn ImageForm(
             return;
         }
         era_applied.set(Some(generation));
-        extra_run_args.set(d.extra_run_args.unwrap_or_default());
+        extra_run_args.set(d.extra_run_args.unwrap_or_default().join("\n"));
     });
 
     let collect_files = move || -> Result<Map<String, Value>, String> {
@@ -1904,12 +1636,15 @@ fn ImageForm(
         if vid_gen.get_untracked() {
             modes.push("vid_gen");
         }
-        // The textarea goes over as *text*, not as one token per line: the
-        // patch's `ArgList` splits it with shell quoting (`parse_args_text`),
-        // which is what makes `--device nvidia.com/gpu=all` two argv elements
-        // instead of one 26-character flag. Same as the chat editor.
-        let era = extra_run_args.get_untracked();
-        let era_empty = era.trim().is_empty();
+        // One argument per line, as the aux and audio editors send it.
+        let era: Vec<String> = extra_run_args
+            .get_untracked()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+        let era_empty = era.is_empty();
         let idle_v = match num_field::<i64>("idle seconds", &idle.get_untracked()) {
             Ok(v) => v.unwrap_or(0),
             Err(e) => {
@@ -1926,7 +1661,7 @@ fn ImageForm(
         };
         // Empty inherits the class settings; `image` clears on an empty
         // string, the rest have to be named — `extra_run_args` so an override
-        // saved before goes too (blank text alone leaves it as it is), and an
+        // saved before goes too, and an
         // empty `capabilities_override` string is not a clear for this patch.
         let mut clear: Vec<&str> = Vec::new();
         if era_empty {
@@ -1956,7 +1691,8 @@ fn ImageForm(
         saving.set(true);
         let saved_id = model_id.get_untracked().trim().to_string();
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/image_model_set", &body).await;
+            let res =
+                crate::api::post::<ImageModelSaved, _>("/api/op/image_model_set", &body).await;
             saving.set(false);
             match res {
                 Ok(v) => {
@@ -1966,27 +1702,9 @@ fn ImageForm(
                         m.saved();
                     }
                     saved_once.set(true);
-                    save_warnings.set(
-                        v.get("warnings")
-                            .and_then(Value::as_array)
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|w| w.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                    );
-                    save_command_line.set(
-                        v.get("command_line")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    );
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                    save_warnings.set(v.warnings.unwrap_or_default());
+                    save_command_line.set(v.command_line.unwrap_or_default());
+                    toasts.ok(v.message);
                     // The row exists now (or was renamed), so the read-back
                     // below has something to read — the modal stays open on
                     // purpose, because the command line it just rendered is
@@ -2336,7 +2054,7 @@ fn ImageForm(
                 />
             </div>
             <div class="field" style="margin-top:8px">
-                <label>"Extra podman run args override (one per line)"</label>
+                <label>"Extra podman run args override (one argument per line)"</label>
                 <textarea
                     class="input mono ta"
                     placeholder=move || {

@@ -19,26 +19,19 @@
 
 use leptos::prelude::*;
 use lmgw_api_types::{McpServerView, McpServersResponse, ToolInventory};
-use serde::{Deserialize, Serialize};
 
 use super::approval_rule::Rule;
 
-/// One attached source. `allowed_tools: None` is its whole surface — the
-/// picker only writes a list when the owner unticks something, so a server
-/// that later gains a tool offers it without the thread being edited again.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ThreadMcp {
-    pub server_label: String,
-    pub allowed_tools: Option<Vec<String>>,
-    /// Which tools wait for an approval (client-apps design §6.1), in
-    /// OpenAI's shapes as the thread stores it. The Chat's picker edits it
-    /// ([`Rule`]); the key editor never sets it. A value the picker cannot
-    /// show is kept as read, so saving the tools does not drop what a client
-    /// wrote.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub require_approval: Option<serde_json::Value>,
-}
+/// One attached source, the type the gateway reads and writes a thread's
+/// tools with. `allowed_tools: None` is its whole surface — the picker only
+/// writes a list when the owner unticks something, so a server that later
+/// gains a tool offers it without the thread being edited again.
+/// `require_approval` names which tools wait for an approval (client-apps
+/// design §6.1), in OpenAI's shapes as the thread stores it: the Chat's
+/// picker edits it ([`Rule`]), the key editor never sets it, and a value the
+/// picker cannot show is kept as read, so saving the tools does not drop
+/// what a client wrote.
+pub use lmgw_api_types::chat::ThreadMcp;
 
 /// The selection a picker edits: read it, and be told the new list.
 #[derive(Clone, Copy)]

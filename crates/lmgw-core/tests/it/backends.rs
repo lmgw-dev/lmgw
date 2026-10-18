@@ -486,7 +486,7 @@ async fn forge_tokens_are_redacted_per_host_on_every_read() {
     let dto: lmgw_api_types::SettingsFull = serde_json::from_value(full.clone()).unwrap();
     assert_eq!(dto.forge_tokens.len(), 2);
 
-    let tool = ops::settings(&st).await.unwrap();
+    let tool = ops::backends::to_json(ops::settings(&st).await).unwrap();
     assert_eq!(
         tool["forge_tokens"],
         json!({"git.example.com": "<set>", "github.com": "<set>"})
@@ -573,7 +573,7 @@ async fn the_update_interval_is_settable_from_the_tool_plane_and_the_rest_is_not
     assert_eq!(status, 200, "{body}");
     assert_eq!(st.snapshot().settings.build_update_check_hours, 12);
     assert_eq!(
-        ops::settings(&st).await.unwrap()["build_update_check_hours"],
+        ops::backends::to_json(ops::settings(&st).await).unwrap()["build_update_check_hours"],
         12
     );
     // Secrets and the write location stay on the dashboard.

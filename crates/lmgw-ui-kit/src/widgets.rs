@@ -170,9 +170,10 @@ pub fn ToastHost() -> impl IntoView {
     }
 }
 
-/// The desktop app saves a download itself (its `on_download` handler) and
-/// tells the page with `lmgw-downloaded` `{path}` or `lmgw-download-failed`
-/// `{error}` window events; a plain browser never fires them.
+/// The desktop app saves a download itself (where its Save As dialog was
+/// pointed) and tells the page with `lmgw-downloaded` `{path}` or
+/// `lmgw-download-failed` `{error}` window events; a Cancel in the dialog
+/// fires neither, and a plain browser never fires them.
 fn listen_downloads(toasts: Toasts) {
     use wasm_bindgen::JsCast;
     let field = |ev: &web_sys::Event, key: &str| -> String {

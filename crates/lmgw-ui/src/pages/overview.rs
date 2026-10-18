@@ -301,7 +301,7 @@ fn class_rank(c: &str) -> u8 {
 fn class_title(c: &str) -> &'static str {
     match c {
         "chat" => "llama-server · chat",
-        "aux" => "llama-server · embeddings + rerank",
+        "aux" => "llama-server · embeddings, rerank + decisions",
         "image" => "stable-diffusion.cpp",
         _ => "audio.cpp",
     }

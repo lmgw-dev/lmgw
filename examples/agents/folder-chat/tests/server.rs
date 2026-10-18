@@ -316,7 +316,7 @@ async fn only_this_machine_is_served_until_the_owner_allows_other_machines() {
     // A machine on the LAN, and another container on this box (which reaches
     // the gateway through host.containers.internal and arrives from the host's
     // own interface address, not loopback).
-    for remote in ["192.168.1.20", "192.168.1.21", "fe80::1", "2001:db8::7"] {
+    for remote in ["198.51.100.20", "198.51.100.21", "fe80::1", "2001:db8::7"] {
         let r = status(Some(remote)).send().await.unwrap();
         let (s, code, msg) = error_code(r).await;
         assert_eq!((s, code.as_str()), (403, "remote_client"), "{remote}");
@@ -333,7 +333,12 @@ async fn only_this_machine_is_served_until_the_owner_allows_other_machines() {
     let (s, code, msg) = error_code(r).await;
     assert_eq!((s, code.as_str()), (403, "not_via_lmgw"));
     assert!(msg.contains("no X-Forwarded-For"), "{msg}");
-    for bad in ["localhost", "127.0.0.1:5000", "192.168.1.20, 127.0.0.1", ""] {
+    for bad in [
+        "localhost",
+        "127.0.0.1:5000",
+        "198.51.100.20, 127.0.0.1",
+        "",
+    ] {
         let r = status(Some(bad)).send().await.unwrap();
         let (s, code, _) = error_code(r).await;
         assert_eq!((s, code.as_str()), (403, "not_via_lmgw"), "'{bad}'");
@@ -353,7 +358,7 @@ async fn only_this_machine_is_served_until_the_owner_allows_other_machines() {
             reqwest::Method::POST,
             "/api/chat",
             Some("app"),
-            Some("192.168.1.20"),
+            Some("198.51.100.20"),
         ),
         &json!({"history": [], "question": "zeta?"}),
     );
@@ -368,7 +373,7 @@ async fn only_this_machine_is_served_until_the_owner_allows_other_machines() {
         reqwest::Method::GET,
         "/api/status",
         Some("app"),
-        Some("192.168.1.20"),
+        Some("198.51.100.20"),
     )
     .send()
     .await
@@ -380,7 +385,7 @@ async fn only_this_machine_is_served_until_the_owner_allows_other_machines() {
             reqwest::Method::POST,
             "/api/sync",
             Some("app"),
-            Some("192.168.1.20"),
+            Some("198.51.100.20"),
         ),
         &json!({}),
     );
@@ -404,7 +409,7 @@ async fn only_this_machine_is_served_until_the_owner_allows_other_machines() {
         reqwest::Method::GET,
         "/api/status",
         Some("mcp"),
-        Some("192.168.1.20"),
+        Some("198.51.100.20"),
     )
     .send()
     .await
@@ -425,7 +430,7 @@ async fn the_guards_run_in_order() {
         .http
         .post(app.url("/api/sync"))
         .header("x-lmgw-face", "mcp")
-        .header("x-forwarded-for", "192.168.1.20")
+        .header("x-forwarded-for", "198.51.100.20")
         .body("{}");
     let (_, code, _) = error_code(r.send().await.unwrap()).await;
     assert_eq!(code, "not_via_lmgw", "provenance first");
@@ -434,7 +439,7 @@ async fn the_guards_run_in_order() {
         post.clone(),
         "/api/sync",
         Some("mcp"),
-        Some("192.168.1.20"),
+        Some("198.51.100.20"),
     )
     .body("{}");
     let (_, code, _) = error_code(r.send().await.unwrap()).await;
@@ -444,7 +449,7 @@ async fn the_guards_run_in_order() {
         post.clone(),
         "/api/sync",
         Some("app"),
-        Some("192.168.1.20"),
+        Some("198.51.100.20"),
     )
     .body("{}");
     let (_, code, _) = error_code(r.send().await.unwrap()).await;
@@ -916,7 +921,7 @@ async fn the_owner_can_stop_a_running_sync() {
             post.clone(),
             "/api/sync/stop",
             Some("app"),
-            Some("192.168.1.20"),
+            Some("198.51.100.20"),
         ),
         &json!({}),
     );

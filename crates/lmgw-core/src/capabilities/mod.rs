@@ -3,7 +3,7 @@
 //! §2.1, §3, §4).
 //!
 //! Five pure builders, one per class of routable model — local llama.cpp chat
-//! rows, aux (embedding/rerank) rows, audio.cpp rows, stable-diffusion.cpp
+//! rows, aux (embedding/rerank/decision) rows, audio.cpp rows, stable-diffusion.cpp
 //! image rows, and cloud catalog entries. "Pure" is the point: every builder takes already-read facts
 //! (a [`ModelSummary`] the caller pulled through `state.gguf_cache`, a parsed
 //! [`ModelInfo`]) and returns a [`Derived`] without touching the filesystem,
@@ -24,126 +24,20 @@ pub mod notes;
 pub mod speech;
 pub mod task;
 
-use serde::{Deserialize, Serialize};
-
 use crate::catalog::ModelInfo;
 use crate::config::{AudioModel, AuxKind, AuxModel, ImageModel, LlamaParams, LocalModel, Protocol};
 use crate::gguf::{ModelSummary, TemplateSignals};
 use crate::ir::Params;
+use crate::runtime::argv::flag_value;
 use crate::runtime::image::ImageCapabilities;
 
+pub use lmgw_api_types::capabilities::{
+    ModelCapabilities, ReasoningCaps, StructuredOutputCaps, ToolCallCaps,
+};
+
 // ---------------------------------------------------------------------------
-// Schema (design §2.1)
+// Schema (design §2.1): the shapes live in lmgw-api-types
 // ---------------------------------------------------------------------------
-
-/// The `capabilities` object of one model on `GET /v1/models`.
-///
-/// `task`, `endpoints` and `source` are always present — they are what makes
-/// the entry actionable at all ("this id exists, here is where to send it,
-/// here is how much to trust the rest"). Everything else is absent unless a
-/// source stated it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ModelCapabilities {
-    /// `chat` | `embedding` | `rerank` | `tts` | `asr` | an audio.cpp task
-    /// name | an image task | `realtime` (an OpenAI Realtime model, no lmgw
-    /// route). Determines `endpoints`.
-    pub task: String,
-    /// The lmgw routes that accept this model id.
-    pub endpoints: Vec<String>,
-    /// Subset of `text`, `image`, `audio`, `video`, `file`, `embedding`.
-    /// Absent = unknown, never "none".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_modalities: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_modalities: Option<Vec<String>>,
-    /// `input_modalities` contains `image`. Redundant with the list on
-    /// purpose: a client can read this one boolean to decide whether to
-    /// send images, e.g. whether a session gets a screenshot tool. Absent
-    /// exactly when `input_modalities` is absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vision: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<ReasoningCaps>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<ToolCallCaps>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_output: Option<StructuredOutputCaps>,
-    /// A text-to-speech model's expressive controls — what `instructions`,
-    /// inline tags, `language` and `stream_format` do on it
-    /// (the speech capabilities object). A local audio model's is derived; a
-    /// cloud alias has one only through an alias's capabilities override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speech: Option<speech::SpeechCaps>,
-    /// Where the facts came from: `gguf+config`, `catalog`, `config`, or
-    /// `owner` (an alias's capabilities override).
-    pub source: String,
-}
-
-/// Reasoning / thinking support and how a request controls it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReasoningCaps {
-    /// `fixed` (nothing to change per request), `toggle` (on/off per
-    /// request), `levels` (effort selectable per request).
-    pub kind: String,
-    /// The default state as this alias is configured. Absent when no source
-    /// states it — "the catalog says the model supports reasoning" does not
-    /// say whether it is on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    /// Accepted effort values, least → most in the canonical order. Only for
-    /// `kind == "levels"`; omitted entirely when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub levels: Vec<String>,
-    /// The effort in force when the request sets none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<String>,
-    /// Whether a request can switch thinking off entirely.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_disable: Option<bool>,
-    /// The configured default thinking-token budget, when set and non-zero
-    /// (a zero budget is published as `enabled: false`, not as a budget).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<i64>,
-    /// Whether replayed reasoning of earlier turns reaches the model again.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preserve_history: Option<bool>,
-    /// The exact header and body fields that work on this route; omitted when
-    /// empty (nothing to control on a `fixed` model).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub control: Vec<String>,
-}
-
-/// Tool-calling support.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ToolCallCaps {
-    /// `native` (lmgw returns structured `tool_calls`), `none` (the template
-    /// renders no tools; aux/audio rows), `text` (the template renders tools
-    /// in a syntax llama-server has no parser for, so calls may arrive as
-    /// prose the caller must read itself).
-    pub kind: String,
-    /// The template can render more than one call per turn. Absent for cloud
-    /// models, which publish nothing about it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parallel: Option<bool>,
-    /// The native syntax family the template renders (`qwen-xml`,
-    /// `hermes-json`, …), `provider` for cloud, `unknown` when the template
-    /// renders tools with none of the known markers. Informational.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-}
-
-/// `response_format` support.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StructuredOutputCaps {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub json_schema: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub json_object: Option<bool>,
-}
 
 /// Everything one builder derives for one exposed model: the `capabilities`
 /// object, the two top-level model fields that come out of the same facts
@@ -314,7 +208,8 @@ pub enum ProjectorStatus<'a> {
 /// - `mmproj_path` unset and `no_mmproj` set ⇒ **no** projector: the renderer
 ///   emits `--no-mmproj` and claims the `mmproj` key, so a `--mmproj` left in
 ///   the freeform args never reaches the command line.
-/// - otherwise, a `--mmproj` in the freeform args.
+/// - otherwise, a `--mmproj` (or `-mm`) in the freeform args, read as the
+///   renderer reads it ([`flag_value`]).
 pub fn configured_projector(model: &LocalModel) -> Option<&str> {
     if let Some(p) = model.params.mmproj_path.as_deref() {
         if !p.trim().is_empty() {
@@ -324,33 +219,7 @@ pub fn configured_projector(model: &LocalModel) -> Option<&str> {
     if model.params.no_mmproj {
         return None;
     }
-    arg_value(&model.args, "mmproj")
-}
-
-/// The value of `--<flag>` in a freeform arg list, in either the spaced or the
-/// `=` spelling. Mirrors `LocalModel::hoist_promoted_args`' own parse,
-/// including its "the next token is the value unless it is itself an option"
-/// rule.
-fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let mut i = 0;
-    while i < args.len() {
-        let raw = args[i].as_str();
-        let (tok, inline) = match raw.split_once('=') {
-            Some((f, v)) if f.starts_with('-') => (f, Some(v)),
-            _ => (raw, None),
-        };
-        if tok.starts_with('-') && tok.trim_start_matches('-') == flag {
-            return match inline {
-                Some(v) => Some(v),
-                None => args
-                    .get(i + 1)
-                    .map(String::as_str)
-                    .filter(|v| !crate::runtime::argv::is_opt(v)),
-            };
-        }
-        i += 1;
-    }
-    None
+    flag_value(&model.args, "mmproj")
 }
 
 /// Capabilities of a local llama.cpp chat row (design §3.2–§3.4), and of an
@@ -645,25 +514,62 @@ fn local_tool_calls(s: &TemplateSignals) -> ToolCallCaps {
 }
 
 // ---------------------------------------------------------------------------
-// Aux rows (embedding / rerank)
+// Aux rows (embedding / rerank / decision)
 // ---------------------------------------------------------------------------
 
-/// Capabilities of an aux row. `source: config` — an embedder's GGUF carries
-/// no chat template and no projector header to read, so the row's own kind is
-/// the whole story.
+/// The projector an aux row loads (decision-models design §3.3): its
+/// `mmproj_path`, else a `--mmproj` left in its freeform args, which the
+/// argv renderer still honours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxProjector {
+    /// The path as the container sees it (`/models/…`), for the notes.
+    pub shown: String,
+    /// The same file relative to the aux models dir, which is what lmgw can
+    /// read; `None` for a freeform path outside the `/models` mount.
+    pub rel: Option<String>,
+}
+
+/// [`AuxProjector`] of `model`, `None` when it loads none.
+pub fn aux_projector(model: &AuxModel) -> Option<AuxProjector> {
+    if let Some(rel) = model
+        .mmproj_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
+        return Some(AuxProjector {
+            shown: format!("/models/{rel}"),
+            rel: Some(rel.to_string()),
+        });
+    }
+    let shown = flag_value(&model.args, "mmproj")?;
+    Some(AuxProjector {
+        shown: shown.to_string(),
+        rel: shown
+            .strip_prefix("/models/")
+            .filter(|r| !r.is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// Capabilities of an aux row. The row's kind decides the task, its route
+/// and its output. The input side is text plus what the row's projector
+/// header says it reads (decision-models design §2.9), by the chat builder's
+/// rule ([`local_modalities`]): `image` for a vision encoder, `audio` for an
+/// audio one, and no list at all when the projector could not be read.
+/// `source` is `config`, or `gguf+config` when a projector header spoke.
 ///
-/// `summary` is the row's GGUF summary when the caller could read it; `None`
-/// only earns a note (unlike a chat row, nothing published here was derived
-/// from the file, so the capabilities stand).
-pub fn for_aux(model: &AuxModel, summary: Option<&ModelSummary>) -> Derived {
-    let projector = arg_value(&model.args, "mmproj");
-    // A multimodal embedder's extra input modalities live in the projector
-    // header, which this builder does not read — so the list is withheld
-    // rather than published as text-only, which would be wrong.
-    let input_modalities = match projector {
-        Some(_) => None,
-        None => Some(vec!["text".to_string()]),
-    };
+/// `summary` is the row's GGUF summary when the caller could read it. It
+/// feeds the notes only (a decision row's type and head budget), so `None`
+/// earns a note and the capabilities stand. `projector_status` and
+/// `projector` are the row's projector ([`aux_projector`]) as the caller
+/// found it, as for [`for_local_row`].
+pub fn for_aux(
+    model: &AuxModel,
+    summary: Option<&ModelSummary>,
+    projector_status: ProjectorStatus<'_>,
+    projector: Option<&ModelSummary>,
+) -> Derived {
+    let (input_modalities, _) = local_modalities(projector_status, projector);
     let vision = input_modalities
         .as_ref()
         .map(|m| m.iter().any(|x| x == "image"));
@@ -677,8 +583,19 @@ pub fn for_aux(model: &AuxModel, summary: Option<&ModelSummary>) -> Derived {
         // A reranker answers with relevance scores, which is none of the
         // modality vocabulary — absent rather than mislabelled.
         AuxKind::Rerank => ("rerank", vec!["/v1/rerank".to_string()], None),
+        // llama.cpp's and OpenRouter's word for what a decision model
+        // answers with (decision-models design §2.9).
+        AuxKind::Decision => (
+            "decision",
+            vec![model.kind.endpoint().to_string()],
+            Some(vec!["decisions".to_string()]),
+        ),
     };
 
+    let source = match (projector_status, projector) {
+        (ProjectorStatus::Configured { .. }, Some(_)) => "gguf+config",
+        _ => "config",
+    };
     let caps = ModelCapabilities {
         task: task.to_string(),
         endpoints,
@@ -693,13 +610,12 @@ pub fn for_aux(model: &AuxModel, summary: Option<&ModelSummary>) -> Derived {
         }),
         structured_output: None,
         speech: None,
-        source: "config".to_string(),
+        source: source.to_string(),
     };
-    let notes = notes::notes_for_aux(model, projector, summary.is_none());
     Derived {
         capabilities: Some(caps),
         max_output_tokens: None,
-        notes,
+        notes: notes::notes_for_aux(model, projector_status, summary),
         created: None,
     }
 }
@@ -890,22 +806,15 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
         .or_else(|| by_name.map(str::to_string))
         .unwrap_or_else(|| "chat".to_string());
     let endpoints = match task.as_str() {
-        // A cloud image model reaches the same two routes a local sd-server
-        // row does (§5). The edits route is added only when the catalog says
-        // the model takes an image *in* — for cloud there is no `edit` column
-        // to read, and the provider's own modality list is the whole of what
-        // is known.
-        "image_generation" | "image_edit" => {
-            let mut v = vec![IMAGE_GENERATIONS_ENDPOINT.to_string()];
-            if info
-                .input_modalities
-                .as_ref()
-                .is_some_and(|m| m.iter().any(|x| x == "image"))
-            {
-                v.push(IMAGE_EDITS_ENDPOINT.to_string());
-            }
-            v
-        }
+        // A cloud image or video model publishes no route (decision-models
+        // design §6.2, revising image-generation §5): lmgw's image routes post
+        // to the upstream's `/images/generations` and `/images/edits`, which
+        // no OpenRouter-shaped catalog's provider is verified to serve.
+        // OpenRouter documents `POST /images` for images and an asynchronous
+        // `POST /videos` for video, and no lmgw route sends either. The note
+        // says so; an alias's `capabilities_override` states the routes of a
+        // provider that serves them.
+        t if task::is_unverified_cloud_media(t) => Vec::new(),
         other => task::endpoints(other, protocol),
     };
 
@@ -978,6 +887,12 @@ pub fn for_catalog(info: &ModelInfo, protocol: Protocol, upstream_name: &str) ->
     let mut notes = notes::notes_for_catalog(info, protocol, upstream_name, &caps);
     if let Some(t) = by_name {
         notes.insert(0, task::by_name_note(upstream_name, t));
+    }
+    if task::is_unverified_cloud_media(&caps.task) {
+        notes.insert(
+            0,
+            task::unverified_media_route_note(upstream_name, &caps.task),
+        );
     }
     Derived {
         capabilities: Some(caps),
@@ -1132,12 +1047,14 @@ pub fn apply_owner_override(
 /// Every `task` this schema knows (design §2.1): the routable classes plus
 /// audio.cpp's own task names, which are the ids `/v1/tasks/run` accepts, plus
 /// the image class's three (image-generation design §5), plus an OpenAI
-/// Realtime model's ([`task::REALTIME_TASK`]), which no lmgw route serves.
-const KNOWN_TASKS: [&str; 21] = [
+/// Realtime model's ([`task::REALTIME_TASK`]), which no lmgw route serves,
+/// plus a decision model's (`decision`, decision-models design §2.9).
+const KNOWN_TASKS: [&str; 22] = [
     "chat",
     task::REALTIME_TASK,
     "embedding",
     "rerank",
+    "decision",
     "tts",
     "asr",
     "image_generation",
@@ -1158,8 +1075,10 @@ const KNOWN_TASKS: [&str; 21] = [
 ];
 
 /// Every modality name this schema knows (design §2.1, plus `pdf`, which the
-/// Kilo/OpenRouter catalogs publish and lmgw passes through verbatim).
-const KNOWN_MODALITIES: [&str; 7] = [
+/// Kilo/OpenRouter catalogs publish and lmgw passes through verbatim, plus
+/// `decisions`, a decision model's output in llama.cpp's and OpenRouter's
+/// word, decision-models design §2.9).
+const KNOWN_MODALITIES: [&str; 8] = [
     "text",
     "image",
     "audio",
@@ -1167,6 +1086,7 @@ const KNOWN_MODALITIES: [&str; 7] = [
     "file",
     "pdf",
     "embedding",
+    "decisions",
 ];
 
 const KNOWN_REASONING_KINDS: [&str; 3] = ["fixed", "toggle", "levels"];

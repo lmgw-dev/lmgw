@@ -9,11 +9,11 @@
 //!
 //! Behind the `http` feature so the base crate stays free of an HTTP stack.
 
-use async_trait::async_trait;
 use serde_json::json;
 
 use crate::embed::{validate_vector, EmbedIdentity, Embedder};
 use crate::error::{QuickdocError, Result};
+use crate::BoxFut;
 
 pub struct HttpEmbedder {
     client: reqwest::Client,
@@ -98,26 +98,27 @@ impl HttpEmbedder {
     }
 }
 
-#[async_trait]
 impl Embedder for HttpEmbedder {
     fn identity(&self) -> EmbedIdentity {
         self.identity.clone()
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let out = self.post(texts).await?;
-        if out.len() != texts.len() {
-            return Err(QuickdocError::EmbedCount {
-                want: texts.len(),
-                got: out.len(),
-            });
-        }
-        for (i, v) in out.iter().enumerate() {
-            validate_vector(&self.identity.model, i, v, self.identity.dims)?;
-        }
-        Ok(out)
+    fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFut<'a, Result<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            if texts.is_empty() {
+                return Ok(Vec::new());
+            }
+            let out = self.post(texts).await?;
+            if out.len() != texts.len() {
+                return Err(QuickdocError::EmbedCount {
+                    want: texts.len(),
+                    got: out.len(),
+                });
+            }
+            for (i, v) in out.iter().enumerate() {
+                validate_vector(&self.identity.model, i, v, self.identity.dims)?;
+            }
+            Ok(out)
+        })
     }
 }

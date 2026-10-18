@@ -19,6 +19,8 @@
 //!   config-dir writer (§3.6, "Audio config") — the audio-engine sibling of
 //!   `argv`'s llama-flag rendering — and a row's engine settings and run
 //!   args with its own backend and threads in effect (the CPU switch).
+//! - [`aux`][]: the same switch for an aux row — its placement, run args and
+//!   thread count (decision-models design §3.3).
 //! - [`Placement`]: whether a container computes on the GPU or the CPU,
 //!   which every VRAM and GPU-hold decision reads.
 //! - [`image`][]: the sd-server engine's own sibling — the capabilities body
@@ -38,6 +40,7 @@
 
 pub mod argv;
 pub mod audio;
+pub mod aux;
 pub mod descriptor;
 pub mod image;
 pub mod lifecycle;

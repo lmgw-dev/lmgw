@@ -1,8 +1,10 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{KeyRow, ToolInventory};
+use lmgw_api_types::{KeyRow, KeySaved, ToolInventory};
 use serde_json::{json, Value};
 
+use super::device_tools::{hosted_reach, DeviceToolsEditor, DeviceToolsState, HostedLabel};
+use super::devices::parse_urls;
 use super::scope_editor::{AliasScopeEditor, ScopeState, ToolScopeEditor};
 use crate::widgets::{use_toasts, Modal, ModalFooter, Select};
 
@@ -11,9 +13,13 @@ pub(super) fn KeyEditor(
     open: RwSignal<bool>,
     editing: RwSignal<Option<KeyRow>>,
     refresh: RwSignal<u32>,
+    /// The labels the paired devices host now, for the device-tools grant.
+    hosted: Signal<Vec<HostedLabel>>,
 ) -> impl IntoView {
     let toasts = use_toasts();
     let scope = ScopeState::new();
+    // The device-tools grant (client-apps design L16 as changed 2026-10-15).
+    let device_tools = DeviceToolsState::new();
     let budget = RwSignal::new(String::new());
     let period = RwSignal::new(String::new());
     let rpm = RwSignal::new(String::new());
@@ -28,6 +34,8 @@ pub(super) fn KeyEditor(
     let note = RwSignal::new(String::new());
     let enabled = RwSignal::new(true);
     let hosts = RwSignal::new(String::new());
+    // A device's URL list, one a line (device link design §3.1, §9.3).
+    let urls = RwSignal::new(String::new());
 
     // Which half of its own policy this row owns.
     //
@@ -74,6 +82,7 @@ pub(super) fn KeyEditor(
             &k.tool_scope_mode,
             &k.tool_scope_patterns,
         );
+        device_tools.load(&k.device_tools, &hosted.get_untracked());
         budget.set(if k.budget_micro > 0 {
             format!("{:.2}", k.budget_micro as f64 / 1e6)
         } else {
@@ -105,6 +114,12 @@ pub(super) fn KeyEditor(
         note.set(k.note.clone());
         enabled.set(k.enabled);
         hosts.set(k.hosts_label.clone().unwrap_or_default());
+        urls.set(
+            k.pairing
+                .as_ref()
+                .map(|p| p.urls.join("\n"))
+                .unwrap_or_default(),
+        );
     });
     // What the gateway serves on `/mcp`, for the tool scope's preview — read
     // only while a client key's dialog is open, since listing connects every
@@ -135,23 +150,28 @@ pub(super) fn KeyEditor(
             .map(|t| t.name.clone())
             .collect();
         let (mode, pats) = (scope.tool_mode.get(), scope.tool_patterns());
-        let seen: Vec<String> = offered
+        // A paired device's tools: its own whole, another's only through
+        // the grant, then as the scope says.
+        let (hosted, grant) = (hosted.get(), device_tools.labels());
+        let own = editing.get().filter(|k| k.kind == "device").map(|k| k.id);
+        let seen: Vec<String> = inv
+            .tools
             .iter()
-            .filter(|n| lmgw_api_types::scope::admits(&mode, &pats, n))
-            .cloned()
+            .filter(|t| t.plane == "/mcp" && t.available && !t.stale)
+            .filter(|t| {
+                hosted_reach(&t.source_label, &hosted, own, &grant)
+                    .unwrap_or_else(|| lmgw_api_types::scope::admits(&mode, &pats, &t.name))
+            })
+            .map(|t| t.name.clone())
             .collect();
         Some((seen, offered.len()))
     });
     // One send for both shapes of body below.
     let submit = move |body: Value| {
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/key_set", &body).await {
+            match crate::api::post::<KeySaved, _>("/api/op/key_set", &body).await {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("key policy saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     open.set(false);
                     refresh.update(|v| *v = v.wrapping_add(1));
                 }
@@ -236,12 +256,28 @@ pub(super) fn KeyEditor(
             "expires_at": expiry.get_untracked().trim(),
             "note": note.get_untracked(),
         });
+        // A client key's and a device's: an agent's tools are its
+        // manifest's, and an internal identity presents no credential.
+        if matches!(k.kind.as_str(), "key" | "device") {
+            body["device_tools"] = json!(untrack(|| device_tools.labels()));
+        }
         if k.kind == "device" {
             // Disable lives on the Devices card, behind its confirmation.
             if let Some(o) = body.as_object_mut() {
                 o.remove("enabled");
             }
             body["hosts_label"] = json!(hosts.get_untracked().trim());
+            // The URLs the device dials, in order; a row with none yet (not
+            // paired since TLS) keeps none until its New token proposes.
+            if !urls.get_untracked().trim().is_empty() {
+                match parse_urls(&urls.get_untracked()) {
+                    Ok(list) => body["urls"] = json!(list),
+                    Err(e) => {
+                        toasts.err(e);
+                        return;
+                    }
+                }
+            }
         }
         submit(body);
     };
@@ -337,8 +373,31 @@ pub(super) fn KeyEditor(
                             }}
                             " The lmgw__* self-admin tools need an owner key and are never in reach of a client key. A caller with no key sees everything until Require API key is on."
                         </div>
+                        <DeviceToolsEditor
+                            state=device_tools
+                            hosted=hosted
+                            own=Signal::derive(move || {
+                                editing.get().filter(|k| k.kind == "device").map(|k| k.id)
+                            })
+                            disabled=Signal::derive(|| false)
+                            scope=Signal::derive(move || (scope.tool_mode.get(), scope.tool_patterns()))
+                        />
                     </Show>
                     <Show when=move || device.get()>
+                        <div class="row" style="margin-top:10px;align-items:flex-start">
+                            <span class="lbl">"URLs"</span>
+                            <textarea
+                                class="input mono pair-urls"
+                                rows=move || (urls.get().lines().count() + 1).clamp(2, 8)
+                                spellcheck="false"
+                                aria-label="The URLs the device dials, one a line, in order"
+                                prop:value=move || urls.get()
+                                on:input=move |ev| urls.set(event_target_value(&ev))
+                            ></textarea>
+                        </div>
+                        <div class="mini-note dim">
+                            "One https URL a line, in the order the device tries them. The device learns a change at its next connection; a name or address new to the list goes into the server certificates."
+                        </div>
                         <div class="row" style="margin-top:10px">
                             <span class="lbl">"hosts tools as"</span>
                             <input

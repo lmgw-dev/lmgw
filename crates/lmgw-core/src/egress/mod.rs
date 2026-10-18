@@ -76,6 +76,24 @@ pub trait Egress: Send + Sync {
         Err(GatewayError::Unsupported("reranking".into()))
     }
 
+    /// Build a System One request (decision-models design §2.1, §4.1): the
+    /// client's object with only `model` rewritten, at `{base}/systemone`,
+    /// which llama-server, TypeSafe and OpenRouter serve. The route check
+    /// refuses every other protocol before admission
+    /// (`gate::RouteCheck::Decision`); this refusal is its backstop.
+    fn build_systemone(
+        &self,
+        _http: &reqwest::Client,
+        _up: &Upstream,
+        _model: &str,
+        _body: &openai_wire::SystemOneBody,
+    ) -> Result<reqwest::RequestBuilder, GatewayError> {
+        Err(GatewayError::Unsupported(format!(
+            "System One via {} upstream",
+            self.proto().as_str()
+        )))
+    }
+
     /// Plan how to count the tokens of `text` against `model` on this upstream
     /// (§6). Each protocol uses its native mechanism: llama.cpp `/tokenize`,
     /// Anthropic `/v1/messages/count_tokens`, Gemini `:countTokens`, or — for

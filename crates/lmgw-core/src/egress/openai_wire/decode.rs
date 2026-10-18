@@ -50,10 +50,14 @@ pub(crate) fn parse_usage(v: Option<&Value>) -> Usage {
 /// present (the marker of a genuine llama-server timings object), so cloud
 /// upstreams — which never emit this field — yield nothing. Also what the
 /// benchmark engine reads `/completion`'s final chunk with, on both engines
-/// (ik sends no `cache_n`).
+/// (ik sends no `cache_n`). A rate llama.cpp writes as `null` is `None`; the
+/// `is_finite` filter is defensive, since parsed JSON holds no non-finite
+/// number.
 pub(crate) fn parse_timings(v: Option<&Value>) -> Option<Timings> {
     let t = v?;
-    let f = |k: &str| t.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    // llama.cpp writes a non-finite rate as `null`: an unknown one stays
+    // unknown, never a measured zero.
+    let f = |k: &str| t.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
     Some(Timings {
         prompt_n: t.get("prompt_n").and_then(Value::as_u64)?,
         prompt_ms: f("prompt_ms"),

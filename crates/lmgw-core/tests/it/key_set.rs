@@ -111,7 +111,7 @@ async fn a_gateway_key_takes_every_field_the_dialog_offers() {
     )
     .await
     .unwrap();
-    assert_eq!(v["changed"].as_array().map(Vec::len), Some(0), "{v}");
+    assert!(v.changed.is_empty(), "{v:?}");
 }
 
 #[tokio::test]
@@ -499,7 +499,7 @@ async fn key_create_takes_scope_fields_and_normalises_them() {
     )
     .await;
     assert_eq!(status, 200, "{v}");
-    assert!(v["plaintext"].as_str().unwrap().starts_with("lmgw-"), "{v}");
+    assert!(v["key"].as_str().unwrap().starts_with("lmgw-"), "{v}");
     let k = key_named(&st, "scoped").await;
     assert_eq!(k.policy.scope_mode, ScopeMode::Allow);
     assert_eq!(k.policy.scope_patterns, "claude-*\nkilo/*");

@@ -87,13 +87,13 @@ pub fn sent_kind(s: Option<&str>) -> Result<Option<UpstreamKind>, String> {
 /// |---|---|---|
 /// | `llama_cpp` | none or `llama_server` | `llama_cpp` + `llama_server` |
 /// | `llama_cpp` | anything else | refused, by name |
-/// | `openai` | `llama_server` | `llama_cpp` (the old spelling), said in the response |
+/// | `openai` | `llama_server` | refused, by name: use protocol `llama_cpp` |
 /// | `anthropic` | `llama_server` | as sent |
-/// | `gemini` | `llama_server` | refused |
+/// | `gemini` | `llama_server` | refused, by name |
 /// | `openai`/`gemini` | none, current kind `llama_server` | kind `generic` (leaving llama) |
 /// | `anthropic` | none, current kind `llama_server` | kind kept |
 /// | none | `generic`/`audio_cpp`, current `llama_cpp` | refused: change the protocol |
-/// | none | `llama_server`, current protocol `openai`/`gemini` | as the `openai`/`gemini` rows above |
+/// | none | `llama_server`, current protocol `openai`/`gemini` | refused, as the `openai`/`gemini` rows above |
 /// | anything else | | as sent |
 ///
 /// On a `llama_cpp` result `supports_responses` is refused when sent `true`,
@@ -132,12 +132,12 @@ pub fn settle(
             ))
         }
         (Some(Openai), Some(LlamaServer)) => {
-            notes.push(
-                "kind llama_server on protocol openai is the old spelling of protocol llama_cpp, \
-                 which was stored"
+            return Err(
+                "kind llama_server cannot go with protocol openai: that was the old spelling of \
+                 protocol llama_cpp — use protocol llama_cpp (or anthropic, for llama-server's \
+                 /v1/messages)"
                     .into(),
-            );
-            (LlamaCpp, LlamaServer)
+            )
         }
         (Some(Anthropic), Some(LlamaServer)) => (Anthropic, LlamaServer),
         (Some(Gemini), Some(LlamaServer)) => {

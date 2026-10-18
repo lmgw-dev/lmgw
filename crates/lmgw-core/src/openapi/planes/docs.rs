@@ -4,9 +4,8 @@
 //! synthetic-candidate queue, eval runs, the doc-request queue and corpus
 //! export/import — `web/api_docs.rs`'s own module doc. Ingest, re-embed, eval
 //! and golden-generate all answer the same `DocsJobStarted` shape (the job now
-//! running, or the one that already was); a handful of small mutations answer
-//! only `{ok, ...}` with no DTO of their own, which this plane marks untyped
-//! rather than inventing one lmgw does not have.
+//! running, or the one that already was); creating a corpus answers a
+//! `CorpusCreated` (the corpus, and the job when it was asked to start one).
 
 use lmgw_api_types as dto;
 
@@ -34,6 +33,7 @@ fn base(method: &'static str, path: &'static str, summary: &'static str) -> DocR
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
@@ -52,19 +52,19 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 models before the row exists. start: true queues the ingest job \
                 immediately.",
             request: Req::Json(|g| g.root_schema_for::<CreateCorpus>()),
-            response: Resp::Json(|g| g.root_schema_for::<dto::DocsJobStarted>()),
+            response: Resp::Json(|g| g.root_schema_for::<dto::CorpusCreated>()),
             ..base("POST", "/api/docs/corpora", "Create a doc corpus")
         },
         DocRoute {
             description: "One corpus's row, documents, golden queries and eval history \
-                (limit caps the eval history; 0 or absent is the whole run).",
+                (limit caps the eval history; 0 or absent is the whole run). 404 not_found for a corpus id nothing has.",
             path_ints: &["id"],
             query: Some(|g| g.root_schema_for::<DetailQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::CorpusDetail>()),
             ..base("GET", "/api/docs/corpora/{id}", "Get a corpus")
         },
         DocRoute {
-            description: "Deletes a corpus and everything ingested into it.",
+            description: "Deletes a corpus and everything ingested into it. 404 not_found for a corpus id nothing has.",
             path_ints: &["id"],
             response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
             confirm_note: Some("deletes every document, chunk and golden query in this corpus"),
@@ -72,7 +72,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Queues (or reports already-running) the ingest job for this \
-                corpus's configured sources.",
+                corpus's configured sources. 404 not_found for a corpus id nothing has.",
             path_ints: &["id"],
             response: Resp::Json(|g| g.root_schema_for::<dto::DocsJobStarted>()),
             ..base(
@@ -83,7 +83,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "Queues (or reports already-running) a re-embed job: fills in \
-                missing vectors, or moves the pin onto a new embed_model.",
+                missing vectors, or moves the pin onto a new embed_model. 404 not_found for a corpus id nothing has.",
             path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<ReEmbedBody>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::DocsJobStarted>()),
@@ -94,7 +94,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
-            description: "Every document crawled into this corpus.",
+            description: "Every document crawled into this corpus. 404 not_found for a corpus id nothing has.",
             path_ints: &["id"],
             response: Resp::Json(|g| g.root_schema_for::<dto::DocumentsResponse>()),
             ..base(
@@ -114,7 +114,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Runs a retrieval search against one corpus with the same stage \
                 pipeline docs__query uses, answering both the trace and the rendered \
-                markdown a client would receive.",
+                markdown a client would receive. 404 not_found for a corpus id nothing has. (A corpus named by library@version \
+                that does not exist is a 404 too.)",
             request: Req::Json(|g| g.root_schema_for::<SearchBody>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::DocsSearchResponse>()),
             // A POST only for its body: a search stores nothing (review R2 #8).
@@ -124,14 +125,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         // -- Golden queries and eval ----------------------------------------------
         DocRoute {
             description: "One corpus's golden queries — the hand- or candidate-curated set \
-                its eval runs are scored against.",
+                its eval runs are scored against. 404 not_found for a corpus id nothing has.",
             query: Some(|g| g.root_schema_for::<CorpusQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::GoldenResponse>()),
             ..base("GET", "/api/docs/golden", "List golden queries")
         },
         DocRoute {
             description: "Creates or edits (id present) a golden query. Expected chunk ids \
-                are validated against the corpus before they are stored.",
+                are validated against the corpus before they are stored. 404 not_found for a corpus id nothing has.",
             request: Req::Json(|g| g.root_schema_for::<GoldenBody>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::GoldenSaved>()),
             ..base("POST", "/api/docs/golden", "Create or edit a golden query")
@@ -139,7 +140,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "Queues a run that samples chunks and asks the corpus's pinned \
                 ingest model to write candidate golden queries from them — the queue is the \
-                only path from a candidate to a real golden query.",
+                only path from a candidate to a real golden query. 404 not_found for a corpus id nothing has.",
             request: Req::Json(|g| g.root_schema_for::<GenerateBody>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::DocsJobStarted>()),
             ..base(
@@ -150,7 +151,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "The synthetic golden-query curation queue, with the chunks each \
-                candidate was written from alongside it.",
+                candidate was written from alongside it. status is pending, accepted or rejected \
+                (empty for all), anything else is a 400. 404 not_found for a corpus id nothing has.",
             query: Some(|g| g.root_schema_for::<CandidatesQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::GoldenCandidatesResponse>()),
             ..base(
@@ -194,14 +196,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "One corpus's eval-run history, most recent first (limit caps it; \
-                0 or absent is the whole history — a score is read as a trend).",
+                0 or absent is the whole history — a score is read as a trend). 404 not_found for a corpus id nothing has.",
             query: Some(|g| g.root_schema_for::<CorpusQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::EvalHistory>()),
             ..base("GET", "/api/docs/eval", "List eval runs")
         },
         DocRoute {
             description: "Queues (or reports already-running) an eval run over the corpus's \
-                golden queries at the given hit@k depth.",
+                golden queries at the given hit@k depth. 404 not_found for a corpus id nothing has.",
             request: Req::Json(|g| g.root_schema_for::<EvalBody>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::DocsJobStarted>()),
             ..base("POST", "/api/docs/eval", "Start an eval run")
@@ -209,7 +211,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         // -- The doc-request queue -------------------------------------------------
         DocRoute {
             description: "The doc-request queue: libraries an agent asked for that this \
-                gateway has no corpus for yet.",
+                gateway has no corpus for yet. status is pending, fulfilled or dismissed (empty \
+                for all), anything else is a 400.",
             query: Some(|g| g.root_schema_for::<RequestsQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::DocRequestsResponse>()),
             ..base("GET", "/api/docs/requests", "List doc requests")
@@ -229,7 +232,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         // -- Export / import ---------------------------------------------------------
         DocRoute {
             description: "The corpus store as a plain SQLite file — one corpus with \
-                ?corpus_id=, or the whole file. The file can be copied to another machine as is.",
+                ?corpus_id=, or the whole file. The file can be copied to another machine as is. 404 not_found for a corpus id nothing has.",
             query: Some(|g| g.root_schema_for::<ExportQuery>()),
             response: Resp::Binary(&["application/vnd.sqlite3"]),
             ..base("GET", "/api/docs/export", "Export corpora as a SQLite file")
@@ -237,7 +240,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             description: "What a GET /api/docs/export download would contain, without \
                 transferring the file — the half a UI shows before committing, and the half \
-                an import re-derives to check against.",
+                an import re-derives to check against. 404 not_found for a corpus id nothing has.",
             query: Some(|g| g.root_schema_for::<ExportQuery>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::ExportManifest>()),
             ..base(

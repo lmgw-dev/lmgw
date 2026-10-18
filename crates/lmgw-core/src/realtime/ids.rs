@@ -25,6 +25,11 @@ impl Default for Ids {
     }
 }
 
+/// The longest `event_…` id as JSON, quotes included: the prefix, `_`, the
+/// tag's twelve digits and a counter of up to sixteen hex digits. What the
+/// calls' splitter reserves for a part's own `event_id`.
+pub const EVENT_ID_JSON_MAX: usize = 2 + "event_".len() + 12 + 16;
+
 impl Ids {
     pub fn new() -> Self {
         // 48 random bits, as 12 hex digits: plenty to keep sessions apart in
@@ -60,5 +65,18 @@ impl Ids {
 
     pub fn session(&self) -> String {
         self.mint("sess")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_longest_event_id_is_what_the_splitter_reserves() {
+        let ids = Ids::new();
+        ids.next.store(u64::MAX, Ordering::Relaxed);
+        let json = serde_json::to_string(&ids.event()).unwrap();
+        assert_eq!(json.len(), EVENT_ID_JSON_MAX);
     }
 }

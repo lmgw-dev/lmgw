@@ -121,7 +121,12 @@ macro_rules! frames_doc {
     message, before the model answers; delta: a piece of the answer; reasoning: a piece of \
     the model's reasoning; tool: a tool call of the turn, by its `event` (start, args, ready, \
     approval, result); usage: the token counts so far; stop: why the model stopped; stats: a \
-    local model's timings; error: a failure, the stream goes on to done; done: the end, \
+    local model's timings; error: a failure, the stream goes on to done — one per MCP label \
+    the thread or its folder attached that offers the turn no tools, with its server_label \
+    and a code (tool_unreachable: a paired device's tools the caller is not granted, or a \
+    server its tool scope keeps out; tool_offline; tool_disabled; tool_unknown; \
+    tool_failed), the turn going on without it, as a plain chat turn when every such label \
+    is an offline or ungranted device's; done: the end, \
     naming the reply it saved and its token counts, and `pending_approvals` when it stopped \
     on calls that wait for a decision. A turn that is refused before it says anything \
     streams error and done {aborted: true}. A client that closes the stream stops the turn; \
@@ -218,6 +223,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 ("speech", speech_frame),
                 ("speech_done", speech_done_frame),
                 ("speech_error", speech_error_frame),
+                ("error", error_frame),
             ]),
             ..chat_route(
                 "POST",
@@ -235,6 +241,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  instructions_required, or the failure's kind). One speech row is written per \
                  call. Closing the stream stops the synthesis at its next step; \
                  POST /chat/api/threads/{id}/speech/stop stops every read-aloud of the thread. \
+                 A device or owner key that is disabled, rotated, deleted or expired while it \
+                 streams, and a gateway that stops, end the stream with a last `error` frame \
+                 (code revoked, with `kind`, or gateway_stopping). \
                  Refused before any frame: 404 not_found (thread or message), 400 bad_request \
                  (the message is not a reply), 400 empty_message (a reply with no text).",
             )
@@ -242,7 +251,11 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         DocRoute {
             path_ints: &["id"],
             request: Req::Json(|g| g.root_schema_for::<WarmRequest>()),
-            response: Resp::Sse(&[("state", state_frame), ("done", warm_done_frame)]),
+            response: Resp::Sse(&[
+                ("state", state_frame),
+                ("error", error_frame),
+                ("done", warm_done_frame),
+            ]),
             ..chat_route(
                 "POST",
                 "/chat/api/threads/{id}/voice/warm",
@@ -255,7 +268,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                  together is warmed without evicting. The stream sends one `state` frame per \
                  change of each stage (loading, then ready with the time it took, or held, \
                  fallback, skipped, failed), then `done` with no fields once every stage has \
-                 settled. Closing the stream drops what still waits for admission; a container \
+                 settled. A device or owner key that is disabled, rotated, deleted or expired \
+                 while it streams, and a gateway that stops, end the stream with an `error` \
+                 frame (code revoked, with `kind`, or gateway_stopping) instead of `done`. \
+                 Closing the stream drops what still waits for admission; a container \
                  start already in flight finishes. Refused before anything is warmed: 404 \
                  not_found, 400 bad_request (no stages, or an unknown name), 422 \
                  asr_not_configured or tts_not_configured (no alias for the stage at any \
@@ -264,4 +280,27 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A send documents every frame a client's `TurnEvent` reads, no more
+    /// and no fewer (client-apps design §4.3, WP10).
+    #[test]
+    fn a_send_documents_every_frame_a_client_reads() {
+        let send = routes()
+            .into_iter()
+            .find(|r| r.path == "/chat/api/threads/{id}/send")
+            .expect("the send is documented");
+        let Resp::Sse(events) = send.response else {
+            panic!("the send is an event stream")
+        };
+        let mut documented: Vec<&str> = events.iter().map(|(name, _)| *name).collect();
+        let mut read: Vec<&str> = frames::TURN_EVENTS.to_vec();
+        documented.sort_unstable();
+        read.sort_unstable();
+        assert_eq!(documented, read);
+    }
 }

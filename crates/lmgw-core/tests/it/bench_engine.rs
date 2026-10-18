@@ -13,12 +13,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use lmgw_api_types::bench::{EnergySource, MixedPlan, Phase, ProbeKind, ProbeOutcome, SuiteParams};
 use lmgw_core::agent::Cancel;
 use lmgw_core::bench::{
     run_suite, Bench, BenchSink, BenchTarget, Progress, Record, Sampler, SuiteEnd,
 };
+use lmgw_core::erased::Erased;
 use lmgw_core::vram::nvml::NoTelemetry;
 use lmgw_core::vram::GpuProbe;
 
@@ -30,14 +30,17 @@ struct Sink {
     phases: Mutex<Vec<(Phase, Record)>>,
 }
 
-#[async_trait]
 impl BenchSink for Sink {
-    async fn progress(&self, p: Progress) {
-        self.progress.lock().unwrap().push(p);
+    fn progress<'a>(&'a self, p: Progress) -> Erased<'a, ()> {
+        Box::pin(async move {
+            self.progress.lock().unwrap().push(p);
+        })
     }
 
-    async fn phase_done(&self, phase: Phase, record: &Record) {
-        self.phases.lock().unwrap().push((phase, record.clone()));
+    fn phase_done<'a>(&'a self, phase: Phase, record: &'a Record) -> Erased<'a, ()> {
+        Box::pin(async move {
+            self.phases.lock().unwrap().push((phase, record.clone()));
+        })
     }
 }
 

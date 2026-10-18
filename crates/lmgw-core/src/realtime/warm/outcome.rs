@@ -340,6 +340,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The document says a frame's `cause`, `answered_by`, `reason`,
+    /// `message`, `needed_bytes` and `capacity_bytes` are never `null`:
+    /// a frame with none of them leaves the keys out.
+    #[test]
+    fn a_frame_with_nothing_optional_set_writes_none_of_the_six_documented_keys() {
+        let v = serde_json::to_value(ModelState::loading("chat", "alias")).unwrap();
+        for key in [
+            "cause",
+            "answered_by",
+            "reason",
+            "message",
+            "needed_bytes",
+            "capacity_bytes",
+        ] {
+            assert!(v.get(key).is_none(), "{key} is written unset: {v}");
+        }
+        // `ms` is the one optional fact the frame always carries, `null` for
+        // "nothing had to load"; the document keeps its `null`.
+        assert_eq!(v["ms"], serde_json::Value::Null);
+    }
+
     /// Review W6-9: every frame the gateway writes reads into the clients'
     /// type (`lmgw-api-types::chat_voice::ModelState`) field for field — the
     /// two are separate structs, and this is what keeps them in step.

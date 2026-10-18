@@ -39,7 +39,6 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use axum::body::{Body, Bytes};
 use axum::extract::Path;
 use axum::http::{header, StatusCode};
@@ -53,6 +52,7 @@ use crate::agent::{
 };
 use crate::config::Route;
 use crate::egress::{apply_bearer_auth, for_protocol};
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::gate::FallbackReason;
 use crate::ingress::responses::{self as wire, ResponsesEncoder, ResponsesRequest};
@@ -669,24 +669,25 @@ struct GatewayRunner {
 /// so the WARN names each image once per run; the send's own check
 /// (`gate::fit_chat`) then finds none left, and the turn's row is marked
 /// from here ([`PerRoute::degraded`]).
-#[async_trait]
 impl proxy::PerRoute for GatewayRunner {
-    async fn request(
-        &self,
-        route: &Route,
-        _hold: Option<&crate::vram::LocalHold>,
-        _rerouted: Option<&crate::gate::GateHeaders>,
-        ir: &ChatRequest,
-    ) -> Result<Option<ChatRequest>, GatewayError> {
-        let unseen = crate::gate::fallback_images::decide(&self.state, route, ir).await;
-        let mut marker = self.marker.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(u) = unseen else {
-            *marker = None;
-            return Ok(None);
-        };
-        let (sent, n) = self.announced.without_images(ir, &u);
-        *marker = Some(u.marker(n));
-        Ok(Some(sent))
+    fn request<'a>(
+        &'a self,
+        route: &'a Route,
+        _hold: Option<&'a crate::vram::LocalHold>,
+        _rerouted: Option<&'a crate::gate::GateHeaders>,
+        ir: &'a ChatRequest,
+    ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>> {
+        Box::pin(async move {
+            let unseen = crate::gate::fallback_images::decide(&self.state, route, ir).await;
+            let mut marker = self.marker.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(u) = unseen else {
+                *marker = None;
+                return Ok(None);
+            };
+            let (sent, n) = self.announced.without_images(ir, &u);
+            *marker = Some(u.marker(n));
+            Ok(Some(sent))
+        })
     }
 
     fn degraded(&self) -> Option<String> {
@@ -697,43 +698,44 @@ impl proxy::PerRoute for GatewayRunner {
     }
 }
 
-#[async_trait]
 impl TurnRunner for GatewayRunner {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        if self.stream {
-            proxy::stream_once_on(
-                &self.state,
-                self._admission.as_ref(),
-                &self.route,
-                self.fallback,
-                ir,
-                RESPONSES_PROTO,
-                self.key.clone(),
-                deadline,
-                sink,
-                Some((self, None)),
-            )
-            .await
-        } else {
-            proxy::sample_once_noting(
-                &self.state,
-                self._admission.as_ref(),
-                &self.route,
-                self.fallback,
-                ir,
-                RESPONSES_PROTO,
-                self.key.clone(),
-                deadline,
-                Some(&self.fell_back),
-                Some((self, None)),
-            )
-            .await
-        }
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            if self.stream {
+                proxy::stream_once_on(
+                    &self.state,
+                    self._admission.as_ref(),
+                    &self.route,
+                    self.fallback,
+                    ir,
+                    RESPONSES_PROTO,
+                    self.key.clone(),
+                    deadline,
+                    sink,
+                    Some((self, None)),
+                )
+                .await
+            } else {
+                proxy::sample_once_noting(
+                    &self.state,
+                    self._admission.as_ref(),
+                    &self.route,
+                    self.fallback,
+                    ir,
+                    RESPONSES_PROTO,
+                    self.key.clone(),
+                    deadline,
+                    Some(&self.fell_back),
+                    Some((self, None)),
+                )
+                .await
+            }
+        })
     }
 }
 
@@ -745,22 +747,23 @@ struct EncoderSink<'a> {
     tx: Option<tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>>,
 }
 
-#[async_trait]
 impl EventSink for EncoderSink<'_> {
-    async fn emit(&mut self, ev: LoopEvent) -> bool {
-        let frames = self.enc.on_event(&ev);
-        match &self.tx {
-            None => true,
-            Some(tx) => {
-                if frames.is_empty() {
-                    return true;
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+        Box::pin(async move {
+            let frames = self.enc.on_event(&ev);
+            match &self.tx {
+                None => true,
+                Some(tx) => {
+                    if frames.is_empty() {
+                        return true;
+                    }
+                    // A closed channel means the client hung up; returning false
+                    // aborts the loop instead of running more turns and tool calls
+                    // for a response nobody is reading.
+                    tx.send(Ok(Bytes::from(frames))).await.is_ok()
                 }
-                // A closed channel means the client hung up; returning false
-                // aborts the loop instead of running more turns and tool calls
-                // for a response nobody is reading.
-                tx.send(Ok(Bytes::from(frames))).await.is_ok()
             }
-        }
+        })
     }
 }
 
@@ -901,8 +904,8 @@ async fn run_loop(
         for (label, defs) in &resolved.listed {
             sink.enc.push_mcp_list_tools(label, defs);
         }
-        for (label, err) in &resolved.failed {
-            sink.enc.push_mcp_list_failed(label, err);
+        for f in &resolved.failed {
+            sink.enc.push_mcp_list_failed(&f.label, &f.why);
         }
         let outcome = agent::run(req.ir, cfg, &runner, &exec, &mut sink).await;
         // A turn a ladder climb handed to the fallback (review finding 13):
@@ -954,8 +957,8 @@ async fn run_loop(
                 return;
             }
         }
-        for (label, err) in &resolved.failed {
-            let f = enc.push_mcp_list_failed(label, err);
+        for failed in &resolved.failed {
+            let f = enc.push_mcp_list_failed(&failed.label, &failed.why);
             if !send(f).await {
                 return;
             }

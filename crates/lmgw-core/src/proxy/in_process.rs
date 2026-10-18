@@ -15,6 +15,7 @@ use axum::http::StatusCode;
 
 use crate::config::Route;
 use crate::egress::for_protocol;
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::gate::FallbackReason;
 use crate::ir::{ChatRequest, Completion, Timings, Usage};
@@ -129,6 +130,7 @@ pub(crate) async fn record_in_process(
         images_out: quantity_column(q.images_out),
         // A model call: no approval decides one.
         approved_by: None,
+        via: p.key.via,
     };
     let share = row.row_cost();
     // A caller stamped with a run (`X-Lmgw-Run` on a `/v1/responses` or a
@@ -235,38 +237,236 @@ impl FallbackNote {
 /// loop that outlives a rename of its key records each turn against the key
 /// it is (A2 review 4). `per_route` decides what goes out on each route, as
 /// for [`stream_once_on`]: `ir` is always the caller's own request.
+///
+/// Erased ([`crate::erased`]), as [`stream_once_on`] is: a unary turn's
+/// whole send path behind one future. A re-route calls it again through
+/// that same indirection.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn sample_once_noting(
-    state: &SharedState,
-    hold: Option<&crate::vram::LocalHold>,
-    route: &Route,
+pub(crate) fn sample_once_noting<'a>(
+    state: &'a SharedState,
+    hold: Option<&'a crate::vram::LocalHold>,
+    route: &'a Route,
     fallback: Option<FallbackReason>,
-    ir: &ChatRequest,
-    ingress_proto: &str,
+    ir: &'a ChatRequest,
+    ingress_proto: &'a str,
     key: KeyRef,
     deadline: Duration,
-    note: Option<&FallbackNote>,
-    per_route: Option<(&dyn PerRoute, Option<&crate::gate::GateHeaders>)>,
-) -> Result<Completion, GatewayError> {
-    let started = Instant::now();
-    state.telemetry.request_started();
-    let own = ir;
+    note: Option<&'a FallbackNote>,
+    per_route: Option<(&'a dyn PerRoute, Option<&'a crate::gate::GateHeaders>)>,
+) -> crate::erased::Erased<'a, Result<Completion, GatewayError>> {
+    futures::FutureExt::boxed(async move {
+        let started = Instant::now();
+        state.telemetry.request_started();
+        let own = ir;
 
-    // Budget and scope for work the gateway does on its own behalf (§4.4).
-    // Before the call, so an unattended loop stops rather than discovering the
-    // ceiling one request at a time.
-    if let Err(e) = crate::policy::check_internal(
-        &state.policy,
-        &state.db,
-        &state.snapshot(),
-        ingress_proto,
-        &ir.model_alias,
-    )
-    .await
-    {
+        // Budget and scope for work the gateway does on its own behalf (§4.4).
+        // Before the call, so an unattended loop stops rather than discovering the
+        // ceiling one request at a time.
+        if let Err(e) = crate::policy::check_internal(
+            &state.policy,
+            &state.db,
+            &state.snapshot(),
+            ingress_proto,
+            &ir.model_alias,
+        )
+        .await
+        {
+            record_in_process(
+                InProcessLog {
+                    key: key.clone(),
+                    ingress_proto,
+                    alias: &ir.model_alias,
+                    route,
+                    started,
+                    streamed: false,
+                    class: RequestClass::Chat,
+                    timings: None,
+                    max_tokens_clamped: None,
+                    fallback,
+                    rung: None,
+                    degraded: None,
+                    quantities: Default::default(),
+                },
+                e.http_status().as_u16(),
+                None,
+                Usage::default(),
+                Some((e.kind(), e.to_string())),
+                state,
+            )
+            .await;
+            return Err(e);
+        }
+
+        // What the caller sends on this route (`per_route`); a refusal of it is
+        // this call's row, like any other.
+        let prepared = match per_route {
+            Some((p, rerouted)) => p.request(route, hold, rerouted, own).await,
+            None => Ok(None),
+        };
+        let (ir, mut refused) = match prepared {
+            Ok(Some(r)) => (std::borrow::Cow::Owned(r), None),
+            Ok(None) => (std::borrow::Cow::Borrowed(own), None),
+            Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
+        };
+        let ir: &ChatRequest = &ir;
+        let egress = for_protocol(route.upstream.protocol);
+        let mut params = ir.params.clone().with_defaults(&route.param_defaults);
+        // An off this cloud model cannot take as asked goes out in the form it
+        // can (model-capabilities design §5.6).
+        let mut fitted = super::reasoning_fit::fit(state, route, &mut params).await;
+
+        // The caller's `deadline` is a bound on this whole call, the gate
+        // included (second review, finding 7): it runs from `started`, and the gate's
+        // count and pool wait end at it, so a queue for KV room can never stretch
+        // MCP sampling's "fail fast" bound or an agent loop's wall clock. `None`
+        // only for a deadline too far out for the clock to represent (a huge
+        // `responses_timeout_seconds`), which bounds nothing anyway.
+        let deadline_at = started.checked_add(deadline);
+
+        let mut max_tokens_clamped = None;
+        let mut rung = None;
+        let mut lease_degraded = None;
+        let result: Result<Turn<Completion>, GatewayError> = async {
+            if let Some(e) = refused.take() {
+                return Err(e);
+            }
+            // The gate's per-send half (unified-KV design §3.3): this turn's own
+            // clamp, count and pool reservation. Per turn, not per hold — the
+            // caller's hold may span a whole tool loop, and the lease must not.
+            let fit =
+                crate::gate::fit_chat(state, hold, route, ir, &mut params, false, deadline_at)
+                    .await;
+            let (mut lease, ir) = match fit {
+                Ok(fit) => fit,
+                // The clamp (step 1) already ran even though the reservation
+                // (step 4) refused — this turn's own log row must still
+                // carry it (review finding 7).
+                Err(f) => {
+                    max_tokens_clamped = f.max_tokens_clamped;
+                    rung = f.rung.as_ref().map(crate::gate::RungTag::log);
+                    return Err(f.error);
+                }
+            };
+            max_tokens_clamped = lease.max_tokens_clamped();
+            lease_degraded = lease.degraded();
+            // The send's effective timeout is the smaller of the upstream's own
+            // timeout and what is left of the caller's `deadline` after the gate —
+            // so the self-starvation guard can fail faster than a generous
+            // per-upstream ceiling (a cold local model's 10 min) without ever
+            // *raising* that bound. Both are visible, neither hidden. An upstream
+            // with no ceiling of its own leaves the deadline standing alone, which
+            // is still a bound: this path always has one.
+            let left =
+                deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Err(GatewayError::Timeout);
+            }
+            let effective = match route.upstream.request_timeout() {
+                Some(t) => left.min(t),
+                None => left,
+            };
+            // One send, through the gate's send (§3.2's dead-container retry, and
+            // on a ladder row the count beside it and the climb): with the hold
+            // in hand this is the same turn re-issued against a fresh container
+            // when the one we hold a claim on has died.
+            let sent = super::reasoning_fit::send_chat(
+                state,
+                hold,
+                route,
+                &mut lease,
+                &ir,
+                &params,
+                false,
+                deadline_at,
+                Some(effective),
+                None,
+                &mut fitted,
+                super::reasoning_fit::RowAs::InProcess {
+                    key: key.clone(),
+                    ingress_proto,
+                    alias: &ir.model_alias,
+                    fallback,
+                },
+                |r, p| {
+                    Ok(egress
+                        .build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, false)?
+                        .timeout(effective))
+                },
+            )
+            .await;
+            rung = lease.rung_log();
+            let resp = match sent? {
+                crate::gate::Sent::Upstream(resp) => resp,
+                crate::gate::Sent::Rerouted(r) => return Ok(Turn::Rerouted(r)),
+            };
+            let status = resp.status();
+            // A body that could not be read to its end (a timeout, a reset) drops
+            // the lease here unfinished: released once llama-server lets go.
+            let bytes = resp.bytes().await.map_err(GatewayError::from)?;
+            // The answer is in: this turn no longer occupies the pool.
+            lease.complete();
+            if !status.is_success() {
+                return Err(crate::gate::attribute(
+                    egress.map_error(status.as_u16(), &bytes),
+                    route,
+                ));
+            }
+            egress.parse_completion(&bytes).map(Turn::Answered)
+        }
+        .await;
+        let result = match result {
+            Ok(Turn::Answered(c)) => Ok(c),
+            Err(e) => Err(e),
+            // The gate refused instead — a candidate alias's deferral: this
+            // turn's row records it, on the candidate it was on.
+            Ok(Turn::Rerouted(Err(f))) => Err(f.error),
+            // The gate sent the turn elsewhere before anything was sent — the
+            // request's fallback after a climb that could not happen (ladder
+            // design §12 entry 8), or a candidate alias's next pick (§12 entry
+            // 45): the turn is that call's, row and gauge included — this one
+            // sent nothing and logs nothing.
+            Ok(Turn::Rerouted(Ok(opened))) => {
+                state.telemetry.request_abandoned();
+                if let (Some(note), Some(fb), Some(reason)) = (
+                    note,
+                    opened.headers.fallback(),
+                    opened.headers.fallback_reason(),
+                ) {
+                    note.note(fb.to_string(), reason);
+                }
+                let left =
+                    deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
+                return sample_once_noting(
+                    state,
+                    opened.hold.as_ref(),
+                    &opened.route,
+                    opened.headers.fallback_reason(),
+                    own,
+                    ingress_proto,
+                    key,
+                    left,
+                    note,
+                    per_route.map(|(p, _)| (p, Some(&opened.headers))),
+                )
+                .await;
+            }
+        };
+
+        if let Some((p, _)) = per_route {
+            p.fitted(&fitted);
+        }
+        // One shared log row either way — the §8 "logs like any request" guarantee.
+        let (status, usage, error): (u16, Usage, Option<(&str, String)>) = match &result {
+            Ok(c) => (StatusCode::OK.as_u16(), c.usage, None),
+            Err(e) => (
+                e.http_status().as_u16(),
+                Usage::default(),
+                Some((e.kind(), e.to_string())),
+            ),
+        };
         record_in_process(
             InProcessLog {
-                key: key.clone(),
+                key,
                 ingress_proto,
                 alias: &ir.model_alias,
                 route,
@@ -274,215 +474,25 @@ pub(crate) async fn sample_once_noting(
                 streamed: false,
                 class: RequestClass::Chat,
                 timings: None,
-                max_tokens_clamped: None,
+                max_tokens_clamped,
                 fallback,
-                rung: None,
-                degraded: None,
+                rung,
+                degraded: crate::degraded::join([
+                    per_route.and_then(|(p, _)| p.degraded()),
+                    lease_degraded,
+                ]),
                 quantities: Default::default(),
             },
-            e.http_status().as_u16(),
-            None,
-            Usage::default(),
-            Some((e.kind(), e.to_string())),
+            status,
+            Some(started.elapsed().as_millis() as i64),
+            usage,
+            error,
             state,
         )
         .await;
-        return Err(e);
-    }
 
-    // What the caller sends on this route (`per_route`); a refusal of it is
-    // this call's row, like any other.
-    let prepared = match per_route {
-        Some((p, rerouted)) => p.request(route, hold, rerouted, own).await,
-        None => Ok(None),
-    };
-    let (ir, mut refused) = match prepared {
-        Ok(Some(r)) => (std::borrow::Cow::Owned(r), None),
-        Ok(None) => (std::borrow::Cow::Borrowed(own), None),
-        Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
-    };
-    let ir: &ChatRequest = &ir;
-    let egress = for_protocol(route.upstream.protocol);
-    let mut params = ir.params.clone().with_defaults(&route.param_defaults);
-    // An off this cloud model cannot take as asked goes out in the form it
-    // can (model-capabilities design §5.6).
-    let mut fitted = super::reasoning_fit::fit(state, route, &mut params).await;
-
-    // The caller's `deadline` is a bound on this whole call, the gate
-    // included (second review, finding 7): it runs from `started`, and the gate's
-    // count and pool wait end at it, so a queue for KV room can never stretch
-    // MCP sampling's "fail fast" bound or an agent loop's wall clock. `None`
-    // only for a deadline too far out for the clock to represent (a huge
-    // `responses_timeout_seconds`), which bounds nothing anyway.
-    let deadline_at = started.checked_add(deadline);
-
-    let mut max_tokens_clamped = None;
-    let mut rung = None;
-    let mut lease_degraded = None;
-    let result: Result<Turn<Completion>, GatewayError> = async {
-        if let Some(e) = refused.take() {
-            return Err(e);
-        }
-        // The gate's per-send half (unified-KV design §3.3): this turn's own
-        // clamp, count and pool reservation. Per turn, not per hold — the
-        // caller's hold may span a whole tool loop, and the lease must not.
-        let fit =
-            crate::gate::fit_chat(state, hold, route, ir, &mut params, false, deadline_at).await;
-        let (mut lease, ir) = match fit {
-            Ok(fit) => fit,
-            // The clamp (step 1) already ran even though the reservation
-            // (step 4) refused — this turn's own log row must still
-            // carry it (review finding 7).
-            Err(f) => {
-                max_tokens_clamped = f.max_tokens_clamped;
-                rung = f.rung.as_ref().map(crate::gate::RungTag::log);
-                return Err(f.error);
-            }
-        };
-        max_tokens_clamped = lease.max_tokens_clamped();
-        lease_degraded = lease.degraded();
-        // The send's effective timeout is the smaller of the upstream's own
-        // timeout and what is left of the caller's `deadline` after the gate —
-        // so the self-starvation guard can fail faster than a generous
-        // per-upstream ceiling (a cold local model's 10 min) without ever
-        // *raising* that bound. Both are visible, neither hidden. An upstream
-        // with no ceiling of its own leaves the deadline standing alone, which
-        // is still a bound: this path always has one.
-        let left = deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-        if left.is_zero() {
-            return Err(GatewayError::Timeout);
-        }
-        let effective = match route.upstream.request_timeout() {
-            Some(t) => left.min(t),
-            None => left,
-        };
-        // One send, through the gate's send (§3.2's dead-container retry, and
-        // on a ladder row the count beside it and the climb): with the hold
-        // in hand this is the same turn re-issued against a fresh container
-        // when the one we hold a claim on has died.
-        let sent = super::reasoning_fit::send_chat(
-            state,
-            hold,
-            route,
-            &mut lease,
-            &ir,
-            &params,
-            false,
-            deadline_at,
-            Some(effective),
-            None,
-            &mut fitted,
-            super::reasoning_fit::RowAs::InProcess {
-                key: key.clone(),
-                ingress_proto,
-                alias: &ir.model_alias,
-                fallback,
-            },
-            |r, p| {
-                Ok(egress
-                    .build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, false)?
-                    .timeout(effective))
-            },
-        )
-        .await;
-        rung = lease.rung_log();
-        let resp = match sent? {
-            crate::gate::Sent::Upstream(resp) => resp,
-            crate::gate::Sent::Rerouted(r) => return Ok(Turn::Rerouted(r)),
-        };
-        let status = resp.status();
-        // A body that could not be read to its end (a timeout, a reset) drops
-        // the lease here unfinished: released once llama-server lets go.
-        let bytes = resp.bytes().await.map_err(GatewayError::from)?;
-        // The answer is in: this turn no longer occupies the pool.
-        lease.complete();
-        if !status.is_success() {
-            return Err(crate::gate::attribute(
-                egress.map_error(status.as_u16(), &bytes),
-                route,
-            ));
-        }
-        egress.parse_completion(&bytes).map(Turn::Answered)
-    }
-    .await;
-    let result = match result {
-        Ok(Turn::Answered(c)) => Ok(c),
-        Err(e) => Err(e),
-        // The gate refused instead — a candidate alias's deferral: this
-        // turn's row records it, on the candidate it was on.
-        Ok(Turn::Rerouted(Err(f))) => Err(f.error),
-        // The gate sent the turn elsewhere before anything was sent — the
-        // request's fallback after a climb that could not happen (ladder
-        // design §12 entry 8), or a candidate alias's next pick (§12 entry
-        // 45): the turn is that call's, row and gauge included — this one
-        // sent nothing and logs nothing.
-        Ok(Turn::Rerouted(Ok(opened))) => {
-            state.telemetry.request_abandoned();
-            if let (Some(note), Some(fb), Some(reason)) = (
-                note,
-                opened.headers.fallback(),
-                opened.headers.fallback_reason(),
-            ) {
-                note.note(fb.to_string(), reason);
-            }
-            let left =
-                deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-            return Box::pin(sample_once_noting(
-                state,
-                opened.hold.as_ref(),
-                &opened.route,
-                opened.headers.fallback_reason(),
-                own,
-                ingress_proto,
-                key,
-                left,
-                note,
-                per_route.map(|(p, _)| (p, Some(&opened.headers))),
-            ))
-            .await;
-        }
-    };
-
-    if let Some((p, _)) = per_route {
-        p.fitted(&fitted);
-    }
-    // One shared log row either way — the §8 "logs like any request" guarantee.
-    let (status, usage, error): (u16, Usage, Option<(&str, String)>) = match &result {
-        Ok(c) => (StatusCode::OK.as_u16(), c.usage, None),
-        Err(e) => (
-            e.http_status().as_u16(),
-            Usage::default(),
-            Some((e.kind(), e.to_string())),
-        ),
-    };
-    record_in_process(
-        InProcessLog {
-            key,
-            ingress_proto,
-            alias: &ir.model_alias,
-            route,
-            started,
-            streamed: false,
-            class: RequestClass::Chat,
-            timings: None,
-            max_tokens_clamped,
-            fallback,
-            rung,
-            degraded: crate::degraded::join([
-                per_route.and_then(|(p, _)| p.degraded()),
-                lease_degraded,
-            ]),
-            quantities: Default::default(),
-        },
-        status,
-        Some(started.elapsed().as_millis() as i64),
-        usage,
-        error,
-        state,
-    )
-    .await;
-
-    result
+        result
+    })
 }
 
 /// What one send came to: its answer, or — before anything was sent — where
@@ -585,7 +595,6 @@ pub(crate) async fn stream_once(
 /// which sampling fields a route takes, whether it can continue a reply, the
 /// llama-server-only continuation fields — and must not decide it once for
 /// the first route and send that to whichever answers (review R1 finding 2).
-#[async_trait::async_trait]
 pub(crate) trait PerRoute: Send + Sync {
     /// The request to send on `route` — `None`: `ir` as it is — or why the
     /// call cannot go there, which fails it like an upstream refusal would.
@@ -594,13 +603,13 @@ pub(crate) trait PerRoute: Send + Sync {
     /// send; `None` for the route the caller handed in. Async: whether a
     /// heard turn's model takes its audio is a capability lookup
     /// (`spoken::may_hear`).
-    async fn request(
-        &self,
-        route: &Route,
-        hold: Option<&crate::vram::LocalHold>,
-        rerouted: Option<&crate::gate::GateHeaders>,
-        ir: &ChatRequest,
-    ) -> Result<Option<ChatRequest>, GatewayError>;
+    fn request<'a>(
+        &'a self,
+        route: &'a Route,
+        hold: Option<&'a crate::vram::LocalHold>,
+        rerouted: Option<&'a crate::gate::GateHeaders>,
+        ir: &'a ChatRequest,
+    ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>>;
 
     /// How the request's reasoning off went out on the route [`Self::request`]
     /// was last asked about (model-capabilities design §5.6) — told once the
@@ -629,335 +638,342 @@ fn before_answer() -> GatewayError {
 /// [`stream_once`], with `per_route` deciding what goes out on each route
 /// ([`PerRoute`]). `ir` is always the caller's own request: a re-route asks
 /// `per_route` again from it, never from what the previous route was sent.
+///
+/// Erased ([`crate::erased`]): the turn's gate, egress, relay and row behind
+/// one future, which the turn runners above it then need not prove `Send`
+/// through. Being a heap future, it is also the indirection a re-route's
+/// recursive call needs.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn stream_once_on(
-    state: &SharedState,
-    hold: Option<&crate::vram::LocalHold>,
-    route: &Route,
+pub(crate) fn stream_once_on<'a>(
+    state: &'a SharedState,
+    hold: Option<&'a crate::vram::LocalHold>,
+    route: &'a Route,
     fallback: Option<FallbackReason>,
-    ir: &ChatRequest,
-    ingress_proto: &str,
+    ir: &'a ChatRequest,
+    ingress_proto: &'a str,
     key: KeyRef,
     deadline: Duration,
-    sink: &mut dyn crate::agent::DeltaSink,
-    per_route: Option<(&dyn PerRoute, Option<&crate::gate::GateHeaders>)>,
-) -> Result<Completion, GatewayError> {
-    let started = Instant::now();
-    state.telemetry.request_started();
-    let mut in_flight = InFlight::armed(&state.telemetry);
-    // The consumer's cooperative stop (realtime design §4.3): every wait
-    // below is raced against it, and a stopped call still writes its row.
-    let stop = sink.stop();
-    let stop = stop.as_ref();
-    let mut produced = 0usize;
-    // The answer carried reasoning — with an off asked, the model did not
-    // take it (`Fitted::observe`).
-    let mut reasoned = false;
+    sink: &'a mut dyn crate::agent::DeltaSink,
+    per_route: Option<(&'a dyn PerRoute, Option<&'a crate::gate::GateHeaders>)>,
+) -> crate::erased::Erased<'a, Result<Completion, GatewayError>> {
+    futures::FutureExt::boxed(async move {
+        let started = Instant::now();
+        state.telemetry.request_started();
+        let mut in_flight = InFlight::armed(&state.telemetry);
+        // The consumer's cooperative stop (realtime design §4.3): every wait
+        // below is raced against it, and a stopped call still writes its row.
+        let stop = sink.stop();
+        let stop = stop.as_ref();
+        let mut produced = 0usize;
+        // The answer carried reasoning — with an off asked, the model did not
+        // take it (`Fitted::observe`).
+        let mut reasoned = false;
 
-    let own = ir;
-    let prepared = match per_route {
-        // Raced against the consumer's stop: the caller's check may read a
-        // provider's catalog (voice-audio-input review V9).
-        Some((p, rerouted)) => tokio::select! {
-            biased;
-            () = super::stopped(stop) => Err(before_answer()),
-            r = p.request(route, hold, rerouted, own) => r,
-        },
-        None => Ok(None),
-    };
-    let (ir, mut refused) = match prepared {
-        Ok(Some(r)) => (std::borrow::Cow::Owned(r), None),
-        Ok(None) => (std::borrow::Cow::Borrowed(own), None),
-        Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
-    };
-    let ir: &ChatRequest = &ir;
-    let egress = for_protocol(route.upstream.protocol);
-    let mut params = ir.params.clone().with_defaults(&route.param_defaults);
-    // As in `sample_once`: an off fitted to the model (§5.6) — not for a
-    // route the caller refused, which gets nothing, not even a catalog read
-    // (voice-audio-input WP2 review #8: a heard turn's audio refused on a
-    // route whose model cannot take it).
-    let mut fitted = match refused {
-        Some(_) => super::reasoning_fit::Fitted::default(),
-        None => super::reasoning_fit::fit(state, route, &mut params).await,
-    };
-    // Same rule as `sample_once`: the caller's deadline may tighten the
-    // upstream's own ceiling but never loosen it, and an upstream with no
-    // ceiling leaves the deadline standing alone. Both are visible. Between
-    // chunks it is a stall bound, as before.
-    let effective = match route.upstream.request_timeout() {
-        Some(t) => deadline.min(t),
-        None => deadline,
-    };
-    // …and up to the first byte it is a deadline that includes the gate
-    // (second review, finding 7): the count and the pool wait end at it, and the wait
-    // for response headers gets only what they left. (`None`: too far out for
-    // the clock, as in `sample_once`.)
-    let deadline_at = started.checked_add(deadline);
-
-    let mut acc = crate::agent::TurnAccumulator::default();
-    let mut outcome = StreamOutcome::default();
-    let mut max_tokens_clamped = None;
-    let mut rung = None;
-    let mut lease_degraded = None;
-    // The request went out and no answer has begun: a stop now still costs
-    // the prompt the upstream may be working on (`stop::unanswered_usage`).
-    // Set by the request's build, as each attempt goes out — not when the
-    // send is first polled: the send can wait long before anything leaves
-    // (a ladder climb in progress, a candidate's re-pick and its start), and
-    // a stop there sent no prompt to bill (package A review #3). Atomic only
-    // because the build closure is `Fn` and the call's future must be `Send`.
-    let prompt_sent = AtomicBool::new(false);
-
-    let result: Result<Turn<()>, GatewayError> = async {
-        // The caller's refusal of this route: the turn's row, like any other.
-        if let Some(e) = refused.take() {
-            return Err(e);
-        }
-        // The gate's per-send half, per turn — see `sample_once`. The lease
-        // lives until the stream below has been drained, and no longer.
-        let fit = tokio::select! {
-            biased;
-            () = super::stopped(stop) => return Err(before_answer()),
-            f = crate::gate::fit_chat(state, hold, route, ir, &mut params, true, deadline_at) => f,
+        let own = ir;
+        let prepared = match per_route {
+            // Raced against the consumer's stop: the caller's check may read a
+            // provider's catalog (voice-audio-input review V9).
+            Some((p, rerouted)) => tokio::select! {
+                biased;
+                () = super::stopped(stop) => Err(before_answer()),
+                r = p.request(route, hold, rerouted, own) => r,
+            },
+            None => Ok(None),
         };
-        let (mut lease, ir) = match fit {
-            Ok(fit) => fit,
-            // Same reason as `sample_once` (review finding 7): the clamp
-            // already ran even though the reservation refused.
-            Err(f) => {
-                max_tokens_clamped = f.max_tokens_clamped;
-                rung = f.rung.as_ref().map(crate::gate::RungTag::log);
-                return Err(f.error);
+        let (ir, mut refused) = match prepared {
+            Ok(Some(r)) => (std::borrow::Cow::Owned(r), None),
+            Ok(None) => (std::borrow::Cow::Borrowed(own), None),
+            Err(e) => (std::borrow::Cow::Borrowed(own), Some(e)),
+        };
+        let ir: &ChatRequest = &ir;
+        let egress = for_protocol(route.upstream.protocol);
+        let mut params = ir.params.clone().with_defaults(&route.param_defaults);
+        // As in `sample_once`: an off fitted to the model (§5.6) — not for a
+        // route the caller refused, which gets nothing, not even a catalog read
+        // (voice-audio-input WP2 review #8: a heard turn's audio refused on a
+        // route whose model cannot take it).
+        let mut fitted = match refused {
+            Some(_) => super::reasoning_fit::Fitted::default(),
+            None => super::reasoning_fit::fit(state, route, &mut params).await,
+        };
+        // Same rule as `sample_once`: the caller's deadline may tighten the
+        // upstream's own ceiling but never loosen it, and an upstream with no
+        // ceiling leaves the deadline standing alone. Both are visible. Between
+        // chunks it is a stall bound, as before.
+        let effective = match route.upstream.request_timeout() {
+            Some(t) => deadline.min(t),
+            None => deadline,
+        };
+        // …and up to the first byte it is a deadline that includes the gate
+        // (second review, finding 7): the count and the pool wait end at it, and the wait
+        // for response headers gets only what they left. (`None`: too far out for
+        // the clock, as in `sample_once`.)
+        let deadline_at = started.checked_add(deadline);
+
+        let mut acc = crate::agent::TurnAccumulator::default();
+        let mut outcome = StreamOutcome::default();
+        let mut max_tokens_clamped = None;
+        let mut rung = None;
+        let mut lease_degraded = None;
+        // The request went out and no answer has begun: a stop now still costs
+        // the prompt the upstream may be working on (`stop::unanswered_usage`).
+        // Set by the request's build, as each attempt goes out — not when the
+        // send is first polled: the send can wait long before anything leaves
+        // (a ladder climb in progress, a candidate's re-pick and its start), and
+        // a stop there sent no prompt to bill (package A review #3). Atomic only
+        // because the build closure is `Fn` and the call's future must be `Send`.
+        let prompt_sent = AtomicBool::new(false);
+
+        let result: Result<Turn<()>, GatewayError> = async {
+            // The caller's refusal of this route: the turn's row, like any other.
+            if let Some(e) = refused.take() {
+                return Err(e);
             }
-        };
-        max_tokens_clamped = lease.max_tokens_clamped();
-        lease_degraded = lease.degraded();
-        let left = deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-        if left.is_zero() {
-            return Err(GatewayError::Timeout);
-        }
-        // The *connect* is retried through the shared dead-container path
-        // (§3.2); the body below is not, and cannot be — by then deltas have
-        // already reached the caller's sink. On a ladder row nothing reaches
-        // the sink before the count's verdict on the rung that answered.
-        // A re-pick clears the record (A2 review 2): what the candidate it
-        // left was sent is not being worked on.
-        // Boxed: this select is a 226 KB poll frame in a debug build when the send
-        // sits inline, on the turn -> gate chain (2 MiB test stack).
-        let send = Box::pin(super::reasoning_fit::send_chat(
-            state,
-            hold,
-            route,
-            &mut lease,
-            &ir,
-            &params,
-            true,
-            deadline_at,
-            Some(effective.min(left)),
-            Some(&prompt_sent),
-            &mut fitted,
-            super::reasoning_fit::RowAs::InProcess {
-                key: key.clone(),
-                ingress_proto,
-                alias: &ir.model_alias,
-                fallback,
-            },
-            |r, p| {
-                prompt_sent.store(true, Ordering::Relaxed);
-                egress.build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, true)
-            },
-        ));
-        // Dropping the send closes its connection, so a stop while the
-        // upstream prefills ends the work there too.
-        let sent = tokio::select! {
-            biased;
-            () = super::stopped(stop) => None,
-            s = send => Some(s),
-        };
-        rung = lease.rung_log();
-        let Some(sent) = sent else {
-            return Err(before_answer());
-        };
-        let resp = match sent? {
-            crate::gate::Sent::Upstream(resp) => resp,
-            crate::gate::Sent::Rerouted(r) => return Ok(Turn::Rerouted(r)),
-        };
-        let status = resp.status();
-        if !status.is_success() {
-            // Raced against the stop like every other wait here: with no
-            // deadline of the caller's (realtime passes `Duration::MAX`) and
-            // an upstream `request_timeout` of 0, an error body that stalls
-            // would otherwise pin this call — and its hold — for good.
-            let bytes = tokio::select! {
+            // The gate's per-send half, per turn — see `sample_once`. The lease
+            // lives until the stream below has been drained, and no longer.
+            let fit = tokio::select! {
+                biased;
+                () = super::stopped(stop) => return Err(before_answer()),
+                f = crate::gate::fit_chat(state, hold, route, ir, &mut params, true, deadline_at) => f,
+            };
+            let (mut lease, ir) = match fit {
+                Ok(fit) => fit,
+                // Same reason as `sample_once` (review finding 7): the clamp
+                // already ran even though the reservation refused.
+                Err(f) => {
+                    max_tokens_clamped = f.max_tokens_clamped;
+                    rung = f.rung.as_ref().map(crate::gate::RungTag::log);
+                    return Err(f.error);
+                }
+            };
+            max_tokens_clamped = lease.max_tokens_clamped();
+            lease_degraded = lease.degraded();
+            let left = deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                return Err(GatewayError::Timeout);
+            }
+            // The *connect* is retried through the shared dead-container path
+            // (§3.2); the body below is not, and cannot be — by then deltas have
+            // already reached the caller's sink. On a ladder row nothing reaches
+            // the sink before the count's verdict on the rung that answered.
+            // A re-pick clears the record (A2 review 2): what the candidate it
+            // left was sent is not being worked on.
+            // Boxed: this select is a 226 KB poll frame in a debug build when the send
+            // sits inline, on the turn -> gate chain (2 MiB test stack).
+            let send = Box::pin(super::reasoning_fit::send_chat(
+                state,
+                hold,
+                route,
+                &mut lease,
+                &ir,
+                &params,
+                true,
+                deadline_at,
+                Some(effective.min(left)),
+                Some(&prompt_sent),
+                &mut fitted,
+                super::reasoning_fit::RowAs::InProcess {
+                    key: key.clone(),
+                    ingress_proto,
+                    alias: &ir.model_alias,
+                    fallback,
+                },
+                |r, p| {
+                    prompt_sent.store(true, Ordering::Relaxed);
+                    egress.build_chat(&state.http, &r.upstream, &r.upstream_model, &ir, p, true)
+                },
+            ));
+            // Dropping the send closes its connection, so a stop while the
+            // upstream prefills ends the work there too.
+            let sent = tokio::select! {
                 biased;
                 () = super::stopped(stop) => None,
-                b = resp.bytes() => Some(b),
+                s = send => Some(s),
             };
-            let Some(bytes) = bytes else {
-                lease.end(false);
-                // An error answer: the upstream took no prompt to work on.
-                prompt_sent.store(false, Ordering::Relaxed);
+            rung = lease.rung_log();
+            let Some(sent) = sent else {
                 return Err(before_answer());
             };
-            // An error answer read to its end is a task the server is done
-            // with; an unreadable one is released once `/slots` says so.
-            lease.end(bytes.is_ok());
-            let bytes = bytes.unwrap_or_default();
-            return Err(crate::gate::attribute(
-                egress.map_error(status.as_u16(), &bytes),
-                route,
-            ));
+            let resp = match sent? {
+                crate::gate::Sent::Upstream(resp) => resp,
+                crate::gate::Sent::Rerouted(r) => return Ok(Turn::Rerouted(r)),
+            };
+            let status = resp.status();
+            if !status.is_success() {
+                // Raced against the stop like every other wait here: with no
+                // deadline of the caller's (realtime passes `Duration::MAX`) and
+                // an upstream `request_timeout` of 0, an error body that stalls
+                // would otherwise pin this call — and its hold — for good.
+                let bytes = tokio::select! {
+                    biased;
+                    () = super::stopped(stop) => None,
+                    b = resp.bytes() => Some(b),
+                };
+                let Some(bytes) = bytes else {
+                    lease.end(false);
+                    // An error answer: the upstream took no prompt to work on.
+                    prompt_sent.store(false, Ordering::Relaxed);
+                    return Err(before_answer());
+                };
+                // An error answer read to its end is a task the server is done
+                // with; an unreadable one is released once `/slots` says so.
+                lease.end(bytes.is_ok());
+                let bytes = bytes.unwrap_or_default();
+                return Err(crate::gate::attribute(
+                    egress.map_error(status.as_u16(), &bytes),
+                    route,
+                ));
+            }
+            outcome = drive_upstream_until(
+                resp,
+                egress.new_decoder(),
+                Some(effective),
+                started,
+                &state.telemetry,
+                |delta| {
+                    acc.on_delta(&delta);
+                    produced += super::produced_chars(&delta);
+                    if matches!(&delta, crate::ir::StreamDelta::ReasoningDelta(r) if !r.is_empty()) {
+                        reasoned = true;
+                    }
+                    sink.on_delta(&delta);
+                    // Checked after the delta went out, so a stop raised by the
+                    // sink itself ends the stream here.
+                    let go = !stop.is_some_and(crate::proxy::StopSignal::is_raised);
+                    async move { go }
+                },
+                super::stopped(stop),
+            )
+            .await;
+            // `drive_upstream` consumed the response, so the connection is closed
+            // by now: released at once after a normal end, once llama-server lets
+            // go of the slot after anything else. (A cancelled turn — the agent
+            // loop dropping this future — drops the lease unfinished too.)
+            lease.end(outcome.completed);
+            Ok(Turn::Answered(()))
         }
-        outcome = drive_upstream_until(
-            resp,
-            egress.new_decoder(),
-            Some(effective),
-            started,
-            &state.telemetry,
-            |delta| {
-                acc.on_delta(&delta);
-                produced += super::produced_chars(&delta);
-                if matches!(&delta, crate::ir::StreamDelta::ReasoningDelta(r) if !r.is_empty()) {
-                    reasoned = true;
-                }
-                sink.on_delta(&delta);
-                // Checked after the delta went out, so a stop raised by the
-                // sink itself ends the stream here.
-                let go = !stop.is_some_and(crate::proxy::StopSignal::is_raised);
-                async move { go }
+        .await;
+        fitted.observe(route, reasoned);
+        if let Some((p, _)) = per_route {
+            p.fitted(&fitted);
+        }
+        let result = match result {
+            Ok(Turn::Answered(())) => Ok(()),
+            Err(e) => Err(e),
+            // See `sample_once`: a refusal instead is this turn's row.
+            Ok(Turn::Rerouted(Err(f))) => Err(f.error),
+            // See `sample_once`: the rerouted call is the turn.
+            Ok(Turn::Rerouted(Ok(opened))) => {
+                in_flight.logging();
+                state.telemetry.request_abandoned();
+                let left =
+                    deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
+                return stream_once_on(
+                    state,
+                    opened.hold.as_ref(),
+                    &opened.route,
+                    opened.headers.fallback_reason(),
+                    own,
+                    ingress_proto,
+                    key,
+                    left,
+                    sink,
+                    per_route.map(|(p, _)| (p, Some(&opened.headers))),
+                )
+                .await;
+            }
+        };
+
+        // A mid-stream failure is reported by `drive_upstream` in the outcome rather
+        // than as an Err, so both have to be folded into one status here. A
+        // stream its consumer stopped (the only early end here) is the public
+        // relay's `canceled` row — status 200 — with what it cost so far,
+        // estimated where the upstream had not said yet; so is a call stopped
+        // before the upstream answered (`stop::row_status`), whose prompt counts
+        // once it was sent.
+        let mut usage = acc.usage();
+        let stopped = result.is_ok() && outcome.error.is_none() && outcome.aborted;
+        let stopped_unanswered =
+            prompt_sent.into_inner() && matches!(&result, Err(e) if super::is_canceled(e));
+        let error: Option<(String, String)> = match &result {
+            Err(_) if stopped_unanswered => {
+                let (u, note) = super::unanswered_usage(ir);
+                usage = u;
+                Some(("canceled".to_string(), note))
+            }
+            Err(e) => Some((e.kind().to_string(), e.to_string())),
+            Ok(()) if stopped => {
+                let (u, note) = super::stopped_usage(usage, outcome.timings.as_ref(), ir, produced);
+                usage = u;
+                Some(("canceled".to_string(), note))
+            }
+            Ok(()) => outcome.error.clone(),
+        };
+        let status = match &result {
+            Err(e) => super::row_status(e),
+            Ok(()) if error.is_some() && !stopped => StatusCode::BAD_GATEWAY.as_u16(),
+            Ok(()) => StatusCode::OK.as_u16(),
+        };
+        // `Ok` only once the response passed its status check: the upstream
+        // answered, so the row counts its request — a stop or a failure
+        // mid-stream included, which the writer's default would leave unknown
+        // (billable-units §4.5). A stop before that stays unknown.
+        let quantities = if result.is_ok() {
+            crate::pricing::Quantities::answered()
+        } else {
+            crate::pricing::Quantities::default()
+        };
+        in_flight.logging();
+        let share = record_in_process(
+            InProcessLog {
+                key,
+                ingress_proto,
+                alias: &ir.model_alias,
+                route,
+                started,
+                streamed: true,
+                class: RequestClass::Chat,
+                timings: outcome.timings,
+                max_tokens_clamped,
+                fallback,
+                rung,
+                degraded: crate::degraded::join([
+                    per_route.and_then(|(p, _)| p.degraded()),
+                    lease_degraded,
+                ]),
+                quantities,
             },
-            super::stopped(stop),
+            status,
+            outcome.ttfb_ms,
+            usage,
+            error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
+            state,
         )
         .await;
-        // `drive_upstream` consumed the response, so the connection is closed
-        // by now: released at once after a normal end, once llama-server lets
-        // go of the slot after anything else. (A cancelled turn — the agent
-        // loop dropping this future — drops the lease unfinished too.)
-        lease.end(outcome.completed);
-        Ok(Turn::Answered(()))
-    }
-    .await;
-    fitted.observe(route, reasoned);
-    if let Some((p, _)) = per_route {
-        p.fitted(&fitted);
-    }
-    let result = match result {
-        Ok(Turn::Answered(())) => Ok(()),
-        Err(e) => Err(e),
-        // See `sample_once`: a refusal instead is this turn's row.
-        Ok(Turn::Rerouted(Err(f))) => Err(f.error),
-        // See `sample_once`: the rerouted call is the turn.
-        Ok(Turn::Rerouted(Ok(opened))) => {
-            in_flight.logging();
-            state.telemetry.request_abandoned();
-            let left =
-                deadline_at.map_or(deadline, |d| d.saturating_duration_since(Instant::now()));
-            return Box::pin(stream_once_on(
-                state,
-                opened.hold.as_ref(),
-                &opened.route,
-                opened.headers.fallback_reason(),
-                own,
-                ingress_proto,
-                key,
-                left,
-                sink,
-                per_route.map(|(p, _)| (p, Some(&opened.headers))),
-            ))
-            .await;
-        }
-    };
+        // This route's row — a re-routed call's own, which the caller's meter
+        // cannot price from the route it started on.
+        sink.billed(&usage);
+        sink.billed_cost(share);
 
-    // A mid-stream failure is reported by `drive_upstream` in the outcome rather
-    // than as an Err, so both have to be folded into one status here. A
-    // stream its consumer stopped (the only early end here) is the public
-    // relay's `canceled` row — status 200 — with what it cost so far,
-    // estimated where the upstream had not said yet; so is a call stopped
-    // before the upstream answered (`stop::row_status`), whose prompt counts
-    // once it was sent.
-    let mut usage = acc.usage();
-    let stopped = result.is_ok() && outcome.error.is_none() && outcome.aborted;
-    let stopped_unanswered =
-        prompt_sent.into_inner() && matches!(&result, Err(e) if super::is_canceled(e));
-    let error: Option<(String, String)> = match &result {
-        Err(_) if stopped_unanswered => {
-            let (u, note) = super::unanswered_usage(ir);
-            usage = u;
-            Some(("canceled".to_string(), note))
+        result?;
+        // The consumer asked for the stop; what it got so far is all it gets.
+        if stopped {
+            return Err(super::canceled("stopped by the caller mid-stream"));
         }
-        Err(e) => Some((e.kind().to_string(), e.to_string())),
-        Ok(()) if stopped => {
-            let (u, note) = super::stopped_usage(usage, outcome.timings.as_ref(), ir, produced);
-            usage = u;
-            Some(("canceled".to_string(), note))
+        // A stream that died mid-flight has no usable turn — surfacing the partial
+        // text as if the model had finished would make the loop act on a truncated
+        // answer, so it fails loudly instead (§14).
+        if let Some((kind, msg)) = error {
+            return Err(match kind.as_str() {
+                "timeout" => GatewayError::Timeout,
+                "transport" => GatewayError::Transport(msg),
+                _ => GatewayError::Upstream {
+                    status: 502,
+                    message: msg,
+                    provider_type: None,
+                },
+            });
         }
-        Ok(()) => outcome.error.clone(),
-    };
-    let status = match &result {
-        Err(e) => super::row_status(e),
-        Ok(()) if error.is_some() && !stopped => StatusCode::BAD_GATEWAY.as_u16(),
-        Ok(()) => StatusCode::OK.as_u16(),
-    };
-    // `Ok` only once the response passed its status check: the upstream
-    // answered, so the row counts its request — a stop or a failure
-    // mid-stream included, which the writer's default would leave unknown
-    // (billable-units §4.5). A stop before that stays unknown.
-    let quantities = if result.is_ok() {
-        crate::pricing::Quantities::answered()
-    } else {
-        crate::pricing::Quantities::default()
-    };
-    in_flight.logging();
-    let share = record_in_process(
-        InProcessLog {
-            key,
-            ingress_proto,
-            alias: &ir.model_alias,
-            route,
-            started,
-            streamed: true,
-            class: RequestClass::Chat,
-            timings: outcome.timings,
-            max_tokens_clamped,
-            fallback,
-            rung,
-            degraded: crate::degraded::join([
-                per_route.and_then(|(p, _)| p.degraded()),
-                lease_degraded,
-            ]),
-            quantities,
-        },
-        status,
-        outcome.ttfb_ms,
-        usage,
-        error.as_ref().map(|(k, m)| (k.as_str(), m.clone())),
-        state,
-    )
-    .await;
-    // This route's row — a re-routed call's own, which the caller's meter
-    // cannot price from the route it started on.
-    sink.billed(&usage);
-    sink.billed_cost(share);
-
-    result?;
-    // The consumer asked for the stop; what it got so far is all it gets.
-    if stopped {
-        return Err(super::canceled("stopped by the caller mid-stream"));
-    }
-    // A stream that died mid-flight has no usable turn — surfacing the partial
-    // text as if the model had finished would make the loop act on a truncated
-    // answer, so it fails loudly instead (§14).
-    if let Some((kind, msg)) = error {
-        return Err(match kind.as_str() {
-            "timeout" => GatewayError::Timeout,
-            "transport" => GatewayError::Transport(msg),
-            _ => GatewayError::Upstream {
-                status: 502,
-                message: msg,
-                provider_type: None,
-            },
-        });
-    }
-    Ok(acc.finish(route.upstream_model.clone()))
+        Ok(acc.finish(route.upstream_model.clone()))
+    })
 }

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use lmgw_core::erased::Erased;
 use lmgw_core::jobs::{self, JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store;
@@ -22,37 +23,38 @@ struct Controlled {
     started: Arc<AtomicBool>,
 }
 
-#[async_trait::async_trait]
 impl JobExecutor for Controlled {
     fn kind(&self) -> JobKind {
         self.kind
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        if input.get("boom").is_some() {
-            return Err("executor said no".into());
-        }
-        let total = input.get("total").and_then(Value::as_u64);
-        let mut done = 0u64;
-        self.started.store(true, Ordering::Relaxed);
-        loop {
-            if ctx.canceled() {
-                return Ok(JobOutcome::Canceled);
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            if input.get("boom").is_some() {
+                return Err("executor said no".into());
             }
-            if self.finish.load(Ordering::Relaxed) {
-                break;
+            let total = input.get("total").and_then(Value::as_u64);
+            let mut done = 0u64;
+            self.started.store(true, Ordering::Relaxed);
+            loop {
+                if ctx.canceled() {
+                    return Ok(JobOutcome::Canceled);
+                }
+                if self.finish.load(Ordering::Relaxed) {
+                    break;
+                }
+                done += 1;
+                ctx.progress(JobProgress {
+                    done,
+                    total,
+                    stage: "working".into(),
+                    detail: json!({ "step": done }),
+                })
+                .await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            done += 1;
-            ctx.progress(JobProgress {
-                done,
-                total,
-                stage: "working".into(),
-                detail: json!({ "step": done }),
-            })
-            .await;
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        Ok(JobOutcome::Done(json!({ "steps": done })))
+            Ok(JobOutcome::Done(json!({ "steps": done })))
+        })
     }
 }
 

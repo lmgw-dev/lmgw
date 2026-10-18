@@ -451,7 +451,7 @@ fn updates(entries: &[Value], aliases: &[(&str, &str)]) -> PriceUpdates {
         .iter()
         .map(|e| parse_openai_entry(e).expect("parses"))
         .collect();
-    price_updates_for_upstream(7, &models, aliases)
+    price_updates_for_upstream(7, &models, aliases, false)
 }
 
 fn of_unit(u: &PriceUpdates, unit: PriceUnit) -> Vec<&PriceUpdate> {
@@ -498,7 +498,7 @@ fn kilo_web_search_is_counted_not_synced() {
         pricing.other
     );
 
-    let u = price_updates_for_upstream(7, &[info], &[]);
+    let u = price_updates_for_upstream(7, &[info], &[], false);
     assert_eq!(u.rows.len(), 1);
     assert_eq!(u.rows[0].unit, PriceUnit::PerMtok);
     assert_eq!(u.not_synced, counts(&[("web_search", 1)]));
@@ -681,7 +681,7 @@ fn every_other_published_price_is_named_and_counted() {
         ]
     );
 
-    let u = price_updates_for_upstream(7, &[info], &[]);
+    let u = price_updates_for_upstream(7, &[info], &[], false);
     assert_eq!(u.rows.len(), 1, "the token row only");
     assert_eq!(
         u.not_synced,
@@ -850,6 +850,7 @@ async fn catalog_gateway(models: Value) -> (SharedState, MockServer, i64) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -895,7 +896,7 @@ async fn rows_in(st: &SharedState, unit: PriceUnit) -> Vec<PriceRow> {
 #[tokio::test]
 async fn the_sync_reports_the_kilo_web_search_as_not_synced() {
     let (st, _server, up) = catalog_gateway(json!([fixture("kilo_anthropic_variants.json")])).await;
-    let v = ops::prices_sync(&st).await.expect("sync");
+    let v = ops::backends::to_json(ops::prices_sync(&st).await).expect("sync");
 
     assert_eq!(v["rows_written"], 1, "{v}");
     assert_eq!(v["not_synced"], json!({ "web_search": 1 }), "{v}");

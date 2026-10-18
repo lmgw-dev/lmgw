@@ -7,8 +7,10 @@
 //! accept different things. A save refuses what no session could run (fix
 //! package B6): a `semantic_vad` row that cannot run, a word-check alias that
 //! is no ASR alias, an alias of the wrong task, a script the word check does
-//! not know, and both WebSocket limits at 0. The session-start fallbacks stay
-//! as a second line for a blob that was written some other way.
+//! not know, both WebSocket limits at 0, and a WebRTC call's reorder window
+//! or bitrate out of its range (`config::settings::webrtc_audio`). The
+//! session-start fallbacks stay as a second line for a blob that was written
+//! some other way.
 
 use std::collections::BTreeMap;
 
@@ -90,12 +92,38 @@ pub struct RealtimeSettingsPatch {
     /// engine's silences.
     pub longest_pause_ms: Option<u32>,
     pub warm_on_connect: Option<bool>,
-    /// In MiB; `0` = no bound. Not `0` together with `max_frame_mb`.
+    /// In MiB; `0` = no bound. Not `0` together with `max_frame_mb`. The
+    /// largest WebSocket message a client sends; on a WebRTC call also the
+    /// largest event lmgw sends in one message and what may wait for the
+    /// call's session before the call ends.
     pub max_message_mb: Option<u32>,
     /// In MiB; `0` = bounded by `max_message_mb`. Not `0` together with it.
     pub max_frame_mb: Option<u32>,
     /// `0` = no pings, and no liveness bound at all.
     pub ping_interval_s: Option<u32>,
+    /// The UDP listener for WebRTC calls (`POST /v1/realtime/calls`),
+    /// beside the HTTP listener and beside the device listener, whose
+    /// addresses and port its sockets follow; off, a call on either is
+    /// refused 503. Applies at the next start.
+    pub webrtc_enabled: Option<bool>,
+    /// The UDP port WebRTC calls use beside the HTTP listener: `null` = the
+    /// HTTP port's number, `0` = chosen by the OS, else 1 to 65535. Calls
+    /// over a paired device's listener use that listener's port instead.
+    /// Applies at the next start.
+    #[serde(deserialize_with = "crate::config::nullable_port")]
+    #[schemars(with = "Option<u16>")]
+    pub webrtc_port: Option<Option<i64>>,
+    /// How long a WebRTC call's frame waits for a missing earlier one, in
+    /// ms; `0` = no wait, the gap concealed at once. At most 40 950 (what
+    /// str0m can hold behind a gap). Applies to the next call.
+    pub webrtc_reorder_ms: Option<u32>,
+    /// How far past its own stamp a push-to-talk commit on a WebRTC call
+    /// takes frames, and how long it waits for them, in ms. Applies to the
+    /// next call.
+    pub webrtc_commit_window_ms: Option<u32>,
+    /// A WebRTC call's Opus output bitrate in kbps, 6 to 510, capped by the
+    /// phone's maxaveragebitrate. Applies to the next call.
+    pub webrtc_output_kbps: Option<u32>,
 }
 
 /// `realtime.semantic_vad`'s patch: the rows by eagerness.
@@ -319,6 +347,26 @@ impl RealtimeSettingsPatch {
             );
         }
         set!(ping_interval_s);
+        if let Some(v) = self.webrtc_enabled {
+            r.webrtc.webrtc_enabled = v;
+            touched.push("realtime.webrtc_enabled");
+        }
+        if let Some(v) = self.webrtc_port {
+            r.webrtc.set_port(v)?;
+            touched.push("realtime.webrtc_port");
+        }
+        if let Some(v) = self.webrtc_reorder_ms {
+            r.webrtc_audio.set_reorder_ms(v)?;
+            touched.push("realtime.webrtc_reorder_ms");
+        }
+        if let Some(v) = self.webrtc_commit_window_ms {
+            r.webrtc_audio.webrtc_commit_window_ms = v;
+            touched.push("realtime.webrtc_commit_window_ms");
+        }
+        if let Some(v) = self.webrtc_output_kbps {
+            r.webrtc_audio.set_output_kbps(v)?;
+            touched.push("realtime.webrtc_output_kbps");
+        }
         Ok(touched)
     }
 }
@@ -496,6 +544,11 @@ pub fn realtime_view(r: &RealtimeSettings) -> dto::RealtimeSettings {
         max_message_mb: r.max_message_mb,
         max_frame_mb: r.max_frame_mb,
         ping_interval_s: r.ping_interval_s,
+        webrtc_enabled: r.webrtc.webrtc_enabled,
+        webrtc_port: r.webrtc.webrtc_port,
+        webrtc_reorder_ms: r.webrtc_audio.webrtc_reorder_ms,
+        webrtc_commit_window_ms: r.webrtc_audio.webrtc_commit_window_ms,
+        webrtc_output_kbps: r.webrtc_audio.webrtc_output_kbps,
     }
 }
 

@@ -237,23 +237,15 @@ async fn a_device_allowed_the_admin_tools_binds_a_toolset_thread_and_never_admin
     let desk = pair(&w, "desktop", json!({ "self_admin": "full" })).await;
     let tools = self_admin_thread(&w).await;
     let admin = admin_thread(&w).await;
-    let as_phone = format!("Bearer {}", phone.key);
-    let as_desk = format!("Bearer {}", desk.key);
     let code = |v: &Value| v["error"]["code"].as_str().unwrap_or_default().to_string();
 
     let (s, v) = w
-        .connect(
-            &format!("chat_thread={}", tools.id),
-            &[("authorization", as_phone.as_str())],
-        )
+        .connect_as(&phone, &format!("chat_thread={}", tools.id))
         .await
         .unwrap_err();
     assert_eq!((s, code(&v)), (404, "chat_thread_not_found".into()), "{v}");
     let mut ws = w
-        .connect(
-            &format!("chat_thread={}", tools.id),
-            &[("authorization", as_desk.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={}", tools.id))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     let created = next(&mut ws).await;
@@ -264,10 +256,7 @@ async fn a_device_allowed_the_admin_tools_binds_a_toolset_thread_and_never_admin
         "{created}"
     );
     let (s, v) = w
-        .connect(
-            &format!("chat_thread={}", admin.id),
-            &[("authorization", as_desk.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={}", admin.id))
         .await
         .unwrap_err();
     assert_eq!((s, code(&v)), (404, "chat_thread_not_found".into()), "{v}");
@@ -311,12 +300,8 @@ async fn the_switch_takes_the_toolset_s_threads_from_the_device_at_once_and_give
     assert_eq!(s, 200);
     let admin = admin_thread(&w).await;
     let mut feed = Feed::open(&w, &desk.client, "", None).await;
-    let bearer = format!("Bearer {}", desk.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={}", tools.id),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={}", tools.id))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");
@@ -461,7 +446,8 @@ async fn the_switch_is_a_device_s_and_the_owner_s_to_set() {
         (200, &json!([])),
         "restating false is no attempt: {v}"
     );
-    // A device cannot reach the key ops at all.
+    // A device cannot reach the key ops at all: `/api` is off the device
+    // listener's face, the 404 an unknown path is (device link design §4.6).
     let desk = pair(&w, "desktop", json!({})).await;
     let resp = desk
         .client
@@ -470,7 +456,7 @@ async fn the_switch_is_a_device_s_and_the_owner_s_to_set() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 403);
+    assert_eq!(resp.status().as_u16(), 404);
     let (_, keys) = get(&w, &w.gw.client(), "/api/usage/keys").await;
     let row = keys["keys"]
         .as_array()

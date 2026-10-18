@@ -37,8 +37,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "preset",
                     enum_p(
-                        "Fill engine, repo_url, forge and ref from a repository preset. Fields \
-                         you also pass win.",
+                        "The id of an entry in lmgw__builds' repo_presets: fills engine, \
+                         repo_url, forge and ref from it. Fields you also pass win.",
                         &["official", "ik", "audio", "sdcpp"],
                     ),
                 ),

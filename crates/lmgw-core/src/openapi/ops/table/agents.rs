@@ -33,7 +33,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_duplicate),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentDuplicated>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -52,7 +52,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_config_set),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentConfigSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -66,13 +66,13 @@ pub(super) const OPS: &[OpDoc] = &[
         description: Some(
             "Install an agent from an image: lmgw reads its manifest out of the image at \
              /lmgw/agent.json without starting it, then installs it through the same path \
-             agent_set uses, so the report shape is the same (plus image, digest, pulled and \
-             manifest_path). `pull` defaults to 'never' — an image not already on the box is \
-             reported rather than downloaded.",
+             agent_set uses, so the report shape is the same (plus image, digest — absent \
+             when podman reports none — pulled, manifest_path and message). `pull` defaults to 'never' — an image not already on \
+             the box is reported rather than downloaded.",
         ),
         tool: Some("lmgw__agent_install"),
         args: OpArgs::Tool,
-        response: Resp::Json(|g| g.root_schema_for::<dto::AgentImportReport>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentInstalled>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -85,12 +85,14 @@ pub(super) const OPS: &[OpDoc] = &[
         summary: "Fetch this agent's image again and report whether it moved",
         description: Some(
             "Pressing this is the consent, so it pulls under every policy, 'never' included. \
-             When the digest moved, the new image's manifest is read and compared with the \
+             `changed` is true when the digest moved or the image arrived (none \
+             before), false when it did not, and absent when podman reports no digest after the \
+             pull. When it is true, the new image's manifest is read and compared with the \
              stored one — never adopted automatically; that is what agent_reimport is for.",
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentPulled>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -103,12 +105,13 @@ pub(super) const OPS: &[OpDoc] = &[
         summary: "Re-run the install path over an existing agent's row",
         description: Some(
             "Run the install path again over an existing row: the manifest is replaced and the \
-             config is kept. Refused when the image carries a different agent id than this row \
-             — install it as its own agent instead.",
+             config is kept. The answer is the import report plus the image, whether its manifest \
+             differed from the stored one, and a message. Refused when the image carries a \
+             different agent id than this row — install it as its own agent instead.",
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::Json(|g| g.root_schema_for::<dto::AgentImportReport>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentReimported>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -122,11 +125,12 @@ pub(super) const OPS: &[OpDoc] = &[
         description: Some(
             "A row setting, never part of the manifest: overrides service mode only. Setting \
              one stops a running app container, since it was started from the image this \
-             override replaces. Omitting url (or an empty string) clears it back to the image.",
+             override replaces. Omitting url (or an empty string) clears it back to the image. \
+             Both are refused for an agent that declares no run.service.",
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_dev_url_set),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentDevUrlSet>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -139,11 +143,12 @@ pub(super) const OPS: &[OpDoc] = &[
         summary: "Enable or disable an agent",
         description: Some(
             "Disable is the kill switch: the agent's token stops authenticating anywhere, and \
-             a running app container is stopped.",
+             a running app container is stopped (`service_stopped` names it; the sentence is \
+             in `message`).",
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_enable),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentEnabled>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -157,7 +162,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__agent_delete"),
         args: OpArgs::Tool,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentDeleted>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -175,7 +180,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentReset>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -193,7 +198,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_open_chat),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentChatOpened>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -204,10 +209,13 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "agent_run",
         tag: TAG,
         summary: "Start one phase of a batch agent's run",
-        description: None,
+        description: Some(
+            "One live run per agent: when one is in flight, nothing starts and the answer \
+             is that run, with `already_running` true and its own `phase`.",
+        ),
         tool: Some("lmgw__agent_run"),
         args: OpArgs::Hand(args::agent_run),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentRunStarted>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -223,7 +231,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentRunCancelled>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -242,7 +250,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentTokenRead>()),
         // Review R2 #8: `token::ensure` mints a missing token and always
         // rewrites the token's scope — a write, even when nothing changed.
         writes: true,
@@ -263,7 +271,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentTokenIssued>()),
         writes: true,
         // The answer carries the new plaintext `token`.
         reveals_secret: true,
@@ -281,7 +289,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentServiceStarted>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -298,7 +306,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_id_only),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentServiceStopped>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -310,13 +318,13 @@ pub(super) const OPS: &[OpDoc] = &[
         tag: TAG,
         summary: "Read an agent's app container's log tail",
         description: Some(
-            "The App tab's log block, as long as the reader asks for — `lines` 0 means the \
-             whole log. The only account of a detached service container: it writes no run \
+            "The App tab's log block, as long as the reader asks for — asking for 0 lines \
+             means the whole log; the answer's `lines` counts what came back. The only account of a detached service container: it writes no run \
              ledger, no job row and no result.",
         ),
         tool: None,
         args: OpArgs::Hand(args::agent_service_log),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentServiceLog>()),
         writes: false,
         reveals_secret: false,
         confirm_note: None,
@@ -333,7 +341,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::NoArgs,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AgentsRestored>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

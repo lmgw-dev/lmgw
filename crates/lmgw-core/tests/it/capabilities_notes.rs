@@ -261,6 +261,11 @@ fn aux(model_id: &str, kind: AuxKind, args: &[&str]) -> AuxModel {
         kind,
         pooling: None,
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: args.iter().map(|s| s.to_string()).collect(),
         idle_seconds: 0,
         enabled: true,
@@ -277,15 +282,48 @@ fn embedder_and_reranker_notes() {
     let embed = aux("qwen3-embedding-4b", AuxKind::Embed, &[]);
     let summary = ModelSummary::default();
     assert_notes(
-        &capabilities::for_aux(&embed, Some(&summary)).notes,
+        &capabilities::for_aux(&embed, Some(&summary), ProjectorStatus::None, None).notes,
         &["Embeddings: POST /v1/embeddings with this model id and an input that is either a string or an array of strings."],
     );
 
     let rerank = aux("bge-reranker-v2", AuxKind::Rerank, &[]);
     assert_notes(
-        &capabilities::for_aux(&rerank, Some(&summary)).notes,
+        &capabilities::for_aux(&rerank, Some(&summary), ProjectorStatus::None, None).notes,
         &["Reranking: POST /v1/rerank with a query and a documents array. Never send this model to /v1/embeddings — llama-server answers a reranker there with an all-zero vector, so lmgw refuses that combination outright."],
     );
+}
+
+/// A decision row's notes carry what the header knows and the engine
+/// enforces (decision-models design §2.9): its type and, where set, the head
+/// budget past which llama.cpp truncates a question and its options.
+#[test]
+fn decision_notes_name_the_type_and_the_head_budget() {
+    let laya = aux("laya", AuxKind::Decision, &[]);
+    let summary = ModelSummary {
+        decision_type: Some("laya".into()),
+        decision_max_head_tokens: Some(192),
+        ..Default::default()
+    };
+    let notes = capabilities::for_aux(&laya, Some(&summary), ProjectorStatus::None, None).notes;
+    assert!(
+        notes[0].starts_with("Decision model: POST /v1/systemone"),
+        "{notes:?}"
+    );
+    assert!(
+        notes[1].contains("'laya'") && notes[1].contains("192 tokens"),
+        "{notes:?}"
+    );
+    assert_eq!(notes.len(), 2, "{notes:?}");
+
+    // Julia-1's header sets the type alone; an unread file says so.
+    let julia = ModelSummary {
+        decision_type: Some("laya".into()),
+        ..Default::default()
+    };
+    let notes = capabilities::for_aux(&laya, Some(&julia), ProjectorStatus::None, None).notes;
+    assert_eq!(notes[1], "Its header declares decision type 'laya'.");
+    let notes = capabilities::for_aux(&laya, None, ProjectorStatus::None, None).notes;
+    assert!(notes[1].contains("could not be read"), "{notes:?}");
 }
 
 fn audio(model_id: &str, task: &str) -> AudioModel {

@@ -1212,7 +1212,7 @@ mod tests {
     /// too. CI has neither podman nor the image, hence the clean early return.
     #[test]
     fn real_help_from_the_image_parses() {
-        let out = match std::process::Command::new("podman")
+        let out = match crate::child::system_tool(&mut std::process::Command::new("podman"))
             .args([
                 "run",
                 "--rm",

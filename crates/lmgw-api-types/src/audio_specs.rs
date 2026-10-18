@@ -9,14 +9,17 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AudioCatalog {
-    /// RFC3339 fetch time of the snapshot; empty when nothing is cached yet.
-    pub fetched_at: String,
+    /// RFC3339 fetch time of the snapshot; absent when nothing is cached yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub fetched_at: Option<String>,
     /// Families with an installed package or a served model come first.
     pub families: Vec<AudioFamily>,
     /// What the last refresh could not do — a spec file that did not load, a
     /// package repo Hugging Face could not list (offline, rate-limited,
     /// gated) — or that it has not checked the package files yet. Stays until
-    /// the next refresh.
+    /// the next refresh. Absent when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
@@ -48,8 +51,18 @@ pub struct AudioFamily {
     pub default_voice: String,
     /// Per-task capability tags, as the spec writes them.
     pub capabilities: serde_json::Map<String, serde_json::Value>,
-    /// The typed options this family accepts, by group.
-    pub options: AudioFamilyOptions,
+    /// The typed options this family accepts, by group. The dashboard's
+    /// catalog always has them; the tool's full listing leaves them out for
+    /// `options_summary` (they are long) and a listing narrowed by `family`
+    /// has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub options: Option<AudioFamilyOptions>,
+    /// In the tool's full listing instead of `options`: where to get them. Never
+    /// in the dashboard's catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub options_summary: Option<String>,
     /// At least one package fully downloaded.
     pub any_installed: bool,
     /// An enabled audio model of this family loads one of its packages
@@ -195,6 +208,9 @@ pub enum AudioCatalogAnswer {
 }
 
 /// `audio_catalog` with `action: refresh`: the catalog was fetched anew.
+// Strict on read, unlike the other answers: `AudioCatalogAnswer` is untagged
+// and tries this variant first, so a container `serde(default)` would make it
+// take the download answer too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AudioCatalogRefreshed {

@@ -60,6 +60,7 @@ mod tests {
             axum::Json(ApiError {
                 code: code.into(),
                 message: "said".into(),
+                ..Default::default()
             }),
         )
             .into_response()

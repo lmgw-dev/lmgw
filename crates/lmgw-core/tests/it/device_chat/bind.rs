@@ -18,11 +18,9 @@ fn code(v: &Value) -> &str {
 async fn a_device_binds_a_chat_thread_and_not_an_admin_one() {
     let w = world(|_| {}).await;
     let d = pair(&w, "phone", json!({})).await;
-    let bearer = format!("Bearer {}", d.key);
-    let auth = [("authorization", bearer.as_str())];
     let tid = w.thread("chatty", json!({})).await;
     let mut ws = w
-        .connect(&format!("chat_thread={tid}"), &auth)
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     let created = next(&mut ws).await;
@@ -36,7 +34,7 @@ async fn a_device_binds_a_chat_thread_and_not_an_admin_one() {
     // refusal is its request row, as realtime's own handshake refusals are.
     let admin = admin_thread(&w).await;
     let (status, body) = w
-        .connect(&format!("chat_thread={}", admin.id), &auth)
+        .connect_as(&d, &format!("chat_thread={}", admin.id))
         .await
         .unwrap_err();
     assert_eq!(
@@ -83,13 +81,9 @@ async fn the_thread_s_aliases_pass_the_device_s_policy_before_the_101() {
         json!({ "scope_mode": "allow", "scope_patterns": "chatty\nhear" }),
     )
     .await;
-    let bearer = format!("Bearer {}", d.key);
     let tid = w.thread("chatty", json!({})).await;
     let (status, body) = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_err();
     assert_eq!((status, code(&body)), (403, "key_scope"), "{body}");
@@ -107,14 +101,10 @@ async fn the_thread_s_aliases_pass_the_device_s_policy_before_the_101() {
 async fn a_takeover_names_the_device_that_took_the_thread() {
     let w = world(|_| {}).await;
     let d = pair(&w, "phone", json!({})).await;
-    let bearer = format!("Bearer {}", d.key);
     let tid = w.thread("chatty", json!({})).await;
     let (mut dashboard, _) = w.bind(tid).await;
     let _phone = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     let e = next(&mut dashboard).await;
@@ -146,14 +136,10 @@ async fn a_takeover_names_the_device_that_took_the_thread() {
 async fn a_device_taken_over_is_told_it_moved_to_the_dashboard() {
     let w = world(|_| {}).await;
     let d = pair(&w, "phone", json!({})).await;
-    let bearer = format!("Bearer {}", d.key);
     let tid = w.thread("chatty", json!({})).await;
     let mut feed = crate::chat_feed::Feed::open(&w, &w.gw.client(), "", None).await;
     let mut phone = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     let created = next(&mut phone).await;
@@ -190,24 +176,16 @@ async fn a_bind_that_never_takes_over_is_refused_while_another_holds_the_thread(
     let w = world(|_| {}).await;
     let phone = pair(&w, "phone", json!({})).await;
     let desktop = pair(&w, "desktop", json!({})).await;
-    let as_phone = format!("Bearer {}", phone.key);
-    let as_desktop = format!("Bearer {}", desktop.key);
     let tid = w.thread("chatty", json!({})).await;
     let other = w.thread("chatty", json!({})).await;
     let mut held = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", as_phone.as_str())],
-        )
+        .connect_as(&phone, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut held).await["type"], "session.created");
 
     let (status, body) = w
-        .connect(
-            &format!("chat_thread={tid}&takeover=never"),
-            &[("authorization", as_desktop.as_str())],
-        )
+        .connect_as(&desktop, &format!("chat_thread={tid}&takeover=never"))
         .await
         .unwrap_err();
     assert_eq!((status, code(&body)), (409, "chat_thread_bound"), "{body}");
@@ -226,20 +204,14 @@ async fn a_bind_that_never_takes_over_is_refused_while_another_holds_the_thread(
 
     // A free thread binds with it.
     let mut free = w
-        .connect(
-            &format!("chat_thread={other}&takeover=never"),
-            &[("authorization", as_desktop.as_str())],
-        )
+        .connect_as(&desktop, &format!("chat_thread={other}&takeover=never"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut free).await["type"], "session.created");
 
     // Without it, the desktop's bind takes over, as always.
     let _taken = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", as_desktop.as_str())],
-        )
+        .connect_as(&desktop, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     let close = loop {
@@ -257,10 +229,7 @@ async fn a_bind_that_never_takes_over_is_refused_while_another_holds_the_thread(
     );
 
     // The parameter applies to a bound session only.
-    let (status, body) = w
-        .connect("takeover=never", &[("authorization", as_desktop.as_str())])
-        .await
-        .unwrap_err();
+    let (status, body) = w.connect_as(&desktop, "takeover=never").await.unwrap_err();
     assert_eq!((status, code(&body)), (400, "invalid_value"), "{body}");
 }
 
@@ -271,21 +240,14 @@ async fn a_bind_that_never_takes_over_is_refused_while_another_holds_the_thread(
 async fn a_bind_that_never_takes_over_takes_its_own_key_s_session() {
     let w = world(|_| {}).await;
     let phone = pair(&w, "phone", json!({})).await;
-    let as_phone = format!("Bearer {}", phone.key);
     let tid = w.thread("chatty", json!({})).await;
     let mut first = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", as_phone.as_str())],
-        )
+        .connect_as(&phone, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut first).await["type"], "session.created");
     let mut again = w
-        .connect(
-            &format!("chat_thread={tid}&takeover=never"),
-            &[("authorization", as_phone.as_str())],
-        )
+        .connect_as(&phone, &format!("chat_thread={tid}&takeover=never"))
         .await
         .unwrap_or_else(|(s, b)| panic!("not refused in its own name: {s}: {b}"));
     assert_eq!(next(&mut again).await["type"], "session.created");
@@ -307,14 +269,10 @@ async fn two_binds_that_never_take_over_at_once_bind_exactly_one() {
     let w = world(|_| {}).await;
     let phone = pair(&w, "phone", json!({})).await;
     let desktop = pair(&w, "desktop", json!({})).await;
-    let as_phone = format!("Bearer {}", phone.key);
-    let as_desktop = format!("Bearer {}", desktop.key);
     for _ in 0..5 {
         let tid = w.thread("chatty", json!({})).await;
         let query = format!("chat_thread={tid}&takeover=never");
-        let ha = [("authorization", as_phone.as_str())];
-        let hb = [("authorization", as_desktop.as_str())];
-        let (a, b) = tokio::join!(w.connect(&query, &ha), w.connect(&query, &hb));
+        let (a, b) = tokio::join!(w.connect_as(&phone, &query), w.connect_as(&desktop, &query));
         let refused: Vec<(u16, Value)> = [&a, &b]
             .into_iter()
             .filter_map(|r| r.as_ref().err().cloned())

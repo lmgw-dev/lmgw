@@ -14,6 +14,7 @@ use folder_chat::sync::{
 };
 use quickdoc_core::embed::FixtureEmbedder;
 use quickdoc_core::store;
+use quickdoc_core::BoxFut;
 
 async fn docs(idx: &IndexDir) -> Vec<String> {
     let c = store::get_corpus_by_id(idx.pool(), "folder@1")
@@ -944,16 +945,20 @@ async fn a_pdf_that_outlasts_the_timeout_is_skipped_naming_the_constant() {
 /// The fixture's vectors, negated: the same alias and width, another model.
 struct Negated(FixtureEmbedder);
 
-#[async_trait::async_trait]
 impl quickdoc_core::embed::Embedder for Negated {
     fn identity(&self) -> quickdoc_core::embed::EmbedIdentity {
         self.0.identity()
     }
 
-    async fn embed(&self, texts: &[String]) -> quickdoc_core::Result<Vec<Vec<f32>>> {
-        let mut v = self.0.embed(texts).await?;
-        v.iter_mut().flatten().for_each(|x| *x = -*x);
-        Ok(v)
+    fn embed<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> BoxFut<'a, quickdoc_core::Result<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            let mut v = self.0.embed(texts).await?;
+            v.iter_mut().flatten().for_each(|x| *x = -*x);
+            Ok(v)
+        })
     }
 }
 

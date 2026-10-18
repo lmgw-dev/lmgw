@@ -1,7 +1,7 @@
 //! Keys & policy (usage-analytics design §4.1)
 
+use lmgw_api_types as dto;
 use serde::Deserialize;
-use serde_json::{json, Value};
 
 use crate::config::{ApiKey, ApiKeyKind, BudgetPeriod, KeyPolicy, ScopeMode};
 use crate::state::SharedState;
@@ -25,6 +25,14 @@ pub struct KeyPatch {
     /// names.
     pub tool_scope_mode: Option<String>,
     pub tool_scope_patterns: Option<String>,
+    /// Client and device keys: the device-hosted labels whose tools the key
+    /// reaches (e.g. `["kai"]` for Kai desktop's tools), whatever the tool
+    /// scope's mode; the tool scope then filters which of those tools it
+    /// sees, as it does any server's. Without it no key reaches another
+    /// device's hosted tools, whatever its tool scope says. Any label a
+    /// device could host is taken, hosted now or not; `[]` clears it.
+    // The client-apps design record, L16 as changed 2026-10-15.
+    pub device_tools: Option<Vec<String>>,
     pub budget_micro: Option<i64>,
     pub budget_period: Option<String>,
     pub rpm_limit: Option<i64>,
@@ -46,6 +54,12 @@ pub struct KeyPatch {
     // The client-apps design record, L3/L5 (2026-10-07); a level since the
     // pre-merge review's P-3.
     pub self_admin: Option<lmgw_api_types::AdminLevel>,
+    /// Device keys only: the device's lmgw URLs, `https` base URLs of the
+    /// device listener in the order the device tries them. Every server
+    /// certificate carries their hosts from the next connection on, and the
+    /// device reads the list at its next enrolment.
+    // The device link design record, §3.1, §9.4.
+    pub urls: Option<Vec<String>>,
 }
 
 /// A device's admin-tools level as the wire carried it; a level this build
@@ -95,6 +109,17 @@ fn normalize_patterns(v: &str) -> String {
         .join("\n")
 }
 
+/// Whether two device-tools grants name the same labels, in any case and
+/// any order — restating a grant is not a change and does not read as one.
+fn same_grant(a: &[String], b: &[String]) -> bool {
+    let folded = |v: &[String]| {
+        let mut f: Vec<String> = v.iter().map(|l| l.to_ascii_lowercase()).collect();
+        f.sort();
+        f
+    };
+    folded(a) == folded(b)
+}
+
 /// An expiry lmgw will still understand when it matters.
 ///
 /// Validated **here, where it is typed**, rather than at the door: `policy`
@@ -132,6 +157,12 @@ fn refuse_derived(key: &ApiKey, what: &str) -> String {
              /v1/responses apply to it. Change the manifest on the agent's page.",
             key.name
         ),
+        "device_tools" => format!(
+            "'{}' is an agent token: the device-hosted labels it reaches are the ones its \
+             manifest names, resolved when it runs, so it carries no device-tools grant. Change \
+             the manifest on the agent's page.",
+            key.name
+        ),
         _ => format!(
             "'{}' is an agent token: its scope is derived from the agent's manifest — every \
              model_alias config field, plus a literal model.alias — and is rewritten on the next \
@@ -157,6 +188,14 @@ fn refuse_inert(key: &ApiKey, what: &str) -> String {
             "'{}' is an internal identity: work lmgw does on its own behalf attaches its tools \
              in process and never presents a credential, so a tool scope here would be stored \
              and never read. Its levers are scope and budget.",
+            key.name
+        );
+    }
+    if what == "device_tools" {
+        return format!(
+            "'{}' is an internal identity: work lmgw does on its own behalf attaches its tools \
+             in process and never presents a credential, so a device-tools grant here would be \
+             stored and never read. Its levers are scope and budget.",
             key.name
         );
     }
@@ -226,6 +265,10 @@ pub fn owner_key_refusal(key: &ApiKey, p: &KeyPatch) -> Option<String> {
         || p.tool_scope_patterns
             .as_deref()
             .is_some_and(|v| normalize_patterns(v) != policy.tool_scope_patterns)
+        || p.device_tools.as_deref().is_some_and(|v| {
+            crate::devices::device_tools_grant(v)
+                .map_or(true, |g| !same_grant(&g, &policy.device_tools))
+        })
         || p.budget_micro.is_some_and(|v| v != policy.budget_micro)
         || p.budget_period
             .as_deref()
@@ -264,6 +307,9 @@ pub fn validate_create_scope(p: &KeyPatch) -> Result<bool, String> {
     {
         non_default |= !normalize_patterns(v).is_empty();
     }
+    if let Some(v) = p.device_tools.as_deref() {
+        non_default |= !crate::devices::device_tools_grant(v)?.is_empty();
+    }
     Ok(non_default)
 }
 
@@ -285,6 +331,9 @@ pub fn policy_from_patch(p: &KeyPatch) -> Result<KeyPolicy, String> {
     }
     if let Some(v) = p.tool_scope_patterns.as_deref() {
         policy.tool_scope_patterns = normalize_patterns(v);
+    }
+    if let Some(v) = p.device_tools.as_deref() {
+        policy.device_tools = crate::devices::device_tools_grant(v)?;
     }
     if let Some(v) = p.budget_micro {
         if v < 0 {
@@ -322,7 +371,7 @@ pub fn policy_from_patch(p: &KeyPatch) -> Result<KeyPolicy, String> {
 /// front end that posts the whole form on every save — which is what the
 /// dashboard's dialog does — is refused only for a field it actually tried to
 /// change. Restating a derived value is not an attempt to change it.
-pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> {
+pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<dto::KeySaved, String> {
     let snap = state.snapshot();
     let key: ApiKey = snap
         .api_keys
@@ -409,6 +458,21 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
             }
             policy.tool_scope_patterns = patterns;
             changed.push("tool_scope_patterns");
+        }
+    }
+    // The device-tools grant (client-apps design L16 as changed 2026-10-15)
+    // binds a credential a client presents, as the tool scope does.
+    if let Some(v) = p.device_tools.as_deref() {
+        let grant = crate::devices::device_tools_grant(v)?;
+        if !same_grant(&grant, &policy.device_tools) {
+            if derived {
+                return Err(refuse_derived(&key, "device_tools"));
+            }
+            if inert {
+                return Err(refuse_inert(&key, "device_tools"));
+            }
+            policy.device_tools = grant;
+            changed.push("device_tools");
         }
     }
 
@@ -515,14 +579,33 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
         }
     }
 
+    // A device's URL list (device link design §3.1): only a device has one.
+    let mut urls = None;
+    if let Some(v) = p.urls.as_deref() {
+        if key.kind != ApiKeyKind::Device {
+            return Err(format!(
+                "'{}' is not a device key: only a paired device has a URL list",
+                key.name
+            ));
+        }
+        let checked = crate::devices::check_urls(v)?;
+        if checked != key.link.urls {
+            urls = Some(checked);
+            changed.push("urls");
+        }
+    }
+
     if changed.is_empty() {
-        return Ok(json!({
-            "ok": true,
-            "id": key.id,
-            "name": key.name,
-            "changed": changed,
-            "message": format!("'{}' already reads exactly that — nothing written", key.name),
-        }));
+        return Ok(dto::KeySaved {
+            ok: true,
+            id: key.id,
+            message: format!(
+                "'{}' already reads exactly that — nothing written",
+                key.name
+            ),
+            name: key.name,
+            changed: Vec::new(),
+        });
     }
 
     let reach_moved = changed.contains(&"self_admin");
@@ -542,6 +625,12 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
             "key {} disappeared between reading it and writing it — nothing was changed",
             key.id
         ));
+    }
+    if let Some(urls) = urls.as_deref() {
+        // The publish below hands the hosts to the server certificates.
+        store::set_device_urls(&state.db, key.id, urls)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     // Raised whether or not the reload below succeeds (review W2-6): the
     // row is written, and a revocation that waited for a snapshot would fail
@@ -590,14 +679,17 @@ pub async fn key_set(state: &SharedState, p: KeyPatch) -> Result<Value, String> 
     state.mcp.reconcile(&published).await;
     // A session this key holds on `/mcp` has its own copy of `tools/list`;
     // nudge it to re-list, as a per-tool switch does.
-    if changed.iter().any(|c| c.starts_with("tool_scope")) {
+    if changed
+        .iter()
+        .any(|c| c.starts_with("tool_scope") || *c == "device_tools")
+    {
         state.mcp.notify_tools_changed_now();
     }
-    Ok(json!({
-        "ok": true,
-        "id": key.id,
-        "name": key.name,
-        "changed": changed,
-        "message": format!("'{}': updated {}", key.name, changed.join(", ")),
-    }))
+    Ok(dto::KeySaved {
+        ok: true,
+        id: key.id,
+        message: format!("'{}': updated {}", key.name, changed.join(", ")),
+        name: key.name,
+        changed: changed.into_iter().map(String::from).collect(),
+    })
 }

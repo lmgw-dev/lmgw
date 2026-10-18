@@ -1,0 +1,434 @@
+[
+ {
+  "js": "'SETUP: a dev instance whose database has a decision row decide/laya (backend cpu; labs-store design 7.2), started with LMGW_DATA_DIR=<scratch> scripts/dev-instance.sh 127.0.0.1:8898. Run: scripts/ui-drive.py scripts/drive/decision-sets.json --base http://127.0.0.1:8898 --token-file <token file> --podman-guard \"\" --shots <dir>. The guard is off because the set run asks decide/laya, which starts its CPU container (and no other). It deletes the Decision lab history and question sets of that instance first, saves Ticket triage as a set, meets a 409 set_changed on Update set and reloads, loads the set from the Load menu, opens New set run: a pasted file with an unknown label is refused with its row named, a score column of mixed spellings asks how it reads, then 30 labelled tickets with a ticket-id key are picked as a file. The run is cancelled and resumed (the answer to the Cancel, and later to the abort, is held until the job left the jobs feed, the order a loaded machine gives at random: the page still has to read canceled at), its items, metrics, bins, threshold slider (against a hand count from the items) and Use as threshold are checked, the threshold shows as measured on the question card, the exports read back, and the run and the set are deleted.'"
+ },
+ {
+  "js": "(async()=>{const h={method:'POST',headers:{'content-type':'application/json'},body:'null'};await fetch('/labs/api/decision/clear',h);const l=await (await fetch('/labs/api/decision/presets')).json();for(const p of l.presets){await fetch('/labs/api/decision/presets/'+p.id+'/delete',h)}return 'clean'})()"
+ },
+ {"nav": "/decision-lab"},
+ {"until": "document.querySelector('.lab-head .dl-facts .dl-fact') && document.querySelector('.dl-setcard')", "timeout": 20},
+ {"script": "scripts/drive/decision-sets-data.js"},
+ {
+  "expect": "document.querySelector('.dl-setname').textContent==='none loaded' && document.querySelectorAll('.dl-setbtns .btn')[1].disabled",
+  "label": "no set is loaded, and Update set waits for one"
+ },
+ {"click": ".dl-toolbar .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.5},
+ {"until": "document.querySelectorAll('.dl-q').length===3", "timeout": 5},
+ {"click": ".dl-setbtns .btn", "nth": 0},
+ {"wait": 0.3},
+ {"type": "drive triage"},
+ {"key": "Enter"},
+ {"until": "document.querySelector('.dl-setname').textContent==='drive triage'", "timeout": 10},
+ {
+  "expect": "(async()=>{const l=await (await fetch('/labs/api/decision/presets?kind=question_set')).json();const p=l.presets.find(p=>p.name==='drive triage');return !!p && p.kind==='question_set' && p.body.default_model==='decide/laya' && p.body.questions.map(q=>q.id).join(',')==='team,urgency,needs_human'})()",
+  "label": "Save as set keeps the questions and the head model under the name"
+ },
+ {
+  "expect": "[...document.querySelectorAll('.dl-qthr')].map(e=>e.textContent).join('|')==='threshold: not measured|threshold: not measured|threshold: not measured'",
+  "label": "each question shows its threshold: not measured"
+ },
+ {"shot": "set-saved"},
+ {"js": "window.__typeInto('.dl-instr', 'Which team handles it?')"},
+ {"wait": 0.3},
+ {
+  "expect": "document.querySelector('.dl-setedit').textContent==='questions edited' && !document.querySelectorAll('.dl-setbtns .btn')[1].disabled && document.querySelector('.dl-qthr').textContent.includes('edited')",
+  "label": "an edited question says so on the card and on its threshold line"
+ },
+ {
+  "js": "(async()=>{const l=await (await fetch('/labs/api/decision/presets?kind=question_set')).json();const p=l.presets.find(p=>p.name==='drive triage');const r=await fetch('/labs/api/decision/presets/'+p.id,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:p.name,kind:p.kind,body:p.body,updated_at:p.updated_at})});return 'another window wrote the set: '+r.status})()"
+ },
+ {"click": ".dl-setbtns .btn", "nth": 1},
+ {"until": "document.querySelector('.dl-set-conflict')", "timeout": 10},
+ {
+  "expect": "document.querySelector('.dl-set-conflict').textContent.includes('the set changed since it was loaded') && document.querySelector('.dl-set-conflict').textContent.includes('Reload the set')",
+  "label": "Update set after the set moved is the 409 set_changed, said with Reload"
+ },
+ {"shot": "set-changed"},
+ {"click": ".dl-set-conflict .btn", "nth": 0},
+ {"until": "!document.querySelector('.dl-set-conflict') && document.querySelector('.dl-instr').value==='Which team should handle this ticket?'", "timeout": 10},
+ {
+  "expect": "document.querySelector('.dl-setedit').textContent==='' && document.querySelectorAll('.dl-q').length===3",
+  "label": "Reload the set gives the questions back as the set has them"
+ },
+ {"js": "window.__typeInto('.dl-instr', 'Edited again')"},
+ {"wait": 0.3},
+ {"click": ".dl-setcard .row-menu .btn"},
+ {"wait": 0.3},
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='drive triage · 3 questions'",
+  "label": "the Load menu lists the saved set"
+ },
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.3},
+ {"js": "document.querySelector('.dl-instr').value==='Edited again' && document.querySelector('.menu-pop .menu-item') ? (document.querySelectorAll('.menu-pop .menu-item')[0].click(), 'armed, picked again') : 'loaded'"},
+ {"until": "document.querySelector('.dl-instr').value==='Which team should handle this ticket?'", "timeout": 5},
+ {
+  "expect": "document.querySelector('.dl-setname').textContent==='drive triage' && document.querySelector('.dl-setedit').textContent==='' && document.querySelector('.lab-head .model-picker').textContent.includes('laya')",
+  "label": "loading the set replaces the questions and picks its model"
+ },
+ {"click": ".dl-setbtns .btn", "nth": 2},
+ {"until": "document.querySelector('dialog[open] .dl-newrun')", "timeout": 10},
+ {
+  "expect": "document.querySelector('.dl-newrun-what').textContent.startsWith('Runs the saved set') && document.querySelector('.dl-newrun-what').textContent.includes('drive triage') && document.querySelector('.dl-price').textContent.includes('decide/laya is a local row: free') && document.querySelector('.dl-newrun-conc input').value==='1'",
+  "label": "the new run names the saved set, its model, its price and a concurrency of 1"
+ },
+ {"js": "window.__typeInto('.dl-paste', 'msg,team\\nhello,billing\\n')"},
+ {"until": "document.querySelector('.dl-preview') && document.querySelector('dialog[open] .dl-start-note').textContent===\"pick the column that holds each item's state\"", "timeout": 15},
+ {
+  "expect": "document.querySelector('dialog[open] .modal-foot .btn.primary').disabled && [...document.querySelectorAll('.dl-preview thead th')].map(th=>th.textContent).join('|').includes('teamlabel: team')",
+  "label": "a file without a state-like column asks for the state column"
+ },
+ {"js": "window.__typeInto('.dl-paste', window.__ticketsBadLabel)"},
+ {"until": "document.querySelectorAll('.dl-problem-table tbody tr').length===1", "timeout": 15},
+ {
+  "expect": "(()=>{const c=[...document.querySelectorAll('.dl-problem-table tbody tr td')].map(e=>e.textContent);return c[0]==='3' && c[1]==='4' && c[2]==='team' && c[3]===\"'Billing'\" && c[4].includes('is not an option of') && document.querySelector('dialog[open] .btn.primary').disabled && document.querySelector('dialog[open] .dl-start-note').textContent==='1 problem: fix the file or the mapping'})()",
+  "label": "an unknown label refuses the file, naming its row, line, column and value"
+ },
+ {"shot": "newrun-unknown-label"},
+ {"js": "window.__typeInto('.dl-paste', window.__ticketsMixed)"},
+ {"until": "document.querySelector('.dl-map-reading .select-btn') && [...document.querySelectorAll('.dl-problem-table tbody tr td')].some(t=>t.textContent.includes('score_labels'))", "timeout": 15},
+ {
+  "expect": "(()=>{const c=[...document.querySelectorAll('.dl-problem-table tbody tr td')].map(e=>e.textContent);return c[0]==='5' && c[2]==='urgency' && c[3]===\"'today'\"})()",
+  "label": "a score column mixing a level text with indices names the row and asks how it reads"
+ },
+ {"click": ".dl-map-reading .select-btn"},
+ {"wait": 0.3},
+ {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('level indices')).click(), 'reads as indices'"},
+ {"until": "[...document.querySelectorAll('.dl-problem-table tbody tr td')].some(t=>t.textContent.includes('no level index'))", "timeout": 15},
+ {
+  "expect": "document.querySelectorAll('.dl-problem-table tbody tr').length===1",
+  "label": "score_labels index settles the column: only the row that is no index is left"
+ },
+ {"click": ".dl-map-reading .select-btn"},
+ {"wait": 0.3},
+ {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('as the column reads')).click(), 'reads as the column does'"},
+ {"js": "window.__typeInto('.dl-paste', '')"},
+ {"wait": 0.3},
+ {"js": "window.__pickFile(window.__tickets, 'tickets.csv')"},
+ {"until": "document.querySelector('.dl-file-chip') && document.querySelector('.dl-preview') && !document.querySelector('.dl-problems') && !document.querySelector('dialog[open] .btn.primary').disabled", "timeout": 20},
+ {
+  "expect": "document.querySelector('.dl-file-chip').textContent.includes('tickets.csv') && document.querySelector('.dl-newrun-part .dl-card-head .mini-note').textContent==='first 20 of 30 rows' && document.querySelectorAll('.dl-preview tbody tr').length===20 && document.querySelector('dialog[open] .dl-start-note').textContent==='Start: 30 items as one job'",
+  "label": "the picked file previews its first 20 of 30 rows and Start can go"
+ },
+ {
+  "expect": "(()=>{const roles=[...document.querySelectorAll('.dl-preview thead th')].map(th=>th.textContent).join('|');return roles.includes('ticket_idkey') && roles.includes('textstate') && roles.includes('teamlabel: team') && roles.includes('urgencylabel: urgency') && roles.includes('needs_humanlabel: needs_human')})()",
+  "label": "the mapping is guessed from the column names: state, key and a label per question"
+ },
+ {"shot": "newrun"},
+ {"click": "dialog[open] .modal-foot .btn.primary"},
+ {"until": "location.pathname.startsWith('/decision-lab/batches/') && document.querySelector('.dl-runcard')", "timeout": 30},
+ {"js": "window.__run=+location.pathname.split('/').pop(); 'set run '+window.__run"},
+ {"until": "/^([3-9]|[12][0-9]) of 30/.test(document.querySelector('.dl-prog-line').textContent)", "timeout": 120},
+ {
+  "expect": "document.querySelector('.dl-run-status').textContent.includes('running') && /· \\d+ to go$/.test(document.querySelector('.dl-prog-line').textContent)",
+  "label": "the run is live: running, its progress from the jobs feed"
+ },
+ {"shot": "run-live"},
+ {"js": "window.__holdAnswer('/batches/'+window.__run+'/cancel', 'lab-batch:'+window.__run)"},
+ {"click": ".dl-runctl .btn", "nth": 0},
+ {"until": "document.querySelector('.dl-run-status').textContent.includes('canceled at') || [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Abort the calls in flight')", "timeout": 10},
+ {"js": "[...document.querySelectorAll('.dl-runctl .btn')].map(b=>b.textContent).join('|')"},
+ {"until": "window.__held.startsWith('released after: job gone')", "timeout": 25, "label": "the Cancel's answer is held until its job left the feed"},
+ {"wait": 0.5},
+ {"until": "document.querySelector('.dl-run-status').textContent.includes('canceled at')", "timeout": 30, "label": "the job left the feed before the Cancel's answer, built while it ran, landed: the page still reads canceled at"},
+ {
+  "expect": "(async()=>{const v=await (await fetch('/decision-lab/api/batches/'+window.__run)).json();return v.status==='canceled' && v.done<30 && document.querySelector('.dl-run-status').textContent==='canceled at '+v.done+' of 30' && [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Resume')})()",
+  "label": "Cancel stops the run after the calls in flight: canceled at N of 30, with Resume"
+ },
+ {"shot": "run-canceled"},
+ {"click": ".dl-runctl .btn.primary"},
+ {"until": "document.querySelector('.dl-run-status').textContent.includes('running') || document.querySelector('.dl-run-status').textContent.includes('done')", "timeout": 20},
+ {"until": "document.querySelector('.dl-run-status').textContent==='done'", "timeout": 240},
+ {"until": "document.querySelectorAll('.dl-qmetrics').length===3 && !document.querySelector('.dl-metrics .dl-warn-line')", "timeout": 20},
+ {
+  "expect": "document.querySelector('.dl-prog-line').textContent==='30 of 30 · 30 answered · 0 failed · 0 unreadable'",
+  "label": "Resume runs the rest: done, 30 of 30"
+ },
+ {"until": "document.querySelectorAll('.dl-items tbody tr').length===30 && [...document.querySelectorAll('.dl-items tbody tr')].every(r=>!r.textContent.includes('—'))", "timeout": 20},
+ {
+  "expect": "(()=>{const rows=[...document.querySelectorAll('.dl-items tbody tr')];const marks=document.querySelectorAll('.dl-items .dl-exp.ok, .dl-items .dl-exp.bad').length;return rows[0].querySelector('.dl-key').textContent==='T-1001' && rows[29].querySelector('.dl-key').textContent==='T-1030' && marks===90})()",
+  "label": "the items table: 30 rows in file order, each key, each question with its expected answer marked"
+ },
+ {
+  "expect": "(()=>{const right=[...document.querySelectorAll('.dl-items tbody tr')].filter(r=>r.querySelectorAll('.dl-qcell')[0].querySelector('.dl-exp.ok')).length;const m=document.querySelector('.dl-qmetrics .dl-qm-acc').textContent.match(/\\((\\d+) of 30 scored\\)/);return m && +m[1]===right})()",
+  "label": "team's accuracy agrees with a count of the right answers in the table"
+ },
+ {"click": ".dl-items tbody tr", "nth": 0},
+ {"until": "document.querySelector('.dl-item-open .dl-run .dl-choice')", "timeout": 5},
+ {
+  "expect": "document.querySelector('.dl-item-open pre').textContent.startsWith('I was charged twice') && document.querySelector('.dl-item-open .dl-score .dl-marker') && document.querySelector('.dl-item-open .dl-noul-view .dl-meter')",
+  "label": "an opened item shows its state whole and its run in full"
+ },
+ {"shot": "run-items-open"},
+ {"click": ".dl-items tbody tr", "nth": 0},
+ {"wait": 0.3},
+ {
+  "expect": "document.querySelectorAll('.dl-qmetrics .dl-cm').length===3 && document.querySelectorAll('.dl-qmetrics svg.dl-rel-svg').length===3 && [...document.querySelectorAll('.dl-qmetrics svg.dl-rel-svg')].every(s=>s.querySelectorAll('.dl-rel-track').length===10)",
+  "label": "per question: a confusion matrix and a reliability diagram of 10 bins, empty ones drawn"
+ },
+ {
+  "expect": "(async()=>{const m=await (await fetch('/decision-lab/api/batches/'+window.__run+'/metrics')).json();const team=m.questions[0];const drawn=document.querySelectorAll('.dl-qmetrics')[0].querySelectorAll('.dl-rel-col').length;const sum=team.reliability.reduce((a,b)=>a+b.count,0);const cells=[...document.querySelectorAll('.dl-qmetrics')[0].querySelectorAll('.dl-cm tbody .dl-cm-cell span')].map(s=>+s.textContent);return drawn===team.reliability.length && sum===team.scored && cells.join(',')===team.confusion.flat().join(',')})()",
+  "label": "the diagram draws each non-empty bin and the matrix the server's counts"
+ },
+ {"js": "(()=>{const i=document.querySelector('.dl-bins input');i.value='5';i.dispatchEvent(new Event('input',{bubbles:true}));i.dispatchEvent(new Event('change',{bubbles:true}));return 'bins 5'})()"},
+ {"until": "[...document.querySelectorAll('.dl-qmetrics svg.dl-rel-svg')].every(s=>s.querySelectorAll('.dl-rel-track').length===5)", "timeout": 10},
+ {
+  "expect": "document.querySelector('.dl-rel-cap').textContent.includes('5 bins')",
+  "label": "the bins field reads the diagram again with 5 bins"
+ },
+ {"shot": "run-metrics"},
+ {
+  "js": "(()=>{const r=document.querySelector('.dl-qmetrics .dl-thr-range');r.value=String(Math.floor(+r.max/2));r.dispatchEvent(new Event('input',{bubbles:true}));window.__stop=+r.value;return 'slider at '+r.value+' of '+r.max})()"
+ },
+ {"wait": 0.3},
+ {
+  "js": "(async()=>{const m=await (await fetch('/decision-lab/api/batches/'+window.__run+'/metrics')).json();const p=m.questions[0].curve[window.__stop];const items=(await (await fetch('/decision-lab/api/batches/'+window.__run+'/items')).json()).items;let answered=0,covered=0,labelled=0,correct=0;for(const g of items){const r=g.runs[0];if(!r||r.http_status<200||r.http_status>299)continue;const a=JSON.parse(r.response).answers.team;answered++;if(a.confidence>=p.threshold){covered++;const e=g.item.expected.team;if(e!==undefined){labelled++;if(a.choice===e)correct++}}}window.__cut=p.threshold;const got=document.querySelector('.dl-qmetrics .dl-thr-at').textContent;const want=Math.round(covered/answered*100)+'% covered, '+(correct/labelled*100).toFixed(1)+'% correct (n = '+labelled+')';window.__hand={ok:labelled>0 && got.endsWith(want),got,want};return window.__hand})()"
+ },
+ {
+  "expect": "window.__hand && window.__hand.ok===true",
+  "label": "the slider's line agrees with a hand count from the items"
+ },
+ {"click": ".dl-qmetrics .dl-thr-act .btn"},
+ {"until": "document.querySelector('.dl-qmetrics .dl-thr-set').textContent.includes('on this run')", "timeout": 10},
+ {
+  "expect": "(async()=>{const l=await (await fetch('/labs/api/decision/presets?kind=question_set')).json();const t=l.presets.find(p=>p.name==='drive triage').body.thresholds.team;return t.value===window.__cut && t.measured.batch_id===window.__run && document.querySelector('.dl-qmetrics .dl-thr-set').textContent.startsWith(\"the set 'drive triage' uses \")})()",
+  "label": "Use as threshold writes the cut and its measurement into the saved set"
+ },
+ {"shot": "run-threshold"},
+ {
+  "expect": "(async()=>{const r=await fetch('/labs/api/decision/export?format=csv&batch='+window.__run);const t=await r.text();const rows=t.split('\\r\\n').filter(Boolean);const head=rows[0].split(',');return (r.headers.get('content-disposition')||'').includes('-batch-'+window.__run) && head.includes('batch_id') && head.includes('item_ix') && head.includes('item_key') && head.includes('expected') && head.includes('correct') && rows.length===1+90 && rows[1].includes('T-1001')})()",
+  "label": "the CSV export of the run: a row per item and question, its key, expected and correct"
+ },
+ {
+  "expect": "(async()=>{const t=await (await fetch('/labs/api/decision/export?format=jsonl&batch='+window.__run)).text();const lines=t.trim().split('\\n').map(l=>JSON.parse(l));return lines.length===30 && lines[0].group.item.key==='T-1001' && document.querySelectorAll('.dl-run-export .btn').length===1})()",
+  "label": "the JSONL export: one line per item with its key"
+ },
+ {"click": ".dl-run-export .btn"},
+ {"wait": 0.3},
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Items as CSV|Items as JSONL'",
+  "label": "the run's Export menu offers both files"
+ },
+ {"key": "Escape"},
+ {"click": ".page-head .actions a"},
+ {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"wait": 0.5},
+ {"click": ".dl-toolbar .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 3},
+ {"wait": 0.3},
+ {"click": ".dl-setcard .row-menu .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.3},
+ {"js": "document.querySelectorAll('.dl-q').length===3 ? 'loaded' : (document.querySelector('.menu-pop .menu-item') ? (document.querySelectorAll('.menu-pop .menu-item')[0].click(), 'armed, picked again') : 'menu gone')"},
+ {"until": "document.querySelectorAll('.dl-qthr').length===3", "timeout": 5},
+ {
+  "expect": "(()=>{const t=document.querySelector('.dl-qthr').textContent;return t.startsWith('threshold ') && t.includes('% correct (n = ') && t.includes('on set run #'+window.__run) && document.querySelector('.dl-qthr a').getAttribute('href')==='/decision-lab/batches/'+window.__run && document.querySelectorAll('.dl-qthr')[1].textContent==='threshold: not measured'})()",
+  "label": "the question card shows its threshold as measured, with coverage, accuracy, n and its set run"
+ },
+ {"shot": "threshold-measured"},
+ {"until": "document.querySelector('.results-note').textContent.includes('1 set run')", "timeout": 10},
+ {
+  "expect": "(async()=>{const u=await (await fetch('/labs/api/decision/usage')).json();return u.batches===1 && document.querySelector('.results-note').textContent.includes(' 30 runs · 1 set run · ')})()",
+  "label": "the usage line counts the set run and its runs"
+ },
+ {"js": "document.querySelector('.dock-rail') ? (document.querySelector('.dock-rail').click(), 'reference opened') : 'reference docked'"},
+ {"until": "document.querySelector('.dl-runrow')", "timeout": 5},
+ {"js": "window.__typeInto('.dl-instr', 'Edited before a load')"},
+ {"until": "document.querySelector('.dl-setrow .dl-setrow-load .confirm .btn')", "timeout": 5},
+ {"click": ".dl-setrow .dl-setrow-load .confirm .btn"},
+ {"wait": 0.5},
+ {
+  "expect": "document.querySelector('.dl-setrow .dl-setrow-load .confirm').textContent.includes('Replace the edited questions?') && document.querySelector('.dl-instr').value==='Edited before a load'",
+  "label": "the reference panel's Load arms first while the questions have edits"
+ },
+ {"click": ".dl-setrow .dl-setrow-load .confirm .btn", "nth": 0},
+ {"until": "document.querySelector('.dl-instr').value==='Which team should handle this ticket?' && !document.querySelector('.dl-setrow .dl-setrow-load')", "timeout": 5},
+ {
+  "expect": "document.querySelector('.dl-setname').textContent==='drive triage' && document.querySelector('.dl-setedit').textContent===''",
+  "label": "and its second press loads the set"
+ },
+ {
+  "expect": "(()=>{const r=document.querySelectorAll('.dl-runrow');return r.length===1 && r[0].textContent.includes('#'+window.__run+' · drive triage') && r[0].textContent.includes('done') && r[0].textContent.includes('30 of 30') && r[0].getAttribute('href')==='/decision-lab/batches/'+window.__run && document.querySelectorAll('.dl-setrow').length===1 && document.querySelector('.dl-setrow').textContent.includes('1 of 3 thresholds measured')})()",
+  "label": "the reference panel lists the set (1 of 3 thresholds measured) and links the set run with its status and progress"
+ },
+ {"shot": "reference"},
+ {"click": ".dl-runrow"},
+ {"until": "location.pathname==='/decision-lab/batches/'+window.__run && document.querySelector('.dl-runctl .confirm .btn')", "timeout": 20},
+ {"click": ".dl-runctl .confirm .btn"},
+ {"wait": 0.4},
+ {
+  "expect": "document.querySelector('.dl-runctl .confirm').textContent.includes('Delete set run #'+window.__run+', its 30 items and their runs?')",
+  "label": "Delete asks first, naming the items it takes"
+ },
+ {"click": ".dl-runctl .confirm .btn", "nth": 0},
+ {"until": "location.pathname==='/decision-lab'", "timeout": 20},
+ {
+  "expect": "(async()=>{const b=await (await fetch('/decision-lab/api/batches')).json();const u=await (await fetch('/labs/api/decision/usage')).json();return b.batches.length===0 && u.batches===0 && u.runs===0})()",
+  "label": "the set run is deleted with its items and runs"
+ },
+ {"until": "document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"click": ".dl-setcard .row-menu .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"until": "document.querySelectorAll('.dl-q').length===3", "timeout": 5},
+ {"click": ".dl-setbtns .btn", "nth": 2},
+ {"until": "document.querySelector('dialog[open] .dl-newrun')", "timeout": 10},
+ {"js": "window.__typeInto('.dl-paste', window.__ticketsLong)"},
+ {"until": "document.querySelector('.dl-preview') && !document.querySelector('.dl-problems') && !document.querySelector('dialog[open] .modal-foot .btn.primary').disabled", "timeout": 20},
+ {
+  "expect": "(()=>{const roles=[...document.querySelectorAll('.dl-preview thead th')].map(th=>th.textContent).join('|');return [...document.querySelectorAll('.dl-newrun-part .dl-card-head .mini-note')].some(n=>n.textContent==='all 1 row') && document.querySelector('.dl-newrun-part .dl-format .seg-btn.active').textContent==='JSONL' && roles.includes('ticket_idkey') && roles.includes('textstate') && !roles.includes('label:')})()",
+  "label": "pasted JSONL is read as JSONL; one unlabelled item with its key"
+ },
+ {"click": "dialog[open] .modal-foot .btn.primary"},
+ {"until": "location.pathname.startsWith('/decision-lab/batches/') && document.querySelector('.dl-runcard') && [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Cancel')", "timeout": 30},
+ {"js": "window.__long=+location.pathname.split('/').pop(); 'set run '+window.__long"},
+ {"wait": 2},
+ {"click": ".dl-runctl .btn", "nth": 0},
+ {"until": "[...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Abort the calls in flight')", "timeout": 10},
+ {
+  "expect": "(()=>{const b=[...document.querySelectorAll('.dl-runctl .btn')].find(b=>b.textContent==='Abort the calls in flight');return b.classList.contains('danger') && b.title.includes('Pressing again aborts them') && document.querySelector('.dl-run-status').textContent.includes('running')})()",
+  "label": "after the first Cancel the button says a second one aborts the call in flight"
+ },
+ {"shot": "run-abort"},
+ {"js": "location.reload(), 'reloaded after the first Cancel'"},
+ {"wait": 1},
+ {"until": "document.querySelector('.dl-runcard') && [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Abort the calls in flight' || b.textContent==='Cancel')", "timeout": 60, "label": "the reloaded page is up while the long call is in flight (a reload of the debug WASM bundle can take over 20 s under load, longer than the call itself)"},
+ {"js": "window.__long=+location.pathname.split('/').pop(); 'set run '+window.__long"},
+ {
+  "expect": "(async()=>{const v=await (await fetch('/decision-lab/api/batches/'+window.__long)).json();const b=[...document.querySelectorAll('.dl-runctl .btn')].find(b=>b.textContent==='Abort the calls in flight');return v.status==='running' && v.cancel_requested===true && !!b && b.classList.contains('danger')})()",
+  "label": "a page reloaded after the first Cancel knows the next press aborts (cancel_requested)"
+ },
+ {"script": "scripts/drive/decision-sets-data.js"},
+ {"js": "window.__holdAnswer('/batches/'+window.__long+'/cancel', 'lab-batch:'+window.__long)"},
+ {"click": ".dl-runctl .btn.danger"},
+ {"until": "window.__held.startsWith('released after: job gone')", "timeout": 25, "label": "the abort's answer is held until its job left the feed"},
+ {"wait": 0.5},
+ {"until": "document.querySelector('.dl-run-status').textContent==='canceled at 0 of 1'", "timeout": 30, "label": "the abort ended the job before its answer landed: the page still reads canceled at 0 of 1"},
+ {
+  "expect": "(async()=>{const v=await (await fetch('/decision-lab/api/batches/'+window.__long)).json();return v.status==='canceled' && v.done===0 && v.labelled===0 && document.querySelector('.dl-metrics-none').textContent.includes('bulk classification') && document.querySelectorAll('.dl-items tbody tr').length===1})()",
+  "label": "the second Cancel aborts the call: no run is kept, and an unlabelled run is bulk classification"
+ },
+ {"js": "(async()=>{const r=await fetch('/decision-lab/api/batches/'+window.__long+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return 'deleted the long run: '+r.status})()"},
+ {"nav": "/decision-lab"},
+ {"until": "document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"script": "scripts/drive/decision-sets-data.js"},
+ {"click": ".dl-setcard .row-menu .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"until": "document.querySelectorAll('.dl-q').length===3", "timeout": 5},
+ {"click": ".dl-setbtns .btn", "nth": 2},
+ {"until": "document.querySelector('dialog[open] .dl-newrun')", "timeout": 10},
+ {"js": "window.__typeInto('.dl-paste', window.__ticketsFail)"},
+ {"until": "document.querySelector('.dl-preview') && !document.querySelector('.dl-problems') && !document.querySelector('dialog[open] .modal-foot .btn.primary').disabled", "timeout": 20},
+ {"click": "dialog[open] .modal-foot .btn.primary"},
+ {"until": "location.pathname.startsWith('/decision-lab/batches/') && document.querySelector('.dl-run-status')", "timeout": 30},
+ {"js": "window.__fail=+location.pathname.split('/').pop(); 'set run '+window.__fail"},
+ {"until": "document.querySelector('.dl-run-status').textContent==='done' && document.querySelectorAll('.dl-items tbody tr').length===2 && ![...document.querySelectorAll('.dl-items tbody tr')].some(r=>r.textContent.includes('—'))", "timeout": 180},
+ {
+  "expect": "(()=>{const rows=document.querySelectorAll('.dl-items tbody tr');return document.querySelector('.dl-prog-line').textContent==='2 of 2 · 1 answered · 1 failed · 0 unreadable' && rows[1].querySelector('.dl-qcell .dl-bad-word').textContent==='failed' && rows[1].lastElementChild.textContent.startsWith('HTTP 500') && rows[1].querySelector('.dl-exp').textContent==='billing' && [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Retry the 1 failed')})()",
+  "label": "a state past the ubatch is the failed item: llama.cpp's 500 in its row, its label kept, Retry the 1 failed offered"
+ },
+ {"shot": "run-failed"},
+ {
+  "expect": "(()=>{const team=document.querySelector('.dl-qmetrics');const b=team.querySelector('.dl-thr-act .btn');return team.querySelector('.dl-qm-acc').textContent.includes('nothing scored') && b.disabled && team.querySelector('.dl-thr-act .mini-note').textContent.includes('no labelled answer at or above this cut')})()",
+  "label": "a run with a label but no labelled answer: Use as threshold says why before it is pressed"
+ },
+ {
+  "expect": "(async()=>{const r=await fetch('/decision-lab/api/batches/'+window.__fail+'/threshold',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({question:'team',value:0})});const e=await r.json();return r.status===409 && e.code==='no_labels'})()",
+  "label": "and the threshold route agrees: 409 no_labels"
+ },
+ {"js": "(async()=>{const p=await (await fetch('/decision-lab/api/batches/'+window.__fail+'/items')).json();window.__failedRun=p.items[1].runs[0].id;return 'failed run '+window.__failedRun})()"},
+ {"click": ".dl-runctl .btn.primary"},
+ {"until": "(async()=>{const p=await (await fetch('/decision-lab/api/batches/'+window.__fail+'/items')).json();return p.items[1].runs[0].id!==window.__failedRun})()", "timeout": 120},
+ {"until": "document.querySelector('.dl-run-status').textContent==='done'", "timeout": 60},
+ {
+  "expect": "(async()=>{const v=await (await fetch('/decision-lab/api/batches/'+window.__fail)).json();return v.status==='done' && v.done===2 && v.failed===1 && document.querySelector('.dl-prog-line').textContent==='2 of 2 · 1 answered · 1 failed · 0 unreadable'})()",
+  "label": "Retry the 1 failed asks it again, its new run in place of the failed one"
+ },
+ {"js": "(async()=>{const r=await fetch('/decision-lab/api/batches/'+window.__fail+'/delete',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return 'deleted the failing run: '+r.status})()"},
+ {"click": ".page-head .actions a"},
+ {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard .row-menu .btn') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"click": ".dl-setcard .row-menu .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"until": "document.querySelectorAll('.dl-q').length===3", "timeout": 5},
+ {"click": ".dl-setbtns .btn", "nth": 2},
+ {"until": "document.querySelector('dialog[open] .dl-newrun')", "timeout": 10},
+ {"js": "window.__typeInto('.dl-paste', window.__tickets120)"},
+ {"js": "window.__typeInto('.dl-newrun-conc input', '2')"},
+ {"until": "[...document.querySelectorAll('.dl-newrun-part .dl-card-head .mini-note')].some(n=>n.textContent==='first 20 of 120 rows') && !document.querySelector('dialog[open] .modal-foot .btn.primary').disabled", "timeout": 20},
+ {"click": "dialog[open] .modal-foot .btn.primary"},
+ {"until": "location.pathname.startsWith('/decision-lab/batches/') && [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Cancel')", "timeout": 30},
+ {"js": "window.__many=+location.pathname.split('/').pop(); 'set run '+window.__many"},
+ {"click": ".dl-runctl .btn", "nth": 0},
+ {"until": "document.querySelector('.dl-run-status').textContent.startsWith('canceled at')", "timeout": 30},
+ {"until": "document.querySelectorAll('.dl-items tbody tr').length===50", "timeout": 10},
+ {
+  "expect": "document.querySelector('.dl-items-card .lh-more .btn').textContent==='70 more · show them' && document.querySelector('.dl-items-card .count').textContent==='120' && [...document.querySelectorAll('.dl-runfacts dd')].some(d=>d.textContent==='2')",
+  "label": "the items come in pages: 50 of 120 read, 70 more offered; the run asked 2 at once"
+ },
+ {"js": "(()=>{const b=document.querySelector('.dl-items-card .lh-more .btn');b.click();return 'pressed '+b.textContent+' where it is: a trusted click scrolls the table end into view first, its sentinel then reads the page itself, and the rows it adds can move an item row under the click'})()"},
+ {"until": "document.querySelectorAll('.dl-items tbody tr').length===100", "timeout": 20},
+ {"wait": 1},
+ {
+  "expect": "document.querySelectorAll('.dl-items tbody tr').length===100 && document.querySelector('.dl-items-card .lh-more .btn').textContent==='20 more · show them'",
+  "label": "show them reads one page: the end the click left behind is not in view, so no other page is read"
+ },
+ {"js": "document.querySelector('.dl-items-card .lh-more').scrollIntoView({block:'end'}), 'scrolled to the end'"},
+ {"until": "document.querySelectorAll('.dl-items tbody tr').length===120 && !document.querySelector('.dl-items-card .lh-more .btn')", "timeout": 20},
+ {
+  "expect": "(()=>{const rows=document.querySelectorAll('.dl-items tbody tr');return rows[49].querySelector('.dl-key').textContent==='T-4050' && rows[50].querySelector('.dl-key').textContent==='T-4051' && rows[119].querySelector('.dl-key').textContent==='T-4120'})()",
+  "label": "the next pages follow in file order, none missing or twice, until none are left"
+ },
+ {"shot": "run-paged"},
+ {"click": ".dl-runctl .btn.primary"},
+ {"until": "document.querySelector('.dl-run-status').textContent.includes('running') && [...document.querySelectorAll('.dl-runctl .btn')].some(b=>b.textContent==='Cancel')", "timeout": 20},
+ {"js": "window.__p0=document.querySelector('.dl-prog-line').textContent; window.__p0"},
+ {"until": "document.querySelector('.dl-prog-line').textContent!==window.__p0", "timeout": 30},
+ {"js": "window.__p0=document.querySelector('.dl-prog-line').textContent; window.__p0"},
+ {"click": ".dl-runctl .confirm .btn"},
+ {"until": "(()=>{const t=document.querySelector('.dl-prog-line').textContent;if(t!==window.__p0){window.__p1=t;return true}return false})()", "timeout": 5},
+ {"until": "document.querySelector('.dl-prog-line').textContent!==window.__p1", "timeout": 5},
+ {
+  "expect": "(()=>{const c=document.querySelector('.dl-runctl .confirm');const a=document.activeElement;return document.querySelector('.dl-run-status').textContent.includes('running') && c.textContent.includes('Delete set run #'+window.__many+', its 120 items and their runs (the calls in flight are aborted)?') && c.contains(a) && a.classList.contains('danger')})()",
+  "label": "an armed Delete outlives two progress frames of a running run, the focus on it"
+ },
+ {"click": ".dl-runctl .confirm .btn", "nth": 0},
+ {"until": "location.pathname==='/decision-lab'", "timeout": 20},
+ {
+  "expect": "(async()=>{const b=await (await fetch('/decision-lab/api/batches')).json();return !b.batches.some(x=>x.id===window.__many)})()",
+  "label": "and its confirm, pressed after the frames, deletes the running run"
+ },
+ {"until": "location.pathname==='/decision-lab' && document.querySelector('.dl-setcard') && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"js": "document.querySelector('.dock-rail') ? (document.querySelector('.dock-rail').click(), 'reference opened') : 'reference docked'"},
+ {"until": "document.querySelector('.dl-setrow .dl-setrow-acts')", "timeout": 5},
+ {"click": ".dl-setrow .dl-setrow-acts .btn", "nth": 1},
+ {"until": "document.querySelector('.dl-setrow .dl-setname-row .input')", "timeout": 5},
+ {"js": "window.__typeInto('.dl-setrow .dl-setname-row .input', 'drive triage renamed')"},
+ {"click": ".dl-setrow .dl-setname-row .btn.primary"},
+ {"until": "document.querySelector('.dl-setrow .n') && document.querySelector('.dl-setrow .n').textContent==='drive triage renamed'", "timeout": 10},
+ {
+  "expect": "(async()=>{const l=await (await fetch('/labs/api/decision/presets?kind=question_set')).json();return l.presets.length===1 && l.presets[0].name==='drive triage renamed' && l.presets[0].body.thresholds.team.measured!==null})()",
+  "label": "Rename keeps the set and its measured threshold under the new name"
+ },
+ {"click": ".dl-setrow .dl-setrow-acts > .confirm .btn"},
+ {"wait": 0.4},
+ {
+  "expect": "document.querySelector('.dl-setrow .dl-setrow-acts > .confirm').textContent.includes(\"Delete the set 'drive triage renamed'?\")",
+  "label": "deleting a set asks first"
+ },
+ {"click": ".dl-setrow .dl-setrow-acts > .confirm .btn", "nth": 0},
+ {"until": "!document.querySelector('.dl-setrow')", "timeout": 10},
+ {
+  "expect": "(async()=>{const l=await (await fetch('/labs/api/decision/presets')).json();return l.presets.length===0 && document.querySelector('.dl-ref').textContent.includes('No saved set')})()",
+  "label": "the set is deleted"
+ },
+ {
+  "js": "(async()=>{const h={method:'POST',headers:{'content-type':'application/json'},body:'null'};const l=await (await fetch('/labs/api/decision/presets')).json();for(const p of l.presets){await fetch('/labs/api/decision/presets/'+p.id+'/delete',h)}await fetch('/labs/api/decision/clear',h);return 'cleaned up'})()"
+ }
+]

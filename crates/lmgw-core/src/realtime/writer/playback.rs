@@ -32,6 +32,13 @@
 //! answer is not over. The synthesis bound reads the same two facts the
 //! other way round — an end that passed while audio waits is a stall
 //! (`responder::speech::room`).
+//!
+//! **On a call** (calls design §5.3) the frame clock writes the record
+//! instead (`paced::pulled`): the window opens with the response's first
+//! frame, ends at its last frame's send end plus the playout allowance, and
+//! **drained** — when the drained marker is due — is half a round trip
+//! later still ([`Playback::drained`]): the phone has played it. On a
+//! WebSocket drained is the window's end.
 
 use std::time::Duration;
 
@@ -48,6 +55,9 @@ pub(crate) struct Playback {
     pub play_end: Option<Instant>,
     /// Its purge — a cancel: the client was told to stop here.
     pub ended: Option<Instant>,
+    /// On a call, when the phone has played what has left (module doc);
+    /// `None` on a WebSocket, whose drained is [`Self::end`].
+    pub drained: Option<Instant>,
     /// When this copy was read: audio of it still waited in the paced
     /// queue (module doc). Never set on the record itself.
     pub waiting: bool,
@@ -60,6 +70,7 @@ impl Playback {
             first: None,
             play_end: None,
             ended: None,
+            drained: None,
             waiting: false,
         }
     }
@@ -86,6 +97,12 @@ impl Playback {
     /// `None` before any audio left (module doc).
     pub fn end(&self) -> Option<Instant> {
         self.ended.or(self.play_end)
+    }
+
+    /// When the drained marker is due: the purge, else drained on a call,
+    /// else the window's end (module doc).
+    pub fn drained_at(&self) -> Option<Instant> {
+        self.ended.or(self.drained).or(self.play_end)
     }
 }
 

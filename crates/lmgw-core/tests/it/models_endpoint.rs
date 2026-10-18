@@ -231,6 +231,7 @@ async fn gateway() -> Gateway {
             expose_all: true,
             expose_prefix: "kilo".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -425,6 +426,7 @@ async fn gateway() -> Gateway {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -479,6 +481,7 @@ async fn gateway() -> Gateway {
             expose_all: true,
             expose_prefix: "gem".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

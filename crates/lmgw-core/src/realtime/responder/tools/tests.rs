@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{mpsc, Notify};
 
 use super::*;
+use crate::erased::Erased;
 use crate::ir::ToolResultBlock;
 use crate::state::AppState;
 
@@ -31,27 +31,28 @@ struct SlowRow {
     tail: Arc<Notify>,
 }
 
-#[async_trait]
 impl ToolExecutor for SlowRow {
-    async fn call(&self, name: &str, _args: &Value) -> ToolOutcome {
-        crate::mcp::ingress::record_tool_call(
-            &self.state,
-            &RequestCtx::default(),
-            REALTIME_TOOL_PROTO,
-            name,
-            Some("alpha".into()),
-            Instant::now(),
-            None,
-        )
-        .await;
-        self.written.notify_one();
-        self.tail.notified().await;
-        ToolOutcome {
-            blocks: ToolResultBlock::one("done".to_string()),
-            is_error: false,
-            structured: None,
-            content: None,
-        }
+    fn call<'a>(&'a self, name: &'a str, _args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            crate::mcp::ingress::record_tool_call(
+                &self.state,
+                &RequestCtx::default(),
+                REALTIME_TOOL_PROTO,
+                name,
+                Some("alpha".into()),
+                Instant::now(),
+                None,
+            )
+            .await;
+            self.written.notify_one();
+            self.tail.notified().await;
+            ToolOutcome {
+                blocks: ToolResultBlock::one("done".to_string()),
+                is_error: false,
+                structured: None,
+                content: None,
+            }
+        })
     }
 }
 
@@ -117,16 +118,17 @@ async fn a_stop_while_the_executor_writes_its_row_leaves_one_row() {
 /// An executor that answers with the call id it runs under.
 struct CallIdEcho;
 
-#[async_trait]
 impl ToolExecutor for CallIdEcho {
-    async fn call(&self, _name: &str, _args: &Value) -> ToolOutcome {
-        let id = crate::agent::current_call_id().unwrap_or_else(|| "(none)".into());
-        ToolOutcome {
-            blocks: ToolResultBlock::one(id),
-            is_error: false,
-            structured: None,
-            content: None,
-        }
+    fn call<'a>(&'a self, _name: &'a str, _args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            let id = crate::agent::current_call_id().unwrap_or_else(|| "(none)".into());
+            ToolOutcome {
+                blocks: ToolResultBlock::one(id),
+                is_error: false,
+                structured: None,
+                content: None,
+            }
+        })
     }
 }
 

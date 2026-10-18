@@ -130,6 +130,7 @@ fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> Resp
         Json(dto::ApiError {
             code: code.into(),
             message: message.into(),
+            ..Default::default()
         }),
     )
         .into_response()

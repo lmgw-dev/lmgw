@@ -132,6 +132,7 @@ async fn a_fallback_that_answers_is_sent_the_text_unchanged() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

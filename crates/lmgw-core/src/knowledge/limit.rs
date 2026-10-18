@@ -3,16 +3,21 @@
 //! `chunk_tokens` is checked against the **per-input limit** of the embedding
 //! model, which is not always its context:
 //!
-//! - a **local aux** llama-server model: lmgw passes no physical batch for it
-//!   (an aux row has no batch field), so llama-server's own default `-ub 512`
-//!   is the real limit of a non-causal embedder — unless the row's extra args
-//!   carry `-ub` / `-b`, which are then what it was started with. The limit is
-//!   `min(context, ubatch, batch)`. A **last-token pooling** model (a causal
-//!   embedder) is the exception: llama-server can split its input across
-//!   batches, so only its context bounds it.
-//! - a **reranker** is the same kind of model (a non-causal one, always):
-//!   [`input_limit`] answers for its alias too, and there the limit bounds the
-//!   whole query + document pair.
+//! - a **local aux** llama-server model whose input llama-server cannot split
+//!   across ubatches ([`aux_rt::splits_input`]: a non-causal encoder, or a
+//!   mean-, cls- or none-pooled one) evaluates a whole input in one ubatch,
+//!   llama.cpp lowers the ubatch to the batch, and llama-server's embedding
+//!   mode lowers the batch to the ubatch, so the limit is `min(context,
+//!   ubatch, batch)`. The ubatch and batch are the ones the row runs with
+//!   ([`aux_rt::ubatch_in_effect`]): its `ubatch_size` / `batch_size` fields,
+//!   else a `-ub` / `-b` its freeform args still carry, else llama-server's
+//!   defaults (`-ub 512`, `-b 2048`) — so such a row that sets neither takes
+//!   512 tokens per input, whatever its context (the aux plan sets both to the
+//!   context). A **last-token pooling** embedder and a **causal reranker** are
+//!   the exception: llama-server splits their input across batches, so only
+//!   the context bounds it.
+//! - a **reranker**: [`input_limit`] answers for its alias too, and there the
+//!   limit bounds the whole query + document pair.
 //! - a **cloud** embedding alias: the context its upstream catalog lists;
 //!   unknown is said, never guessed.
 //!
@@ -31,13 +36,9 @@ use serde::Serialize;
 use crate::config::{Snapshot, UpstreamKind};
 use crate::egress::{for_protocol, CountPlan};
 use crate::quickdoc::query::TiktokenCounter;
+use crate::runtime::aux::{self as aux_rt, CountFrom};
 use crate::state::SharedState;
 
-/// llama-server's default physical batch (`-ub`): what an aux embedder takes
-/// per input when nothing else was configured.
-pub const LLAMA_DEFAULT_UBATCH: u64 = 512;
-/// llama-server's default logical batch (`-b`).
-pub const LLAMA_DEFAULT_BATCH: u64 = 2048;
 /// Tokens the embedding model adds around an input (BOS/EOS, CLS/SEP) that
 /// `/tokenize` does not count; reserved inside `chunk_tokens`.
 pub const SPECIAL_TOKENS: usize = 2;
@@ -71,56 +72,89 @@ pub struct InputLimit {
     pub tokenizer: &'static str,
 }
 
-/// An `-x N` / `--long N` / `--long=N` integer among freeform llama-server
-/// args.
-fn arg_int(args: &[String], short: &str, long: &str) -> Option<u64> {
-    let mut found = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        let value = if a == short || a == long {
-            i += 1;
-            args.get(i).map(String::as_str)
-        } else {
-            a.strip_prefix(&format!("{long}="))
-        };
-        if let Some(n) = value.and_then(|v| v.trim().parse::<u64>().ok()) {
-            found = Some(n);
-        }
-        i += 1;
-    }
-    found
+/// A count in effect ([`aux_rt::ubatch_in_effect`]) as a token count, and
+/// how a sentence names it: the row's field by its name, a copy in the
+/// freeform args by its flag. `None` for no count, or one that is not
+/// positive.
+fn said(count: Option<(i64, CountFrom)>, field: &str, flag: &str) -> Option<(u64, String)> {
+    let (n, from) = count?;
+    let n = u64::try_from(n).ok().filter(|n| *n > 0)?;
+    Some((
+        n,
+        match from {
+            CountFrom::Field => format!("the model row's {field} of {n}"),
+            CountFrom::Args => format!("the model row's {flag} {n} in its extra args"),
+        },
+    ))
 }
 
-/// The limit of a local aux row, from its context, its freeform args and its
-/// pooling. `last_pooling` models split an input across batches, so nothing
-/// but the context bounds them.
-fn local_limit(context: Option<u64>, args: &[String], last_pooling: bool) -> (Option<u64>, String) {
-    if last_pooling {
+/// Whether llama-server splits an aux row's input across batches
+/// ([`aux_rt::splits_input`]), and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Splits {
+    /// It evaluates a whole input in one ubatch.
+    No,
+    /// A last-token pooling embedder.
+    LastToken,
+    /// A causal reranker, from llama.cpp b11223 on
+    /// ([`aux_rt::CAUSAL_RERANK_SPLIT_BUILD`]).
+    CausalRerank,
+}
+
+/// The limit of a local aux row, from its context, the ubatch and batch it
+/// runs with ([`aux_rt::ubatch_in_effect`], [`aux_rt::batch_in_effect`]) and
+/// whether llama-server `splits` its input across batches
+/// ([`aux_rt::splits_input`]), in which case nothing but the context bounds
+/// it.
+fn local_limit(
+    context: Option<u64>,
+    ubatch: Option<(i64, CountFrom)>,
+    batch: Option<(i64, CountFrom)>,
+    splits: Splits,
+) -> (Option<u64>, String) {
+    let why = match splits {
+        Splits::No => None,
+        Splits::LastToken => Some(
+            "last-token pooling: llama-server splits an input across batches, so the ubatch \
+             is no limit"
+                .to_string(),
+        ),
+        Splits::CausalRerank => Some(format!(
+            "a causal reranker: llama-server splits its input across batches from llama.cpp \
+             b{} on, so the ubatch is no limit there; an older image evaluates an input in \
+             one ubatch, so raise the row's ubatch_size and batch_size to its context there",
+            aux_rt::CAUSAL_RERANK_SPLIT_BUILD
+        )),
+    };
+    if let Some(why) = why {
         return match context {
             Some(c) => (
                 Some(c),
-                format!(
-                    "the model's context of {c} tokens (last-token pooling: llama-server \
-                     splits an input across batches, so the ubatch is no limit)"
-                ),
+                format!("the model's context of {c} tokens ({why})"),
             ),
             None => (
                 None,
-                "unknown: a last-token pooling model has no ubatch limit and its context is \
-                 not known to this gateway"
-                    .to_string(),
+                format!("unknown: its context is not known to this gateway ({why})"),
             ),
         };
     }
-    let ub = arg_int(args, "-ub", "--ubatch-size");
-    let b = arg_int(args, "-b", "--batch-size");
-    let batch = b.unwrap_or(LLAMA_DEFAULT_BATCH);
-    let ubatch = ub.unwrap_or(LLAMA_DEFAULT_UBATCH).min(batch);
-    let ub_src = match (ub, b) {
-        (Some(_), _) => format!("the model row's own -ub {ubatch}"),
-        (None, Some(b)) if b < LLAMA_DEFAULT_UBATCH => format!("the model row's own -b {b}"),
-        _ => format!("llama-server's ubatch default of {LLAMA_DEFAULT_UBATCH}"),
+    let (default_ub, default_b) = (
+        aux_rt::LLAMA_DEFAULT_UBATCH.unsigned_abs(),
+        aux_rt::LLAMA_DEFAULT_BATCH.unsigned_abs(),
+    );
+    let ub = said(ubatch, "ubatch_size", "-ub");
+    let b = said(batch, "batch_size", "-b");
+    let batch = b.as_ref().map_or(default_b, |(n, _)| *n);
+    let ubatch = ub.as_ref().map_or(default_ub, |(n, _)| *n).min(batch);
+    let batch_src = match &b {
+        Some((_, s)) => s.clone(),
+        None => format!("llama-server's batch default of {default_b}"),
+    };
+    let ub_src = match (ub, &b) {
+        (Some((n, s)), _) if n <= batch => s,
+        (Some((_, s)), _) => format!("{batch_src}, to which llama.cpp lowers {s}"),
+        (None, Some(_)) if batch < default_ub => batch_src,
+        (None, _) => format!("llama-server's ubatch default of {default_ub}"),
     };
     match context {
         Some(c) if c < ubatch => (
@@ -130,8 +164,12 @@ fn local_limit(context: Option<u64>, args: &[String], last_pooling: bool) -> (Op
         Some(_) | None => (
             Some(ubatch),
             format!(
-                "{ub_src}; set a larger batch on the model row (extra args -ub N -b N) to \
-                 raise it"
+                "{ub_src}; raise the model row's ubatch_size and batch_size together{} to \
+                 raise it — embedding mode runs at the smaller of the two",
+                match context {
+                    Some(c) => format!(" (up to its context of {c})"),
+                    None => String::new(),
+                }
             ),
         ),
     }
@@ -156,8 +194,13 @@ pub async fn input_limit(state: &SharedState, alias: &str) -> InputLimit {
             .flatten()
     });
     if let Some(m) = aux {
-        let last = pools_last(state, &snap, m).await;
-        let (tokens, source) = local_limit(context, &m.args, last);
+        let splits = splits(state, &snap, m).await;
+        let (tokens, source) = local_limit(
+            context,
+            aux_rt::ubatch_in_effect(m),
+            aux_rt::batch_in_effect(m),
+            splits,
+        );
         return InputLimit {
             tokens,
             source,
@@ -181,20 +224,37 @@ pub async fn input_limit(state: &SharedState, alias: &str) -> InputLimit {
     }
 }
 
-/// Whether an aux embedder pools on the last token: the row says so, or
-/// leaves it to the model and the GGUF header does. A reranker never does
-/// (`--reranking` selects rank pooling).
-async fn pools_last(state: &SharedState, snap: &Snapshot, m: &crate::config::AuxModel) -> bool {
-    if m.kind != crate::config::AuxKind::Embed {
-        return false;
-    }
-    if let Some(p) = m.pooling.as_deref().filter(|p| !p.is_empty()) {
-        return p == "last";
-    }
+/// Whether llama-server splits an input of aux row `m` across batches
+/// ([`aux_rt::splits_input`]): its pooling is the row's, else the GGUF
+/// header's (a reranker's is rank), and its attention the header's, read as
+/// causal when the header does not say. A header that cannot be read leaves
+/// an embedder to its pooling, and a reranker unsplit: the smaller limit,
+/// since a BERT-family reranker needs it.
+async fn splits(state: &SharedState, snap: &Snapshot, m: &crate::config::AuxModel) -> Splits {
     let path = std::path::Path::new(&snap.settings.aux_router.models_dir).join(&m.gguf_path);
-    match state.gguf_cache.summarize_cached(&path).await {
-        Ok(s) => s.pooling_type.and_then(crate::gguf::pooling_name) == Some("last"),
-        Err(_) => false,
+    let header = state.gguf_cache.summarize_cached(&path).await.ok();
+    let pooling = m
+        .pooling
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            header
+                .as_ref()
+                .and_then(|s| s.pooling_type.and_then(crate::gguf::pooling_name))
+                .map(str::to_string)
+        });
+    let causal = match &header {
+        Some(s) => s.attention_causal != Some(false),
+        None => m.kind != crate::config::AuxKind::Rerank,
+    };
+    match (
+        aux_rt::splits_input(m.kind, pooling.as_deref(), causal),
+        m.kind,
+    ) {
+        (false, _) => Splits::No,
+        (true, crate::config::AuxKind::Rerank) => Splits::CausalRerank,
+        (true, _) => Splits::LastToken,
     }
 }
 
@@ -492,31 +552,78 @@ pub fn fit_tail<'a>(text: &'a str, max: usize, counter: &dyn TokenCounter) -> (&
 mod tests {
     use super::*;
 
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
+    const fn field(n: i64) -> Option<(i64, CountFrom)> {
+        Some((n, CountFrom::Field))
+    }
+
+    const fn args(n: i64) -> Option<(i64, CountFrom)> {
+        Some((n, CountFrom::Args))
     }
 
     #[test]
     fn a_local_embedder_takes_the_ubatch_default_unless_the_row_raises_it() {
-        let (t, why) = local_limit(Some(8192), &[], false);
+        let (t, why) = local_limit(Some(8192), None, None, Splits::No);
         assert_eq!(t, Some(512));
         assert!(why.contains("ubatch default of 512"), "{why}");
-        let (t, _) = local_limit(Some(8192), &s(&["-ub", "2048", "-b", "2048"]), false);
+        assert!(
+            why.contains("ubatch_size and batch_size") && why.contains("up to its context of 8192"),
+            "the advice names the fields, not extra args the boot hoist moves: {why}"
+        );
+        assert!(!why.contains("extra args"), "{why}");
+        let (t, why) = local_limit(Some(8192), args(2048), args(2048), Splits::No);
         assert_eq!(t, Some(2048));
-        let (t, _) = local_limit(Some(8192), &s(&["--ubatch-size=4096"]), false);
+        assert!(why.contains("-ub 2048 in its extra args"), "{why}");
+        let (t, why) = local_limit(Some(8192), args(4096), None, Splits::No);
         assert_eq!(t, Some(2048), "the logical batch default caps it");
-        let (t, _) = local_limit(Some(256), &s(&["-ub", "2048", "-b", "4096"]), false);
+        assert!(
+            why.contains("batch default of 2048") && why.contains("-ub 4096"),
+            "{why}"
+        );
+        let (t, _) = local_limit(Some(256), args(2048), args(4096), Splits::No);
         assert_eq!(t, Some(256), "never above the context");
-        let (t, _) = local_limit(None, &s(&["-b", "128"]), false);
+        let (t, _) = local_limit(None, None, args(128), Splits::No);
         assert_eq!(t, Some(128));
+    }
+
+    /// Since the boot hoist (decision-models WP2b) a row's ubatch lives in its
+    /// fields, and the renderer drops an args copy of a field it renders.
+    #[test]
+    fn the_row_s_ubatch_and_batch_fields_are_its_limit() {
+        let (t, why) = local_limit(Some(8192), field(8192), field(8192), Splits::No);
+        assert_eq!(t, Some(8192));
+        assert!(why.contains("the model row's ubatch_size of 8192"), "{why}");
+        let (t, why) = local_limit(Some(8192), field(8192), None, Splits::No);
+        assert_eq!(t, Some(2048), "llama.cpp lowers the ubatch to the batch");
+        assert!(
+            why.contains("batch default of 2048") && why.contains("ubatch_size of 8192"),
+            "{why}"
+        );
+        let (t, why) = local_limit(Some(8192), field(4096), field(1024), Splits::No);
+        assert_eq!(t, Some(1024));
+        assert!(why.contains("the model row's batch_size of 1024"), "{why}");
+        let (t, why) = local_limit(Some(8192), None, field(256), Splits::No);
+        assert_eq!(t, Some(256));
+        assert!(why.contains("batch_size of 256"), "{why}");
+        let (t, _) = local_limit(Some(512), field(8192), field(8192), Splits::No);
+        assert_eq!(t, Some(512), "never above the context");
     }
 
     #[test]
     fn a_last_pooling_embedder_is_bounded_by_its_context_not_the_ubatch() {
-        let (t, why) = local_limit(Some(8192), &[], true);
+        let (t, why) = local_limit(Some(8192), None, None, Splits::LastToken);
         assert_eq!(t, Some(8192));
         assert!(why.contains("splits an input"), "{why}");
-        assert_eq!(local_limit(None, &[], true).0, None);
+        assert_eq!(
+            local_limit(None, field(8192), None, Splits::LastToken).0,
+            None
+        );
+        // Review finding 5: a causal reranker's split names its build.
+        let (t, why) = local_limit(Some(40960), None, None, Splits::CausalRerank);
+        assert_eq!(t, Some(40960));
+        assert!(
+            why.contains("b11223") && why.contains("older image"),
+            "{why}"
+        );
     }
 
     #[test]

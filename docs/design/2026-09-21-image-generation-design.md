@@ -5,7 +5,7 @@
 `feat/image-generation`) — see §14 for the corrections found while building,
 which are the record where they contradict the body above. The body is v2:
 v1 was written from the sd.cpp source and docs at `c678dfe`; v2 folded in the
-WP0 spike (§12, measured 2026-09-21 on the RTX 4090), which changed five
+WP0 spike (§12, measured 2026-09-21 on a 24 GB GPU), which changed five
 things: `--eager-load`, `--init` and the two directory flags are now mandatory
 parts of the rendered argv, the health probe tolerates a 5xx, admission has to
 reserve a generation's *transient* peak, and an edit request on a non-edit
@@ -47,7 +47,7 @@ cut (§13).
 
 Everything here is read from `examples/server/*.cpp`, `examples/server/api.md`,
 `examples/common/common.cpp` and `docker/Dockerfile.cuda` at `c678dfe`.
-§12 lists which of these must be confirmed on the RTX 4090 before WP1.
+§12 lists which of these must be confirmed on a 24 GB GPU before WP1.
 
 ### 2.1 Process model
 
@@ -374,6 +374,12 @@ neither `model` nor `diffusion_model` is refused at save time.
   catalog says `output_modalities: [image]` (OpenRouter/Kilo-shaped catalogs
   do) gets the same `task` and endpoints from `source: catalog`. Nothing
   else changes for cloud.
+  *(rev 2026-10-14, decision-models design §6.2)* It gets the task and **no
+  endpoints**, with a note: OpenRouter documents `POST /images` (and
+  `POST /videos` for video), not the `/images/generations` and
+  `/images/edits` lmgw's routes post to, so no route is verified to reach
+  such a model. An alias's `capabilities_override` states the routes of a
+  provider that serves them, and the Image lab lists it then.
 
 ## 6. Ingress routes
 
@@ -620,7 +626,7 @@ WP3 and WP5 hang off it. Branch `feat/image-generation`, merged back to
 
 ## 12. Spike results (WP0, measured 2026-09-21)
 
-Host: the RTX 4090 (24 GiB; ~0.8 GiB held by the desktop throughout),
+Host: a 24 GiB GPU (~0.8 GiB held by the desktop throughout),
 image `ghcr.io/leejet/stable-diffusion.cpp:master-cuda` at digest
 `sha256:8771c2d5…` (commit `c678dfe`), pipeline: Z-Image-Turbo Q4_K
 (3.86 GB) + Flux `ae.safetensors` (335 MB, Comfy-Org mirror) + Qwen3-4B

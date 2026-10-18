@@ -16,7 +16,8 @@
 //! cloud entry and for an override that changes a task: the chat routes by
 //! protocol, the embedding, rerank and image routes, the speech and
 //! transcription routes on the OpenAI protocol only (lmgw's `/v1/audio/*`
-//! refuses every other), none for an OpenAI Realtime model, and audio.cpp's
+//! refuses every other), `/v1/systemone` for a decision model on the OpenAI
+//! protocol only, none for an OpenAI Realtime model, and audio.cpp's
 //! generic task routes for its other tasks. A local audio row publishes its
 //! own, richer list (`for_audio_with`: the voice list, the detail route).
 
@@ -72,6 +73,10 @@ pub fn endpoints(task: &str, protocol: Protocol) -> Vec<String> {
         "chat" => strings(&CHAT_ENDPOINTS_OTHER),
         "embedding" => strings(&["/v1/embeddings"]),
         "rerank" => strings(&["/v1/rerank"]),
+        // `/v1/systemone` forwards to `openai` and `llama_cpp` upstreams only
+        // (decision-models design §2.9, §4.1).
+        "decision" if openai => strings(&["/v1/systemone"]),
+        "decision" => Vec::new(),
         "image_generation" | "video_generation" => strings(&[IMAGE_GENERATIONS_ENDPOINT]),
         "image_edit" => strings(&[IMAGE_GENERATIONS_ENDPOINT, IMAGE_EDITS_ENDPOINT]),
         // `/v1/audio/*` requires an OpenAI-protocol upstream.
@@ -82,6 +87,34 @@ pub fn endpoints(task: &str, protocol: Protocol) -> Vec<String> {
         REALTIME_TASK => Vec::new(),
         _ => strings(&["/v1/tasks/run", "/v1/tasks/stream"]),
     }
+}
+
+/// Whether `task` is a cloud catalog's image or video model, which publishes
+/// no route ([`unverified_media_route_note`]).
+pub fn is_unverified_cloud_media(task: &str) -> bool {
+    matches!(task, "image_generation" | "image_edit" | "video_generation")
+}
+
+/// Why a cloud image or video model publishes no route (decision-models
+/// design §6.2): lmgw's image routes post to the upstream's
+/// `/images/generations` and `/images/edits`, and no provider that states an
+/// image or video output in its catalog is verified to serve those. OpenRouter,
+/// whose catalog shape this is, documents `POST /images` and an asynchronous
+/// `POST /videos` instead.
+pub fn unverified_media_route_note(upstream_name: &str, task: &str) -> String {
+    let what = if task == "video_generation" {
+        "video"
+    } else {
+        "images"
+    };
+    format!(
+        "The catalog of upstream {upstream_name} says this model outputs {what} and no text. \
+         No lmgw route is verified to reach it there: /v1/images/generations and \
+         /v1/images/edits post to the upstream's /images/generations and /images/edits, and \
+         OpenRouter documents POST /images for images and an asynchronous POST /videos for \
+         video instead. So no endpoint is published. A capabilities_override on an alias can \
+         state the endpoints of a provider that serves them."
+    )
 }
 
 /// The note of a cloud entry whose task its name gave ([`by_name`]).

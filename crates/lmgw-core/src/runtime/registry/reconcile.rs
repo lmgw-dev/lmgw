@@ -196,6 +196,12 @@ impl Registry {
                     .warnings
                     .iter()
                     .chain(e.llama.as_ref().and_then(|l| l.props.as_ref().err()))
+                    .chain(
+                        e.llama
+                            .as_ref()
+                            .and_then(|l| l.decision_route.as_ref())
+                            .and_then(DecisionRoute::warning),
+                    )
                     .cloned()
                     .collect(),
                 image_capabilities: e.capabilities.clone(),
@@ -475,7 +481,13 @@ impl Registry {
         let llama = match render.engine {
             EngineArgs::Llama(_) => {
                 let props = self.read_llama_props_by(port, deadline).await;
-                if let Err(why) = &props {
+                // A decision row's route, after `/props` and in the same
+                // budget (decision-models design §3.6).
+                let decision_route = self
+                    .decision_route_of(&render, port, deadline, Some(&props))
+                    .await;
+                let route_warning = decision_route.as_ref().and_then(DecisionRoute::warning);
+                for why in props.as_ref().err().into_iter().chain(route_warning) {
                     tracing::warn!(
                         container = %name,
                         "adopting {class} model '{model_id}', with a warning: {why}"
@@ -484,6 +496,7 @@ impl Registry {
                 Some(LlamaEntry {
                     props,
                     ubatch_advisory: llama_props::ubatch_advisory(runtime, spec.models_dir).await,
+                    decision_route,
                 })
             }
             _ => None,

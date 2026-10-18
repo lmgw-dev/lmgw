@@ -49,6 +49,7 @@ async fn setup_native(upstream_base: &str, supports_responses: bool) -> (SharedS
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses,
+            catalog_all_modalities: true,
         },
     )
     .await

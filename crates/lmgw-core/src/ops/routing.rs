@@ -1,7 +1,8 @@
 //! Alias routing: `upstream_set` / `model_set`
 
+use lmgw_api_types as dto;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::ir::Params;
 use crate::state::SharedState;
@@ -31,6 +32,12 @@ pub struct UpstreamPatch {
     pub expose_all: Option<bool>,
     pub expose_prefix: Option<String>,
     pub supports_responses: Option<bool>,
+    /// Ask the catalog for every output modality (`GET …/models?output_modalities=all`),
+    /// so OpenRouter lists its decision, embedding, rerank, speech,
+    /// transcription, image and video models too. On unless turned off; only
+    /// an `openai` row of kind `generic` sends it. Off for an endpoint
+    /// that refuses the parameter, such as Gemini's OpenAI-compatible one.
+    pub catalog_all_modalities: Option<bool>,
 }
 
 /// `writer` is who asks: a self-admin tool's move of a keyed row to another
@@ -39,7 +46,7 @@ pub async fn upstream_set(
     state: &SharedState,
     p: UpstreamPatch,
     writer: RowWriter,
-) -> Result<Value, String> {
+) -> Result<dto::RowSaved, String> {
     let id_of = |p: &UpstreamPatch| p.id.ok_or_else(|| format!("'{}' requires id", p.action));
 
     match p.action.as_str() {
@@ -74,6 +81,7 @@ pub async fn upstream_set(
                 expose_all: p.expose_all.unwrap_or(false),
                 expose_prefix: opt(&p.expose_prefix).unwrap_or_default(),
                 supports_responses: settled.shape.supports_responses,
+                catalog_all_modalities: p.catalog_all_modalities.unwrap_or(true),
             };
             let id = store::insert_upstream(&state.db, &new)
                 .await
@@ -82,7 +90,7 @@ pub async fn upstream_set(
             state.catalog.invalidate(id).await;
             state.llama_facts.invalidate(id);
             let message = settled.message(format!("upstream '{name}' created"));
-            Ok(json!({ "ok": true, "id": id, "message": message }))
+            Ok(dto::RowSaved::new(id, message))
         }
         "update" | "enable" | "disable" => {
             let id = id_of(&p)?;
@@ -126,6 +134,11 @@ pub async fn upstream_set(
                 expose_all: p.expose_all.unwrap_or(cur.expose_all),
                 expose_prefix: opt(&p.expose_prefix).unwrap_or(cur.expose_prefix),
                 supports_responses: settled.shape.supports_responses,
+                // Unsent keeps what the row has: the snapshot names the rows
+                // where it is off.
+                catalog_all_modalities: p
+                    .catalog_all_modalities
+                    .unwrap_or(!state.snapshot().catalog_bare.contains(&id)),
             };
             store::update_upstream(&state.db, id, &new, update_key)
                 .await
@@ -133,8 +146,9 @@ pub async fn upstream_set(
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
             state.catalog.invalidate(id).await;
             state.llama_facts.invalidate(id);
-            let message = settled.message(format!("upstream {id} updated"));
-            Ok(json!({ "ok": true, "id": id, "message": message }))
+            let message =
+                settled.message(format!("upstream '{}' {}", new.name, saved_verb(&p.action)));
+            Ok(dto::RowSaved::new(id, message))
         }
         "delete" => {
             let id = id_of(&p)?;
@@ -152,10 +166,10 @@ pub async fn upstream_set(
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
             state.catalog.invalidate(id).await;
             state.llama_facts.invalidate(id);
-            Ok(json!({
-                "ok": true, "id": id,
-                "message": format!("upstream '{}' deleted", cur.name),
-            }))
+            Ok(dto::RowSaved::new(
+                id,
+                format!("upstream '{}' deleted", cur.name),
+            ))
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable)"
@@ -207,7 +221,7 @@ async fn resolve_upstream(state: &SharedState, r: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("no upstream named '{r}'"))
 }
 
-pub async fn model_set(state: &SharedState, p: AliasPatch) -> Result<Value, String> {
+pub async fn model_set(state: &SharedState, p: AliasPatch) -> Result<dto::RowSaved, String> {
     let snap = state.snapshot();
     let find = |id: Option<i64>, alias: Option<String>, all: Vec<crate::config::ModelAlias>| {
         if let Some(id) = id {
@@ -251,7 +265,7 @@ pub async fn model_set(state: &SharedState, p: AliasPatch) -> Result<Value, Stri
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(json!({ "ok": true, "id": id, "message": format!("alias '{alias}' created") }))
+            Ok(dto::RowSaved::new(id, format!("alias '{alias}' created")))
         }
         "update" | "enable" | "disable" => {
             let all = store::list_aliases(&state.db)
@@ -306,9 +320,10 @@ pub async fn model_set(state: &SharedState, p: AliasPatch) -> Result<Value, Stri
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(
-                json!({ "ok": true, "id": cur.id, "message": format!("alias '{}' updated", new.alias) }),
-            )
+            Ok(dto::RowSaved::new(
+                cur.id,
+                format!("alias '{}' {}", new.alias, saved_verb(&p.action)),
+            ))
         }
         "delete" => {
             let all = store::list_aliases(&state.db)
@@ -319,9 +334,10 @@ pub async fn model_set(state: &SharedState, p: AliasPatch) -> Result<Value, Stri
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(
-                json!({ "ok": true, "id": cur.id, "message": format!("alias '{}' deleted", cur.alias) }),
-            )
+            Ok(dto::RowSaved::new(
+                cur.id,
+                format!("alias '{}' deleted", cur.alias),
+            ))
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable)"

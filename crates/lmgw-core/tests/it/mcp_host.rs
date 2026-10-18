@@ -60,7 +60,7 @@ pub(crate) fn device_row(w: &World, key_id: i64) -> lmgw_core::config::McpServer
 
 /// `desktop` connected with `tools`, its row `Ready`.
 pub(crate) async fn linked(w: &World, d: &Device, tools: &[&str]) -> FakeDevice {
-    let dev = FakeDevice::connect(&w.addr(), &d.key, tools.iter().map(|t| tool(t)).collect()).await;
+    let dev = FakeDevice::connect(d, tools.iter().map(|t| tool(t)).collect()).await;
     let id = device_row(w, d.id).id;
     crate::common::patience::until_async("the device row is ready", || async {
         w.state.mcp.is_ready(id).await

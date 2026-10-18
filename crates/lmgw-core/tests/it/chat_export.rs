@@ -80,7 +80,7 @@ pub(crate) async fn rich_thread(state: &SharedState, title: &str) -> i64 {
         }],
         ..Default::default()
     };
-    store::set_chat_message_knowledge(db, id, uid, &[7], Some(&ctx))
+    store::set_chat_message_knowledge(db, id, uid, &[7], Some(&ctx), None)
         .await
         .unwrap();
     let ir =

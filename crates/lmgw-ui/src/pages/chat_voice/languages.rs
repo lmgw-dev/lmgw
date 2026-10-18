@@ -12,11 +12,11 @@
 
 use leptos::prelude::*;
 
-use super::{source_label, Sourced, VoiceResolved};
+use super::{source_label, Sourced, VoiceResolved, VoiceSource};
 
 /// The spoken language's "in effect" line.
 pub(super) fn spoken_line(l: &Sourced<Option<String>>) -> String {
-    match (&l.value, l.source.as_deref()) {
+    match (&l.value, l.source.as_ref().map(VoiceSource::as_str)) {
         (Some(v), src) => format!("in effect: {v} · {}", source_label(src)),
         (None, Some(src)) => format!(
             "in effect: auto — speech recognition detects · {}",
@@ -29,7 +29,10 @@ pub(super) fn spoken_line(l: &Sourced<Option<String>>) -> String {
 /// The reply language's "in effect" line.
 pub(super) fn reply_line(l: &Sourced<Option<String>>) -> String {
     match &l.value {
-        Some(v) => format!("in effect: {v} · {}", source_label(l.source.as_deref())),
+        Some(v) => format!(
+            "in effect: {v} · {}",
+            source_label(l.source.as_ref().map(VoiceSource::as_str))
+        ),
         None => "in effect: none — the reply follows you".to_string(),
     }
 }
@@ -38,9 +41,9 @@ pub(super) fn reply_line(l: &Sourced<Option<String>>) -> String {
 /// as the saved resolution says — Settings' reply language, or the spoken
 /// language it follows. A folder (no resolution) says the chain.
 pub(super) fn reply_placeholder(r: Option<&VoiceResolved>) -> String {
-    match r.map(|r| (&r.reply_language.value, r.reply_language.source.as_deref())) {
-        Some((Some(v), Some("chat"))) => format!("inherit: {v}"),
-        Some((_, Some("speech_in") | None)) => "as I speak".to_string(),
+    match r.map(|r| (&r.reply_language.value, r.reply_language.source.as_ref())) {
+        Some((Some(v), Some(VoiceSource::Chat))) => format!("inherit: {v}"),
+        Some((_, Some(VoiceSource::SpeechIn) | None)) => "as I speak".to_string(),
         _ => "inherit, else as I speak".to_string(),
     }
 }
@@ -102,21 +105,21 @@ pub(super) fn LanguageFields(
 mod tests {
     use super::*;
 
-    fn sourced(value: Option<&str>, source: Option<&str>) -> Sourced<Option<String>> {
+    fn sourced(value: Option<&str>, source: Option<VoiceSource>) -> Sourced<Option<String>> {
         Sourced {
             value: value.map(str::to_string),
-            source: source.map(str::to_string),
+            source,
         }
     }
 
     #[test]
     fn each_line_says_what_is_in_effect_and_where_from() {
         assert_eq!(
-            spoken_line(&sourced(Some("de"), Some("thread"))),
+            spoken_line(&sourced(Some("de"), Some(VoiceSource::Thread))),
             "in effect: de · this thread"
         );
         assert_eq!(
-            spoken_line(&sourced(None, Some("thread"))),
+            spoken_line(&sourced(None, Some(VoiceSource::Thread))),
             "in effect: auto — speech recognition detects · this thread"
         );
         assert_eq!(
@@ -124,11 +127,11 @@ mod tests {
             "in effect: none — speech recognition detects"
         );
         assert_eq!(
-            reply_line(&sourced(Some("de"), Some("speech_in"))),
+            reply_line(&sourced(Some("de"), Some(VoiceSource::SpeechIn))),
             "in effect: de · the language you speak"
         );
         assert_eq!(
-            reply_line(&sourced(Some("en"), Some("chat"))),
+            reply_line(&sourced(Some("en"), Some(VoiceSource::Chat))),
             "in effect: en · Settings → Chat"
         );
         assert_eq!(
@@ -139,16 +142,16 @@ mod tests {
 
     #[test]
     fn the_reply_placeholder_names_what_an_empty_box_inherits() {
-        let with = |v: Option<&str>, s: Option<&str>| VoiceResolved {
+        let with = |v: Option<&str>, s: Option<VoiceSource>| VoiceResolved {
             reply_language: sourced(v, s),
             ..Default::default()
         };
         assert_eq!(
-            reply_placeholder(Some(&with(Some("en"), Some("chat")))),
+            reply_placeholder(Some(&with(Some("en"), Some(VoiceSource::Chat)))),
             "inherit: en"
         );
         assert_eq!(
-            reply_placeholder(Some(&with(Some("de"), Some("speech_in")))),
+            reply_placeholder(Some(&with(Some("de"), Some(VoiceSource::SpeechIn)))),
             "as I speak"
         );
         assert_eq!(reply_placeholder(Some(&with(None, None))), "as I speak");

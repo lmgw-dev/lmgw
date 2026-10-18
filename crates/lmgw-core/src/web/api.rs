@@ -30,6 +30,10 @@ use crate::telemetry::Event;
 
 use super::audio;
 
+mod models_full;
+use models_full::models_full;
+mod responses_ops;
+
 pub fn routes(state: &SharedState) -> Router<SharedState> {
     use crate::principal::Cap;
     use crate::server::require;
@@ -117,6 +121,7 @@ pub(super) fn ops_result(res: Result<Value, String>) -> Response {
                     .unwrap_or("op_failed")
                     .into(),
                 message,
+                ..Default::default()
             }),
         )
             .into_response(),
@@ -130,7 +135,7 @@ async fn version() -> Json<dto::VersionInfo> {
 }
 
 async fn status(State(st): State<SharedState>) -> Response {
-    ops_result(crate::ops::status(&st).await)
+    ops_result(crate::ops::backends::to_json(crate::ops::status(&st).await))
 }
 
 /// `GET /api/vram` — the GPU ledger and the admission queue (quickdoc §9b),
@@ -169,11 +174,27 @@ async fn connect(State(st): State<SharedState>) -> Json<dto::ConnectInfo> {
             }
         })
         .collect();
+    let device_port = snap
+        .settings
+        .devices
+        .effective_port(&snap.settings.bind_addr)
+        .ok();
+    let device_urls = crate::devices::proposed_for_device(&snap.settings)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| dto::DeviceUrl {
+            url: p.url,
+            interface: p.interface,
+            wireguard: p.wireguard,
+        })
+        .collect();
     Json(dto::ConnectInfo {
         bases,
         auth_enabled: snap.settings.auth_enabled,
         models,
         catalog_prefixes,
+        device_port,
+        device_urls,
     })
 }
 
@@ -212,7 +233,7 @@ fn truthy(v: &str) -> bool {
 
 /// Same row shape as the `request` SSE frame ([`dto::RequestRow`]), so the
 /// live feed and pagination share one type. Goes to `store` directly rather
-/// than `ops::logs`, whose JSON uses different key names (tool-plane legacy).
+/// than `ops::logs`, which answers a subset of the columns.
 async fn logs(State(st): State<SharedState>, Query(q): Query<LogsQuery>) -> Response {
     let filter = crate::store::LogFilter {
         alias: q.alias.filter(|s| !s.is_empty()),
@@ -292,155 +313,6 @@ async fn logs(State(st): State<SharedState>, Query(q): Query<LogsQuery>) -> Resp
 // Models domain
 // ---------------------------------------------------------------------------
 
-async fn models_full(State(st): State<SharedState>) -> Response {
-    let snap = st.snapshot();
-    let aliases = snap
-        .aliases
-        .values()
-        .map(|a| dto::AliasView {
-            id: a.id,
-            alias: a.alias.clone(),
-            upstream_id: a.upstream_id,
-            upstream_name: snap.upstreams.get(&a.upstream_id).map(|u| u.name.clone()),
-            upstream_model_id: a.upstream_model_id.clone(),
-            param_overrides: serde_json::from_value(
-                serde_json::to_value(&a.param_overrides).unwrap_or_default(),
-            )
-            .unwrap_or_default(),
-            enabled: a.enabled,
-            capabilities_override: a.capabilities_override.clone(),
-        })
-        .collect();
-    let local = snap
-        .local_models
-        .iter()
-        .map(|m| {
-            serde_json::to_value(m).map(|v| {
-                serde_json::json!({
-                    "public_name": snap.local_public_name(&m.model_id),
-                    "model": v,
-                })
-            })
-        })
-        .collect::<Result<Vec<_>, _>>();
-    let audio = crate::store::list_audio_models(&st.db).await;
-    let (Ok(local), Ok(audio)) = (local, audio) else {
-        return ops_result(Err("failed to load model lists".into()));
-    };
-    // What each audio row is charged and why (realtime design §9.4): the
-    // learned residency, or the on-disk size it stands in for. A plain loop
-    // for the same reason as the candidate loop below; the on-disk size is
-    // a memoized directory walk.
-    let mut residency_notes: Vec<String> = Vec::with_capacity(audio.len());
-    for m in &audio {
-        residency_notes.push(st.vram.audio_residency_note(&st, &snap, m).await);
-    }
-    // One `candidates::derive` per row (candidate-aliases design §4.6) — a
-    // cached GGUF read per candidate, warm calls free (see that function's
-    // own cost note). A plain loop, not `join_all`: this is a desktop app for
-    // one user, and a handful of aliases at most.
-    //
-    // The deferral count (§6) is one grouped query for every alias, read
-    // once before the loop rather than once per alias
-    // (`candidates::deferrals::deferrals_24h`'s own doc comment).
-    let deferral_counts = crate::candidates::deferrals::deferrals_24h(&st.db)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("deferrals_24h query failed, showing zero for every alias: {e}");
-            Default::default()
-        });
-    let mut candidate_aliases: Vec<dto::CandidateAliasView> = Vec::new();
-    for c in snap.candidate_aliases.values() {
-        let d = crate::candidates::derive::derive(&st, &snap, c).await;
-        candidate_aliases.push(dto::CandidateAliasView {
-            id: c.id,
-            alias: c.alias.clone(),
-            candidates: c.candidates.clone(),
-            background: c.background,
-            fallback_mode: c.fallback_mode.as_str().to_string(),
-            fallback: c.fallback.clone(),
-            capabilities_disabled: c.capabilities_disabled.clone(),
-            enabled: c.enabled,
-            notes: c.notes.clone(),
-            enabled_facets: d.enabled.names(),
-            common_facets: d.common.names(),
-            unsupported_by: d.unsupported_by,
-            routable: d.routable,
-            problems: d.problems,
-            advisories: d.advisories,
-            fallback_usable: d.fallback_usable,
-            context_length: d.context_length,
-            max_output_tokens: d.max_output_tokens,
-            deferrals_24h: crate::candidates::deferrals::for_alias(&deferral_counts, &c.alias),
-        });
-    }
-    candidate_aliases.sort_by(|a, b| a.alias.cmp(&b.alias));
-    let audio_prefix = snap.settings.audio.public_prefix.clone();
-    let prefixed = |prefix: &str, id: &str| match prefix.trim_matches('/') {
-        "" => id.to_string(),
-        p => format!("{p}/{id}"),
-    };
-    let out = serde_json::json!({
-        "aliases": aliases_sorted(aliases),
-        "candidate_aliases": candidate_aliases,
-        "local": local,
-        "aux": snap.aux_models
-            .iter()
-            .map(|m| serde_json::json!({
-                "public_name": snap.aux_public_name(&m.model_id),
-                "model": m,
-            }))
-            .collect::<Vec<_>>(),
-        "audio": audio
-            .iter()
-            .zip(&residency_notes)
-            .map(|(m, note)| {
-                let a = &snap.settings.audio;
-                let (threads, source) =
-                    crate::runtime::audio::threads_in_effect(m, a, crate::host::cpu());
-                serde_json::json!({
-                    "public_name": prefixed(&audio_prefix, &m.model_id),
-                    "model": m,
-                    "residency_note": note,
-                    "residency_charged_bytes": crate::vram::residency::learned(m, a),
-                    "runs_on": crate::runtime::audio::placement(m, a).as_str(),
-                    "threads_in_effect": threads,
-                    "threads_source": source.as_str(),
-                })
-            })
-            .collect::<Vec<_>>(),
-        "image": snap.image_models
-            .iter()
-            .map(|m| serde_json::json!({
-                "public_name": snap.image_public_name(&m.model_id),
-                "model": m,
-            }))
-            .collect::<Vec<_>>(),
-        "passthrough": snap
-            .upstreams
-            .values()
-            .filter(|u| u.enabled && u.expose_all)
-            .map(|u| serde_json::json!({
-                "upstream": u.name,
-                "id": u.id,
-                "prefix": u.prefix(),
-                "hidden": snap
-                    .hidden_passthrough
-                    .iter()
-                    .filter(|(uid, _)| *uid == u.id)
-                    .map(|(_, model_id)| model_id.clone())
-                    .collect::<Vec<_>>(),
-            }))
-            .collect::<Vec<_>>(),
-    });
-    Json(out).into_response()
-}
-
-fn aliases_sorted(mut aliases: Vec<dto::AliasView>) -> Vec<dto::AliasView> {
-    aliases.sort_by(|a, b| a.alias.cmp(&b.alias));
-    aliases
-}
-
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct LocalModelQuery {
     id: Option<i64>,
@@ -498,15 +370,13 @@ async fn llama_flags(State(st): State<SharedState>, Query(q): Query<FlagsQuery>)
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct InspectQuery {
     path: String,
-    #[serde(default)]
-    probe: bool,
     /// `chat` (default) | `aux` — which class's models dir `path` is under.
     target: Option<String>,
 }
 
 async fn model_inspect(State(st): State<SharedState>, Query(q): Query<InspectQuery>) -> Response {
     ops_result(crate::ops::backends::to_json(
-        crate::modelinfo::model_inspect(&st, &q.path, q.probe, q.target.as_deref()).await,
+        crate::modelinfo::model_inspect(&st, &q.path, q.target.as_deref()).await,
     ))
 }
 
@@ -514,7 +384,7 @@ async fn local_model_plan(
     State(st): State<SharedState>,
     Query(q): Query<InspectQuery>,
 ) -> Response {
-    ops_result(crate::modelinfo::local_model_plan(&st, &q.path, q.probe, q.target.as_deref()).await)
+    ops_result(crate::modelinfo::local_model_plan(&st, &q.path, q.target.as_deref()).await)
 }
 
 /// The editor's ladder table: every rung shares cache types, projector and
@@ -535,7 +405,7 @@ async fn ladder_rung_plan(
     State(st): State<SharedState>,
     Query(q): Query<RungPlanQuery>,
 ) -> Response {
-    ops_result(
+    ops_result(crate::ops::backends::to_json(
         crate::ops::ladder_rung_plan(
             &st,
             crate::ops::RungPlanInput {
@@ -549,7 +419,7 @@ async fn ladder_rung_plan(
             },
         )
         .await,
-    )
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -563,7 +433,7 @@ pub(crate) struct HfRepoQuery {
 }
 
 async fn hf_repo(State(st): State<SharedState>, Query(q): Query<HfRepoQuery>) -> Response {
-    ops_result(
+    ops_result(crate::ops::backends::to_json(
         crate::ops::hf_repo(
             &st,
             &q.repo,
@@ -571,11 +441,13 @@ async fn hf_repo(State(st): State<SharedState>, Query(q): Query<HfRepoQuery>) ->
             q.target.as_deref().unwrap_or("chat"),
         )
         .await,
-    )
+    ))
 }
 
 async fn hf_downloads(State(st): State<SharedState>) -> Response {
-    ops_result(crate::ops::hf_downloads(&st).await)
+    ops_result(crate::ops::backends::to_json(
+        crate::ops::hf_downloads(&st).await,
+    ))
 }
 
 /// Poll half of the jobs feed; the SSE `jobs` frame on `/api/events` is
@@ -591,7 +463,7 @@ pub(crate) struct JobsQuery {
 }
 
 async fn jobs(State(st): State<SharedState>, Query(q): Query<JobsQuery>) -> Response {
-    ops_result(
+    ops_result(crate::ops::backends::to_json(
         crate::ops::jobs_list(
             &st,
             q.kind.as_deref(),
@@ -599,10 +471,10 @@ async fn jobs(State(st): State<SharedState>, Query(q): Query<JobsQuery>) -> Resp
             q.limit.unwrap_or(0),
         )
         .await,
-    )
+    ))
 }
 
-/// audio.cpp's spec catalog, from the cached snapshot only — an empty
+/// audio.cpp's spec catalog, from the cached snapshot only — an absent
 /// `fetched_at` means "never fetched here", and the refresh op is the only
 /// thing that goes to the network (the old page's rule: a page load never
 /// waits on GitHub).
@@ -611,33 +483,9 @@ async fn audio_catalog(State(st): State<SharedState>) -> Json<dto::AudioCatalog>
 }
 
 async fn upstreams(State(st): State<SharedState>) -> Response {
-    match crate::store::list_upstreams(&st.db).await {
-        Ok(rows) => {
-            let upstreams = rows
-                .into_iter()
-                .map(|u| dto::UpstreamView {
-                    id: u.id,
-                    name: u.name,
-                    protocol: u.protocol.as_str().to_string(),
-                    kind: u.kind.as_str().to_string(),
-                    base_url: u.base_url,
-                    has_api_key: u.api_key.is_some(),
-                    extra_headers: u
-                        .extra_headers
-                        .into_iter()
-                        .map(|(k, _)| (k, "<set>".to_string()))
-                        .collect(),
-                    timeout_ms: u.timeout_ms,
-                    enabled: u.enabled,
-                    expose_all: u.expose_all,
-                    expose_prefix: u.expose_prefix,
-                    supports_responses: u.supports_responses,
-                    llama_facts: st.llama_facts.view(u.id),
-                })
-                .collect();
-            Json(dto::UpstreamsResponse { upstreams }).into_response()
-        }
-        Err(e) => ops_result(Err(e.to_string())),
+    match crate::ops::upstreams(&st).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => ops_result(Err(e)),
     }
 }
 
@@ -648,12 +496,16 @@ async fn wiring(State(st): State<SharedState>) -> Json<dto::WiringView> {
 }
 
 async fn mcp_servers(State(st): State<SharedState>) -> Response {
-    ops_result(crate::ops::mcp_servers(&st).await)
+    ops_result(crate::ops::backends::to_json(
+        crate::ops::mcp_servers(&st).await,
+    ))
 }
 
 /// One server's exposed tools — what a Chat thread's MCP picker offers.
 async fn mcp_server_tools(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(crate::ops::mcp_server_tools(&st, id).await)
+    ops_result(crate::ops::backends::to_json(
+        crate::ops::mcp_server_tools(&st, id).await,
+    ))
 }
 
 /// `GET /api/tools` — the whole northbound tool surface: the built-in toolsets
@@ -661,7 +513,7 @@ async fn mcp_server_tools(State(st): State<SharedState>, Path(id): Path<i64>) ->
 /// is not offered. The inventory behind the MCP page's per-tool switches, and
 /// the list the Chat picker reads to offer the built-in toolsets.
 async fn tools(State(st): State<SharedState>) -> Response {
-    ops_result(crate::ops::tools(&st).await)
+    ops_result(crate::ops::backends::to_json(crate::ops::tools(&st).await))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -721,38 +573,19 @@ async fn responses_index(State(st): State<SharedState>) -> Response {
         .await
         .unwrap_or((0, 0));
     let s = st.snapshot().settings.clone();
-    let rows: Vec<Value> = chains
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "chain_id": c.chain_id,
-                "head_id": c.head_id,
-                "model": c.model,
-                "status": c.status,
-                "responses": c.responses,
-                "first_at": c.first_at,
-                "last_at": c.last_at,
-                "input_tokens": c.input_tokens,
-                "output_tokens": c.output_tokens,
-                "size": super::responses::human_bytes(c.bytes),
-                "awaiting_approval": c.awaiting_approval,
-            })
-        })
-        .collect();
-    Json(serde_json::json!({
-        "chains": rows,
-        "total_chains": total_chains,
-        "total_responses": total_responses,
-        "store_enabled": s.responses_store,
-        "retention_hours": s.responses_retention_hours,
-        "max_chains": s.responses_max_chains,
-        "rules": super::responses::describe_rules(
+    ops_result(crate::ops::backends::to_json(Ok(dto::ResponsesIndex {
+        chains: chains.iter().map(dto::ChainRow::from).collect(),
+        total_chains,
+        total_responses,
+        store_enabled: s.responses_store,
+        retention_hours: s.responses_retention_hours,
+        max_chains: s.responses_max_chains,
+        rules: super::responses::describe_rules(
             s.responses_retention_hours,
             s.responses_max_chains,
         ),
-        "capped": total_chains > 200,
-    }))
-    .into_response()
+        capped: total_chains > 200,
+    })))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -767,24 +600,10 @@ async fn responses_chain(State(st): State<SharedState>, Query(q): Query<ChainQue
     if rows.is_empty() {
         return ops_result(Err("no such conversation".into()));
     }
-    let responses: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            let body: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
-            serde_json::json!({
-                "id": r.id,
-                "created_at": r.created_at,
-                "status": r.status,
-                "input_tokens": r.input_tokens,
-                "output_tokens": r.output_tokens,
-                "outline": super::responses::outline(&body),
-                "text": crate::ingress::responses::output_text(&body),
-                "pending": super::responses::pending_names(r.pending.as_deref()),
-                "body": serde_json::to_string_pretty(&body).unwrap_or_default(),
-            })
-        })
-        .collect();
-    Json(serde_json::json!({ "chain_id": q.id, "responses": responses })).into_response()
+    ops_result(crate::ops::backends::to_json(Ok(dto::ChainDetail {
+        chain_id: q.id,
+        responses: rows.iter().map(dto::ResponseItem::from).collect(),
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -855,62 +674,64 @@ async fn op(
     }
     let res = match name.as_str() {
         "upstream_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::upstream_set(&st, p, ops::RowWriter::Dashboard).await,
+            Ok(p) => {
+                ops::backends::to_json(ops::upstream_set(&st, p, ops::RowWriter::Dashboard).await)
+            }
             Err(e) => Err(e),
         },
         "model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::model_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(ops::model_set(&st, p).await),
             Err(e) => Err(e),
         },
         "local_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::local_model_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(ops::local_model_set(&st, p).await),
             Err(e) => Err(e),
         },
         // The candidate-alias editor (candidate-aliases design §6): create,
         // update, delete, enable, disable and the UI-only `preview` dry run
         // all go through the one op, exactly like every other `*_set`.
         "candidate_alias_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::candidate_alias_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(ops::candidate_alias_set(&st, p).await),
             Err(e) => Err(e),
         },
         "mcp_server_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::mcp_server_set(&st, p, ops::RowWriter::Dashboard).await,
+            Ok(p) => {
+                ops::backends::to_json(ops::mcp_server_set(&st, p, ops::RowWriter::Dashboard).await)
+            }
             Err(e) => Err(e),
         },
         "settings_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::settings_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(ops::settings_set(&st, p).await),
             Err(e) => Err(e),
         },
-        // `embed_model_set` is the pre-rename spelling, still accepted so a
-        // browser holding an older SPA bundle keeps working.
-        "aux_model_set" | "embed_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::aux_model_set(&st, p).await,
+        "aux_model_set" => match patch_from_args(Some(args)) {
+            Ok(p) => ops::backends::to_json(ops::aux_model_set(&st, p).await),
             Err(e) => Err(e),
         },
         // Ops-level like the image class's (`ops::audio_model_set`), so the
         // dashboard and `lmgw__audio_model_set` post the same patch at the
         // same function.
         "audio_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::audio_model_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(ops::audio_model_set(&st, p).await),
             Err(e) => Err(e),
         },
         // The image class's CRUD is ops-level rather than web-only
         // (image-generation design §8), so the dashboard and
         // `lmgw__image_model_set` post the same patch at the same function.
         "image_model_set" => match patch_from_args(Some(args)) {
-            Ok(p) => ops::image_model_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(ops::image_model_set(&st, p).await),
             Err(e) => Err(e),
         },
         "model_visibility" => match patch_from_args(Some(args)) {
-            Ok(p) => model_visibility_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(model_visibility_set(&st, p).await),
             Err(e) => Err(e),
         },
         "alias_set" => match patch_from_args(Some(args)) {
-            Ok(p) => alias_set(&st, p).await,
+            Ok(p) => ops::backends::to_json(alias_set(&st, p).await),
             Err(e) => Err(e),
         },
         "upstream_set_full" => match patch_from_args(Some(args)) {
-            Ok(p) => upstream_set_full(&st, p).await,
+            Ok(p) => ops::backends::to_json(upstream_set_full(&st, p).await),
             Err(e) => Err(e),
         },
 
@@ -948,7 +769,7 @@ async fn op(
             // row's key, so the op writes by scope and unit and ignores it.
             let unit = arg_str(&args, "unit").map(str::to_string);
             match rates {
-                Ok(rates) => {
+                Ok(rates) => ops::backends::to_json(
                     ops::price_set(
                         &st,
                         &scope_kind,
@@ -957,83 +778,42 @@ async fn op(
                         rates,
                         note.as_deref(),
                     )
-                    .await
-                }
+                    .await,
+                ),
                 Err(e) => Err(e),
             }
         }
+        // An id no price row has is a `404 not_found`, not the flat `op_failed`:
+        // the op refuses with a `Refusal`, which answers for itself.
         "price_delete" => match args.get("id").and_then(Value::as_i64) {
-            Some(id) => ops::price_delete(&st, id).await,
+            Some(id) => {
+                return match ops::price_delete(&st, id).await {
+                    Ok(ack) => ops_result(ops::backends::to_json(Ok(ack))),
+                    Err(refusal) => refusal.into_response(),
+                }
+            }
             None => Err("pass id".to_string()),
         },
-        "prices_sync" => ops::prices_sync(&st).await,
+        "prices_sync" => ops::backends::to_json(ops::prices_sync(&st).await),
         "tool_set" => match (
             arg_str(&args, "name"),
             args.get("enabled").and_then(Value::as_bool),
         ) {
-            (Some(name), Some(enabled)) => ops::tool_set(&st, name, enabled).await,
+            (Some(name), Some(enabled)) => {
+                ops::backends::to_json(ops::tool_set(&st, name, enabled).await)
+            }
             _ => Err("pass name and enabled".to_string()),
         },
-        "update_check" => super::api_settings::update_check(&st).await,
+        "update_check" => ops::backends::to_json(super::api_settings::update_check(&st).await),
         "job_cancel" => match args.get("id").and_then(Value::as_i64) {
-            Some(id) => ops::job_cancel(&st, id).await,
+            Some(id) => ops::backends::to_json(ops::job_cancel(&st, id).await),
             None => Err("pass id".to_string()),
         },
-        "response_chain_delete" => match arg_str(&args, "chain_id") {
-            Some(chain_id) => match crate::store::delete_response_chain(&st.db, chain_id).await {
-                Ok(n) => Ok(serde_json::json!({
-                    "ok": true,
-                    "message": format!("deleted {n} response(s)"),
-                })),
-                Err(e) => Err(e.to_string()),
-            },
-            None => Err("pass chain_id".to_string()),
-        },
-        "responses_gc" => {
-            let scope = arg_str(&args, "scope").unwrap_or("rules");
-            if scope == "all" {
-                let chains = crate::store::list_response_chains(&st.db, i64::MAX)
-                    .await
-                    .unwrap_or_default();
-                let mut n = 0;
-                for c in &chains {
-                    n += crate::store::delete_response_chain(&st.db, &c.chain_id)
-                        .await
-                        .unwrap_or(0);
-                }
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "message": format!("cleared {n} stored response(s)"),
-                }))
-            } else {
-                let s = st.snapshot().settings.clone();
-                match crate::store::gc_responses(
-                    &st.db,
-                    s.responses_retention_hours,
-                    s.responses_max_chains,
-                )
-                .await
-                {
-                    Ok(0) => Ok(serde_json::json!({ "ok": true, "message": "nothing to evict" })),
-                    Ok(n) => Ok(serde_json::json!({
-                        "ok": true,
-                        "message": format!("evicted {n} response(s)"),
-                    })),
-                    Err(e) => Err(e.to_string()),
-                }
-            }
+        "response_chain_delete" => {
+            ops::backends::to_json(responses_ops::response_chain_delete(&st, &args).await)
         }
-        "upstream_test" => match args.get("id").and_then(Value::as_i64) {
-            None => Err("pass id".to_string()),
-            Some(id) => match crate::store::get_upstream(&st.db, id).await {
-                Err(e) => Err(e.to_string()),
-                Ok(None) => Err(format!("no upstream with id {id}")),
-                Ok(Some(u)) => match super::admin::test_upstream(&st, &u).await {
-                    Ok(detail) => Ok(serde_json::json!({ "ok": true, "detail": detail })),
-                    Err(e) => Err(format!("connection test failed — {e}")),
-                },
-            },
-        },
+        "responses_gc" => ops::backends::to_json(responses_ops::responses_gc(&st, &args).await),
+        "upstream_test" => ops::backends::to_json(upstream_test(&st, &args).await),
         "hf_add" => {
             let repo = arg_str(&args, "repo").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").unwrap_or("chat").to_string();
@@ -1043,21 +823,23 @@ async fn op(
                 .get("companions")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            ops::hf_add(
-                &st,
-                &repo,
-                file.as_deref(),
-                quant.as_deref(),
-                &target,
-                companions,
+            ops::backends::to_json(
+                ops::hf_add(
+                    &st,
+                    &repo,
+                    file.as_deref(),
+                    quant.as_deref(),
+                    &target,
+                    companions,
+                )
+                .await,
             )
-            .await
         }
         "hf_set" => {
             let action = arg_str(&args, "action").unwrap_or_default().to_string();
             let target = arg_str(&args, "target").unwrap_or("chat").to_string();
             let id = args.get("id").and_then(Value::as_i64);
-            ops::hf_set(&st, &action, id, &target).await
+            ops::backends::to_json(ops::hf_set(&st, &action, id, &target).await)
         }
         "container" => {
             let target = arg_str(&args, "target").map(str::to_string);
@@ -1084,7 +866,7 @@ async fn op(
         // engaging it stops containers, which a generic settings save must not
         // start doing.
         "hold_set" => match args.get("active").and_then(Value::as_bool) {
-            Some(active) => ops::hold_set(&st, active).await,
+            Some(active) => ops::backends::to_json(ops::hold_set(&st, active).await),
             None => Err("pass active: true or false".into()),
         },
         "audio_catalog" => audio_catalog_op(&st, &args).await,
@@ -1096,10 +878,12 @@ async fn op(
         // "Add from recipe" for the image class (image-generation design
         // §7.2), the audio catalog's sibling with a compiled-in source.
         // Shared with `lmgw__image_recipes` / `lmgw__image_recipe_add`.
-        "image_recipes" => ops::image_recipes(&st).await,
+        "image_recipes" => ops::backends::to_json(ops::image_recipes(&st).await),
         "image_recipe_add" => {
             let key = arg_str(&args, "key").unwrap_or_default();
-            ops::image_recipe_add(&st, key, arg_str(&args, "diffusion_file")).await
+            ops::backends::to_json(
+                ops::image_recipe_add(&st, key, arg_str(&args, "diffusion_file")).await,
+            )
         }
         "local_model_test" => {
             let model_id = arg_str(&args, "model_id").unwrap_or_default().to_string();
@@ -1198,6 +982,19 @@ async fn audio_catalog_op(st: &SharedState, args: &Args) -> Result<Value, String
     }
 }
 
+/// `upstream_test { id }`: connect to one configured upstream now.
+async fn upstream_test(st: &SharedState, args: &Args) -> Result<dto::UpstreamTested, String> {
+    let id = args.get("id").and_then(Value::as_i64).ok_or("pass id")?;
+    let u = crate::store::get_upstream(&st.db, id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no upstream with id {id}"))?;
+    super::admin::test_upstream(st, &u)
+        .await
+        .map_err(|e| format!("connection test failed — {e}"))?;
+    Ok(dto::UpstreamTested { ok: true })
+}
+
 /// Upstream create/update including `extra_headers`, which the self-admin
 /// `upstream_set` tool omits. For secrets, an empty api_key keeps
 /// the stored one, and a header value of "<set>" round-trips to the stored
@@ -1221,9 +1018,16 @@ pub(crate) struct UpstreamFullPatch {
     expose_all: Option<bool>,
     expose_prefix: Option<String>,
     supports_responses: Option<bool>,
+    /// Ask the catalog for every output modality
+    /// (`GET …/models?output_modalities=all`). On unless turned off; only an
+    /// `openai` row of kind `generic` sends it.
+    catalog_all_modalities: Option<bool>,
 }
 
-async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Value, String> {
+async fn upstream_set_full(
+    st: &SharedState,
+    p: UpstreamFullPatch,
+) -> Result<dto::RowSaved, String> {
     use crate::ops::{sent_kind, sent_protocol, settle, UpstreamShape};
     use crate::store;
     // Protocol and kind as sent — `sd_cpp` refused by name like the tool
@@ -1266,6 +1070,7 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                     .trim_matches('/')
                     .to_string(),
                 supports_responses: settled.shape.supports_responses,
+                catalog_all_modalities: p.catalog_all_modalities.unwrap_or(true),
             };
             let id = store::insert_upstream(&st.db, &new)
                 .await
@@ -1273,8 +1078,10 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
             st.reload_snapshot().await.map_err(|e| e.to_string())?;
             st.catalog.invalidate(id).await;
             st.llama_facts.invalidate(id);
-            let message = settled.message(format!("upstream '{name}' created"));
-            Ok(serde_json::json!({ "ok": true, "id": id, "message": message }))
+            Ok(dto::RowSaved::new(
+                id,
+                settled.message(format!("upstream '{name}' created")),
+            ))
         }
         "update" => {
             let id = p.id.ok_or("pass id")?;
@@ -1328,6 +1135,11 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
                     .map(|s| s.trim_matches('/').to_string())
                     .unwrap_or(cur.expose_prefix),
                 supports_responses: settled.shape.supports_responses,
+                // Unsent keeps what the row has: the snapshot names the rows
+                // where it is off.
+                catalog_all_modalities: p
+                    .catalog_all_modalities
+                    .unwrap_or(!st.snapshot().catalog_bare.contains(&id)),
             };
             store::update_upstream(&st.db, id, &upd, update_key)
                 .await
@@ -1335,8 +1147,10 @@ async fn upstream_set_full(st: &SharedState, p: UpstreamFullPatch) -> Result<Val
             st.reload_snapshot().await.map_err(|e| e.to_string())?;
             st.catalog.invalidate(id).await;
             st.llama_facts.invalidate(id);
-            let message = settled.message("upstream updated");
-            Ok(serde_json::json!({ "ok": true, "id": id, "message": message }))
+            Ok(dto::RowSaved::new(
+                id,
+                settled.message(format!("upstream '{}' updated", upd.name)),
+            ))
         }
         other => Err(format!("unknown action '{other}' (create, update)")),
     }
@@ -1366,7 +1180,7 @@ pub(crate) struct AliasFullPatch {
     capabilities_override: Option<serde_json::Value>,
 }
 
-async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<Value, String> {
+async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<dto::RowSaved, String> {
     use crate::store;
     let overrides: crate::ir::Params = match &p.overrides {
         Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("bad overrides: {e}"))?,
@@ -1407,9 +1221,7 @@ async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<Value, String>
                 .await
                 .map_err(|e| e.to_string())?;
             st.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(
-                serde_json::json!({ "ok": true, "id": id, "message": format!("alias '{alias}' created") }),
-            )
+            Ok(dto::RowSaved::new(id, format!("alias '{alias}' created")))
         }
         "update" => {
             let id = p.id.ok_or("pass id")?;
@@ -1447,7 +1259,10 @@ async fn alias_set(st: &SharedState, p: AliasFullPatch) -> Result<Value, String>
                 .await
                 .map_err(|e| e.to_string())?;
             st.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(serde_json::json!({ "ok": true, "id": id, "message": "alias updated" }))
+            Ok(dto::RowSaved::new(
+                id,
+                format!("alias '{}' updated", upd.alias),
+            ))
         }
         other => Err(format!("unknown action '{other}' (create, update)")),
     }
@@ -1470,7 +1285,10 @@ pub(crate) struct ModelVisibilityPatch {
     model_ids: Option<Vec<String>>,
 }
 
-async fn model_visibility_set(st: &SharedState, p: ModelVisibilityPatch) -> Result<Value, String> {
+async fn model_visibility_set(
+    st: &SharedState,
+    p: ModelVisibilityPatch,
+) -> Result<dto::ModelVisibilitySaved, String> {
     use crate::store;
     let upstream_id = p.upstream_id.ok_or("pass upstream_id")?;
     let mut ids: Vec<String> = Vec::new();
@@ -1505,7 +1323,7 @@ async fn model_visibility_set(st: &SharedState, p: ModelVisibilityPatch) -> Resu
     } else {
         format!("{what} restored to the client-facing model list")
     };
-    Ok(serde_json::json!({ "ok": true, "message": message, "count": ids.len() }))
+    Ok(dto::ModelVisibilitySaved::new(message, ids.len()))
 }
 
 /// How often a `stats` frame is refreshed *while a request is in flight*, so
@@ -1669,7 +1487,7 @@ async fn events(
         stream::select(tick, stream::select(rate, chat)),
     ));
     // Ends when the server stops: the page reconnects to the next one.
-    let at = served.map(|axum::Extension(crate::server::ServedAt(at))| at);
+    let at = served.map(|axum::Extension(at)| at);
     let stream = crate::server::until_stopped(&st.stops, at, stream, None);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

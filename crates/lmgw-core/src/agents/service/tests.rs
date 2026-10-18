@@ -14,9 +14,8 @@ use super::*;
 
 use std::sync::atomic::AtomicU32;
 
-use async_trait::async_trait;
-
 use crate::agents::container::{Spawned, Spawner};
+use crate::erased::Erased;
 use crate::runtime::registry::CmdOutput;
 use crate::state::AppState;
 use crate::store::AgentRow;
@@ -132,31 +131,38 @@ fn verbs(calls: &Arc<Mutex<Vec<Vec<String>>>>) -> Vec<String> {
         .collect()
 }
 
-#[async_trait]
 impl Spawner for Fake {
-    async fn spawn(&self, _p: &str, _a: &[String]) -> std::io::Result<Spawned> {
-        panic!("service mode never uses the streaming seam");
+    fn spawn<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            panic!("service mode never uses the streaming seam");
+        })
     }
 
-    async fn run(&self, _p: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        self.calls.lock().unwrap().push(args.to_vec());
-        if args.first().map(String::as_str) == Some("run") && !self.deaf {
-            // `-p 127.0.0.1:<host>:<container>` — bind the host side, which is
-            // exactly what the real container's published port does.
-            let port = published_port(args).expect("a service run publishes a port");
-            let app = axum::Router::new().route(
-                "/",
-                axum::routing::get(|| async { "hello from the fake container" }),
-            );
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-            tokio::spawn(async move {
-                let _ = axum::serve(listener, app).await;
-            });
-        }
-        Ok(CmdOutput {
-            status: 0,
-            stdout: "deadbeef\n".into(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _p: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(args.to_vec());
+            if args.first().map(String::as_str) == Some("run") && !self.deaf {
+                // `-p 127.0.0.1:<host>:<container>` — bind the host side, which is
+                // exactly what the real container's published port does.
+                let port = published_port(args).expect("a service run publishes a port");
+                let app = axum::Router::new().route(
+                    "/",
+                    axum::routing::get(|| async { "hello from the fake container" }),
+                );
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+                tokio::spawn(async move {
+                    let _ = axum::serve(listener, app).await;
+                });
+            }
+            Ok(CmdOutput {
+                status: 0,
+                stdout: "deadbeef\n".into(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -619,11 +625,11 @@ fn a_dev_url_is_http_on_loopback_and_nothing_else() {
     for (bad, why) in [
         ("https://example.com", "is not loopback"),
         ("http://8.8.8.8:5173", "is not loopback"),
-        ("http://192.168.1.14:3000", "is not loopback"),
-        ("http://10.0.0.7:8080", "is not loopback"),
+        ("http://198.51.100.14:3000", "is not loopback"),
+        ("http://203.0.113.7:8080", "is not loopback"),
         ("http://172.20.0.3:8080", "is not loopback"),
         ("http://169.254.1.2:8080", "is not loopback"),
-        ("http://[fd00::1]:5173", "is not loopback"),
+        ("http://[2001:db8::1]:5173", "is not loopback"),
         ("http://myhost.local:5173", "is not loopback"),
         ("http://dev.home.arpa:5173", "is not loopback"),
         ("http://user:pass@127.0.0.1:5173", "must not carry userinfo"),
@@ -765,8 +771,11 @@ fn the_origin_is_the_id_under_the_suffix_on_lmgws_own_port() {
     );
     assert_eq!(agent_origin(&s, "board"), "http://board.localhost:8787/");
     // The suffix is the only thing that moves; the label is the id itself.
-    let lan = settings_with("lmgw.lan", "192.168.1.10:8001");
-    assert_eq!(agent_origin(&lan, "board"), "http://board.lmgw.lan:8001/");
+    let lan = settings_with("lmgw.example", "198.51.100.10:8001");
+    assert_eq!(
+        agent_origin(&lan, "board"),
+        "http://board.lmgw.example:8001/"
+    );
 }
 
 #[test]
@@ -792,10 +801,10 @@ fn a_service_id_that_is_not_a_dns_label_is_refused() {
 #[test]
 fn an_agent_origin_that_is_the_gateways_own_address_is_refused() {
     // A bind address that is a name rather than an IP: `reachable_urls` passes
-    // it through, so `board.lan` is an address this gateway answers on.
-    let s = settings_with("lan", "board.lan:8001");
+    // it through, so `board.example` is an address this gateway answers on.
+    let s = settings_with("example", "board.example:8001");
     let e = origin_shadows_refusal(&s, &origin_doc("board", true)).expect("it takes the door");
-    assert!(e.contains("board.lan"), "{e}");
+    assert!(e.contains("board.example"), "{e}");
     assert!(e.contains("this gateway's own address"), "{e}");
     // Any other label under the same suffix is fine, and a non-serving agent
     // named like the gateway has no origin to collide with.
@@ -871,13 +880,16 @@ fn the_mdns_zone_is_not_a_suffix_anyone_can_have() {
 fn a_suffix_sharing_a_cookie_parent_with_the_dashboard_is_refused() {
     let own = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
 
-    let e = suffix_refusal_against("apps.lmgw.lan", &own(&["127.0.0.1", "myhost.lmgw.lan"]))
-        .expect("board.apps.lmgw.lan can set Domain=lmgw.lan");
-    assert!(e.contains("lmgw.lan"), "{e}");
-    assert!(e.contains("Domain=lmgw.lan"), "{e}");
+    let e = suffix_refusal_against(
+        "apps.lmgw.example",
+        &own(&["127.0.0.1", "myhost.lmgw.example"]),
+    )
+    .expect("board.apps.lmgw.example can set Domain=lmgw.example");
+    assert!(e.contains("lmgw.example"), "{e}");
+    assert!(e.contains("Domain=lmgw.example"), "{e}");
     assert!(e.contains("overwrite"), "{e}");
     // The dashboard's own domain, exactly, is the same clash.
-    assert!(suffix_refusal_against("lmgw.lan", &own(&["myhost.lmgw.lan"])).is_some());
+    assert!(suffix_refusal_against("lmgw.example", &own(&["myhost.lmgw.example"])).is_some());
 
     // And the passes. A browser refuses a single-label cookie domain, so the
     // shipped default is safe beside a bare host name, beside an IP bind, and
@@ -889,14 +901,14 @@ fn a_suffix_sharing_a_cookie_parent_with_the_dashboard_is_refused() {
     assert_eq!(
         suffix_refusal_against(
             "localhost",
-            &own(&["192.168.1.10", "myhost", "myhost.lmgw.lan"])
+            &own(&["198.51.100.10", "myhost", "myhost.lmgw.example"])
         ),
         None
     );
     // A zone that shares nothing with the dashboard's name is what the setting
     // is for.
     assert_eq!(
-        suffix_refusal_against("agents.example", &own(&["myhost.lmgw.lan"])),
+        suffix_refusal_against("agents.example", &own(&["myhost.lmgw.example"])),
         None
     );
 }
@@ -927,13 +939,16 @@ async fn origin_resolves_asks_the_resolver_and_a_name_that_is_not_there_is_false
 
 #[test]
 fn a_suffix_that_is_part_of_the_gateways_own_address_is_refused() {
-    // The same rule from the other end: under `.lan`, an agent with the id
+    // The same rule from the other end: under `.example`, an agent with the id
     // `board` would be served at the gateway's own name.
-    let e = origin_suffix_refusal("lan", "board.lan:8001").expect("it shadows the gateway");
-    assert!(e.contains("board.lan"), "{e}");
+    let e = origin_suffix_refusal("example", "board.example:8001").expect("it shadows the gateway");
+    assert!(e.contains("board.example"), "{e}");
     // The shipped default is not a suffix of any loopback spelling.
     assert_eq!(origin_suffix_refusal("localhost", BIND), None);
-    assert_eq!(origin_suffix_refusal("lmgw.lan", "board.lan:8001"), None);
+    assert_eq!(
+        origin_suffix_refusal("lmgw.example", "board.example:8001"),
+        None
+    );
     // An IP literal is an address the gateway answers on too, and is compared
     // the same way rather than being explained away.
     assert!(origin_suffix_refusal("1", "127.0.0.1:8787").is_some());

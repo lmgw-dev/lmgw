@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use lmgw_core::bench::BenchLauncher;
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner};
 use lmgw_core::vram::{GpuMemory, GpuPower, GpuProbe, ProcessMemory};
 use serde_json::{json, Value};
@@ -76,87 +77,81 @@ pub fn out(status: i32, stdout: &str, stderr: &str) -> std::io::Result<CmdOutput
     })
 }
 
-#[async_trait::async_trait]
 impl BenchLauncher for FakeLauncher {
     fn free_port(&self) -> std::io::Result<u16> {
         Ok(self.decoy.lock().unwrap().take().unwrap_or(self.port))
     }
 
-    async fn podman(&self, argv: &[String]) -> std::io::Result<CmdOutput> {
-        self.calls.lock().unwrap().push(argv.to_vec());
-        if self.panic_on.lock().unwrap().as_deref() == Some(argv[0].as_str()) {
-            panic!("the fake podman panicked on '{}'", argv[0]);
-        }
-        let stall = self.stall_on.lock().unwrap().as_deref() == Some(argv[0].as_str());
-        if stall {
-            std::future::pending::<()>().await;
-        }
-        match argv[0].as_str() {
-            "image" if self.image_missing.load(Ordering::SeqCst) => {
-                out(125, "", "Error: image not known")
+    fn podman<'a>(&'a self, argv: &'a [String]) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(argv.to_vec());
+            if self.panic_on.lock().unwrap().as_deref() == Some(argv[0].as_str()) {
+                panic!("the fake podman panicked on '{}'", argv[0]);
             }
-            "image" => out(
-                0,
-                "sha256:feedbeef {\"dev.lmgw.slug\":\"official-master\",\
+            let stall = self.stall_on.lock().unwrap().as_deref() == Some(argv[0].as_str());
+            if stall {
+                std::future::pending::<()>().await;
+            }
+            match argv[0].as_str() {
+                "image" if self.image_missing.load(Ordering::SeqCst) => {
+                    out(125, "", "Error: image not known")
+                }
+                "image" => out(
+                    0,
+                    "sha256:feedbeef {\"dev.lmgw.slug\":\"official-master\",\
                  \"org.opencontainers.image.version\":\"b11226\"}\n",
-                "",
-            ),
-            "ps" => {
-                let created = self.created.lock().unwrap().clone();
-                let rows: Vec<Value> = self
-                    .leftovers
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|n| {
-                        let prefix = n.split("-bench-").next().unwrap_or_default();
-                        json!({"Names": [n],
+                    "",
+                ),
+                "ps" => {
+                    let created = self.created.lock().unwrap().clone();
+                    let rows: Vec<Value> = self
+                        .leftovers
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|n| {
+                            let prefix = n.split("-bench-").next().unwrap_or_default();
+                            json!({"Names": [n],
                                "Labels": {"lmgw.bench": "99", "lmgw.instance": prefix},
                                "Created": created.get(n).copied().unwrap_or(0)})
-                    })
-                    .collect();
-                out(0, &serde_json::to_string(&rows).unwrap(), "")
-            }
-            "run"
-                if self
-                    .taken
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                    .is_ok() =>
-            {
-                out(
+                        })
+                        .collect();
+                    out(0, &serde_json::to_string(&rows).unwrap(), "")
+                }
+                "run" if take_one(&self.taken) => out(
                     126,
                     "",
                     "Error: rootlessport listen tcp 127.0.0.1:41234: bind: address already in use",
-                )
-            }
-            "rm" if self.rm_fails.load(Ordering::SeqCst) => {
-                out(125, "", "Error: container state improper")
-            }
-            "rm" => {
-                if let Some(kill) = self.rm_kills.lock().unwrap().clone() {
-                    kill.notify_waiters();
+                ),
+                "rm" if self.rm_fails.load(Ordering::SeqCst) => {
+                    out(125, "", "Error: container state improper")
                 }
-                let name = argv.last().cloned().unwrap_or_default();
-                self.leftovers.lock().unwrap().retain(|n| *n != name);
-                out(0, "", "")
+                "rm" => {
+                    if let Some(kill) = self.rm_kills.lock().unwrap().clone() {
+                        kill.notify_waiters();
+                    }
+                    let name = argv.last().cloned().unwrap_or_default();
+                    self.leftovers.lock().unwrap().retain(|n| *n != name);
+                    out(0, "", "")
+                }
+                "logs" => out(
+                    0,
+                    "",
+                    "ggml_cuda: cudaMalloc failed: out of memory\nexiting\n",
+                ),
+                "inspect" if self.exited.load(Ordering::SeqCst) => out(
+                    0,
+                    r#"[{"State":{"Status":"exited","Running":false,"ExitCode":1}}]"#,
+                    "",
+                ),
+                "inspect" => out(
+                    0,
+                    r#"[{"State":{"Status":"running","Running":true,"ExitCode":0}}]"#,
+                    "",
+                ),
+                _ => out(0, "c0ffee\n", ""),
             }
-            "logs" => out(
-                0,
-                "",
-                "ggml_cuda: cudaMalloc failed: out of memory\nexiting\n",
-            ),
-            "inspect" if self.exited.load(Ordering::SeqCst) => out(
-                0,
-                r#"[{"State":{"Status":"exited","Running":false,"ExitCode":1}}]"#,
-                "",
-            ),
-            "inspect" => out(
-                0,
-                r#"[{"State":{"Status":"running","Running":true,"ExitCode":0}}]"#,
-                "",
-            ),
-            _ => out(0, "c0ffee\n", ""),
-        }
+        })
     }
 }
 
@@ -166,14 +161,19 @@ pub struct PsRunner {
     pub calls: Mutex<Vec<Vec<String>>>,
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for PsRunner {
-    async fn run(&self, _program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args[0].as_str() {
-            "ps" => out(0, &self.ps, ""),
-            _ => out(0, "", ""),
-        }
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args[0].as_str() {
+                "ps" => out(0, &self.ps, ""),
+                _ => out(0, "", ""),
+            }
+        })
     }
 }
 
@@ -274,4 +274,18 @@ impl GpuProbe for HeldProbe {
     fn driver_version(&self) -> Option<String> {
         self.inner.driver_version()
     }
+}
+
+/// Take one of `n` if one is left (`fetch_update`'s old job here). A
+/// compare-exchange loop, so it builds on a toolchain from before that
+/// method's rename to `try_update` as on one after it.
+fn take_one(n: &AtomicUsize) -> bool {
+    let mut cur = n.load(Ordering::SeqCst);
+    while cur > 0 {
+        match n.compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => cur = now,
+        }
+    }
+    false
 }

@@ -125,7 +125,7 @@ async fn open_for_count(
     row: &mut Unanswered,
 ) -> Result<Opened, (GateHeaders, GatewayError)> {
     let refused = |f: OpenFailed| (f.headers, f.error);
-    let routed = crate::gate::resolve(state, alias, RouteCheck::Text("/v1/messages/count_tokens"))
+    let routed = crate::gate::resolve(state, alias, RouteCheck::Count("/v1/messages/count_tokens"))
         .await
         .map_err(refused)?;
     let routed = match parsed {

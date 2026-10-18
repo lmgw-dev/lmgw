@@ -23,6 +23,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::chat_approvals::{code, ApprovalRequest, MOVED_ON};
+use lmgw_api_types::chat_frames::DoneFrame;
 use serde_json::{json, Value};
 
 use super::chat::{tools_from_ir, IrTool, ToolCard};
@@ -280,17 +281,7 @@ pub(super) fn merge_cards(shown: RwSignal<Vec<ToolCard>>, fresh: Vec<ToolCard>) 
 
 /// A `tool {event: "approval"}` frame: the card it is about (the first
 /// without a result or a hold whose call is the request's) now waits.
-pub(super) fn hold_for_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
-    let req = ApprovalRequest {
-        approval_request_id: v["approval_request_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        server_label: v["server_label"].as_str().unwrap_or_default().to_string(),
-        name: v["name"].as_str().unwrap_or_default().to_string(),
-        arguments: v["arguments"].as_str().unwrap_or_default().to_string(),
-        call_id: v["call_id"].as_str().map(str::to_string),
-    };
+pub(super) fn hold_for_frame(tools: RwSignal<Vec<ToolCard>>, req: &ApprovalRequest) {
     if req.approval_request_id.is_empty() {
         return;
     }
@@ -302,7 +293,7 @@ pub(super) fn hold_for_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
         let hit = tools
             .iter()
             .filter(open)
-            .find(|c| is_call_of(&c.name.get_untracked(), &c.args.get_untracked(), &req));
+            .find(|c| is_call_of(&c.name.get_untracked(), &c.args.get_untracked(), req));
         // Arguments written differently by the model and the stream: the
         // name alone still finds the call.
         let hit = hit.or_else(|| {
@@ -323,11 +314,12 @@ pub(super) fn hold_for_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
 
 /// `done` of a turn that stopped on calls: the calls without a result stop
 /// "running"; those not gated wait beside the gated ones.
-pub(super) fn settle_done(tools: RwSignal<Vec<ToolCard>>, done: &Value) {
-    if done["pending_approvals"]
-        .as_array()
-        .is_none_or(Vec::is_empty)
-    {
+pub(super) fn settle_done(tools: RwSignal<Vec<ToolCard>>, done: &DoneFrame) {
+    let pending = done
+        .saved
+        .as_ref()
+        .and_then(|s| s.pending_approvals.as_ref());
+    if pending.is_none_or(Vec::is_empty) {
         return;
     }
     tools.with_untracked(|tools| {
@@ -817,5 +809,45 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!((id(&holds[0]), id(&holds[1])), ("r1".into(), "r2".into()));
+    }
+
+    #[test]
+    fn a_done_that_waits_on_calls_settles_the_cards_still_running() {
+        use lmgw_api_types::chat_frames::DoneSaved;
+        let owner = Owner::new();
+        owner.with(|| {
+            let card = |hold: Option<Hold>, done: bool| {
+                let c = card_of(0, tool("a__b", "{}", None), hold);
+                c.done.set(done);
+                c
+            };
+            let gated = Hold::Gated {
+                id: "r".into(),
+                label: "a".into(),
+            };
+            let tools = RwSignal::new(vec![
+                card(Some(gated.clone()), true),
+                card(None, false),
+                card(None, true),
+            ]);
+            let done = |pending: Option<Vec<ApprovalRequest>>| DoneFrame {
+                aborted: false,
+                saved: Some(DoneSaved {
+                    pending_approvals: pending,
+                    ..Default::default()
+                }),
+            };
+            // Nothing waits: the cards stay as they are.
+            settle_done(tools, &done(None));
+            settle_done(tools, &done(Some(Vec::new())));
+            settle_done(tools, &DoneFrame::aborted());
+            tools.with_untracked(|t| assert!(!t[1].done.get_untracked()));
+            settle_done(tools, &done(Some(vec![req("r", "a", "b", "{}")])));
+            tools.with_untracked(|t| {
+                let holds: Vec<_> = t.iter().map(|c| c.approval.hold.get_untracked()).collect();
+                assert_eq!(holds, [Some(gated), Some(Hold::Beside), None]);
+                assert!(t.iter().all(|c| c.done.get_untracked()));
+            });
+        });
     }
 }

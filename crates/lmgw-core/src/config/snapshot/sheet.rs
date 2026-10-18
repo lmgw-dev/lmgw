@@ -32,11 +32,40 @@ impl Snapshot {
         upstream_id: Option<i64>,
         upstream_model: Option<&str>,
     ) -> Sheet {
+        let Some(rows) = self.sheet_rows(alias, upstream_id, upstream_model) else {
+            return Sheet::local();
+        };
+        let mut sheet = Sheet::default();
+        for row in rows {
+            if row.unit.is_tokens() {
+                sheet.tokens = Some(token_prices(row));
+            } else {
+                let rate = row.price.map(|price| UnitRate {
+                    price,
+                    source: row.source,
+                });
+                sheet.set_rate(row.unit, rate);
+            }
+        }
+        sheet
+    }
+
+    /// The rows [`Self::sheet_for`] prices one resolved route by: per unit,
+    /// in [`PriceUnit::ALL`]'s order, the first usable row of its chain, a
+    /// unit with none left out. `None` for a local upstream, which is free
+    /// whatever rows exist. For a reader that names the rows, not their sum:
+    /// the Decision lab's price line.
+    pub fn sheet_rows(
+        &self,
+        alias: &str,
+        upstream_id: Option<i64>,
+        upstream_model: Option<&str>,
+    ) -> Option<Vec<&PriceRow>> {
         // Anything served out of a container on this machine is free, and no
         // price row can make it otherwise. What a local request really costs is
         // GPU time, which is recorded as the llama.cpp timings instead (§2.4).
         if upstream_id.is_some_and(|id| self.is_local_upstream(id)) {
-            return Sheet::local();
+            return None;
         }
 
         let alias_key = alias.to_lowercase();
@@ -86,21 +115,7 @@ impl Snapshot {
                     .filter(|row| usable(row))
             })
         };
-
-        let mut sheet = Sheet {
-            tokens: resolve(PriceUnit::PerMtok).map(token_prices),
-            ..Default::default()
-        };
-        for unit in PriceUnit::ALL.into_iter().filter(|u| !u.is_tokens()) {
-            let rate = resolve(unit).and_then(|row| {
-                row.price.map(|price| UnitRate {
-                    price,
-                    source: row.source,
-                })
-            });
-            sheet.set_rate(unit, rate);
-        }
-        sheet
+        Some(PriceUnit::ALL.into_iter().filter_map(resolve).collect())
     }
 
     /// The token sheet alone ([`Self::sheet_for`]'s `tokens`), or `None`

@@ -40,6 +40,7 @@ pub(crate) mod synthesize;
 pub use image::*;
 mod route_guards;
 pub(crate) use route_guards::*;
+mod relay;
 mod unanswered;
 pub(crate) use unanswered::Unanswered;
 pub use unanswered::{CLIENT_CLOSED_STATUS, CLIENT_DISCONNECTED};
@@ -48,6 +49,9 @@ pub(crate) use stop::{
     canceled, is_canceled, produced_chars, row_status, stopped, stopped_usage, unanswered_usage,
 };
 pub use stop::{stop_pair, StopHandle, StopSignal};
+// Public for `server::build_router`, which registers its handler with the
+// `/v1` JSON routes.
+pub mod systemone;
 // Public for `server::build_router`, which merges its `routes()` at the root.
 pub mod tokenize;
 

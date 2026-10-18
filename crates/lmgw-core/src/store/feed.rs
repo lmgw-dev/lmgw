@@ -30,8 +30,7 @@ pub type By<'a> = Option<&'a str>;
 /// tell their own changes by it (`FeedPrincipal::by`).
 pub const BY_OWNER: &str = lmgw_api_types::chat_feed::BY_ADMIN;
 
-/// The record types this build writes (§2.2). `message.*` are written once
-/// the message writes record them (WP10).
+/// The record types this build writes (§2.2).
 pub mod kind {
     pub const THREAD_CREATED: &str = "thread.created";
     pub const THREAD_UPDATED: &str = "thread.updated";
@@ -44,6 +43,12 @@ pub mod kind {
     /// the transaction of every write that moves it
     /// (`store::chat_ongoing`).
     pub const FOLDER_CURRENT: &str = "folder.current";
+    /// Messages of a thread were added, changed in place or deleted
+    /// (WP10; [`record_messages`](super::feed::record_messages)), in the
+    /// transaction of every message write: the ids in `message_ids`.
+    pub const MESSAGE_ADDED: &str = "message.added";
+    pub const MESSAGE_UPDATED: &str = "message.updated";
+    pub const MESSAGE_DELETED: &str = "message.deleted";
     /// A device's level of lmgw's admin tools changed
     /// ([`record_device_reach`]): that device's own stream hears the
     /// threads and folders with the self-admin toolset come or go, and its
@@ -81,8 +86,12 @@ pub mod kind {
 }
 
 mod devices;
+mod messages;
+mod open;
 mod tasks;
 pub use devices::{record_device_revoked, DeviceRevoked};
+pub use messages::{record_added, record_deleted, record_messages, record_updated};
+pub use open::{opening, waiting, Opening, WaitingReply};
 pub use tasks::{record_task, TaskFacts};
 
 /// One change, as [`record`] writes it.
@@ -699,13 +708,23 @@ pub async fn bounds_and_switch(
     // (`begin_write` is for a transaction that writes).
     #[allow(clippy::disallowed_methods)]
     let mut tx = pool.begin().await?;
+    let read = head_and_levels(&mut tx, key_id).await?;
+    tx.commit().await?;
+    Ok(read)
+}
+
+/// [`bounds_and_switch`]'s reads, on `conn` inside a transaction the caller
+/// holds (`open::opening` reads the waiting calls in the same one).
+async fn head_and_levels(
+    conn: &mut SqliteConnection,
+    key_id: Option<i64>,
+) -> DbResult<(Bounds, Levels)> {
     let device = match key_id {
-        Some(id) => super::device_self_admin(&mut tx, id).await?,
+        Some(id) => super::device_self_admin(&mut *conn, id).await?,
         None => crate::config::DeviceAdmin::Off,
     };
-    let gateway = super::gateway_self_admin_in(&mut tx).await?;
-    let bounds = bounds_on(&mut tx).await?;
-    tx.commit().await?;
+    let gateway = super::gateway_self_admin_in(&mut *conn).await?;
+    let bounds = bounds_on(&mut *conn).await?;
     Ok((bounds, Levels { device, gateway }))
 }
 

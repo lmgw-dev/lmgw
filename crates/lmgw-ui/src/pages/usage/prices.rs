@@ -2,8 +2,11 @@ use std::collections::HashMap;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{KeysResponse, PriceRowView, PriceUnit, PricesResponse, UpstreamsResponse};
-use serde_json::{json, Value};
+use lmgw_api_types::{
+    IdAck, KeysResponse, PriceRowView, PriceSaved, PriceSyncSummary, PriceUnit, PricesResponse,
+    UpstreamsResponse,
+};
+use serde_json::json;
 
 use crate::fmt::grouped;
 use crate::widgets::{
@@ -135,7 +138,7 @@ pub fn UsagePrices() -> impl IntoView {
     let price_it = Callback::new(move |name: String| load(None, name));
     let delete = Callback::new(move |id: i64| {
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/price_delete", &json!({ "id": id })).await {
+            match crate::api::post::<IdAck, _>("/api/op/price_delete", &json!({ "id": id })).await {
                 Ok(_) => {
                     toasts.ok("Price removed");
                     refresh.update(|v| *v = v.wrapping_add(1));
@@ -155,9 +158,9 @@ pub fn UsagePrices() -> impl IntoView {
         }
         syncing.set(true);
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/prices_sync", &json!({})).await {
-                Ok(v) => {
-                    let msg = sync_message(&v);
+            match crate::api::post::<PriceSyncSummary, _>("/api/op/prices_sync", &json!({})).await {
+                Ok(summary) => {
+                    let msg = sync_message(&summary);
                     toasts.ok(msg);
                     syncing.set(false);
                     refresh.update(|v| *v = v.wrapping_add(1));
@@ -213,7 +216,7 @@ pub fn UsagePrices() -> impl IntoView {
             price,
         );
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/price_set", &body).await {
+            match crate::api::post::<PriceSaved, _>("/api/op/price_set", &body).await {
                 Ok(_) => {
                     toasts.ok("Price saved");
                     open.set(false);
@@ -525,43 +528,38 @@ const PRICE_COLS: u32 = 8;
 /// advertise no price, catalog fee rows removed because the catalog stopped
 /// publishing them, the advertised fields not synced ([`not_synced`]), and
 /// every upstream it could not ask — each said, never folded into a count.
-fn sync_message(v: &Value) -> String {
-    let rows = v.get("rows_written").and_then(Value::as_i64).unwrap_or(0);
-    let unpriced = v
-        .get("unpriced_models")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+fn sync_message(s: &PriceSyncSummary) -> String {
     let mut msg = format!(
-        "{} price row(s) written · {unpriced} model(s) advertise no price",
-        grouped(rows.max(0) as u64),
+        "{} price row(s) written · {} model(s) advertise no price",
+        grouped(s.rows_written as u64),
+        s.unpriced_models,
     );
     // A catalog fee the provider stopped publishing is removed rather than
     // left to bill: said, not done silently.
-    let removed = v.get("rows_removed").and_then(Value::as_i64).unwrap_or(0);
-    if removed > 0 {
+    if s.rows_removed > 0 {
         msg.push_str(&format!(
             " · {} catalog fee row(s) removed, no longer published",
-            grouped(removed as u64)
+            grouped(s.rows_removed as u64)
         ));
     }
     // Advertised fields the sync does not carry (billable-units §6): counted,
     // never silently dropped.
-    let skipped = not_synced(v);
+    let skipped = not_synced(s);
     if !skipped.is_empty() {
         msg.push_str(&format!(" · not synced: {skipped}"));
     }
     // An upstream whose catalog fetch failed is named rather than folded into
     // the count: "0 rows" and "could not ask" are different answers.
-    let failed: Vec<&str> = v
-        .get("upstreams")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|u| u.get("error").is_some_and(|e| !e.is_null()))
+    let failed: Vec<&str> = s
+        .upstreams
+        .iter()
+        .filter(|u| u.error.is_some())
         .map(|u| {
-            u.get("upstream")
-                .and_then(Value::as_str)
-                .unwrap_or("upstream")
+            if u.upstream.is_empty() {
+                "upstream"
+            } else {
+                u.upstream.as_str()
+            }
         })
         .collect();
     if !failed.is_empty() {
@@ -573,24 +571,18 @@ fn sync_message(v: &Value) -> String {
 /// What `prices_sync` did not sync — the advertised price fields it has no
 /// unit for, with how many models publish each: "image 12, web_search 37"
 /// (billable-units §6). The summary's own total when it has one, else the
-/// upstreams' summed. Read without a typed shape, so a gateway that does not
-/// report it shows nothing rather than failing the toast.
-fn not_synced(v: &Value) -> String {
-    let mut by: std::collections::BTreeMap<String, i64> = Default::default();
-    let maps: Vec<&serde_json::Map<String, Value>> =
-        match v.get("not_synced").and_then(Value::as_object) {
-            Some(total) => vec![total],
-            None => v
-                .get("upstreams")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|u| u.get("not_synced").and_then(Value::as_object))
-                .collect(),
-        };
+/// upstreams' summed. A gateway that does not report it reads as nothing, so
+/// the toast shows nothing rather than failing.
+fn not_synced(s: &PriceSyncSummary) -> String {
+    let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+    let maps: Vec<&std::collections::BTreeMap<String, usize>> = if s.not_synced.is_empty() {
+        s.upstreams.iter().map(|u| &u.not_synced).collect()
+    } else {
+        vec![&s.not_synced]
+    };
     for map in maps {
         for (field, n) in map {
-            *by.entry(field.clone()).or_default() += n.as_i64().unwrap_or(0);
+            *by.entry(field.as_str()).or_default() += n;
         }
     }
     by.into_iter()
@@ -977,9 +969,15 @@ mod tests {
         assert!(price_field("input", "inf").is_err());
     }
 
+    /// A summary as the gateway sends it, so a test can leave out what an
+    /// older gateway leaves out.
+    fn summary(v: serde_json::Value) -> PriceSyncSummary {
+        serde_json::from_value(v).unwrap()
+    }
+
     #[test]
     fn the_sync_toast_says_what_was_removed_skipped_and_unreachable() {
-        let v = serde_json::json!({
+        let v = summary(serde_json::json!({
             "rows_written": 12,
             "unpriced_models": 3,
             "rows_removed": 2,
@@ -988,14 +986,15 @@ mod tests {
                 {"upstream": "kilo", "not_synced": {"web_search": 37}},
                 {"upstream": "gemini", "error": "connection refused"}
             ]
-        });
+        }));
         assert_eq!(
             sync_message(&v),
             "12 price row(s) written · 3 model(s) advertise no price · 2 catalog fee row(s) \
              removed, no longer published · not synced: web_search 37 · could not ask: gemini"
         );
         // An older summary without the new fields reads as it always did.
-        let v = serde_json::json!({"rows_written": 0, "unpriced_models": 0, "upstreams": []});
+        let v =
+            summary(serde_json::json!({"rows_written": 0, "unpriced_models": 0, "upstreams": []}));
         assert_eq!(
             sync_message(&v),
             "0 price row(s) written · 0 model(s) advertise no price"
@@ -1004,21 +1003,24 @@ mod tests {
 
     #[test]
     fn the_sync_toast_sums_what_each_upstream_did_not_sync() {
-        let v = serde_json::json!({
+        let v = summary(serde_json::json!({
             "upstreams": [
                 {"upstream": "kilo", "not_synced": {"web_search": 30, "image": 12}},
                 {"upstream": "or", "not_synced": {"web_search": 7}},
                 {"upstream": "old"}
             ]
-        });
+        }));
         assert_eq!(not_synced(&v), "image 12, web_search 37");
-        assert_eq!(not_synced(&serde_json::json!({"upstreams": []})), "");
+        assert_eq!(
+            not_synced(&summary(serde_json::json!({"upstreams": []}))),
+            ""
+        );
         // The summary's total, when it carries one, is the figure: the
         // upstreams' maps are its parts, not more of it.
-        let v = serde_json::json!({
+        let v = summary(serde_json::json!({
             "not_synced": {"web_search": 37, "image": 12},
             "upstreams": [{"upstream": "kilo", "not_synced": {"web_search": 30, "image": 12}}]
-        });
+        }));
         assert_eq!(not_synced(&v), "image 12, web_search 37");
     }
 }

@@ -8,6 +8,7 @@
 //! every profile's edits must match today's upstream text.
 
 use super::*;
+use crate::erased::Erased;
 use crate::runtime::registry::CmdOutput;
 
 macro_rules! fixture {
@@ -1020,16 +1021,21 @@ fn the_driver_cuda_version_comes_from_the_nvidia_smi_header() {
 /// A canned `nvidia-smi`.
 struct FakeSmi(Result<CmdOutput, String>);
 
-#[async_trait::async_trait]
 impl CommandRunner for FakeSmi {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "nvidia-smi");
-        if !args.is_empty() {
-            assert_eq!(args, ["--query-gpu=compute_cap", "--format=csv,noheader"]);
-        }
-        self.0
-            .clone()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "nvidia-smi");
+            if !args.is_empty() {
+                assert_eq!(args, ["--query-gpu=compute_cap", "--format=csv,noheader"]);
+            }
+            self.0
+                .clone()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))
+        })
     }
 }
 

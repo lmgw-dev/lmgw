@@ -22,11 +22,11 @@ fn usage_delta(completion_tokens: u64) -> StreamDelta {
 fn timings_delta(predicted_n: u64) -> StreamDelta {
     StreamDelta::Timings(Timings {
         prompt_n: 7,
-        prompt_ms: 1.0,
-        prompt_per_second: 7.0,
+        prompt_ms: Some(1.0),
+        prompt_per_second: Some(7.0),
         predicted_n,
-        predicted_ms: 10.0,
-        predicted_per_second: 30.0,
+        predicted_ms: Some(10.0),
+        predicted_per_second: Some(30.0),
         cache_n: None,
         draft_n: None,
         draft_n_accepted: None,
@@ -178,6 +178,7 @@ async fn sample_once_writes_mcp_sampling_log_with_real_tokens() {
         &state.db,
         &NewUpstream {
             supports_responses: false,
+            catalog_all_modalities: true,
             name: "sampling-up".into(),
             protocol: Protocol::Openai,
             kind: UpstreamKind::Generic,
@@ -296,6 +297,7 @@ async fn sample_once_logs_failures() {
         &state.db,
         &NewUpstream {
             supports_responses: false,
+            catalog_all_modalities: true,
             name: "down-up".into(),
             protocol: Protocol::Openai,
             kind: UpstreamKind::Generic,
@@ -383,6 +385,7 @@ async fn record_in_process_chat_and_workflow_rows_have_expected_shape() {
         &state.db,
         &NewUpstream {
             supports_responses: false,
+            catalog_all_modalities: true,
             name: "inproc-up".into(),
             protocol: Protocol::Openai,
             kind: UpstreamKind::Generic,
@@ -533,6 +536,7 @@ async fn sample_once_on_a_blind_fallback_sends_the_placeholder() {
         &state.db,
         &NewUpstream {
             supports_responses: false,
+            catalog_all_modalities: true,
             name: "blind-up".into(),
             protocol: Protocol::Openai,
             kind: UpstreamKind::Generic,

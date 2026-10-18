@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
 use super::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
+use crate::erased::Erased;
 use crate::hf;
 use crate::state::SharedState;
 use crate::store::{self, HfModelRow};
@@ -67,27 +68,28 @@ pub async fn cancel_for_row(state: &SharedState, hf_model_id: i64) -> Result<Str
 
 pub struct HfDownloadExecutor;
 
-#[async_trait::async_trait]
 impl JobExecutor for HfDownloadExecutor {
     fn kind(&self) -> JobKind {
         JobKind::HfDownload
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("hf_download input: {e}"))?;
-        let row = store::get_hf_model(&ctx.state.db, input.hf_model_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("download entry {} no longer exists", input.hf_model_id))?;
-        match transfer(&ctx, &row).await {
-            Ok(outcome) => Ok(outcome),
-            Err(e) => {
-                tracing::warn!("hf download {}/{} failed: {e}", row.repo, row.file);
-                let _ = store::set_hf_status(&ctx.state.db, row.id, "failed", Some(&e)).await;
-                Err(e)
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("hf_download input: {e}"))?;
+            let row = store::get_hf_model(&ctx.state.db, input.hf_model_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("download entry {} no longer exists", input.hf_model_id))?;
+            match transfer(&ctx, &row).await {
+                Ok(outcome) => Ok(outcome),
+                Err(e) => {
+                    tracing::warn!("hf download {}/{} failed: {e}", row.repo, row.file);
+                    let _ = store::set_hf_status(&ctx.state.db, row.id, "failed", Some(&e)).await;
+                    Err(e)
+                }
             }
-        }
+        })
     }
 }
 

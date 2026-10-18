@@ -4,6 +4,7 @@
 //! it. The fake driver lists no process for its container and charges it
 //! nothing, as a container that never opened the card would be.
 
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::Class;
 
 use super::audio_residency::{add_audio_model, models_page, op, speak, start_idle};
@@ -154,17 +155,15 @@ async fn under_the_hold_a_cpu_row_keeps_serving_and_the_gpu_row_does_not() {
     assert_eq!(speak(&f, "asr").await, 200);
 
     let out = engage_hold(&f).await;
-    assert_eq!(out["stopped"], json!(["audio/tts"]), "{out}");
-    assert_eq!(out["kept_on_cpu"], json!(["audio/asr"]), "{out}");
+    assert_eq!(out.stopped, ["audio/tts"], "{out:?}");
+    assert_eq!(out.kept_on_cpu, ["audio/asr"], "{out:?}");
     assert!(
-        out["message"]
-            .as_str()
-            .unwrap()
-            .contains("audio models that run on the CPU keep serving (audio/asr)"),
-        "{out}"
+        out.message
+            .contains("; models that run on the CPU keep serving (audio/asr)"),
+        "{out:?}"
     );
     let again = lmgw_core::ops::hold_set(&f.state, true).await.unwrap();
-    assert_eq!(again["kept_on_cpu"], json!(["audio/asr"]), "{again}");
+    assert_eq!(again.kept_on_cpu, ["audio/asr"], "{again:?}");
 
     let held = f
         .gateway
@@ -211,7 +210,7 @@ async fn a_row_switched_while_its_gpu_container_runs_is_refused_until_that_stops
     let busy = f.state.runtime().acquire(&spec).await.unwrap();
 
     let out = engage_hold(&f).await;
-    assert_eq!(out["draining"], json!(["audio/asr"]), "{out}");
+    assert_eq!(out.draining, ["audio/asr"], "{out:?}");
     sqlx::query("UPDATE audio_models SET backend = 'cpu' WHERE model_id = 'asr'")
         .execute(&f.state.db)
         .await
@@ -344,10 +343,17 @@ async fn a_benchmark_lease_refuses_and_drains_the_cpu_row() {
     assert_eq!(body["error"]["code"], "gpu_benchmark", "{body}");
 
     struct Quiet;
-    #[async_trait::async_trait]
     impl lmgw_core::bench::BenchSink for Quiet {
-        async fn progress(&self, _: lmgw_core::bench::Progress) {}
-        async fn phase_done(&self, _: lmgw_api_types::bench::Phase, _: &lmgw_core::bench::Record) {}
+        fn progress<'a>(&'a self, _: lmgw_core::bench::Progress) -> Erased<'a, ()> {
+            Box::pin(async move {})
+        }
+        fn phase_done<'a>(
+            &'a self,
+            _: lmgw_api_types::bench::Phase,
+            _: &'a lmgw_core::bench::Record,
+        ) -> Erased<'a, ()> {
+            Box::pin(async move {})
+        }
     }
     let drained = lmgw_core::bench::drain::empty_the_card(
         &f.state,

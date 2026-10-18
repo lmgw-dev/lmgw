@@ -74,4 +74,8 @@ web-sys = { version = "0.3", features = [
   "GainNode", "MediaStreamAudioSourceNode",
   # and the visualisation's canvas.
   "HtmlCanvasElement",
+  # Lab history: the next older page is read when the list's end scrolls
+  # into view.
+  "IntersectionObserver", "IntersectionObserverEntry",
 ] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }

@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{AliasView, UpstreamModelEntry, UpstreamModelsResponse};
-use serde_json::{json, Value};
+use lmgw_api_types::{AliasView, ModelVisibilitySaved, UpstreamModelEntry, UpstreamModelsResponse};
+use serde_json::json;
 
 use super::models::{ModelsData, ModelsTabs};
 use crate::catalog::{use_model_catalog, ModelCatalog};
@@ -303,7 +303,7 @@ impl Visibility {
                 }
             });
             spawn_local(async move {
-                let res = crate::api::post::<Value, _>(
+                let res = crate::api::post::<ModelVisibilitySaved, _>(
                     "/api/op/model_visibility",
                     &json!({
                         "action": if hide { "hide" } else { "unhide" },
@@ -313,12 +313,8 @@ impl Visibility {
                 )
                 .await;
                 match res {
-                    Ok(v) => {
-                        self.toasts.ok(v
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("done")
-                            .to_string());
+                    Ok(saved) => {
+                        self.toasts.ok(saved.message);
                         self.catalog.refresh();
                     }
                     Err(e) => {

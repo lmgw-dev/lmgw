@@ -87,6 +87,7 @@ impl External {
                 expose_all: false,
                 expose_prefix: String::new(),
                 supports_responses: false,
+                catalog_all_modalities: true,
             },
         )
         .await
@@ -196,7 +197,7 @@ async fn the_resolver_reads_an_external_row_from_the_cache() {
     assert_eq!(shown[0]["props"]["n_ctx_slot"], 8192);
     assert_eq!(shown[0]["cached"], true);
     assert!(shown[0]["read_at"].is_i64(), "{shown}");
-    let mcp = lmgw_core::ops::upstreams(&w.state).await.unwrap();
+    let mcp = lmgw_core::ops::backends::to_json(lmgw_core::ops::upstreams(&w.state).await).unwrap();
     assert_eq!(mcp["upstreams"][0]["llama_facts"], *shown);
 }
 
@@ -213,11 +214,9 @@ async fn the_resolver_asks_nothing_of_another_protocol() {
     w.state.llama_facts.settled(w.id).await;
     assert!(!w.knows());
     assert_eq!(w.props_asked().await, 0);
-    let listed = lmgw_core::ops::upstreams(&w.state).await.unwrap();
-    assert!(
-        listed["upstreams"][0].get("llama_facts").is_none(),
-        "{listed}"
-    );
+    let listed =
+        lmgw_core::ops::backends::to_json(lmgw_core::ops::upstreams(&w.state).await).unwrap();
+    assert_eq!(listed["upstreams"][0]["llama_facts"], json!([]), "{listed}");
 }
 
 /// An edit of the row drops its facts, on the dashboard's write path and on
@@ -408,6 +407,7 @@ async fn an_error_body_that_breaks_off_is_relayed_as_it_came() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

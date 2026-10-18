@@ -620,7 +620,7 @@ compile was 13 s (609/610 ccache hits). The rest was the web UI (47 s), apt
   through a cached user alias; elsewhere short-name mode "enforcing" with no
   TTY fails. Every preset with a bare base image carries a (non-required)
   `docker.io/` qualify edit.
-- **CUDA version:** 13.0.0 works for all four engines on driver 615.71.
+- **CUDA version:** 13.0.0 works for all four engines on a 615-series driver.
   Using it everywhere shares base images: no 10 GB pull of 12.9.2 for audio,
   and no 12.6.3-cudnn for sd. sd.cpp needs no cuDNN, so its preset carries
   a non-required `-cudnn-` → `-` edit. Preset default: `13.0.0` for all

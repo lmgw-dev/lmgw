@@ -8,7 +8,7 @@ use std::io::{Cursor, Read};
 
 use lmgw_api_types::chat::Ack;
 use lmgw_api_types::chat_attachments::{ModeSet, Transcribed};
-use lmgw_api_types::chat_export::{ChatExport, EXPORT_FORMAT};
+use lmgw_api_types::chat_export::{ChatExport, ExportRef, EXPORT_FORMAT};
 use lmgw_api_types::chat_threads::{AttachmentFacts, AttachmentMeta};
 use lmgw_core::ops::settings_set;
 use lmgw_core::store;
@@ -210,7 +210,40 @@ async fn an_export_has_its_documented_content_type_disposition_and_bundle() {
     assert_eq!(status, 200, "{v}");
     let r = get(&gw, &format!("/chat/api/threads/{id}/export?format=json")).await;
     let typed = bundle("folder json", &r.bytes().await.unwrap());
-    assert_eq!(typed.folder.unwrap().name, "Notes");
+    assert_eq!(
+        typed.folder,
+        Some(ExportRef {
+            id: folder,
+            name: "Notes".into()
+        })
+    );
+    assert!(typed.profile.is_none());
+    // And its profile, named the same way.
+    let (status, p) = post_json(
+        &gw,
+        "/chat/api/profiles",
+        json!({"name": "Calm \"q\"\n\u{e9}", "persona": "You are calm."}),
+    )
+    .await;
+    assert_eq!(status, 200, "{p}");
+    let profile = p["id"].as_i64().unwrap();
+    let (status, v) = post_json(
+        &gw,
+        &format!("/chat/api/threads/{id}/settings"),
+        json!({"profile_id": profile}),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    let r = get(&gw, &format!("/chat/api/threads/{id}/export?format=json")).await;
+    let typed = bundle("profile json", &r.bytes().await.unwrap());
+    assert_eq!(
+        typed.profile,
+        Some(ExportRef {
+            id: profile,
+            name: "Calm \"q\"\n\u{e9}".into()
+        })
+    );
+    assert_eq!(typed.folder.map(|f| f.id), Some(folder));
     let r = get(
         &gw,
         &format!("/chat/api/folders/{folder}/export?format=json"),

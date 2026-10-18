@@ -47,6 +47,7 @@ async fn gateway(
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -887,6 +888,40 @@ async fn tokenize_forwards_the_llama_shape_verbatim() {
     assert_eq!(head(&resp, "content-type"), Some("application/json"));
     assert_eq!(head(&resp, APPROX), None, "token ids are never approximate");
     assert_eq!(resp.bytes().await.unwrap().as_ref(), answer.as_slice());
+}
+
+/// A rate-limited or loading backend says how long to wait; the relay keeps
+/// that header (and no other) with the status and body.
+#[tokio::test]
+async fn tokenize_relays_the_upstreams_retry_after() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/tokenize"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("retry-after", "17")
+                .insert_header("x-upstream-private", "1")
+                .set_body_raw(br#"{"error":{"code":503}}"#.to_vec(), "application/json"),
+        )
+        .mount(&mock)
+        .await;
+    let (_s, gw) = gateway(
+        &mock.uri(),
+        Protocol::LlamaCpp,
+        UpstreamKind::LlamaServer,
+        "tgt-model",
+    )
+    .await;
+
+    let resp = post(
+        &gw,
+        "/tokenize",
+        json!({"model": "my-model", "content": "hi"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 503);
+    assert_eq!(head(&resp, "retry-after"), Some("17"));
+    assert_eq!(head(&resp, "x-upstream-private"), None);
 }
 
 #[tokio::test]

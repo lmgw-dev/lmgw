@@ -49,6 +49,7 @@ pub(crate) async fn gateway_at(
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -1087,12 +1088,12 @@ async fn a_user_edit_is_one_write() {
         query: "one".into(),
         ..Default::default()
     };
-    store::set_chat_message_knowledge(&state.db, tid, u1, &[3], Some(&ctx))
+    store::set_chat_message_knowledge(&state.db, tid, u1, &[3], Some(&ctx), None)
         .await
         .unwrap();
 
     assert!(
-        !store::rewrite_chat_user_message(&state.db, tid, r1, "x", &[])
+        !store::rewrite_chat_user_message(&state.db, tid, r1, "x", &[], None)
             .await
             .unwrap(),
         "a reply is not rewritten as a user message"
@@ -1106,7 +1107,7 @@ async fn a_user_edit_is_one_write() {
     );
 
     assert!(
-        store::rewrite_chat_user_message(&state.db, tid, u1, "one, again", &[4])
+        store::rewrite_chat_user_message(&state.db, tid, u1, "one, again", &[4], None)
             .await
             .unwrap()
     );

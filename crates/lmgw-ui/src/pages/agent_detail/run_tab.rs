@@ -1,7 +1,10 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
-use lmgw_api_types::{AgentBatchShape, AgentDetail, AgentField, AgentRuntime, AgentWarning};
+use lmgw_api_types::{
+    AgentBatchShape, AgentChatOpened, AgentConfigSaved, AgentDecide, AgentDetail, AgentField,
+    AgentRunCancelled, AgentRuntime, AgentWarning,
+};
 use serde_json::{json, Value};
 
 use super::*;
@@ -41,6 +44,11 @@ pub(super) struct RunCtx {
     /// resolve, a warning blocks it (§4.3), or the form is missing a required
     /// value — or `None`. Reactive, because the form half of it is.
     pub(super) blocked_by: Signal<Option<String>>,
+    /// Why a classify (Dry run, Re-run attention) may not start: what
+    /// `blocked_by` says, or an output that can decide through a question
+    /// set with neither the model nor a set in the form (labs-store design
+    /// §4). List only needs neither.
+    pub(super) classify_blocked_by: Signal<Option<String>>,
     /// The config form's own problem: a number that does not parse, a save
     /// the server refused (it names the field; the form is where to say it).
     problem: RwSignal<Option<String>>,
@@ -54,6 +62,13 @@ impl RunCtx {
         // Tracked, so filling the field in un-blocks the buttons as you type
         // rather than at the next save.
         let gap = Signal::derive(move || config_gap(&unfilled_required(&fields.get(), draft)));
+        let decide = StoredValue::new(d.batch.as_ref().and_then(|b| b.decide.clone()));
+        let classify_gap = Signal::derive(move || {
+            decide.with_value(|d| {
+                d.as_ref()
+                    .and_then(|d| unfilled_model_and_set(&fields.get(), draft, d))
+            })
+        });
         let enabled = d.enabled;
         let requires_ok = d.requires_ok;
         let chat = d.kind == "chat";
@@ -81,6 +96,8 @@ impl RunCtx {
                 gap.get()
             }
         });
+        let classify_blocked_by =
+            Signal::derive(move || blocked_by.get().or_else(|| classify_gap.get()));
         Self {
             agent_id: StoredValue::new(d.id.clone()),
             fields,
@@ -92,6 +109,7 @@ impl RunCtx {
             budget: StoredValue::new(d.budget.clone()),
             currency: StoredValue::new(d.currency.clone()),
             blocked_by,
+            classify_blocked_by,
             problem: RwSignal::new(None),
             saving: RwSignal::new(false),
         }
@@ -99,6 +117,10 @@ impl RunCtx {
 
     pub(super) fn blocked(&self) -> bool {
         self.blocked_by.with(Option::is_some)
+    }
+
+    pub(super) fn classify_blocked(&self) -> bool {
+        self.classify_blocked_by.with(Option::is_some)
     }
 
     /// The form at the moment of *this* click, so a re-run and an apply
@@ -169,8 +191,11 @@ impl RunCtx {
         let id = self.agent_id.get_value();
         let toasts = self.toasts;
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/agent_run_cancel", &json!({ "id": id }))
-                .await
+            match crate::api::post::<AgentRunCancelled, _>(
+                "/api/op/agent_run_cancel",
+                &json!({ "id": id }),
+            )
+            .await
             {
                 Ok(_) => toasts.ok("cancel requested"),
                 Err(e) => toasts.err(e.to_string()),
@@ -199,7 +224,7 @@ impl RunCtx {
         problem.set(None);
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentConfigSaved, _>(
                 "/api/op/agent_config_set",
                 &json!({ "id": id, "values": patch, "clear": clear }),
             )
@@ -321,7 +346,11 @@ fn ConfigCard(ctx: RunCtx, reload: Callback<()>) -> impl IntoView {
                     {move || if saving.get() { "Saving…" } else { "Save config" }}
                 </button>
             </div>
-            <SchemaForm fields=ctx.fields draft=ctx.draft/>
+            <SchemaForm
+                fields=ctx.fields
+                draft=ctx.draft
+                decide=ctx.shape.with_value(|s| s.decide.clone())
+            />
             {move || problem.get().map(|p| view! { <div class="notice err">{p}</div> })}
             // Said out loud, because the two are deliberately different acts
             // and nothing else on the page would tell you.
@@ -359,7 +388,10 @@ fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -
     let busy = RwSignal::new(false);
     let live = Signal::derive(move || run.summary.with(|s| s.as_ref().is_some_and(is_live)));
     let off = Signal::derive(move || ctx.blocked() || run.busy.get() || live.get());
+    let classify_off =
+        Signal::derive(move || ctx.classify_blocked() || run.busy.get() || live.get());
     let why = move || ctx.blocked_by.get().unwrap_or_default();
+    let classify_why = move || ctx.classify_blocked_by.get().unwrap_or_default();
 
     let open_chat = move |_| {
         if busy.get_untracked() {
@@ -380,7 +412,7 @@ fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -
         busy.set(true);
         let id = ctx.agent_id.get_value();
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentChatOpened, _>(
                 "/api/op/agent_open_chat",
                 &json!({ "id": id, "values": values }),
             )
@@ -388,25 +420,14 @@ fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -
             busy.set(false);
             match res {
                 Ok(v) => {
-                    for w in v
-                        .get("warnings")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                    {
+                    for w in v.warnings {
                         // Amber, not red: the thread was created. A warning
                         // here is "it opened, and here is what is off about
                         // it" — an unserved alias, a missing MCP server.
-                        toasts.warn(w.to_string());
+                        toasts.warn(w);
                     }
-                    let url = v
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .unwrap_or("/chat")
-                        .to_string();
                     if let Some(go) = navigate.try_get_value() {
-                        go(&url, Default::default());
+                        go(&v.url, Default::default());
                     }
                 }
                 Err(e) => toasts.err(e.to_string()),
@@ -527,8 +548,8 @@ fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -
                                 view! {
                                     <button
                                         class="btn primary"
-                                        title=why
-                                        disabled=move || off.get()
+                                        title=classify_why
+                                        disabled=move || classify_off.get()
                                         on:click=move |_| ctx.start("classify")
                                     >
                                         "Dry run · classify"
@@ -541,7 +562,16 @@ fn RunColumn(d: AgentDetail, ctx: RunCtx, reload: Callback<()>, runs: RunList) -
             </div>
             // Named, because the form is right there: most of these are a
             // two-second fix, not a fault.
-            {move || ctx.blocked_by.get().map(|w| view! { <div class="run-why">{w}</div> })}
+            // A batch agent that classifies says what keeps its classify off
+            // too, which is everything that keeps List off and more.
+            {move || {
+                let why = if has_classify {
+                    ctx.classify_blocked_by.get()
+                } else {
+                    ctx.blocked_by.get()
+                };
+                why.map(|w| view! { <div class="run-why">{w}</div> })
+            }}
             {(!is_chat).then(|| view! { <MountSummary fields=ctx.fields draft=ctx.draft/> })}
             <Show when=show_last>
                 {move || {
@@ -636,14 +666,43 @@ fn unfilled_required(fields: &[AgentField], draft: Draft) -> Vec<String> {
     fields
         .iter()
         .filter(|f| f.required && f.default.is_none() && !draft.has_value(f))
-        .map(|f| {
-            if f.title.is_empty() {
-                f.name.clone()
-            } else {
-                f.title.clone()
-            }
-        })
+        .map(label_of)
         .collect()
+}
+
+/// The config fields' label: their title, else their name.
+fn label_of(f: &AgentField) -> String {
+    if f.title.is_empty() {
+        f.name.clone()
+    } else {
+        f.title.clone()
+    }
+}
+
+/// Why a classify cannot start for want of a model and a question set, or
+/// `None`: an output that decides through a set needs one of the two, and
+/// the model is a config field the form can hold (`decide.model_field`).
+/// The form, not the stored config, as [`unfilled_required`] asks it.
+pub(super) fn unfilled_model_and_set(
+    fields: &[AgentField],
+    draft: Draft,
+    decide: &AgentDecide,
+) -> Option<String> {
+    let model = fields
+        .iter()
+        .find(|f| decide.model_field.as_deref() == Some(f.name.as_str()))?;
+    let set = fields.iter().find(|f| f.name == decide.field)?;
+    let filled = |f: &AgentField| f.default.is_some() || draft.has_value(f);
+    if filled(model) || filled(set) {
+        return None;
+    }
+    Some(model_or_set_gap(&label_of(model), &label_of(set)))
+}
+
+/// What Classify says when neither the model nor a question set is in the
+/// form, named as the form shows them.
+pub(super) fn model_or_set_gap(model: &str, set: &str) -> String {
+    format!("set {model} or {set} in Config above — a classify needs one of them")
 }
 
 /// What the Start and Open buttons say when they are off, or `None` when the

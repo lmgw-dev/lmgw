@@ -336,13 +336,8 @@ async fn a_device_binds_to_speak_a_result_it_learned_of_from_the_feed() {
     chat_send(&w, &w.gw.client(), tid, "build it").await;
     dev.complete("t1", "42 files", true);
     until_results(&w, tid, 1).await;
-
-    let bearer = format!("Bearer {}", d.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={tid}&takeover=never"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}&takeover=never"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");

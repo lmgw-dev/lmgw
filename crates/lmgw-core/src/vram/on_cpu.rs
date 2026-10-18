@@ -1,5 +1,5 @@
-//! Audio rows on the CPU (the per-row CPU switch) as the VRAM side sees
-//! them: nothing to charge, nothing to evict, nothing to learn, and no claim
+//! Audio and aux rows on the CPU (the per-row CPU switch) as the VRAM side
+//! sees them: nothing to charge, nothing to evict, nothing to learn, and no claim
 //! for the GPU hold (`runtime::Placement`).
 //!
 //! The ledger keeps GPU containers only ([`on_gpu`]), which is what takes a
@@ -17,8 +17,8 @@ use crate::state::SharedState;
 
 use super::{Footprint, Target};
 
-/// The registry entry is a container on the GPU — every one but an audio
-/// container started on the CPU.
+/// The registry entry is a container on the GPU — every one but an audio or
+/// aux container started on the CPU.
 pub(crate) fn on_gpu(e: &RuntimeView) -> bool {
     e.placement == Placement::Gpu
 }

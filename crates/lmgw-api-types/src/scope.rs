@@ -70,6 +70,53 @@ pub fn patterns_match(patterns: &str, value: &str) -> bool {
         .any(|p| glob_match(&fold(p), &v))
 }
 
+/// The text of an allow `pattern` before its first `*` (the whole pattern when
+/// it has none), folded: the part that fixes the names it can match.
+fn head(pattern: &str) -> String {
+    fold(pattern.trim().split('*').next().unwrap_or_default())
+}
+
+/// Does the allow `pattern` name the device-hosted `label`: is the text before
+/// its first `*` `<label>__…`, case-insensitively (`kai__*`, `kai__notify`)?
+/// Under the device-tools grant (client-apps design L16, 2026-10-15) such a
+/// pattern only filters the label's tools; the grant is what reaches them.
+pub fn names_label(pattern: &str, label: &str) -> bool {
+    head(pattern).starts_with(&fold(&format!("{}__", label.trim())))
+}
+
+/// Could the allow `pattern` match a tool of `label` without naming it: has a
+/// `*`, does not name the label, and the text before that `*` is a prefix of
+/// `<label>__` (`*`, `k*`, `ka*`, `*__search`)?
+pub fn broad_for_label(pattern: &str, label: &str) -> bool {
+    let ns = fold(&format!("{}__", label.trim()));
+    let h = head(pattern);
+    pattern.contains('*') && !h.starts_with(&ns) && ns.starts_with(&h)
+}
+
+/// Whether migration 0082 grants `label` to a key whose `allow` list is
+/// `patterns`: a line names the label and no other line could match its
+/// tools. Granting a mixed list (`*` and `kai__notify`) would let its broad
+/// line admit every tool of the label, where before only the naming line
+/// filtered them; such a key is left without the grant, so it loses reach
+/// rather than gaining it. The SQL in `0082_key_device_tools.sql` implements
+/// this rule; keep them equal.
+pub fn migration_grants(patterns: &str, label: &str) -> bool {
+    let lines = || patterns.lines().map(str::trim).filter(|p| !p.is_empty());
+    lines().any(|p| names_label(p, label)) && !lines().any(|p| broad_for_label(p, label))
+}
+
+/// The labels among `hosted` that the allow `patterns` name and `grant` does
+/// not hold: the tool scope filters a label's tools, but only the grant
+/// reaches them, so such a pattern does nothing until the grant is given.
+pub fn ungranted_named<'a>(patterns: &str, grant: &[String], hosted: &'a [String]) -> Vec<&'a str> {
+    hosted
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !grant.iter().any(|g| fold(g.trim()) == fold(l.trim())))
+        .filter(|l| patterns.lines().any(|p| names_label(p, l)))
+        .collect()
+}
+
 /// A scope list's verdict on `value`, with the mode in its wire spelling
 /// (`all` | `allow` | `deny`). An unknown mode reads as `all`, which is what
 /// the server's own parser does with one.
@@ -116,5 +163,32 @@ mod tests {
             admits("deny", "", "github__search"),
             "an empty deny list denies nothing"
         );
+    }
+
+    #[test]
+    fn the_migration_grants_a_label_only_to_a_list_no_broad_line_could_widen() {
+        assert!(migration_grants("kai__notify", "kai"));
+        assert!(migration_grants("docs__*\n  KAI__x*  ", "kai"));
+        assert!(!migration_grants("*\nkai__notify", "kai"));
+        assert!(!migration_grants("docs__*\nkai__echo\n*__search", "kai"));
+        assert!(!migration_grants("k*\nkai__x", "kai"));
+        assert!(!migration_grants("ka*\nkai__x", "kai"));
+        // Other lines that cannot reach the label's names do not matter.
+        assert!(migration_grants("d*\nkai__x\nkai_b__y*", "kai"));
+        assert!(!migration_grants("d*\nkai_b__y*", "kai"), "names nothing");
+    }
+
+    #[test]
+    fn a_pattern_naming_a_label_is_flagged_until_the_grant_holds_it() {
+        let hosted = vec!["kai".to_string(), "desk".to_string()];
+        assert_eq!(
+            ungranted_named("kai__*\nDESK__x", &[], &hosted),
+            ["kai", "desk"]
+        );
+        assert_eq!(
+            ungranted_named("kai__*\nDESK__x", &["KAI".to_string()], &hosted),
+            ["desk"]
+        );
+        assert!(ungranted_named("k*\n*", &[], &hosted).is_empty());
     }
 }

@@ -30,6 +30,7 @@ async fn world(base: &str, protocol: Protocol, kind: UpstreamKind) -> Gw {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

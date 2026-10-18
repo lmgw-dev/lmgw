@@ -28,10 +28,11 @@ use lmgw_api_types::builds::{
     ContainerImagePullStatusArgs, ContainerImageTagArgs, ContainerImageTagResponse,
     ContainerImagesArgs, ContainerImagesResponse, Engine, Forge, ForgePr, ForgePrArgs, ForgePrPage,
     ForgePrsArgs, ForgeRefsArgs, GpuBackend, ImageUse, KeptImage, PromoteResponse, RemoteRefsView,
-    ResolvedPreview, RunLogChunk, VerifyReport,
+    RepoPreset, ResolvedPreview, RunLogChunk, VerifyReport,
 };
+use lmgw_api_types::self_admin::{BuildList, BuildSet, Builds};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::backends::images::{self, describe_users, UsageIndex};
 use crate::backends::run::{self, short_id, Podman};
@@ -661,7 +662,7 @@ pub async fn build_log_tool(
     run_id: i64,
     offset: Option<i64>,
     tail: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<RunLogChunk, String> {
     let offset = offset
         .map(|o| u64::try_from(o).map_err(|_| format!("offset {o} is not a byte offset")))
         .transpose()?;
@@ -679,17 +680,15 @@ pub async fn build_log_tool(
         (None, None) => Some(TOOL_LOG_TAIL),
         (_, t) => t,
     };
-    to_json(
-        build_run_log(
-            state,
-            BuildRunLogArgs {
-                run_id,
-                offset: offset.unwrap_or(0),
-                tail,
-            },
-        )
-        .await,
+    build_run_log(
+        state,
+        BuildRunLogArgs {
+            run_id,
+            offset: offset.unwrap_or(0),
+            tail,
+        },
     )
+    .await
 }
 
 /// `lmgw__builds`: without `id`, every build (the `builds` op) plus the repo
@@ -700,29 +699,28 @@ pub async fn builds_tool(
     id: Option<i64>,
     limit: Option<i64>,
     before: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<Builds, String> {
     let Some(id) = id else {
-        let mut v = to_json(builds(state).await)?;
-        v["repo_presets"] = presets::REPO_PRESETS
-            .iter()
-            .map(|p| {
-                json!({
-                    "preset": p.id,
-                    "name": p.name,
-                    "engine": p.engine,
-                    "repo_url": p.repo_url,
-                    "forge": p.forge,
-                    "default_ref": p.default_ref,
+        return Ok(Builds::List(BuildList {
+            builds: builds(state).await?,
+            repo_presets: presets::REPO_PRESETS
+                .iter()
+                .map(|p| RepoPreset {
+                    id: p.id.to_string(),
+                    name: p.name.to_string(),
+                    engine: p.engine,
+                    repo_url: p.repo_url.to_string(),
+                    forge: p.forge,
+                    default_ref: p.default_ref.to_string(),
                 })
-            })
-            .collect();
-        return Ok(v);
+                .collect(),
+        }));
     };
     let limit = match limit {
         None => TOOL_RUNS_PAGE,
         Some(n) => u32::try_from(n).map_err(|_| format!("limit {n} is not a run count"))?,
     };
-    to_json(
+    Ok(Builds::One(Box::new(
         build_get(
             state,
             BuildsGetArgs {
@@ -731,8 +729,8 @@ pub async fn builds_tool(
                 before,
             },
         )
-        .await,
-    )
+        .await?,
+    )))
 }
 
 /// `lmgw__forge_prs`: the `forge_prs` op, with the repository taken from a
@@ -744,7 +742,7 @@ pub async fn forge_prs_tool(
     forge_name: Option<&str>,
     query: Option<&str>,
     page: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<ForgePrPage, String> {
     let (repo_url, chosen) = match (id, repo_url) {
         (Some(id), _) => {
             let b = get_build(state, id).await?;
@@ -764,18 +762,16 @@ pub async fn forge_prs_tool(
     let page = page
         .map(|p| u32::try_from(p).map_err(|_| format!("page {p} is not a page number")))
         .transpose()?;
-    to_json(
-        forge_prs(
-            state,
-            ForgePrsArgs {
-                repo_url,
-                forge,
-                query: query.map(str::to_string),
-                page,
-            },
-        )
-        .await,
+    forge_prs(
+        state,
+        ForgePrsArgs {
+            repo_url,
+            forge,
+            query: query.map(str::to_string),
+            page,
+        },
     )
+    .await
 }
 
 /// The forge a repository without a chosen one gets
@@ -993,7 +989,7 @@ impl BuildPatch {
 
 /// `lmgw__build_set`: [`BuildPatch`] → [`BuildSetArgs`] → [`build_set`], with
 /// the next step named in the answer.
-pub async fn build_patch(state: &SharedState, p: BuildPatch) -> Result<Value, String> {
+pub async fn build_patch(state: &SharedState, p: BuildPatch) -> Result<BuildSet, String> {
     let action = match p.action.trim() {
         "create" => BuildSetAction::Create,
         "update" => BuildSetAction::Update,
@@ -1034,16 +1030,18 @@ pub async fn build_patch(state: &SharedState, p: BuildPatch) -> Result<Value, St
         },
     )
     .await?;
-    let mut v = to_json::<BuildSetResponse>(Ok(resp.clone()))?;
-    if let Some(b) = &resp.build {
-        v["next_step"] = json!(format!(
+    let next_step = resp.build.as_ref().map(|b| {
+        format!(
             "lmgw__build_run id={} starts a run (it takes minutes; poll lmgw__builds id={} and \
              read lmgw__build_log). With extras, lmgw__build_check_merge id={} first says in \
              seconds whether they merge cleanly.",
             b.id, b.id, b.id
-        ));
-    }
-    Ok(v)
+        )
+    });
+    Ok(BuildSet {
+        answer: resp,
+        next_step,
+    })
 }
 
 #[cfg(test)]

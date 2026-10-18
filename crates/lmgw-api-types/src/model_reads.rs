@@ -39,10 +39,10 @@ pub enum ModelCheck {
         /// The model starts, but misbehaves under some input.
         advisories: Vec<String>,
     },
-    /// An embedding or rerank model.
+    /// An embedding, rerank or decision model.
     Aux {
         model_id: String,
-        /// `embed` or `rerank`.
+        /// `embed`, `rerank` or `decision`.
         kind: String,
         enabled: bool,
         ok: bool,
@@ -87,6 +87,29 @@ pub struct LlamaFlags {
     pub note: String,
 }
 
+/// The licence a GGUF header states (`general.license`, with the optional
+/// `general.license.name` and `general.license.link`). Information only: it
+/// is never a filter, a ranking or a warning. At least one field is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModelLicence {
+    /// `general.license`: an SPDX-like id or a name, such as `apache-2.0`
+    /// or `other`.
+    pub id: Option<String>,
+    /// `general.license.name`.
+    pub name: Option<String>,
+    /// `general.license.link`.
+    pub link: Option<String>,
+}
+
+impl ModelLicence {
+    /// What a chip says: the name when the header gives one, else the id.
+    /// `None` for a licence that only has a link.
+    pub fn label(&self) -> Option<&str> {
+        self.name.as_deref().or(self.id.as_deref())
+    }
+}
+
 /// `GET /api/model-inspect` — what a GGUF file is, from its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -100,7 +123,7 @@ pub struct ModelInspect {
     /// Which class serves this file, from its header rather than its
     /// directory: `chat` or `aux`.
     pub serve_as: String,
-    /// For an aux file: `embed` or `rerank`.
+    /// For an aux file: `embed`, `rerank` or `decision`.
     pub aux_kind: Option<String>,
     /// `none`, `mean`, `cls`, `last` or `rank`; set on encoders.
     pub pooling_type: Option<String>,
@@ -112,6 +135,8 @@ pub struct ModelInspect {
     pub architecture: Option<String>,
     pub name: Option<String>,
     pub size_label: Option<String>,
+    /// The licence the header states; null when it states none.
+    pub licence: Option<ModelLicence>,
     pub quant: Option<String>,
     /// The model's trained context, in tokens.
     pub context_length: Option<u64>,
@@ -138,8 +163,6 @@ pub struct ModelInspect {
     /// `file_size_bytes` for a person to read.
     pub file_size: String,
     pub vram_estimate: VramEstimate,
-    /// The runtime probe, or why none was made.
-    pub runtime: RuntimeProbe,
 }
 
 /// What the chat template's own text says about reasoning, effort selection
@@ -174,7 +197,10 @@ pub struct TemplateSignals {
     pub tool_call_format: Option<String>,
 }
 
-/// A lower bound for the GPU cost of the weights and the KV cache.
+/// The GPU cost of the weights and the KV cache at the trained context; a
+/// chat model's is laid out as its row is charged, for one slot. Compute
+/// buffers depend on a row's settings and are in the plan's footprint, not
+/// here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VramEstimate {
@@ -186,60 +212,4 @@ pub struct VramEstimate {
     pub kv_cache_bytes_at_full_ctx_q8_0: Option<u64>,
     /// What the figures leave out.
     pub note: String,
-}
-
-/// The result of asking llama-server whether it accepts a file's
-/// architecture. `checked` false means no answer, and `reason` says why.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RuntimeProbe {
-    /// A probe ran and reached a verdict.
-    pub checked: bool,
-    /// The verdict, when `checked`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supported: Option<bool>,
-    /// Why there is no verdict, or what the runtime rejected.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// What to do about an unsupported file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    /// How a supported verdict was reached, when it needs saying.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-impl RuntimeProbe {
-    /// No probe was made, or it gave no answer.
-    pub fn unchecked(reason: impl Into<String>) -> Self {
-        Self {
-            checked: false,
-            supported: None,
-            reason: Some(reason.into()),
-            hint: None,
-            detail: None,
-        }
-    }
-
-    /// The architecture was accepted.
-    pub fn supported(detail: Option<String>) -> Self {
-        Self {
-            checked: true,
-            supported: Some(true),
-            reason: None,
-            hint: None,
-            detail,
-        }
-    }
-
-    /// The runtime refused the file.
-    pub fn unsupported(reason: String, hint: Option<&str>) -> Self {
-        Self {
-            checked: true,
-            supported: Some(false),
-            reason: Some(reason),
-            hint: hint.map(str::to_string),
-            detail: None,
-        }
-    }
 }

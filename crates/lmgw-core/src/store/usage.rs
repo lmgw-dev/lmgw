@@ -466,7 +466,7 @@ pub async fn rebuild_usage(pool: &SqlitePool) -> DbResult<u64> {
                 COALESCE(SUM(total_ms), 0),
                 SUM(CASE WHEN total_ms IS NOT NULL THEN 1 ELSE 0 END),
                 MIN(total_ms), MAX(total_ms),
-                COALESCE(SUM(predicted_n), 0),
+                COALESCE(SUM(CASE WHEN decode_ms IS NOT NULL THEN predicted_n END), 0),
                 COALESCE(SUM(decode_ms), 0),
                 COALESCE(SUM(prefill_ms), 0),
                 COALESCE(SUM(prompt_n), 0),

@@ -6,7 +6,7 @@
 //! off, R26). A value sent back as it is stored is no change, so the MCP
 //! page's whole form saves.
 
-use serde_json::{json, Value};
+use lmgw_api_types as dto;
 
 use crate::config::{McpServer, McpTransport};
 use crate::runtime::argv;
@@ -44,7 +44,7 @@ pub(super) async fn update(
     state: &SharedState,
     p: &McpServerPatch,
     cur: &McpServer,
-) -> Result<Value, String> {
+) -> Result<dto::McpServerSaved, String> {
     if let Some(why) = refusal(p, cur)? {
         return Err(format!("'{}': {why}", cur.name));
     }
@@ -61,10 +61,12 @@ pub(super) async fn update(
         .await
         .map_err(|e| e.to_string())?;
     state.reload_snapshot().await.map_err(|e| e.to_string())?;
-    Ok(json!({
-        "ok": true, "id": cur.id,
-        "message": format!("MCP server '{}' updated", cur.name),
-    }))
+    Ok(dto::McpServerSaved {
+        ok: true,
+        id: cur.id,
+        message: format!("MCP server '{}' {}", cur.name, super::saved_verb(&p.action)),
+        ..Default::default()
+    })
 }
 
 /// The first field `p` would change that a device row does not let change.
@@ -113,7 +115,7 @@ fn refusal(p: &McpServerPatch, cur: &McpServer) -> Result<Option<String>, String
             .is_some_and(|a| !a.is_empty())
         || p.extra_run_args
             .as_deref()
-            .map(argv::parse_args_text)
+            .map(crate::ops::arg_list)
             .transpose()?
             .is_some_and(|a| !a.is_empty())
         || p.env

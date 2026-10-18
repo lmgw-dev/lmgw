@@ -383,7 +383,7 @@ pub fn Traffic() -> impl IntoView {
         vec![
             (String::new(), "all classes".to_string()),
             ("chat".into(), "chat".into()),
-            ("aux".into(), "aux (embed/rerank)".into()),
+            ("aux".into(), "aux (embed/rerank/decision)".into()),
             ("audio".into(), "audio".into()),
             ("image".into(), "image".into()),
             ("tool".into(), "tool".into()),
@@ -853,8 +853,8 @@ fn GpuButton(vram: Memo<Option<VramStatus>>, open: RwSignal<bool>) -> impl IntoV
 /// It lives on Traffic because a request waiting for VRAM *is* traffic — it has
 /// arrived, it is not being served yet, and the reason is here. Measured and
 /// estimated figures are labelled apart on purpose: the estimate is weights +
-/// KV read from the GGUF and is a lower bound, so presenting the two as one
-/// number would be the wrong kind of tidy.
+/// KV + compute buffers derived from the GGUF and leaves the CUDA context out,
+/// so presenting the two as one number would be the wrong kind of tidy.
 #[component]
 fn GpuPanel(vram: Memo<Option<VramStatus>>) -> impl IntoView {
     let used_pct = move || {

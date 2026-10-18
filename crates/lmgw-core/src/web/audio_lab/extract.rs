@@ -6,8 +6,8 @@
 //! The status stays axum's (400 for bad syntax, 415 for a wrong content type,
 //! 422 for a shape that is not the type).
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::FromRequest;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{FromRequest, Query};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::{extract::Request, Json};
@@ -59,6 +59,19 @@ where
         match Json::<T>::from_request(req, state).await {
             Ok(Json(v)) => Ok(Self(Some(v))),
             Err(e) => Err(lab_rejected(e)),
+        }
+    }
+}
+
+/// The query of a route the lab hands to a `/v1` handler, refused the way
+/// that handler refuses a body: axum's status with the OpenAI error
+/// envelope.
+pub(super) fn openai_query<T>(q: Result<Query<T>, QueryRejection>) -> Result<T, Response> {
+    match q {
+        Ok(Query(q)) => Ok(q),
+        Err(e) => {
+            let err = GatewayError::BadRequest(e.body_text());
+            Err((e.status(), Json(err.to_openai_json())).into_response())
         }
     }
 }

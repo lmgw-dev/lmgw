@@ -4,8 +4,8 @@ target/, a local bare repo as the fake GitHub, no network.
 
 Usage: python3 scripts/publish_github_test.py   (ci/check.sh runs it)
 
-The private repo's history starts at its own "pre-public root" (the hook template's root sha is
-replaced by it), the public repo is a separate lineage, and the private repo's `origin` names a
+The private repo's history starts at its own "pre-public root" (the root sha in the hook and in
+the publish script is replaced by it), the public repo is a separate lineage, and the private repo's `origin` names a
 host that is never contacted (GIT_SSH_COMMAND=false makes sure of it). Git's global and system
 config are shut out, so the owner's settings change nothing here.
 """
@@ -139,11 +139,12 @@ def setup(tmp):
     os.makedirs(os.path.join(w.src, "scripts"))
     for name in SCRIPTS:
         shutil.copy2(os.path.join(ROOT, "scripts", name), os.path.join(w.src, "scripts", name))
-    hook = os.path.join(w.src, "scripts", "pre-push-github.sh")
-    text = open(hook).read()
-    assert REAL_ROOT in text, "the hook template names its root sha"
-    with open(hook, "w") as f:
-        f.write(text.replace(REAL_ROOT, w.old_root))
+    for name in ("pre-push-github.sh", "publish-github.sh"):
+        path = os.path.join(w.src, "scripts", name)
+        text = open(path).read()
+        assert REAL_ROOT in text, f"{name} names the pre-public root sha"
+        with open(path, "w") as f:
+            f.write(text.replace(REAL_ROOT, w.old_root))
     with open(os.path.join(w.src, ".gitignore"), "w") as f:
         f.write("/target\n")
     w.git("add", "scripts", ".gitignore")
@@ -190,6 +191,13 @@ def run(w):
           "the hook refuses the pre-public history even with LMGW_PUBLISH=1", p.stderr)
     p = w.git("push", "github", "main", check_ok=False)
     check(p.returncode != 0, "git push github fails on the disabled push URL", p.stderr)
+
+    # GitHub in another spelling of its case is GitHub all the same.
+    shouty = os.path.join(w.tmp, "GitHub.COM", "lmgw.git")
+    w.git("init", "-q", "--bare", "-b", "main", shouty, cwd=w.tmp)
+    p = w.git("push", shouty, "main:refs/heads/side", check_ok=False)
+    check(p.returncode != 0 and "refusing to push to GitHub" in p.stderr,
+          "the hook refuses GitHub spelled in other case without LMGW_PUBLISH", p.stderr)
     check(w.public_main() == w.p0, "nothing reached the fake GitHub so far")
 
     # --- gate: no approval, a scan hit, a mismatched tree --------------------------------------
@@ -309,6 +317,36 @@ def run(w):
           "a late tag lands on the public commit that carries its tree")
     rc, out = w.publish("--ref", first_src, "-F", msg, "--dry-run")
     check(rc != 0 and "would revert" in out, "an older state than a published one is refused", out)
+
+    # --- the public parent comes from the push target, and never carries the pre-public history -
+    w.commit("docs/more.md", "more\n", "more")
+    tree = w.rev("main^{tree}")
+    w.publish("--dry-run", "-F", msg)
+    approve(w, tree, "--ack-scan")
+    rc, out = w.publish("--dry-run", "-F", msg)
+    check(rc == 0 and "gate: open" in out, "the next tree passes a dry run (control)", out)
+    other = os.path.join(w.tmp, "github.com", "other.git")
+    w.git("clone", "-q", "--bare", w.bare, other, cwd=w.tmp)
+    w.env["LMGW_PUBLISH_URL"] = other
+    rc, out = w.publish("--dry-run", "-F", msg)
+    check(rc != 0 and "the push goes to" in out,
+          "a github remote that names another URL than the push target is refused", out)
+    rc, out = w.publish("--install-guard")
+    check(rc != 0 and "not the public" in out,
+          "--install-guard refuses a github remote that names another URL", out)
+    tainted = os.path.join(w.tmp, "github.com", "tainted.git")
+    w.git("clone", "-q", "--bare", w.src, tainted, cwd=w.tmp)
+    w.git("remote", "set-url", "github", tainted)
+    w.env["LMGW_PUBLISH_URL"] = tainted
+    rc, out = w.publish("--dry-run", "-F", msg)
+    check(rc != 0 and "carries the pre-public history" in out,
+          "a public tip that descends from the pre-public root is refused", out)
+    rc, out = w.publish("-F", msg, answer="publish")
+    check(rc != 0 and "carries the pre-public history" in out
+          and w.git("rev-parse", "main", cwd=tainted).stdout.strip() == w.rev("main"),
+          "a publish onto such a tip pushes nothing", out)
+    w.git("remote", "set-url", "github", w.bare)
+    w.env["LMGW_PUBLISH_URL"] = w.bare
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@
 //! comes — never the ticking clock or the level meter (WP7 review m8).
 
 use leptos::prelude::*;
+use lmgw_api_types::chat_frames::DoneFrame;
 
 use super::super::chat::ChatThread;
 use super::dictation::DictState;
@@ -82,8 +83,12 @@ impl VoiceStatus {
     /// although off was asked, a voice turn's own off included
     /// (model-capabilities design §5.6) — said once, in place of the last
     /// turn's; none clears it.
-    pub(crate) fn reasoning(&self, done: &serde_json::Value) {
-        match done["reasoning_note"].as_str().filter(|n| !n.is_empty()) {
+    pub(crate) fn reasoning(&self, done: &DoneFrame) {
+        let note = done
+            .saved
+            .as_ref()
+            .and_then(|s| s.reasoning_note.as_deref());
+        match note.filter(|n| !n.is_empty()) {
             Some(n) => self.set(Note::new(REASONING_KEY, NoteKind::Info, n)),
             None => self.clear(REASONING_KEY),
         }
@@ -347,6 +352,7 @@ mod tests {
     #[test]
     fn a_turn_that_reasoned_although_off_was_asked_is_said_once() {
         use leptos::prelude::*;
+        use lmgw_api_types::chat_frames::{DoneFrame, DoneSaved};
         let status = super::VoiceStatus::new(RwSignal::new(None));
         let note = "gpt cannot switch reasoning off; it reasons at its lowest level (minimal)";
         let said = || {
@@ -358,11 +364,18 @@ mod tests {
                 .map(|n| (n.kind, n.text.clone()))
                 .collect::<Vec<_>>()
         };
-        status.reasoning(&serde_json::json!({"reasoning_note": note}));
-        status.reasoning(&serde_json::json!({"reasoning_note": note}));
+        let done = |note: Option<&str>| DoneFrame {
+            aborted: false,
+            saved: Some(DoneSaved {
+                reasoning_note: note.map(str::to_string),
+                ..Default::default()
+            }),
+        };
+        status.reasoning(&done(Some(note)));
+        status.reasoning(&done(Some(note)));
         assert_eq!(said(), [(NoteKind::Info, note.to_string())]);
         // A turn that took the off clears it.
-        status.reasoning(&serde_json::json!({"reasoning_note": null}));
+        status.reasoning(&done(None));
         assert!(said().is_empty());
     }
 

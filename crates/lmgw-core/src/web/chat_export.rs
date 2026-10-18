@@ -22,9 +22,9 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use lmgw_api_types::chat_export::{ExportQuery, EXPORT_FORMAT};
+use lmgw_api_types::chat_export::{ExportQuery, ExportRef, EXPORT_FORMAT};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use zip::write::SimpleFileOptions;
 
@@ -521,9 +521,9 @@ struct JsonExport<'a> {
     exported_at: String,
     thread: ThreadOut<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    folder: Option<Value>,
+    folder: Option<ExportRef>,
     /// `{id, name}`, or `null` for none.
-    profile: Option<Value>,
+    profile: Option<ExportRef>,
     messages: Vec<MessageOut<'a>>,
     draft_attachments: Vec<AttachmentOut<'a>>,
 }
@@ -583,7 +583,9 @@ impl<'a> JsonExport<'a> {
                 if let Some(raw) = m.ir_messages.as_deref() {
                     match serde_json::from_str::<Value>(raw) {
                         Ok(v) => row["ir_messages"] = v,
-                        Err(_) => row["ir_messages_unparsed"] = json!(true),
+                        // `ExportMessage::ir_messages_unparsed`: the row stays a
+                        // `Value` so its keys are written sorted, this one among them.
+                        Err(_) => row["ir_messages_unparsed"] = Value::Bool(true),
                     }
                 }
                 MessageOut {
@@ -604,14 +606,14 @@ impl<'a> JsonExport<'a> {
                 thread: &b.thread,
                 temporary: b.thread.id < 0,
             },
-            folder: b
-                .folder
-                .as_ref()
-                .map(|f| json!({"id": f.id, "name": f.name})),
-            profile: b
-                .profile
-                .as_ref()
-                .map(|(id, name)| json!({"id": id, "name": name})),
+            folder: b.folder.as_ref().map(|f| ExportRef {
+                id: f.id,
+                name: f.name.clone(),
+            }),
+            profile: b.profile.as_ref().map(|(id, name)| ExportRef {
+                id: *id,
+                name: name.clone(),
+            }),
             messages,
             draft_attachments: b
                 .attachments

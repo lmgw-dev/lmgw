@@ -46,6 +46,9 @@ fn every_field_is_settable_and_named_when_touched() {
         "max_message_mb": 0,
         "max_frame_mb": 8,
         "ping_interval_s": 0,
+        "webrtc_reorder_ms": 0,
+        "webrtc_commit_window_ms": 200,
+        "webrtc_output_kbps": 24,
     }))
     .unwrap();
     assert_eq!(r.default_model, "my-chat");
@@ -63,7 +66,16 @@ fn every_field_is_settable_and_named_when_touched() {
     assert!(!r.warm_on_connect && r.half_duplex);
     assert_eq!(r.speech_instructions, "calm, warm");
     assert!(!r.tag_hint);
-    assert_eq!(touched.len(), 31, "{touched:?}");
+    assert_eq!(
+        r.webrtc_audio,
+        crate::config::WebRtcAudioSettings {
+            webrtc_reorder_ms: 0,
+            webrtc_commit_window_ms: 200,
+            webrtc_output_kbps: 24
+        }
+    );
+    assert_eq!(touched.len(), 34, "{touched:?}");
+    assert!(touched.contains(&"realtime.webrtc_commit_window_ms"));
     assert!(touched.contains(&"realtime.semantic_vad"));
     // Nothing named, nothing touched.
     assert_eq!(applied(json!({})).unwrap().1, Vec::<&str>::new());
@@ -179,6 +191,18 @@ fn names_and_ranges_are_checked() {
         ),
         (json!({"model_map": {"": "x"}}), "realtime.model_map"),
         (json!({"voice_map": {"alloy": " "}}), "realtime.voice_map"),
+        (
+            json!({"webrtc_reorder_ms": 40_951}),
+            "realtime.webrtc_reorder_ms",
+        ),
+        (
+            json!({"webrtc_output_kbps": 5}),
+            "realtime.webrtc_output_kbps",
+        ),
+        (
+            json!({"webrtc_output_kbps": 511}),
+            "realtime.webrtc_output_kbps",
+        ),
     ] {
         let e = applied(v.clone()).unwrap_err();
         assert!(e.contains(field), "{v}: {e}");
@@ -207,6 +231,23 @@ fn the_view_reads_back_what_was_stored() {
     assert_eq!((v.max_message_mb, v.max_frame_mb), (64, 16));
     assert_eq!(v.ping_interval_s, 20);
     assert!(v.warm_on_connect);
+    assert_eq!(
+        (
+            v.webrtc_reorder_ms,
+            v.webrtc_commit_window_ms,
+            v.webrtc_output_kbps
+        ),
+        (60, 120, 32)
+    );
+    // The three keys sit in the realtime section of the stored blob, and a
+    // blob from before them reads the defaults.
+    let blob = serde_json::to_value(&r).unwrap();
+    assert_eq!(blob["webrtc_reorder_ms"], 60);
+    let old: RealtimeSettings = serde_json::from_str(r#"{"ping_interval_s": 7}"#).unwrap();
+    assert_eq!(
+        old.webrtc_audio,
+        crate::config::WebRtcAudioSettings::default()
+    );
     // The view's words are the patch's words: a read-back patches cleanly.
     let mut round = RealtimeSettings::default();
     patch(json!({

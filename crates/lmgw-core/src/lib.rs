@@ -25,12 +25,19 @@ pub mod bench;
 pub mod candidates;
 pub mod capabilities;
 pub mod catalog;
+/// What a process lmgw starts inherits from it: every `podman` (and other
+/// system tool) spawn goes through [`child::system_tool`], so no descriptor
+/// beyond stdio and no `LD_LIBRARY_PATH` reaches podman's `pasta`.
+pub mod child;
 pub mod config;
 pub mod degraded;
 /// Device keys (client-apps design §1): pairing, open connections, the
 /// revocation signal.
 pub mod devices;
 pub mod egress;
+/// Futures erased to `dyn Future + Send`: what the crate's async trait
+/// methods return, written out instead of `#[async_trait]`, and the seams.
+pub mod erased;
 pub mod error;
 pub mod extract;
 /// The request gate (unified-KV design §3.3/§5, ladder design §3.2–3.4): one
@@ -54,6 +61,9 @@ pub mod jobs;
 /// embedded and searched with quickdoc-core's hybrid pipeline, in their own
 /// private `knowledge.db`.
 pub mod knowledge;
+/// The lab store (labs-store design §1): the groups, runs and artifact
+/// files the dashboard's labs keep, their usage, deletion and export.
+pub mod labs;
 /// The ladder's own config shape and pure derivations (ladder design §4.1,
 /// §4.2): `Rung`, and the per-rung view — per-slot context, switchover — every
 /// other package (runtime, gate, capabilities, UI) reads instead of

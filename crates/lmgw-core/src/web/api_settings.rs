@@ -3,16 +3,15 @@
 //! human dashboard owns everything): bind address, self-admin mode + token,
 //! secrets with explicit clear flags, and all three class definitions.
 
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json, Response};
+use lmgw_api_types as dto;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use crate::agents::token;
 use crate::config::{
-    ApiKey, ApiKeyKind, AudioSettings, BudgetPeriod, ImageSettings, RouterSettings, SelfAdmin,
-    VramSettings,
+    ApiKey, ApiKeyKind, AudioSettings, AuxRouterSettings, BudgetPeriod, ImageSettings,
+    RouterSettings, SelfAdmin, VramSettings,
 };
 use crate::ops::KeyPatch;
 use crate::principal::Refusal;
@@ -21,225 +20,9 @@ use crate::store;
 
 /// The device half of the credential ops (client-apps design §1.4).
 mod device_keys;
-
-/// The chat/aux *class* settings (per-model-containers §6). Four fields left
-/// with router mode — the container name is derived (§3.3), the port is
-/// dynamic (§3.5), `models_max` has no router left to cap, and auto-start is
-/// the per-model `warm_start` flag — and this is a contract change to any
-/// third-party caller of `/api/settings-full`, not a compat shim.
-#[derive(Serialize)]
-pub struct RouterSettingsDto {
-    pub image: String,
-    pub models_dir: String,
-    pub extra_run_args: Vec<String>,
-    pub public_prefix: String,
-    /// Per-request ceiling in seconds; 0 = the maximum possible (no deadline
-    /// of lmgw's own). Per class since the four stopped sharing one constant.
-    pub request_timeout_seconds: u64,
-}
-
-impl From<&RouterSettings> for RouterSettingsDto {
-    fn from(r: &RouterSettings) -> Self {
-        RouterSettingsDto {
-            image: r.image.clone(),
-            models_dir: r.models_dir.clone(),
-            extra_run_args: r.extra_run_args.clone(),
-            public_prefix: r.public_prefix.clone(),
-            request_timeout_seconds: r.request_timeout_seconds,
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct AudioSettingsDto {
-    pub image: String,
-    pub models_dir: String,
-    pub backend: String,
-    pub device: i64,
-    pub threads: i64,
-    pub lazy_load: bool,
-    /// Wait-for-a-busy-model bound, in ms (0 = wait forever).
-    pub busy_timeout_ms: i64,
-    /// Unload a resident model after this long idle, in ms (0 = never).
-    pub idle_unload_ms: i64,
-    /// Free memory a load must leave behind, in MiB (0 = no guard).
-    pub min_free_memory_mb: i64,
-    /// Largest buffered request body, in MiB (0 = the engine's 2 GiB).
-    pub max_request_body_mb: i64,
-    /// Shared voice library as the container sees it (empty = none).
-    pub voice_dir: String,
-    pub extra_run_args: Vec<String>,
-    pub public_prefix: String,
-    /// See [`RouterSettingsDto::request_timeout_seconds`].
-    pub request_timeout_seconds: u64,
-    /// Local speech-to-text model for voice-library clip transcripts (empty =
-    /// none, nothing transcribed automatically).
-    pub voice_transcribe_alias: String,
-    /// `pinned` | `latest`: what an audio catalog download takes.
-    pub catalog_revision: &'static str,
-}
-
-impl From<&AudioSettings> for AudioSettingsDto {
-    fn from(a: &AudioSettings) -> Self {
-        AudioSettingsDto {
-            image: a.image.clone(),
-            models_dir: a.models_dir.clone(),
-            backend: a.backend.clone(),
-            device: a.device,
-            threads: a.threads,
-            lazy_load: a.lazy_load,
-            busy_timeout_ms: a.busy_timeout_ms,
-            idle_unload_ms: a.idle_unload_ms,
-            min_free_memory_mb: a.min_free_memory_mb,
-            max_request_body_mb: a.max_request_body_mb,
-            voice_dir: a.voice_dir.clone(),
-            extra_run_args: a.extra_run_args.clone(),
-            public_prefix: a.public_prefix.clone(),
-            request_timeout_seconds: a.request_timeout_seconds,
-            voice_transcribe_alias: a.voice_transcribe_alias.clone(),
-            catalog_revision: a.catalog_revision.as_str(),
-        }
-    }
-}
-
-/// Mirror of `config::ImageSettings` (image-generation design §4). The four
-/// fields every class has and no engine-specific ones: sd-server has no config
-/// file, so anything per-process is a flag in some row's `args`.
-#[derive(Serialize)]
-pub struct ImageSettingsDto {
-    pub image: String,
-    pub models_dir: String,
-    pub extra_run_args: Vec<String>,
-    pub public_prefix: String,
-    /// See [`RouterSettingsDto::request_timeout_seconds`].
-    pub request_timeout_seconds: u64,
-}
-
-impl From<&ImageSettings> for ImageSettingsDto {
-    fn from(i: &ImageSettings) -> Self {
-        ImageSettingsDto {
-            image: i.image.clone(),
-            models_dir: i.models_dir.clone(),
-            extra_run_args: i.extra_run_args.clone(),
-            public_prefix: i.public_prefix.clone(),
-            request_timeout_seconds: i.request_timeout_seconds,
-        }
-    }
-}
-
 /// `GET /api/settings-full`.
-pub async fn settings_full(State(st): State<SharedState>) -> Response {
-    let snap = st.snapshot();
-    let s = &snap.settings;
-    let keys: Vec<Value> = snap
-        .api_keys
-        .iter()
-        .map(|k| json!({ "id": k.id, "name": k.name, "enabled": k.enabled }))
-        .collect();
-    // `chat_archive_days`/`chat_purge_days` are set outside the macro below,
-    // not woven into it: this `json!` invocation was already near rustc's
-    // default macro recursion limit (128), and two more fields tipped it
-    // over. Assigning after construction avoids bumping a crate-wide limit
-    // just to route around one call site.
-    let mut body = json!({
-        "bind_addr": s.bind_addr,
-        "auth_enabled": s.auth_enabled,
-        "retention_days": s.retention_days,
-        "retention_max_rows": s.retention_max_rows,
-        "jobs_retention_days": s.jobs_retention_days,
-        "jobs_max_rows": s.jobs_max_rows,
-        "usage_retention_months": s.usage_retention_months,
-        "currency": s.currency,
-        "local_reference_alias": s.local_reference_alias,
-        "global_budget_micro": s.global_budget_micro,
-        "global_budget_period": s.global_budget_period.as_str(),
-        "max_body_mb": s.max_body_mb,
-        "self_admin": lmgw_api_types::AdminLevel::from(s.self_admin),
-        "sampling_alias": s.sampling_alias,
-        "responses_max_tool_calls": s.responses_max_tool_calls,
-        "responses_timeout_seconds": s.responses_timeout_seconds,
-        "responses_store": s.responses_store,
-        "responses_retention_hours": s.responses_retention_hours,
-        "responses_max_chains": s.responses_max_chains,
-        "docs_ingest_reply_tokens": s.docs_ingest_reply_tokens,
-        "docs_embed_batch": s.docs_embed_batch,
-        "docs_fetch_delay_ms": s.docs_fetch_delay_ms,
-        "docs_search": s.docs_search,
-        "docs_rerank_model": s.docs_rerank_model,
-        "vram": s.vram,
-        "hold": s.hold,
-        "container_prefix": s.container_prefix,
-        "agent_origin_suffix": s.agent_origin_suffix,
-        // Asked per read rather than remembered from boot (origins §4.1): the
-        // rule is about `bind_addr`, this machine's names and the suffix
-        // together, and any of the three can move under a suffix nobody
-        // retyped. `null` when it shadows nothing, which is every gateway that
-        // has not been moved.
-        "agent_origin_suffix_warning": crate::agents::service::origin_suffix_warning(s),
-        "agent_script_image": s.agent_script_image,
-        "update_check_enabled": s.update_check_enabled,
-        "has_update_token": !s.update_token.is_empty(),
-        "has_hf_token": !s.hf_token.is_empty(),
-        "router": RouterSettingsDto::from(&s.router),
-        "aux_router": RouterSettingsDto::from(&s.aux_router),
-        "audio": AudioSettingsDto::from(&s.audio),
-        "image": ImageSettingsDto::from(&s.image),
-        "api_keys": keys,
-        "data_dir": st.data_dir.display().to_string(),
-        "version": env!("CARGO_PKG_VERSION"),
-    });
-    body["chat_archive_days"] = json!(s.chat_archive_days);
-    body["chat_purge_days"] = json!(s.chat_purge_days);
-    // The Chat change feed's limits (client-apps design §2.3).
-    body["chat_feed_retention_days"] = json!(s.chat_feed_retention_days);
-    body["chat_feed_keepalive_s"] = json!(s.chat_feed_keepalive_s);
-    body["chat_feed_page_size"] = json!(s.chat_feed_page_size);
-    body["chat_feed_live_buffer"] = json!(s.chat_feed_live_buffer);
-    // The default new Chat threads start with, as in force now, and the
-    // built-in one beside it: the page's Reset puts that back in the box.
-    body["chat_pdf_mode"] = json!(s.chat_pdf_mode);
-    body["chat_stt_alias"] = json!(s.chat_stt_alias);
-    // The Chat's Voice group (chat-voice design §2.1).
-    body["chat_tts_alias"] = json!(s.chat_tts_alias);
-    body["chat_voice"] = json!(s.chat_voice);
-    body["chat_speech_style"] = json!(s.chat_speech_style);
-    body["chat_voice_language"] = json!(s.chat_voice_language);
-    body["chat_voice_reply_language"] = json!(s.chat_voice_reply_language);
-    // Where the saved languages do not reach a speech model as set — the
-    // spoken one the ASR, the reply's the TTS — said beside the fields
-    // (chat-voice design §2.1).
-    body["chat_voice_language_notes"] = json!(super::chat_voice::language_notes(&st).await);
-    body["chat_read_aloud"] = json!(s.chat_read_aloud);
-    body["chat_turn_detection"] = json!(s.chat_turn_detection);
-    body["chat_voice_audio_input"] = json!(s.chat_voice_audio_input);
-    body["chat_kb_budget_tokens"] = json!(s.chat_kb_budget_tokens);
-    body["chat_system_prompt"] = json!(s.default_chat_prompt());
-    body["chat_system_prompt_builtin"] = json!(crate::config::BUILTIN_CHAT_SYSTEM_PROMPT);
-    // The profile new threads start with (personality-profiles §3.3).
-    body["chat_profile"] = json!(s.chat_profile);
-    // Container builds (container-builds §5, §7, §8), outside the macro for
-    // the recursion-limit reason above. The effective dir is spelled out
-    // because "unset" means a default that differs between prod and a dev
-    // instance, and the warning is asked per read: what the dir sits on can
-    // change under a setting nobody retyped.
-    let builds_dir = st.builds_dir();
-    body["builds_dir"] = json!(s.builds_dir);
-    body["builds_dir_effective"] = json!(builds_dir.display().to_string());
-    body["builds_dir_warning"] = json!(crate::backends::paths::tmpfs_refusal(&builds_dir));
-    body["forge_tokens"] = crate::ops::redact_map(&s.forge_tokens);
-    body["build_update_check_hours"] = json!(s.build_update_check_hours);
-    body["realtime"] = json!(crate::ops::realtime_view(&s.realtime));
-    body["mcp"] = crate::ops::mcp_settings_view(&s.mcp);
-    // A derived fact, like the built-in prompt above: what an audio row on
-    // the CPU runs with when it names no thread count.
-    let cpu = crate::host::cpu();
-    body["host_cpu"] = json!({
-        "physical_cores": cpu.physical_cores,
-        "logical_cpus": cpu.logical_cpus,
-        "source": cpu.source,
-    });
-    Json(body).into_response()
-}
+mod full;
+pub use full::settings_full;
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -269,6 +52,38 @@ impl RouterSettingsPatch {
         // and any positive number an owner types is a number they meant.
         if let Some(v) = self.request_timeout_seconds {
             r.request_timeout_seconds = v;
+        }
+    }
+}
+
+/// The aux class's patch: the class fields and the decision rows' prefix
+/// (decision-models design §3.10). Its own type rather than a flattened
+/// [`RouterSettingsPatch`], because a patch denies unknown fields and serde
+/// cannot do that through a flatten.
+#[derive(Deserialize, Default, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuxRouterSettingsPatch {
+    image: Option<String>,
+    models_dir: Option<String>,
+    extra_run_args: Option<Vec<String>>,
+    public_prefix: Option<String>,
+    request_timeout_seconds: Option<u64>,
+    /// The prefix decision rows are exposed under (`decide`); `""` = bare ids.
+    decision_prefix: Option<String>,
+}
+
+impl AuxRouterSettingsPatch {
+    fn apply(self, a: &mut AuxRouterSettings) {
+        RouterSettingsPatch {
+            image: self.image,
+            models_dir: self.models_dir,
+            extra_run_args: self.extra_run_args,
+            public_prefix: self.public_prefix,
+            request_timeout_seconds: self.request_timeout_seconds,
+        }
+        .apply(&mut a.base);
+        if let Some(v) = self.decision_prefix {
+            a.decision_prefix = v.trim_matches('/').to_string();
         }
     }
 }
@@ -419,8 +234,12 @@ pub struct SettingsFullPatch {
     /// Keep the Chat change feed's records this many days; `0` keeps every
     /// record. A client away longer resumes with a `resync`.
     chat_feed_retention_days: Option<i64>,
-    /// Seconds between the Chat feed's keep-alive comments, at least 1.
+    /// Seconds between the Chat feed's keep-alive comments, from 1 to
+    /// `chat_feed_keepalive_max_s`.
     chat_feed_keepalive_s: Option<i64>,
+    /// The longest keep-alive a feed may ask for itself
+    /// (`GET /chat/api/feed?keepalive_s=`), from 1 to 86400 seconds.
+    chat_feed_keepalive_max_s: Option<i64>,
     /// Records the Chat feed reads per query while a client catches up,
     /// from 1 to 10000.
     chat_feed_page_size: Option<i64>,
@@ -512,7 +331,7 @@ pub struct SettingsFullPatch {
     /// Build update check interval in hours; `0` = off, at most 8760.
     build_update_check_hours: Option<u32>,
     router: Option<RouterSettingsPatch>,
-    aux_router: Option<RouterSettingsPatch>,
+    aux_router: Option<AuxRouterSettingsPatch>,
     audio: Option<AudioSettingsPatch>,
     image: Option<ImageSettingsPatch>,
     /// `GET /v1/realtime`'s settings — the same patch
@@ -520,6 +339,9 @@ pub struct SettingsFullPatch {
     realtime: Option<crate::ops::RealtimeSettingsPatch>,
     /// The device MCP host link's limits (Settings → MCP).
     mcp: Option<crate::ops::McpSettingsPatch>,
+    /// The device link's bounds (Settings → Network & access → Devices) —
+    /// the same patch the `settings_set` op takes, with the same checks.
+    devices: Option<crate::ops::DevicesSettingsPatch>,
 }
 
 /// VRAM admission control. Every field is optional so one knob moves
@@ -800,6 +622,7 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
         crate::ops::ChatFeedPatch {
             chat_feed_retention_days: p.chat_feed_retention_days,
             chat_feed_keepalive_s: p.chat_feed_keepalive_s,
+            chat_feed_keepalive_max_s: p.chat_feed_keepalive_max_s,
             chat_feed_page_size: p.chat_feed_page_size,
             chat_feed_live_buffer: p.chat_feed_live_buffer,
         },
@@ -900,11 +723,26 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     if let Some(v) = p.vram {
         v.apply(&mut s.vram)?;
     }
+    let mut ports_touched = false;
     if let Some(r) = p.realtime {
-        crate::ops::apply_realtime(st, &mut s.realtime, r).await?;
+        let touched = crate::ops::apply_realtime(st, &mut s.realtime, r).await?;
+        ports_touched |= touched
+            .iter()
+            .any(|k| crate::config::WEBRTC_KEYS.contains(k));
+        notes.extend(crate::config::webrtc_applies(&touched));
     }
     if let Some(m) = p.mcp {
         crate::ops::apply_mcp_settings(&mut s.mcp, m)?;
+    }
+    let mut listener_moved = false;
+    if let Some(d) = p.devices {
+        listener_moved = crate::ops::touches_listener(&d);
+        ports_touched |= listener_moved;
+        notes.extend(
+            crate::ops::apply_devices(&mut s.devices, d, &s.bind_addr)?
+                .iter()
+                .map(crate::ops::DevicesChange::note),
+        );
     }
     if let Some(h) = p.hold {
         if let Some(v) = h.fallback_alias {
@@ -1133,6 +971,9 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
         }
     }
 
+    if ports_touched {
+        crate::config::webrtc_port_collision(&s)?;
+    }
     store::save_settings(&st.db, &s)
         .await
         .map_err(|e| e.to_string())?;
@@ -1145,6 +986,10 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     // (`reconcile_mcp`).
     drop(guard);
     st.reconcile_mcp().await;
+    // The device listener follows at once (device link design §4.1).
+    if listener_moved {
+        notes.extend(crate::ops::apply_devices_listener(st).await);
+    }
     if let Some(e) = published.reload_failed {
         notes.push(format!(
             "the rest of the configuration could not be reloaded ({e}); these settings apply \
@@ -1204,7 +1049,7 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
     } else {
         format!("settings saved — {}", notes.join("; "))
     };
-    Ok(json!({ "ok": true, "message": message }))
+    answer(dto::MessageAck::new(message))
 }
 
 /// The `agent_origin_suffix` setting, checked as a DNS name (origins §4.1).
@@ -1216,7 +1061,7 @@ pub async fn settings_set_full(st: &SharedState, p: SettingsFullPatch) -> Result
 /// `service::origin_suffix_refusal`, which answers with its own code.
 ///
 /// Upper case is accepted and lower-cased on the way in, because a host name
-/// is case-insensitive and a field that refuses `Lmgw.lan` would be refusing
+/// is case-insensitive and a field that refuses `Lmgw.example` would be refusing
 /// the same value it is about to store.
 fn validate_origin_suffix(raw: &str) -> Result<String, String> {
     let v = raw.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -1230,7 +1075,7 @@ fn validate_origin_suffix(raw: &str) -> Result<String, String> {
     if v.contains("://") || v.contains('/') {
         return Err(format!(
             "agent origin suffix '{v}' is a DNS name, not a URL — no scheme and no path, just \
-             the suffix (for example 'localhost' or 'lmgw.lan')"
+             the suffix (for example 'localhost' or 'lmgw.example')"
         ));
     }
     if v.contains(':') {
@@ -1312,6 +1157,13 @@ fn validate_container_prefix(raw: &str) -> Result<String, String> {
 // Keys (principals design §3.12)
 // ---------------------------------------------------------------------------
 
+/// A typed answer as the JSON the dispatcher answers with. A `Value`'s keys are
+/// sorted, as they were when these answers were built as maps, so the bytes on
+/// the wire stay as they were.
+fn answer<T: Serialize>(typed: T) -> Result<Value, Refusal> {
+    serde_json::to_value(typed).map_err(|e| bad_request(format!("serializing the answer: {e}")))
+}
+
 /// An op-level input error in the shape every other op's has: `400 op_failed`,
 /// which is exactly what `api::ops_result` produces from a bare `Err(String)`.
 /// Here so that moving the credential ops onto [`Refusal`] — which they need,
@@ -1353,8 +1205,9 @@ fn key_by_id(st: &SharedState, id: i64) -> Result<ApiKey, Refusal> {
         })
 }
 
-/// The five credential ops of the `/api` plane, dispatched off `api::op` the
-/// way the agent catalog's ops are (§3.12).
+/// The credential ops of the `/api` plane — the five key ops and the device
+/// link's four pairing ops (device link design §9.4) — dispatched off
+/// `api::op` the way the agent catalog's ops are (§3.12).
 ///
 /// They answer `Result<Value, Refusal>` rather than the plane's usual
 /// `Result<Value, String>` because an owner refusal carries its own code.
@@ -1362,7 +1215,8 @@ fn key_by_id(st: &SharedState, id: i64) -> Result<ApiKey, Refusal> {
 /// None of them is on the `lmgw__*` self-admin plane. That plane has never
 /// exposed a credential — there is no `lmgw__agent_token_get` either, only the
 /// `/api` op — and `key_reveal` / `key_rotate` hand out the key that holds
-/// every capability. A model-driven client with the self-admin tools is
+/// every capability, `key_create` and `device_token` a pairing link that
+/// makes a device. A model-driven client with the self-admin tools is
 /// exactly who must not be able to ask for it.
 pub(super) async fn key_op(
     st: &SharedState,
@@ -1389,7 +1243,9 @@ pub(super) async fn key_op(
             // A device is created with its whole policy and its pairing link
             // (client-apps design §1.4), not with the scope alone.
             if kind.trim() == "device" {
-                return device_keys::create(st, name.trim(), &args).await;
+                return answer(dto::KeyCreateAnswer::Device(
+                    device_keys::create(st, name.trim(), &args).await?,
+                ));
             }
             // The admin-tools level is a paired device's (client-apps
             // design L3/L5): asked of any other kind, said, not dropped.
@@ -1402,32 +1258,69 @@ pub(super) async fn key_op(
                      uses lmgw's admin tools as the owner, and a client key never",
                 ));
             }
+            let device_tools =
+                match args.get("device_tools") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(serde_json::from_value::<Vec<String>>(v.clone()).map_err(
+                        |e| bad_request(format!("device_tools is a list of labels: {e}")),
+                    )?),
+                };
             let scope = KeyPatch {
                 scope_mode: str_arg(&args, "scope_mode"),
                 scope_patterns: str_arg(&args, "scope_patterns"),
                 tool_scope_mode: str_arg(&args, "tool_scope_mode"),
                 tool_scope_patterns: str_arg(&args, "tool_scope_patterns"),
+                device_tools,
                 ..Default::default()
             };
-            key_create(st, &name, &kind, scope).await
+            answer(dto::KeyCreateAnswer::Key(
+                key_create(st, &name, &kind, scope).await?,
+            ))
         }
         "key_set" => {
             let p: KeyPatch = crate::ops::patch_from_args(Some(args)).map_err(bad_request)?;
             key_set(st, p).await
         }
-        "key_delete" => key_delete(st, id(&args)?).await,
-        "key_reveal" => key_reveal(st, id(&args)?).await,
+        "key_delete" => answer(key_delete(st, id(&args)?).await?),
+        "key_reveal" => answer(key_reveal(st, id(&args)?).await?),
         "key_rotate" => {
             let id = id(&args)?;
-            // A device rotates by re-pairing: a new path, because its row
-            // keeps no plaintext to replace (L1).
+            // A device holds no secret of lmgw's making: it pairs again with
+            // a new token (device link design §5.2).
             match key_by_id(st, id)? {
-                key if key.kind == ApiKeyKind::Device => device_keys::rotate(st, &key, &args).await,
-                _ => key_rotate(st, id).await,
+                key if key.kind == ApiKeyKind::Device => Err(device_keys::rotate_refusal(&key)),
+                _ => answer(key_rotate(st, id).await?),
             }
         }
+        // The device link's pairing (device link design §3, §5.5, §9.4).
+        "device_token" => {
+            let key = device_by_id(st, id(&args)?)?;
+            answer(device_keys::token(st, &key, &args).await?)
+        }
+        "device_token_end" => {
+            let key = device_by_id(st, id(&args)?)?;
+            answer(device_keys::token_end(st, &key).await?)
+        }
+        "device_confirm" => {
+            let key = device_by_id(st, id(&args)?)?;
+            answer(device_keys::confirm(st, &key, &args).await?)
+        }
+        "device_ca_rotate" => answer(device_keys::ca_rotate(st).await?),
         other => Err(bad_request(format!("unknown op '{other}'"))),
     }
+}
+
+/// The device row an id names, refused when there is none or it is another
+/// kind of key.
+fn device_by_id(st: &SharedState, id: i64) -> Result<ApiKey, Refusal> {
+    let key = key_by_id(st, id)?;
+    if key.kind != ApiKeyKind::Device {
+        return Err(bad_request(format!(
+            "'{}' is not a device — the device ops take a paired device's id",
+            key.name
+        )));
+    }
+    Ok(key)
 }
 
 fn str_arg(args: &Map<String, Value>, key: &str) -> Option<String> {
@@ -1435,11 +1328,13 @@ fn str_arg(args: &Map<String, Value>, key: &str) -> Option<String> {
 }
 
 /// `key_create { name, kind, scope_mode?, scope_patterns?, tool_scope_mode?,
-/// tool_scope_patterns? }` — a client key or an owner key (§3.12).
+/// tool_scope_patterns?, device_tools? }` — a client key or an owner key
+/// (§3.12).
 ///
-/// The four scope fields are `key_set`'s, with `key_set`'s validation and
+/// The five scope fields are `key_set`'s, with `key_set`'s validation and
 /// normalisation; `scope` carries only those (its `id` is unused). An owner
-/// key refuses a scope that narrows anything, as it does on `key_set`.
+/// key refuses a scope that narrows or grants anything, as it does on
+/// `key_set`.
 ///
 /// `kind` absent means `client`, which is what every caller predating the
 /// owner principal sends. The two spellings of that kind are both taken: the
@@ -1450,7 +1345,7 @@ pub async fn key_create(
     name: &str,
     kind: &str,
     scope: KeyPatch,
-) -> Result<Value, Refusal> {
+) -> Result<dto::KeyCreated, Refusal> {
     let name = name.trim();
     if name.is_empty() {
         return Err(bad_request("key name is required"));
@@ -1497,18 +1392,18 @@ pub async fn key_create(
         let id = token::set_owner_key(st, &name, &plaintext, true)
             .await
             .map_err(bad_request)?;
-        return Ok(json!({
-            "ok": true,
-            "id": id,
-            "name": name,
-            // Stored, unlike a client key's: an owner key is handed back by
-            // `key_reveal` for as long as the row exists (§3.1).
-            "plaintext": plaintext,
-            "message": format!(
+        return Ok(dto::KeyCreated {
+            ok: true,
+            id,
+            message: format!(
                 "owner key '{name}' created — it holds every capability, and stays copyable on \
                  Usage → Keys"
             ),
-        }));
+            name,
+            // Stored, unlike a client key's: an owner key is handed back by
+            // `key_reveal` for as long as the row exists (§3.1).
+            key: plaintext,
+        });
     }
 
     let plaintext = format!("lmgw-{}", super::rand_hex32());
@@ -1529,14 +1424,14 @@ pub async fn key_create(
             )));
         }
     }
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "name": name,
+    Ok(dto::KeyCreated {
+        ok: true,
+        id,
+        message: format!("key '{name}' created — copy it now, it is not shown again"),
+        name,
         // Shown exactly once; only the hash is stored.
-        "plaintext": plaintext,
-        "message": format!("key '{name}' created — copy it now, it is not shown again"),
-    }))
+        key: plaintext,
+    })
 }
 
 /// `key_set` with the owner rules in front of it (§3.12).
@@ -1549,7 +1444,7 @@ pub async fn key_set(st: &SharedState, p: KeyPatch) -> Result<Value, Refusal> {
             return Err(refuse_owner(message));
         }
     }
-    crate::ops::key_set(st, p).await.map_err(bad_request)
+    crate::ops::backends::to_json(crate::ops::key_set(st, p).await).map_err(bad_request)
 }
 
 /// `key_delete { id }` — every row but the door (§3.12).
@@ -1559,7 +1454,7 @@ pub async fn key_set(st: &SharedState, p: KeyPatch) -> Result<Value, Refusal> {
 /// answers `401` naming the row until the owner enables it. The credential
 /// that was handed out is gone in the meantime, which is the point of
 /// reaching for delete rather than for the toggle.
-pub async fn key_delete(st: &SharedState, id: i64) -> Result<Value, Refusal> {
+pub async fn key_delete(st: &SharedState, id: i64) -> Result<dto::MessageAck, Refusal> {
     let key = key_by_id(st, id)?;
     if key.kind == ApiKeyKind::Owner && key.name == token::OWNER_DASHBOARD {
         return Err(refuse_owner(crate::ops::REFUSE_DOOR));
@@ -1584,7 +1479,7 @@ pub async fn key_delete(st: &SharedState, id: i64) -> Result<Value, Refusal> {
         crate::web::chat_tasks::servers_gone(st).await;
     }
     reloaded.map_err(|e| bad_request(e.to_string()))?;
-    Ok(json!({ "ok": true, "message": "key revoked" }))
+    Ok(dto::MessageAck::new("key revoked"))
 }
 
 /// The stored plaintext of one owner row, or why there is none to hand back.
@@ -1625,16 +1520,16 @@ fn owner_plaintext(key: &ApiKey) -> Result<String, Refusal> {
 ///
 /// No origin list of its own: a cookie-authenticated caller is same-origin by
 /// the gate (§3.6) and a bearer caller already holds the key it is asking for.
-pub async fn key_reveal(st: &SharedState, id: i64) -> Result<Value, Refusal> {
+pub async fn key_reveal(st: &SharedState, id: i64) -> Result<dto::KeySecret, Refusal> {
     let key = key_by_id(st, id)?;
     let plaintext = owner_plaintext(&key)?;
-    Ok(json!({
-        "ok": true,
-        "id": key.id,
-        "name": key.name,
-        "key": plaintext,
-        "message": format!("'{}' copied", key.name),
-    }))
+    Ok(dto::KeySecret {
+        ok: true,
+        id: key.id,
+        message: format!("'{}' copied", key.name),
+        name: key.name,
+        key: plaintext,
+    })
 }
 
 /// `key_rotate { id }` → `{ key }` (§3.12).
@@ -1643,7 +1538,7 @@ pub async fn key_reveal(st: &SharedState, id: i64) -> Result<Value, Refusal> {
 /// old value is dead the moment the new one is live and the two can never
 /// disagree. The row's enabled flag is carried across: rotating a disabled
 /// `owner:self-admin` re-mints it and leaves the plane closed.
-pub async fn key_rotate(st: &SharedState, id: i64) -> Result<Value, Refusal> {
+pub async fn key_rotate(st: &SharedState, id: i64) -> Result<dto::KeySecret, Refusal> {
     let key = key_by_id(st, id)?;
     // Same three refusals as `key_reveal`, for the same reason — an agent
     // token rotates with `agent_token_rotate`, and a client key has no
@@ -1680,26 +1575,24 @@ pub async fn key_rotate(st: &SharedState, id: i64) -> Result<Value, Refusal> {
              effect at the next reload)"
         ));
     }
-    Ok(json!({
-        "ok": true,
-        "id": key.id,
-        "name": key.name,
-        "key": plaintext,
-        "message": message,
-    }))
+    Ok(dto::KeySecret {
+        ok: true,
+        id: key.id,
+        name: key.name,
+        key: plaintext,
+        message,
+    })
 }
 
-pub async fn update_check(st: &SharedState) -> Result<Value, String> {
+/// `POST /api/op/update_check`: polls the feed now and says what it found.
+pub async fn update_check(st: &SharedState) -> Result<dto::MessageAck, String> {
     let current = crate::update::current_version();
     match crate::update::check(st, current).await {
-        Ok(Some(info)) => Ok(json!({
-            "ok": true,
-            "message": format!(
-                "update available: {} (you have {}) — install it from the tray menu",
-                info.manifest.version, info.current
-            ),
-        })),
-        Ok(None) => Ok(json!({ "ok": true, "message": format!("up to date ({current})") })),
+        Ok(Some(info)) => Ok(dto::MessageAck::new(format!(
+            "update available: {} (you have {}) — install it from the tray menu",
+            info.manifest.version, info.current
+        ))),
+        Ok(None) => Ok(dto::MessageAck::new(format!("up to date ({current})"))),
         Err(e) => Err(format!("update check failed: {e}")),
     }
 }

@@ -17,10 +17,6 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-/// The largest integer a JSON number survives round-tripping through a
-/// JavaScript/JSON reader unchanged (`Number.MAX_SAFE_INTEGER`).
-const MAX_SAFE_INT: i64 = 9_007_199_254_740_991;
-
 /// The documented rate for analysis timelines: audio.cpp resamples WAV input to
 /// 16 kHz mono before VAD/diarization/alignment and reports spans in samples at
 /// that rate. Editable in the UI rather than baked in, because a result that
@@ -389,114 +385,14 @@ pub fn is_openai_shaped(task: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Number / value coercion
-// ---------------------------------------------------------------------------
-
-/// `JSON.stringify` prints an integral float without a fraction (`3`, not
-/// `3.0`) and audio.cpp's integer options reject the latter — so an integral
-/// value goes out as a JSON integer, exactly as the old island sent it.
-fn js_number(n: f64) -> Value {
-    if n.fract() == 0.0 && n.abs() <= MAX_SAFE_INT as f64 {
-        Value::from(n as i64)
-    } else {
-        Value::from(n)
-    }
-}
-
-/// audio.cpp takes uint64 seeds; a JSON number past 2^53 would lose precision
-/// before it reaches option parsing, so those travel as a string.
-fn seed_value(raw: &str) -> Value {
-    match raw.parse::<i64>() {
-        Ok(n) if n.abs() <= MAX_SAFE_INT => Value::from(n),
-        _ => Value::from(raw.to_string()),
-    }
-}
-
-fn parse_number(name: &str, raw: &str) -> Result<Value, String> {
-    let n: f64 = raw.parse().map_err(|_| format!("{name}: not a number"))?;
-    if !n.is_finite() {
-        return Err(format!("{name}: not a number"));
-    }
-    Ok(js_number(n))
-}
-
-// ---------------------------------------------------------------------------
 // TTS (`POST /v1/audio/speech`)
 // ---------------------------------------------------------------------------
 
-/// The TTS panel's widgets, raw. Parsed here so the "Request" disclosure and
-/// the actual call are literally the same bytes.
-#[derive(Clone, Default, Debug)]
-pub struct SpeechForm {
-    pub model: String,
-    pub input: String,
-    pub voice: String,
-    pub voice_ref: String,
-    pub reference_text: String,
-    /// `speed` — a positive multiplier, on models that support speed control
-    /// (audio.cpp rejects it on models that do not, rather than ignoring it).
-    pub speed: String,
-    /// Language code passed to models whose contract accepts one.
-    pub language: String,
-    /// OpenAI's `instructions` — delivery/style guidance, forwarded as the
-    /// engine's `instruction` option.
-    pub instructions: String,
-    pub seed: String,
-    pub max_tokens: String,
-    pub response_format: String,
-    pub stream: bool,
-    pub options: String,
-}
-
-pub fn speech_body(f: &SpeechForm) -> Result<Value, String> {
-    let mut b = Map::new();
-    b.insert("model".into(), Value::from(f.model.clone()));
-    b.insert("input".into(), Value::from(f.input.clone()));
-    for (key, raw) in [
-        ("voice", &f.voice),
-        ("voice_ref", &f.voice_ref),
-        ("reference_text", &f.reference_text),
-        ("language", &f.language),
-        ("instructions", &f.instructions),
-    ] {
-        let s = raw.trim();
-        if !s.is_empty() {
-            b.insert(key.into(), Value::from(s.to_string()));
-        }
-    }
-    let speed = f.speed.trim();
-    if !speed.is_empty() {
-        b.insert("speed".into(), parse_number("speed", speed)?);
-    }
-    let seed = f.seed.trim();
-    if !seed.is_empty() {
-        b.insert("seed".into(), seed_value(seed));
-    }
-    let max_tokens = f.max_tokens.trim();
-    if !max_tokens.is_empty() {
-        b.insert("max_tokens".into(), parse_number("max tokens", max_tokens)?);
-    }
-    if f.stream {
-        // SSE only ever carries raw PCM — the header comes from the declared
-        // rate/channels/depth on the client side.
-        b.insert("stream_format".into(), Value::from("sse"));
-        b.insert("response_format".into(), Value::from("pcm"));
-    } else if !f.response_format.is_empty() {
-        b.insert(
-            "response_format".into(),
-            Value::from(f.response_format.clone()),
-        );
-    }
-    let options = f.options.trim();
-    if !options.is_empty() {
-        // Surfaced as an error rather than swallowed — a typo here silently
-        // dropping every advanced parameter is the worst outcome.
-        let v: Value =
-            serde_json::from_str(options).map_err(|e| format!("options: invalid JSON — {e}"))?;
-        b.insert("options".into(), v);
-    }
-    Ok(Value::Object(b))
-}
+/// The TTS panel's widgets and their builder live in `lmgw-api-types`: a saved
+/// `audio_settings` preset is checked on the gateway by the same rules the page
+/// builds the request with (labs-store design §5).
+pub use lmgw_api_types::audio_lab::form::{parse_number, seed_value};
+pub use lmgw_api_types::audio_lab::{speech_body, SpeechForm};
 
 // ---------------------------------------------------------------------------
 // ASR (`POST /v1/audio/transcriptions`)

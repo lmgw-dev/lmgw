@@ -31,7 +31,6 @@ pub struct Operation {
     pub confirm_note: Option<String>,
     pub deprecated: bool,
     pub op_name: Option<String>,
-    pub alias_of: Option<String>,
     pub tool: Option<String>,
     pub dialect: Option<String>,
     pub model_task: Option<String>,
@@ -204,7 +203,6 @@ impl ApiDoc {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         op_name: opt_str_field(op, ext::OP),
-                        alias_of: opt_str_field(op, ext::ALIAS_OF),
                         tool: opt_str_field(op, ext::TOOL),
                         dialect: opt_str_field(op, ext::DIALECT),
                         model_task: opt_str_field(op, ext::MODEL_TASK),

@@ -8,11 +8,13 @@
 //! cannot say.
 
 use lmgw_api_types::chat_profiles::{
-    examples_from_text, examples_to_text, ProfileCreate, ProfilePatch, ProfileVoice, Reasoning,
+    examples_from_text, ProfileCreate, ProfilePatch, ProfileVoice, Reasoning,
 };
-use serde_json::{json, Map, Value};
+use lmgw_api_types::self_admin::{ToolProfile, ToolProfileDeleted, ToolProfileList};
+use serde_json::{Map, Value};
 
 use crate::ops;
+use crate::ops::backends::to_json;
 use crate::ops::ProfileError;
 use crate::state::SharedState;
 use crate::store::{feed, AdminThreads};
@@ -138,15 +140,7 @@ pub(super) async fn run(
     match name {
         "lmgw__profiles" => {
             let list = ops::profiles_list(state, admin).await.map_err(refused)?;
-            let mut v = serde_json::to_value(&list).map_err(|e| e.to_string())?;
-            for (p, w) in list
-                .profiles
-                .iter()
-                .zip(v["profiles"].as_array_mut().into_iter().flatten())
-            {
-                w["examples"] = json!(examples_to_text(&p.examples));
-            }
-            Ok(v)
+            to_json(Ok(ToolProfileList::from(&list)))
         }
         "lmgw__profile_set" => {
             let action = arg_str(&a, "action")?.ok_or("action is required (create|update)")?;
@@ -257,22 +251,14 @@ pub(super) async fn run(
                 other => return Err(format!("action '{other}' is not create or update")),
             }
             .map_err(refused)?;
-            let mut v = serde_json::to_value(&profile).map_err(|e| e.to_string())?;
-            v["examples"] = json!(examples_to_text(&profile.examples));
-            Ok(v)
+            to_json(Ok(ToolProfile::from(&profile)))
         }
         "lmgw__profile_delete" => {
             let id = arg_i64(&a, "id")?.ok_or("id is required")?;
             let d = ops::profile_delete(state, id, admin, Some(&by), caller.device)
                 .await
                 .map_err(refused)?;
-            let mut v = serde_json::to_value(&d).map_err(|e| e.to_string())?;
-            v["message"] = json!(format!(
-                "profile {id} deleted; {} thread(s) and {} folder default(s) no longer use it",
-                d.threads_cleared,
-                d.folders_cleared.len()
-            ));
-            Ok(v)
+            to_json(Ok(ToolProfileDeleted::from(d)))
         }
         other => Err(format!("unhandled built-in tool '{other}'")),
     }

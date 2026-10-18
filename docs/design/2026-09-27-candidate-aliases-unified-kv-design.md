@@ -838,7 +838,7 @@ reversible.
 
 Phase 2 (`feat/external-vram-fallback`, 2026-09-27): §4.7.
 
-**WP0, per-process attribution (2026-09-27, RTX 4090, driver 615.71.09,
+**WP0, per-process attribution (2026-09-27, a 24 GB GPU, a 615-series driver,
 rootless podman, qwen3.5-0.8b):**
 - `podman inspect --format '{{.State.Pid}}'` of the chat container is the
   llama-server host PID, and NVML's compute list shows exactly that PID
@@ -962,8 +962,8 @@ rootless podman, qwen3.5-0.8b):**
     model.
 29. **The non-gate sites go through the gate.** Embeddings, rerank, the
     audio routes (speech, tasks, uploads, voices) and the image routes call
-    `gate::open`; `audio_voices_if_running` calls `gate::resolve` only,
-    because it never admits. Their pre-admission checks are new `RouteCheck`
+    `gate::open`; the lab's voice list (`voices_if_running`) calls `gate::resolve` only
+    (its remote branch too), because it never admits. Their pre-admission checks are new `RouteCheck`
     variants, re-run on a swapped route: `Embeddings`, `Rerank` (media
     check plus section guard), `Audio`, `AudioVoices` (protocol, voices),
     and `Image(endpoint)` (protocol, image row and `edit`, or the cloud
@@ -1674,7 +1674,7 @@ rewrote entries 62, 70 and 74 in place.
     case stops nothing at all, and a guest's own model keeps today's forced
     stop.
 
-**Live check of phase 4 (2026-09-28, dev instance, RTX 4090, Qwen3.5-0.8B
+**Live check of phase 4 (2026-09-28, dev instance, a 24 GB GPU, Qwen3.5-0.8B
 `q08` and Qwen3.5-2B `q2`, ctx 4096, `parallel` 1; aliases `bg` = [q2, q08]
 background, `own` = [q2, q08], both fallback `none`):**
 - A background request to `bg` while `q2` ran as the owner's model was

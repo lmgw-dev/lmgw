@@ -253,7 +253,7 @@ async fn a_resume_through_a_bound_session_takes_its_starters_slot() {
     let id = approval_frames(&frames)[0]["approval_request_id"].clone();
 
     // The phone's one slot, held by a session of its own (realtime §10.3).
-    let held = tools_session(&w.addr(), Some(&phone.key), json!([]), 0).await;
+    let held = tools_session(&phone.addr, None, json!([]), 0).await;
     let (mut ws, _) = w.bind(tid).await;
     send(
         &mut ws,

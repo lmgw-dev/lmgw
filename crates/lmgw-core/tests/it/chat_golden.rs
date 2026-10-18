@@ -416,6 +416,7 @@ async fn an_auto_mode_retrieval() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -744,9 +745,11 @@ async fn a_refused_save() {
         content: "edited by hand".into(),
         ..Default::default()
     };
-    assert!(store::update_chat_message(&state.db, tid, rid, &update)
-        .await
-        .unwrap());
+    assert!(
+        store::update_chat_message(&state.db, tid, rid, &update, None)
+            .await
+            .unwrap()
+    );
     release.notify_one();
     golden("not_saved", &cont.await.unwrap());
 }

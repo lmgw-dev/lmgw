@@ -72,7 +72,7 @@ async fn a_frame_overrun_names_the_frame_setting() {
 async fn a_missed_pong_closes_1011() {
     let (w, d) = host_world().await;
     crate::realtime_chat_thread::settings(&w.state, |s| s.mcp.host_ping_interval_s = 1).await;
-    let mut ws = super::device::silent(&w.addr(), &d.key).await;
+    let mut ws = super::device::silent(&d).await;
     // Unread for two intervals: the first ping goes unanswered.
     tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
     let close = patience::within("the gateway's close", async {
@@ -99,11 +99,10 @@ async fn a_missed_pong_closes_1011() {
 async fn two_links_opening_at_once_leave_one() {
     let (w, d) = host_world().await;
     let id = device_row(&w, d.id).id;
-    let addr = w.addr();
     for round in 0..5 {
         let (mut a, mut b) = tokio::join!(
-            FakeDevice::connect(&addr, &d.key, vec![tool("a")]),
-            FakeDevice::connect(&addr, &d.key, vec![tool("b")]),
+            FakeDevice::connect(&d, vec![tool("a")]),
+            FakeDevice::connect(&d, vec![tool("b")]),
         );
         let closed = patience::within("one of the two closes", async {
             tokio::select! {

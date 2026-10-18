@@ -447,13 +447,18 @@ mod tests {
     fn a_directory_value_that_escapes_the_models_dir_falls_back_to_the_default() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().display().to_string();
+        // A name no other run or process shares, one level above the models dir.
+        let escape = format!(
+            "{}-escape",
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
         let mut m = row(&[], false);
         m.files
-            .insert("lora_model_dir".into(), "../../tmp/x".into());
+            .insert("lora_model_dir".into(), format!("../{escape}/x").into());
         assert_eq!(dir_path(&m, "lora_model_dir", "loras"), "loras");
         ensure_dirs(&root, &m).unwrap();
         assert!(dir.path().join("loras").is_dir());
-        assert!(!dir.path().parent().unwrap().join("../tmp/x").exists());
+        assert!(!dir.path().parent().unwrap().join(&escape).exists());
 
         // And a file value with the same shape resolves to nothing usable, so
         // every existence check the callers make fails.

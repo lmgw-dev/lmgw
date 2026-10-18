@@ -7,35 +7,18 @@
 //! in that answer is `excerpts[n - 1]`.
 
 use leptos::prelude::*;
+use lmgw_api_types::chat_frames::RetrievalFrame;
+use lmgw_api_types::chat_threads::{ContextExcerpt, MessageContext};
 use serde::Deserialize;
 
 use super::chat_knowledge::KbUi;
 use super::knowledge_source::SourceRef;
 
-/// One retrieved passage.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub(super) struct Excerpt {
-    pub kb: String,
-    pub file_id: i64,
-    pub file: String,
-    pub page: Option<i64>,
-    pub chunk_id: String,
-    pub heading_path: String,
-    pub text: String,
-    pub score: f64,
-    /// Where the passage was in the file's text, and the file's sha256 then:
-    /// what finds it again after a re-ingest renamed its chunk.
-    pub span_start: i64,
-    pub span_end: i64,
-    pub file_sha: String,
-}
-
 /// A turn's retrieval.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub(super) struct KbContext {
-    pub excerpts: Vec<Excerpt>,
+    pub excerpts: Vec<ContextExcerpt>,
     pub tokens: i64,
     pub dropped: i64,
     pub budget_tokens: i64,
@@ -46,6 +29,43 @@ pub(super) struct KbContext {
     /// Live only: the stored retrieval of this message stood, nothing was
     /// searched again.
     pub reused: bool,
+}
+
+/// The live `retrieval` frame, as the page holds it. Every field of the two
+/// api types is named, so one the gateway adds fails the build here until it
+/// is decided; `kb_ids` and `message_id` are not shown (the page knows the
+/// message and the bases from its own state).
+impl From<RetrievalFrame> for KbContext {
+    fn from(frame: RetrievalFrame) -> Self {
+        let RetrievalFrame {
+            context,
+            message_id: _,
+            reused,
+        } = frame;
+        let MessageContext {
+            excerpts,
+            tokens,
+            dropped,
+            budget_tokens,
+            notes,
+            searched,
+            kb_ids: _,
+            query,
+            ms,
+        } = context;
+        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        Self {
+            excerpts,
+            tokens: count(tokens),
+            dropped: count(dropped),
+            budget_tokens: count(budget_tokens),
+            notes,
+            searched,
+            query,
+            ms,
+            reused,
+        }
+    }
 }
 
 /// `3100` → `3.1k`, `900` → `900`.
@@ -380,7 +400,7 @@ mod tests {
     fn the_summary_names_the_bases_and_the_tokens() {
         let c = KbContext {
             excerpts: vec![
-                Excerpt {
+                ContextExcerpt {
                     kb: "Taxes".into(),
                     ..Default::default()
                 };
@@ -403,5 +423,40 @@ mod tests {
             c.summary(),
             "No excerpts found in Taxes — GPU hold is on — keyword search only"
         );
+    }
+
+    #[test]
+    fn the_live_retrieval_frame_is_the_context_with_its_reuse_flag() {
+        use super::super::chat_stream::{frame, ChatEvent};
+        let sent = serde_json::json!({
+            "excerpts": [{
+                "kb_id": 2, "kb": "Taxes", "file_id": 9, "file": "2025.pdf", "page": 3,
+                "chunk_id": "c1", "heading_path": "Rent", "text": "Due on the 3rd.",
+                "score": 0.5, "tokens": 6, "span_start": 10, "span_end": 25,
+                "file_sha": "ab12"
+            }],
+            "tokens": 3100, "dropped": 2, "budget_tokens": 4000,
+            "notes": ["a note"], "searched": ["Taxes"], "kb_ids": [2],
+            "query": "rent", "ms": 12.5, "message_id": 41, "reused": true
+        });
+        let Some(ChatEvent::Retrieval(c)) = frame("retrieval", sent) else {
+            panic!("the frame was not read");
+        };
+        assert_eq!(
+            (c.tokens, c.dropped, c.budget_tokens, c.reused),
+            (3100, 2, 4000, true)
+        );
+        assert_eq!((c.query.as_str(), c.ms), ("rent", 12.5));
+        assert_eq!(
+            (c.notes, c.searched),
+            (vec!["a note".into()], vec!["Taxes".into()])
+        );
+        assert_eq!(c.excerpts.len(), 1);
+        assert_eq!(c.excerpts[0].file, "2025.pdf");
+        assert_eq!(c.excerpts[0].page, Some(3));
+        // The stored retrieval of a message has no flag: it was not reused.
+        let stored: KbContext =
+            serde_json::from_value(serde_json::json!({"tokens": 5, "query": "q"})).unwrap();
+        assert!(!stored.reused);
     }
 }

@@ -1,5 +1,6 @@
-use lmgw_api_types::{AgentField, AgentImportReport, AgentRunSummary};
-use serde_json::Value;
+use lmgw_api_types::{
+    AgentDetail, AgentField, AgentImportReport, AgentRunSummary, AgentServiceMount,
+};
 
 use crate::widgets::schema_form::{access_of, is_mount};
 
@@ -216,47 +217,17 @@ pub fn unbound_line(names: &[String]) -> Option<String> {
     })
 }
 
-/// One bound host mount of a service container, as `dto::AgentService.mounts`
-/// carries it (mounts §5.7).
-///
-/// Read out of the detail's **raw** document rather than off `AgentService`:
-/// the list is what the container was started with, and the DTO field lands
-/// with the core half of this work package. Reading the document means the App
-/// tab draws the list whether or not this build's `lmgw-api-types` has caught
-/// up, and a gateway that sends nothing simply has no mounts to list.
-#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
-#[serde(default)]
-pub struct ServiceMount {
-    /// The config field that bound it.
-    pub field: String,
-    /// The path on this machine. Absent for a slot nothing has bound — which
-    /// is not a mount, and is not listed.
-    pub host: Option<String>,
-    /// What the container sees: `/lmgw/mounts/<field>`.
-    pub inside: String,
-    /// `directory` or `file`.
-    pub kind: String,
-    /// `ro` or `rw`.
-    pub access: String,
-}
-
-/// The service's bound mounts, out of a `GET /api/agents/{id}` document.
-///
-/// Deliberately tolerant: an absent key, a `null`, an entry shaped some other
-/// way or one with no host path all read as "nothing to list". A tab is not the
-/// place to fail over the half of a document it did not need.
-pub fn service_mounts(detail: &Value) -> Vec<ServiceMount> {
+/// The service's bound mounts: what `AgentService.mounts` carries (mounts
+/// §5.7), less a slot with no host path, which nothing has bound and which is
+/// not a mount, so it is not listed.
+pub fn service_mounts(detail: &AgentDetail) -> Vec<AgentServiceMount> {
     detail
-        .get("service")
-        .and_then(|s| s.get("mounts"))
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|r| serde_json::from_value::<ServiceMount>(r.clone()).ok())
-                .filter(|m| m.host.as_deref().is_some_and(|h| !h.trim().is_empty()))
-                .collect()
-        })
-        .unwrap_or_default()
+        .service
+        .iter()
+        .flat_map(|s| &s.mounts)
+        .filter(|m| m.host.as_deref().is_some_and(|h| !h.trim().is_empty()))
+        .cloned()
+        .collect()
 }
 
 /// Every warning a manifest save came back with, in the order the server put

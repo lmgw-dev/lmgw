@@ -19,9 +19,9 @@ async fn disable_rotate_and_delete_end_a_device_s_feed_with_revoked() {
             "device_disabled",
         ),
         (
-            "rotate",
+            "new token",
             "rotated",
-            "device 'phone' was rotated — pair it again",
+            "the key of device 'phone' was replaced — pair it again",
             "key_unknown",
         ),
         (
@@ -36,7 +36,14 @@ async fn disable_rotate_and_delete_end_a_device_s_feed_with_revoked() {
         let mut feed = Feed::open(&w, &d.client, "", None).await;
         let (status, v) = match how {
             "disable" => op(&w, "key_set", json!({ "id": d.id, "enabled": false })).await,
-            "rotate" => op(&w, "key_rotate", json!({ "id": d.id })).await,
+            "new token" => {
+                op(
+                    &w,
+                    "device_token",
+                    json!({ "id": d.id, "end_current": true }),
+                )
+                .await
+            }
             _ => op(&w, "key_delete", json!({ "id": d.id })).await,
         };
         assert_eq!(status, 200, "{how}: {v}");

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use leptos::prelude::*;
-use serde::Deserialize;
+use lmgw_api_types::chat_threads::{SearchHit, SearchPage};
 
 use super::chat::Msg;
 use super::chat_folders::FolderInfo;
@@ -23,34 +23,6 @@ const FLASH_MS: u64 = 1500;
 /// The server's match markers (private-use characters).
 const OPEN: char = '\u{E000}';
 const CLOSE: char = '\u{E001}';
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-struct Hit {
-    kind: String,
-    message_id: Option<i64>,
-    role: Option<String>,
-    snippet: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-struct SearchThread {
-    thread_id: i64,
-    title: String,
-    folder_id: Option<i64>,
-    archived: bool,
-    match_count: i64,
-    hits: Vec<Hit>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-struct SearchResp {
-    total_threads: i64,
-    threads: Vec<SearchThread>,
-    next_offset: Option<i64>,
-}
 
 /// Is `q` long enough to ask the server?
 fn searchable(q: &str) -> bool {
@@ -82,7 +54,7 @@ pub(super) fn snippet_html(s: &str) -> String {
     out
 }
 
-fn who(h: &Hit) -> &'static str {
+fn who(h: &SearchHit) -> &'static str {
     match (h.kind.as_str(), h.role.as_deref()) {
         ("t", _) => "title",
         ("a", _) => "file",
@@ -103,7 +75,7 @@ pub(super) fn MessageHits(
     let latest = Latest::new();
     let idle = RwSignal::new(String::new());
     let include_archived = RwSignal::new(false);
-    let resp = RwSignal::new(None::<Result<SearchResp, String>>);
+    let resp = RwSignal::new(None::<Result<SearchPage, String>>);
     let busy = RwSignal::new(false);
 
     // The idle debounce: `idle` follows `query` a beat after it stops.
@@ -136,7 +108,7 @@ pub(super) fn MessageHits(
         let Some(ticket) = latest.next() else { return };
         busy.set(true);
         scope.spawn(async move {
-            let r = crate::api::get::<SearchResp>(search_url(&q, arch, 0))
+            let r = crate::api::get::<SearchPage>(search_url(&q, arch, 0))
                 .await
                 .map_err(|e| e.to_string());
             if latest.is(ticket) {
@@ -156,7 +128,7 @@ pub(super) fn MessageHits(
         let Some(ticket) = latest.next() else { return };
         busy.set(true);
         scope.spawn(async move {
-            let r = crate::api::get::<SearchResp>(search_url(&q, arch, off)).await;
+            let r = crate::api::get::<SearchPage>(search_url(&q, arch, off)).await;
             if !latest.is(ticket) {
                 return;
             }

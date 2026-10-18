@@ -122,15 +122,25 @@ async fn a_device_s_feed_is_online_and_stamps_last_seen() {
     let feed = Feed::open(&w, &d.client, "", None).await;
     let open = row(&w).await;
     assert_eq!(open["online"], json!(["feed"]), "{open}");
-    assert_eq!(open["open_links"], json!([{ "kind": "feed", "count": 1 }]));
+    // The card's line: the keep-alive, the start and the peer of each link
+    // (device link design §9.3).
+    let links = &open["open_links"];
+    assert_eq!(links[0]["kind"], "feed", "{open}");
+    assert_eq!(links[0]["count"], 1);
+    let one = &links[0]["links"][0];
+    assert_eq!(one["keepalive_s"], 15, "{open}");
+    assert!(one["since"].as_str().unwrap().ends_with('Z'), "{open}");
+    assert!(
+        one["peer"].as_str().unwrap().starts_with("127.0.0.1:"),
+        "{open}"
+    );
     assert!(open["last_seen_at"].is_string(), "{open}");
     // A second feed of the same device is counted, so a reconnect pile-up
     // shows on the card (review W4-25).
     let second = Feed::open(&w, &d.client, "", None).await;
-    assert_eq!(
-        row(&w).await["open_links"],
-        json!([{ "kind": "feed", "count": 2 }])
-    );
+    let both = row(&w).await;
+    assert_eq!(both["open_links"][0]["count"], 2, "{both}");
+    assert_eq!(both["open_links"][0]["links"].as_array().unwrap().len(), 2);
     drop(second);
     drop(feed);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -159,7 +169,12 @@ async fn a_rotate_closes_a_device_s_feed_unseen() {
         .execute(&w.state.db)
         .await
         .unwrap();
-    let (s, v) = op(&w, "key_rotate", json!({ "id": d.id })).await;
+    let (s, v) = op(
+        &w,
+        "device_token",
+        json!({ "id": d.id, "end_current": true }),
+    )
+    .await;
     assert_eq!(s, 200, "{v}");
     feed.until(10, |_| false).await;
     assert_eq!(feed.frames.last().unwrap().event, "revoked");
@@ -185,7 +200,7 @@ async fn an_owner_key_s_feed_ends_with_revoked() {
     let (s, v) = op(&w, "key_create", json!({ "kind": "owner", "name": "cli" })).await;
     assert_eq!(s, 200, "{v}");
     let id = v["id"].as_i64().unwrap();
-    let client = crate::device_chat::bearer(v["plaintext"].as_str().unwrap());
+    let client = crate::device_chat::bearer(v["key"].as_str().unwrap());
     let mut feed = Feed::open(&w, &client, "", None).await;
     assert_eq!(
         feed.hello()["principal"],

@@ -24,6 +24,11 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// An op's answer as the JSON both dispatchers serve.
+fn wire<T: serde::Serialize>(answer: Result<T, String>) -> Result<Value, String> {
+    lmgw_core::ops::backends::to_json(answer)
+}
+
 // ---------------------------------------------------------------------------
 // The shipped list
 // ---------------------------------------------------------------------------
@@ -413,7 +418,7 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
         err.contains("image.models_dir") && err.contains("not configured"),
         "{err}"
     );
-    let view = lmgw_core::ops::image_recipes(&state).await.unwrap();
+    let view = wire(lmgw_core::ops::image_recipes(&state).await).unwrap();
     assert_eq!(view["models_dir_missing"], true);
     assert_eq!(view["hf_token_set"], false);
 
@@ -434,7 +439,7 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
 
-    let view = lmgw_core::ops::image_recipes(&state).await.unwrap();
+    let view = wire(lmgw_core::ops::image_recipes(&state).await).unwrap();
     assert_eq!(view["models_dir_missing"], false);
     let z = view["recipes"]
         .as_array()
@@ -467,9 +472,8 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
     );
 
     // 3. Add: two downloads queued, the VAE skipped, and a prefilled row back.
-    let added = lmgw_core::ops::image_recipe_add(&state, "z-image-turbo", None)
-        .await
-        .unwrap();
+    let added =
+        wire(lmgw_core::ops::image_recipe_add(&state, "z-image-turbo", None).await).unwrap();
     assert_eq!(added["ok"], true);
     assert_eq!(added["files_queued"], 2, "{added}");
     assert_eq!(added["downloads"].as_array().unwrap().len(), 2);
@@ -521,7 +525,7 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
         assert_eq!(r.status, "done", "{:?}", r.error);
         assert_eq!(r.target, "image");
     }
-    let view = lmgw_core::ops::image_recipes(&state).await.unwrap();
+    let view = wire(lmgw_core::ops::image_recipes(&state).await).unwrap();
     let z = view["recipes"]
         .as_array()
         .unwrap()
@@ -535,9 +539,8 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
     assert_eq!(z["components"][0]["downloading"], false);
 
     // 5. Adding again is a clean no-op that still returns the row.
-    let again = lmgw_core::ops::image_recipe_add(&state, "z-image-turbo", None)
-        .await
-        .unwrap();
+    let again =
+        wire(lmgw_core::ops::image_recipe_add(&state, "z-image-turbo", None).await).unwrap();
     assert_eq!(again["files_queued"], 0, "{again}");
     assert_eq!(again["already_present"].as_array().unwrap().len(), 3);
 
@@ -559,7 +562,6 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
     let plan = lmgw_core::modelinfo::local_model_plan(
         &state,
         "leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q4_K.gguf",
-        false,
         Some("image"),
     )
     .await
@@ -599,13 +601,9 @@ async fn recipe_add_queues_only_what_is_missing_and_hands_back_a_row() {
     let sharded = lmgw_core::ops::hf_add(&state, "some/sharded", Some(shard), None, "image", false)
         .await
         .unwrap();
-    assert_eq!(
-        sharded["files_queued"], 1,
-        "only the named shard: {sharded}"
-    );
-    let w = sharded["warnings"].as_array().unwrap();
-    assert_eq!(w.len(), 1, "{sharded}");
-    let w = w[0].as_str().unwrap();
+    assert_eq!(sharded.files_queued, 1, "only the named shard: {sharded:?}");
+    assert_eq!(sharded.warnings.len(), 1, "{sharded:?}");
+    let w = &sharded.warnings[0];
     assert!(w.contains("shard 1 of 3"), "{w}");
     assert!(w.contains("cannot reassemble shards"), "{w}");
     assert!(w.contains("image_recipes"), "it names what does work: {w}");
@@ -656,9 +654,8 @@ async fn a_component_already_downloading_is_reported_not_queued_again() {
             .unwrap();
     }
 
-    let added = lmgw_core::ops::image_recipe_add(&state, "z-image-turbo", None)
-        .await
-        .unwrap();
+    let added =
+        wire(lmgw_core::ops::image_recipe_add(&state, "z-image-turbo", None).await).unwrap();
     assert_eq!(added["files_queued"], 0, "{added}");
     assert_eq!(added["already_present"], json!([]));
     let queued = added["already_queued"].as_array().unwrap();
@@ -701,7 +698,7 @@ async fn an_unknown_family_says_so_and_lists_the_recipes_it_knows() {
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
 
-    let plan = lmgw_core::modelinfo::local_model_plan(&state, rel, false, Some("image"))
+    let plan = lmgw_core::modelinfo::local_model_plan(&state, rel, Some("image"))
         .await
         .unwrap();
     assert_eq!(plan["planned"], false, "{plan}");
@@ -733,7 +730,7 @@ async fn a_half_downloaded_pipeline_plans_with_its_gaps_named() {
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
 
-    let plan = lmgw_core::modelinfo::local_model_plan(&state, &dit, false, Some("image"))
+    let plan = lmgw_core::modelinfo::local_model_plan(&state, &dit, Some("image"))
         .await
         .unwrap();
     assert_eq!(plan["planned"], true, "{plan}");
@@ -797,7 +794,7 @@ async fn the_spike_pipeline_reports_every_component_present_on_this_box() {
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
 
-    let view = lmgw_core::ops::image_recipes(&state).await.unwrap();
+    let view = wire(lmgw_core::ops::image_recipes(&state).await).unwrap();
     let z = view["recipes"]
         .as_array()
         .unwrap()

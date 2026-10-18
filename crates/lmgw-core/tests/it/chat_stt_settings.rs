@@ -30,6 +30,7 @@ async fn setup(upstream_base: &str) -> (SharedState, Gw) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -165,7 +166,7 @@ async fn the_chat_settings_have_defaults_and_validate() {
     assert_eq!(cur.chat_pdf_mode, "images");
     assert_eq!(cur.chat_stt_alias, "my-asr");
     assert_eq!(cur.chat_kb_budget_tokens, 1200);
-    let read = lmgw_core::ops::settings(&state).await.unwrap();
+    let read = lmgw_core::ops::backends::to_json(lmgw_core::ops::settings(&state).await).unwrap();
     assert_eq!(read["chat_stt_alias"], "my-asr");
     assert_eq!(read["chat_kb_budget_tokens"], 1200);
 

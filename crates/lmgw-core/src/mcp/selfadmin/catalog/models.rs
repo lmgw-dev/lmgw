@@ -1,8 +1,8 @@
 //! Local llama.cpp model tools: `lmgw__local_model_set` through
-//! `lmgw__local_model_test`, covering chat, aux (embed/rerank) and
+//! `lmgw__local_model_test`, covering chat, aux (embed/rerank/decision) and
 //! image-model rows plus the load smoke test.
 
-use crate::mcp::selfadmin::{bool_p, enum_p, int_p, ladder_p, num_p, str_p, Builtin};
+use crate::mcp::selfadmin::{bool_p, enum_p, int_p, ladder_p, num_p, str_p, strs_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -12,9 +12,10 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Create, update, delete, enable, disable or duplicate a local llama.cpp \
                  CHAT model entry. Every llama-server parameter lmgw manages is settable \
-                 here. Embedding and rerank models are a different class with their own \
-                 directory and tool — lmgw__aux_model_set — and must not be created here \
-                 (a chat row cannot serve /v1/embeddings). \
+                 here. Embedding, rerank and decision models are a different class with \
+                 their own directory and tool — lmgw__aux_model_set — and must not be \
+                 created here (a chat row serves none of /v1/embeddings, /v1/rerank and \
+                 /v1/systemone). \
                  Prefer lmgw__local_model_plan to derive these values from the GGUF itself \
                  rather than guessing them. Update is partial: pass only what changes, and \
                  use 'clear' to unset a field. Duplicate clones the model named by id/ \
@@ -263,10 +264,12 @@ pub(super) fn tools() -> Vec<Builtin> {
                 // -- everything else --
                 (
                     "extra_args",
-                    str_p(
-                        "Escape hatch for llama-server flags with no field above, one option \
-                         per line (e.g. '--no-warmup'). Validated against the running build. \
-                         A flag that HAS a field above is ignored here — use the field.",
+                    strs_p(
+                        "Escape hatch for llama-server flags with no field above, one \
+                         argument per entry (e.g. ['--no-warmup'], ['--threads', '16']). \
+                         Absent leaves them unchanged; an empty list clears them. Validated \
+                         against the running build. A flag that HAS a field above is ignored \
+                         here — use the field.",
                     ),
                 ),
                 (
@@ -352,17 +355,25 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: true,
             description:
                 "Create, update, delete, enable or disable an AUX model: an embedding model \
-                 (served on /v1/embeddings with --embeddings) or a reranker (served on \
-                 /v1/rerank with --reranking). This is the class for encoders — a GGUF whose \
-                 header declares a pooling_type or a classifier head — which have no LM head \
-                 and cannot be chat models. Aux models live in their own models directory \
+                 (served on /v1/embeddings with --embeddings), a reranker (served on \
+                 /v1/rerank with --reranking) or a decision model (a GGUF whose header \
+                 declares decision.type, served on /v1/systemone). This is the class for \
+                 models that answer without generating: encoders, whose header declares a \
+                 pooling_type or a classifier head and which have no LM head, and decision \
+                 models, causal ones included, which llama-server serves without a \
+                 generation route. Neither can be a chat model. Aux models live in their own models directory \
                  (download with lmgw__hf_add target=aux, list with lmgw__gguf_files \
-                 target=aux) and are exposed under the aux prefix (usually 'embed/<model_id>'). \
-                 Get kind, pooling and ctx_size from lmgw__local_model_plan target=aux rather \
+                 target=aux) and are exposed under their kind's prefix, both in lmgw__settings' \
+                 aux_router: public_prefix for embedders and rerankers (usually \
+                 'embed/<model_id>'), decision_prefix for decision models (usually \
+                 'decide/<model_id>'); a row answers to its own prefix only. \
+                 Get kind, pooling and ctx_size (and for a decision model ubatch_size, \
+                 batch_size and backend) from lmgw__local_model_plan target=aux rather \
                  than guessing: the wrong pooling produces vectors that look fine and \
                  retrieve garbage. Update is partial: pass only what changes, and use 'clear' \
                  to unset a field. A model's own container starts on its first request; \
-                 lmgw__local_model_test target=aux then proves it embeds (or reranks).",
+                 lmgw__local_model_test target=aux then proves it embeds, reranks or answers \
+                 one System One question.",
             props: vec![
                 (
                     "action",
@@ -392,8 +403,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "kind",
                     enum_p(
                         "'embed' (default on create) serves /v1/embeddings; 'rerank' serves \
-                         /v1/rerank. lmgw__model_inspect reports which a file is.",
-                        &["embed", "rerank"],
+                         /v1/rerank; 'decision' serves /v1/systemone (no kind flag, no \
+                         pooling). lmgw__model_inspect reports which a file is.",
+                        &["embed", "rerank", "decision"],
                     ),
                 ),
                 (
@@ -403,7 +415,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                          lmgw__local_model_plan reads from the GGUF header; omit to let \
                          llama-server pick the model's default. Never set on a rerank model \
                          (--reranking selects rank pooling itself, and a second pooling flag \
-                         breaks it). Empty string clears.",
+                         breaks it) or a decision model. Empty string clears.",
                         &["none", "mean", "cls", "last", "rank"],
                     ),
                 ),
@@ -411,20 +423,62 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "ctx_size",
                     int_p(
                         "Context length (--ctx-size). Use the model's trained context from \
-                         the plan; llama-server truncates longer inputs silently rather \
-                         than rejecting them.",
+                         the plan; llama-server refuses a longer input with an error rather \
+                         than truncating it. 'ctx_size' in clear takes llama-server's \
+                         default.",
+                    ),
+                ),
+                (
+                    "ubatch_size",
+                    int_p(
+                        "--ubatch-size, 1 or more; omit for llama-server's default. An \
+                         encoder whose input llama-server cannot split (any but a last-token \
+                         embedder or a causal reranker) evaluates its whole input in one \
+                         ubatch, so this bounds every input it answers; lmgw__local_model_plan \
+                         sets it to the context there. Raise batch_size with it: llama.cpp \
+                         lowers the ubatch to the batch. The VRAM ledger charges the compute \
+                         buffer it grows.",
+                    ),
+                ),
+                (
+                    "batch_size",
+                    int_p("--batch-size, 1 or more; omit for llama-server's default."),
+                ),
+                (
+                    "mmproj_path",
+                    str_p(
+                        "A projector (--mmproj) relative to the AUX models directory, for a \
+                         model that reads images (a vision-language embedder, an image-capable \
+                         decision model). Use the one lmgw__local_model_plan finds beside the \
+                         weights. Charged with the weights. Empty string clears.",
+                    ),
+                ),
+                (
+                    "backend",
+                    enum_p(
+                        "'cpu' runs the model on the CPU: --n-gpu-layers 0, the class's run \
+                         args without the GPU passthrough, no VRAM charged, and it keeps \
+                         serving while the GPU hold is on. Omit to keep the current value; \
+                         an empty string (or 'backend' in clear) runs it on the GPU.",
+                        &["cpu", ""],
+                    ),
+                ),
+                (
+                    "threads",
+                    int_p(
+                        "--threads, 1 or more. Unset renders none on the GPU, and on the \
+                         CPU this machine's physical cores (the logical CPU count where the \
+                         core topology cannot be read) unless extra_args name a count.",
                     ),
                 ),
                 (
                     "extra_args",
-                    str_p(
-                        "Escape hatch for llama-server flags with no field above, one option \
-                         per line — this is where placement goes: '--n-gpu-layers 0' runs \
-                         the model on the CPU (and the VRAM planner then charges it nothing), \
-                         '--threads 16' sizes it, '--mmproj /models/<path>' attaches a \
-                         projector for a multimodal embedder. --embeddings, --reranking, \
-                         --pooling and --ctx-size are rendered from the fields above and \
-                         ignored here.",
+                    strs_p(
+                        "Escape hatch for llama-server flags with no field above, one \
+                         argument per entry (['--flash-attn', 'on']). --embeddings, \
+                         --reranking, --pooling, --ctx-size, --ubatch-size, --batch-size, \
+                         --mmproj, --n-gpu-layers and --threads are rendered from the fields \
+                         above; a copy here is ignored when its field is set.",
                     ),
                 ),
                 (
@@ -441,8 +495,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "extra_run_args",
-                    str_p(
-                        "'podman run' args override, one per line. Empty or absent leaves it \
+                    strs_p(
+                        "'podman run' args override, one argument per entry. Absent leaves it \
                          unchanged; name it in 'clear' to revert to the class default. An \
                          override with no args is never stored: it is the class default.",
                     ),
@@ -474,7 +528,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     str_p(
                         "Field names to reset to unset, comma-separated: 'extra_args', \
                          'extra_run_args', 'image', 'hold_fallback' (resets both mode and \
-                         alias).",
+                         alias), 'ctx_size', 'ubatch_size', 'batch_size', 'mmproj_path', \
+                         'backend', 'threads'.",
                     ),
                 ),
             ],
@@ -589,8 +644,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "extra_run_args",
-                    str_p(
-                        "'podman run' args override, one per line. Empty or absent leaves \
+                    strs_p(
+                        "'podman run' args override, one argument per entry. Absent leaves \
                          it unchanged; name it in 'clear' to revert to the class default (an \
                          override with no args is never stored: it is the class default). The \
                          GPU device flags live here — sd-server links libcuda directly and \
@@ -654,7 +709,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                 "Load a configured local model and prove it does its job: a chat model \
                  generates one token, an embedding model returns one vector (checked to be \
                  non-zero — an embedder misconfigured as a reranker answers with zeros), a \
-                 reranker scores two documents, an image model draws one 256x256 four-step \
+                 reranker scores two documents, a decision model answers one System One \
+                 choice question on /v1/systemone (its input tokens and answer come back), an \
+                 image model draws one 256x256 four-step \
                  image and reports how many bytes came back. Works for chat, aux and image \
                  models alike; the probe is chosen by class and kind, so an encoder is never \
                  judged by token generation and a diffusion pipeline is never asked to chat. \

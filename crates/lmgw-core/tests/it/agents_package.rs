@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use lmgw_core::agents::container::{self, Spawned, Spawner};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::CmdOutput;
 use lmgw_core::server::build_router;
 use lmgw_core::state::{AppState, SharedState};
@@ -332,104 +332,111 @@ async fn dev_mcp(body: String) -> impl axum::response::IntoResponse {
     )
 }
 
-#[async_trait]
 impl Spawner for Fake {
-    async fn spawn(&self, _p: &str, _a: &[String]) -> std::io::Result<Spawned> {
-        panic!("the package path never uses the streaming seam");
+    fn spawn<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            panic!("the package path never uses the streaming seam");
+        })
     }
 
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        let ok = |stdout: &str| {
-            Ok(CmdOutput {
-                status: 0,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-            })
-        };
-        let failed = |status: i32, stderr: &str| {
-            Ok(CmdOutput {
-                status,
-                stdout: String::new(),
-                stderr: stderr.to_string(),
-            })
-        };
-        let img_of = |name: &str| self.images.lock().unwrap().get(name).cloned();
-        match args.first().map(String::as_str) {
-            // The reference is the **last** argument: every argv that takes
-            // one passes `--` before it, so a ref that reads as a flag cannot
-            // be mistaken for one.
-            Some("image") if args.get(1).map(String::as_str) == Some("exists") => {
-                match img_of(args.last().unwrap()) {
-                    Some(i) if i.present => ok(""),
-                    _ => failed(1, ""),
-                }
-            }
-            // `image inspect --format {{.Digest}}`
-            Some("image") => match img_of(args.last().unwrap()) {
-                Some(i) if i.present => ok(&format!("{}\n", i.digest)),
-                _ => failed(125, "Error: image not known"),
-            },
-            Some("pull") => {
-                let name = args.last().unwrap();
-                match self.on_pull.lock().unwrap().get(name).cloned() {
-                    Some(next) => {
-                        self.images.lock().unwrap().insert(name.to_string(), next);
-                        ok("")
-                    }
-                    // Nothing new upstream: a pull of an image that is here is
-                    // a no-op, and of one that is not is a registry error.
-                    None => match img_of(name) {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            let ok = |stdout: &str| {
+                Ok(CmdOutput {
+                    status: 0,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                })
+            };
+            let failed = |status: i32, stderr: &str| {
+                Ok(CmdOutput {
+                    status,
+                    stdout: String::new(),
+                    stderr: stderr.to_string(),
+                })
+            };
+            let img_of = |name: &str| self.images.lock().unwrap().get(name).cloned();
+            match args.first().map(String::as_str) {
+                // The reference is the **last** argument: every argv that takes
+                // one passes `--` before it, so a ref that reads as a flag cannot
+                // be mistaken for one.
+                Some("image") if args.get(1).map(String::as_str) == Some("exists") => {
+                    match img_of(args.last().unwrap()) {
                         Some(i) if i.present => ok(""),
-                        _ => failed(125, &format!("Error: {name}: manifest unknown")),
-                    },
-                }
-            }
-            Some("create") => {
-                let name = args.last().unwrap();
-                match img_of(name) {
-                    Some(i) if i.present => ok("6158a95fea92\n"),
-                    _ => failed(125, "Error: image not known"),
-                }
-            }
-            Some("cp") => {
-                // `<container>:/lmgw/agent.json` — the container is the one
-                // `create` just made, and this fake has exactly one image in
-                // flight per call, so the manifest is looked up by whichever
-                // image was created last.
-                let image = self
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find(|a| a.first().map(String::as_str) == Some("create"))
-                    .and_then(|a| a.last().cloned())
-                    .unwrap_or_default();
-                match img_of(&image).and_then(|i| i.manifest) {
-                    Some(text) => {
-                        std::fs::write(args.last().unwrap(), text)?;
-                        ok("")
+                        _ => failed(1, ""),
                     }
-                    None => failed(
-                        125,
-                        "Error: \"/lmgw/agent.json\" could not be found on container: no such \
-                         file or directory",
-                    ),
                 }
+                // `image inspect --format {{.Digest}}`
+                Some("image") => match img_of(args.last().unwrap()) {
+                    Some(i) if i.present => ok(&format!("{}\n", i.digest)),
+                    _ => failed(125, "Error: image not known"),
+                },
+                Some("pull") => {
+                    let name = args.last().unwrap();
+                    match self.on_pull.lock().unwrap().get(name).cloned() {
+                        Some(next) => {
+                            self.images.lock().unwrap().insert(name.to_string(), next);
+                            ok("")
+                        }
+                        // Nothing new upstream: a pull of an image that is here is
+                        // a no-op, and of one that is not is a registry error.
+                        None => match img_of(name) {
+                            Some(i) if i.present => ok(""),
+                            _ => failed(125, &format!("Error: {name}: manifest unknown")),
+                        },
+                    }
+                }
+                Some("create") => {
+                    let name = args.last().unwrap();
+                    match img_of(name) {
+                        Some(i) if i.present => ok("6158a95fea92\n"),
+                        _ => failed(125, "Error: image not known"),
+                    }
+                }
+                Some("cp") => {
+                    // `<container>:/lmgw/agent.json` — the container is the one
+                    // `create` just made, and this fake has exactly one image in
+                    // flight per call, so the manifest is looked up by whichever
+                    // image was created last.
+                    let image = self
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .rev()
+                        .find(|a| a.first().map(String::as_str) == Some("create"))
+                        .and_then(|a| a.last().cloned())
+                        .unwrap_or_default();
+                    match img_of(&image).and_then(|i| i.manifest) {
+                        Some(text) => {
+                            std::fs::write(args.last().unwrap(), text)?;
+                            ok("")
+                        }
+                        None => failed(
+                            125,
+                            "Error: \"/lmgw/agent.json\" could not be found on container: no such \
+                         file or directory",
+                        ),
+                    }
+                }
+                Some("run") => {
+                    let i = args.iter().position(|a| a == "-p").expect("published");
+                    let port: u16 = args[i + 1].split(':').nth(1).unwrap().parse().unwrap();
+                    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+                    tokio::spawn(async move {
+                        let _ = axum::serve(listener, fake_container_app()).await;
+                    });
+                    ok("deadbeef\n")
+                }
+                _ => ok(""),
             }
-            Some("run") => {
-                let i = args.iter().position(|a| a == "-p").expect("published");
-                let port: u16 = args[i + 1].split(':').nth(1).unwrap().parse().unwrap();
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-                tokio::spawn(async move {
-                    let _ = axum::serve(listener, fake_container_app()).await;
-                });
-                ok("deadbeef\n")
-            }
-            _ => ok(""),
-        }
+        })
     }
 }
 
@@ -1415,7 +1422,7 @@ async fn a_dev_url_that_is_not_local_or_not_a_base_url_is_refused_naming_why() {
         ("https://example.com", "is not loopback"),
         // A LAN address is refused too: the app proxy is on the
         // unauthenticated, CORS-permissive dashboard plane.
-        ("http://192.168.1.14:3000", "is not loopback"),
+        ("http://198.51.100.14:3000", "is not loopback"),
         ("http://user:pass@127.0.0.1:5173", "must not carry userinfo"),
         ("http://127.0.0.1:5173/?x=1", "no query and no fragment"),
         ("not a url", "is not a URL"),
@@ -1459,6 +1466,53 @@ async fn a_dev_url_needs_an_agent_that_declares_a_service() {
             .contains("declares no run.service"),
         "{res}"
     );
+    // Clearing is refused the same way: there is no app to serve from anywhere.
+    for cleared in [
+        json!({ "id": "board" }),
+        json!({ "id": "board", "url": "" }),
+    ] {
+        let (status, res) = op(&base, "agent_dev_url_set", cleared).await;
+        assert_eq!(status, 400, "{res}");
+        assert!(
+            res["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("declares no run.service"),
+            "{res}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_manifest_that_drops_the_service_block_takes_the_stored_dev_url_with_it() {
+    let image = "localhost/board:1";
+    let (_state, base, _calls) = with(Fake::with(
+        image,
+        "sha256:one",
+        Some(&doc("1.0.0", image, true)),
+    ))
+    .await;
+    op(&base, "agent_install", json!({ "image": image })).await;
+    let dev = dev_server().await;
+    let (status, res) = op(
+        &base,
+        "agent_dev_url_set",
+        json!({ "id": "board", "url": format!("{dev}/") }),
+    )
+    .await;
+    assert_eq!(status, 200, "{res}");
+    assert_ne!(detail(&base, "board").await["dev_url"], "");
+
+    // The owner cannot clear it once the service is gone, so the write that
+    // takes the service away does.
+    let (status, res) = op(
+        &base,
+        "agent_set",
+        json!({ "manifest": doc("2.0.0", image, false) }),
+    )
+    .await;
+    assert_eq!(status, 200, "{res}");
+    assert_eq!(detail(&base, "board").await["dev_url"], "");
 }
 
 #[tokio::test]

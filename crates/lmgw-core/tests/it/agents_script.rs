@@ -408,7 +408,7 @@ fn mail_2_0_0() -> String {
 }
 
 /// An older install: a `2.0.0` row seeded before hashes were recorded. The
-/// card shows the notice, and **one Reset to shipped** adopts `3.0.0`, keeps
+/// card shows the notice, and **one Reset to shipped** adopts `3.1.0`, keeps
 /// the taxonomy and clears both warnings.
 #[tokio::test]
 async fn the_newer_manifest_notice_and_one_reset_adopts_it_keeping_the_config() {
@@ -459,7 +459,7 @@ async fn the_newer_manifest_notice_and_one_reset_adopts_it_keeping_the_config() 
     assert_eq!(status, 200, "{res}");
 
     let d = detail(&base, "mail-labeler").await;
-    assert_eq!(d["version"], json!("3.0.0"));
+    assert_eq!(d["version"], json!("3.1.0"));
     assert!(warning(&d, "builtin_update_available").is_none(), "{d}");
     assert!(warning(&d, "apply_turn").is_none(), "{d}");
     // The taxonomy survived the reset, which is the whole point of it keeping
@@ -471,7 +471,7 @@ async fn the_newer_manifest_notice_and_one_reset_adopts_it_keeping_the_config() 
     // rather than as edited and pinned.
     seed::seed(&state).await;
     let d = detail(&base, "mail-labeler").await;
-    assert_eq!(d["version"], json!("3.0.0"));
+    assert_eq!(d["version"], json!("3.1.0"));
     assert!(warning(&d, "builtin_update_available").is_none(), "{d}");
 }
 
@@ -616,8 +616,8 @@ impl Drop for ContainerSweep {
     }
 }
 
-/// Set the mail labeler up for an apply: a model in the config (it is required,
-/// and the point is that apply never uses it) and the prefix §9's script reads.
+/// Set the mail labeler up for an apply: a model in the config (the point is
+/// that apply never uses it) and the prefix §9's script reads.
 async fn configure_mail(state: &SharedState) {
     store::set_agent_config(
         &state.db,

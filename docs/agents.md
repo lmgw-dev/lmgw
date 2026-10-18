@@ -65,7 +65,7 @@ kind.
   `GET /api/agents/{id}/runs` (every run of this agent, newest first, **no
   limit**: the jobs table is already bounded by two visible retention settings),
   `GET /api/agents/runs/{job_id}` (one run with its rows, its log and its
-  result — what `lmgw__agent_run`'s `next_step` tells a caller to poll), and
+  result), and
   `GET /api/agents/{id}/export`.
 - **HTTP writes**: `POST /api/agents/import` (a file body), the three ledger
   routes (§6), and everything else as `POST /api/op/{name}`: `agent_set`,
@@ -105,7 +105,8 @@ manifest does not carry. `lmgw__agent_get` returns the same document.
 | `portability` | `{ portable, notes }`, the same verdict the export carries, but with the `dev_url` named. |
 | `batch` | The review surface: columns, editable fields with their options, `has_classify`, `has_apply`, and the `apply_tools` ceiling. |
 | `budget` | Settings → Agents & tools: `max_tool_calls` and `timeout_seconds`, which bound a `turn`. |
-| `live_job` / `resettable` / `threads` / `currency` / `error` | The run in flight, whether a shipped manifest exists for this id, the chat threads, the display currency, and why the row could not be parsed. |
+| `live_job` / `last_run` | The run in flight, and the agent's most recent run with its outcome (`status`, `error`, tokens, cost; while a run is in flight it is that run). `last_run` is absent when the agent never ran, and an agent reading its own detail sees a mount refusal in it as the field and code only. `lmgw__agent_get` carries both. |
+| `resettable` / `threads` / `currency` / `error` | Whether a shipped manifest exists for this id, the chat threads, the display currency, and why the row could not be parsed. |
 
 `config`, `provenance` and `dev_url` are read **only** through here — none of the
 three is part of the manifest, and none is ever exported.
@@ -277,16 +278,19 @@ Each property takes exactly these keywords:
 | `title` | all | The form label. |
 | `description` | all | The help line under the field. |
 | `default` | all | Type-checked against `type`, `enum`, `minimum`, `maximum` at load. |
-| `format` | `string` only | One of `secret`, `model_alias`, `multiline`, `directory`, `file`. |
+| `format` | `string` only, but `lmgw-question-set` `integer` only | One of `secret`, `model_alias`, `multiline`, `directory`, `file` on a string; `lmgw-question-set` on an integer. |
 | `enum` | `string` only | Array of strings; renders a select. Refused on a mount field. |
 | `access` | `string` with `format: "directory"` or `"file"` only | `"ro"` (default) or `"rw"`. Refused everywhere else, naming the property. |
 | `minimum` / `maximum` | `integer`, `number` only | |
 | `items` | `array` only, required there | Must be `{"type": "string"}`. `title`/`description` inside `items` are accepted and ignored. |
 
-The five formats:
+The six formats:
 
 - `format: "model_alias"` — a picker over `/v1/models`. **These fields derive
   the agent token's scope** (§9).
+- `format: "lmgw-question-set"` (an `integer` field) — a select of the owner's
+  Decision lab question sets, its value the set's id; empty is no set. What a
+  batch output's `decide` names (below).
 - `format: "secret"` — write-only. Never returned by the API, never exported,
   and refused in any model prompt (see the validation rules below).
 - `format: "multiline"` — a textarea.
@@ -457,6 +461,31 @@ routes refuse it and point at `agent_open_chat`.
 | `field` | Required. The single output field name. |
 | `enum_from` | Required. `config.<field>`, naming an **array** config field. |
 | `fallback` | Required, a non-empty string. The answer a failed or unconvinced call gets, and the value that marks a row **needs attention**. Appended to the enum exactly once and last. |
+| `decide` | Optional. `config.<field>`, naming an `integer` field of `format: "lmgw-question-set"`. While that field names a set, the item is classified through the set instead of the model call (below). |
+
+With `decide` and a set chosen, each item asks the set's question whose id is
+`field` of the rendered `user` prompt (the state, as text) through
+`/v1/systemone` on the set's default model; `system` is not sent and no chat
+model is needed. The question must be a `choice`: its options are the enum
+(the `enum_from` field is not read), with `fallback` appended once and last.
+The output is the winner; a row **needs attention** when the winner is the
+fallback, when its confidence is below the set's **measured** threshold for
+that question (a threshold not measured on a labelled set run is shown on the
+Run tab, not applied), or when the call failed (the fallback then, the
+route's error verbatim). An error the model itself answered (llama.cpp's 500
+for a state over the ubatch, a provider's 5xx relayed) is that row's own and
+never counts toward the early abort; lmgw's own 5xx (transport, timeout)
+still does. An answer lmgw would give every row (the GPU hold, a budget or
+scope refusal, an alias gone, a container that does not start) stops the
+classify at once and fails the run with it, keeping the rows done before it.
+A set that is gone, has no such question, asks it as another type, names no
+model, or whose model answers no `/v1/systemone` fails the run before any tool
+call; a classify with neither a model nor a set fails at start, saying both.
+The call is filed under the agents' identity and counts in the run's total.
+Each row it classifies carries the set (`set`: id, name, `updated_at`), and a
+finished apply run's rows can be saved as a labelled set run of that set
+("Save as labelled set", `POST /decision-lab/api/batches/from-agent`), which
+asks the output field's question only, as the agent does.
 
 *schema form* — a general object schema:
 
@@ -783,7 +812,7 @@ This is the complete shipped manifest, annotated after the block.
   "id": "mail-labeler",
   "name": "Mail labeler",
   "description": "Classifies unread Gmail into labels. Nothing is written until you apply.",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "model": {
     "alias": "{{config.model}}",
     "temperature": 0.0
@@ -796,7 +825,13 @@ This is the complete shipped manifest, annotated after the block.
           "type": "string",
           "format": "model_alias",
           "title": "Model",
-          "description": "The alias each classify call runs on. One call per message, so a small local model is the usual choice."
+          "description": "The alias each classify call runs on when no question set is chosen. One call per message, so a small local model is the usual choice."
+        },
+        "decision_set": {
+          "type": "integer",
+          "format": "lmgw-question-set",
+          "title": "Question set",
+          "description": "Classify through a Decision lab question set instead: its choice question 'category' picks the label from its options, which replace Categories, and its default model answers. Other stays the review's catch-all and what a failed call falls back to. A row needs attention when the answer is Other, its confidence is below the set's measured threshold, or the call failed. Empty classifies with the model above."
         },
         "categories": {
           "type": "array",
@@ -828,8 +863,7 @@ This is the complete shipped manifest, annotated after the block.
           "minimum": 1,
           "description": "Parallel classify calls; match the local server's -np"
         }
-      },
-      "required": ["model"]
+      }
     }
   },
   "tools": [
@@ -875,7 +909,8 @@ This is the complete shipped manifest, annotated after the block.
       "output": {
         "field": "category",
         "enum_from": "config.categories",
-        "fallback": "Other"
+        "fallback": "Other",
+        "decide": "config.decision_set"
       },
       "concurrency": "{{config.concurrency}}"
     },
@@ -935,6 +970,12 @@ What each part is doing:
   model's allowed values from the **stored** array, and `fallback: "Other"` is
   appended once and last — so widening the taxonomy on the Run tab and pressing
   *Re-run attention rows* costs no manifest edit.
+- `decision_set` and `decide: "config.decision_set"` let the owner classify
+  through a Decision lab question set instead: its `category` choice question
+  replaces the model call and `categories`, and its threshold, once measured,
+  decides which rows need attention beside Other and failed calls. `model` is
+  not required, since with a set nothing in a run uses it; the Run tab blocks
+  a classify until one of the two is set.
 - `limit` is `maxResults` for the Gmail search, passed through whole-value
   typing so it arrives as an integer. Its description says out loud what the
   real remote ceiling is — a visible limit, not a hidden one.
@@ -1888,15 +1929,15 @@ all the origin asks.
   agent (`127.0.0.1 board.localhost`) — the App tab says so.
 - **`agent_origin_suffix` exists for one reason**: a gateway bound to a real
   address and opened from another machine. Set it to a zone with a wildcard
-  record (`*.lmgw.lan → <host>`) and every agent origin becomes
-  `<id>.lmgw.lan:<port>`. It is validated on write — one or more DNS labels, no
+  record (`*.lmgw.example → <host>`) and every agent origin becomes
+  `<id>.lmgw.example:<port>`. It is validated on write — one or more DNS labels, no
   port, no scheme, not empty, and not `local` (mDNS cannot answer arbitrary
   names under it) — and refused with `origin_suffix_shadows_gateway` when it is
   itself a name the gateway answers on, or shares a parent domain of two or
-  more labels with one: a dashboard at `myhost.lmgw.lan` refuses a suffix of
-  `apps.lmgw.lan`, because a page under that suffix could set a cookie for
-  `lmgw.lan` and overwrite — never read — the dashboard's session; a suffix of
-  `agents.lan` is fine. The gateway's own names are its bind address, the host
+  more labels with one: a dashboard at `myhost.lmgw.example` refuses a suffix of
+  `apps.lmgw.example`, because a page under that suffix could set a cookie for
+  `lmgw.example` and overwrite — never read — the dashboard's session; a suffix of
+  `agents.example` is fine. The gateway's own names are its bind address, the host
   name, `<hostname>.local`, and `<hostname>.<search domain>` for each resolver
   search domain. The check runs again at boot; a stored suffix that has
   started shadowing is reported as a warning rather than reset.
@@ -2127,7 +2168,10 @@ Setting one **stops a running app container**; clearing it (`{"url": null}`)
 goes back to the image and the next request starts the container. `dev_url` is a
 row setting, never part of the manifest, and is **never exported**. It overrides
 service mode only — runs and applies still start the image, because their dev
-loop is a rebuild. `agent_service_start` refuses while it is set.
+loop is a rebuild. `agent_service_start` refuses while it is set. An agent that
+declares no `run.service` has no app to point at: setting **and** clearing are
+refused, and a manifest write (import, `agent_set`, reset) that leaves the
+manifest without a service block clears the stored `dev_url` with it.
 
 If a later `bind_addr` change makes a stored `dev_url` illegal (most often
 because the gateway moved onto that very port), it is **cleared** and recorded,
@@ -2175,7 +2219,8 @@ not running is success**.
 
 `agent_service_log { id, lines? }` returns the tail. `lines` defaults to 12
 (the same excerpt size the rest of the runtime uses, and what the App tab shows)
-and **`0` is the whole log**. The count is echoed back with the text. The
+and **`0` is the whole log**. The answer's `lines` is how many lines came back, which is fewer when the
+container has logged less. The
 agent's own token is substituted out of every tail lmgw republishes.
 
 Ten things stop a running app container, each saying so:
@@ -2438,16 +2483,18 @@ on the Run tab's Runtime block:
 | Field | Meaning |
 |---|---|
 | `image` | The reference **as you gave it**, tag and all — not the digest-pinned form. |
-| `digest` | `podman image inspect --format '{{.Digest}}'` at the last read. Empty when podman could not say. |
+| `digest` | `podman image inspect --format '{{.Digest}}'` at the last read. Absent when podman could not say. |
 | `manifest_path` | `/lmgw/agent.json`. |
 | `installed_at` | RFC 3339, when this row was written from the image. |
 | `pulled_at` | RFC 3339, when the digest was last read. |
 
 **Pull image** (`agent_pull { id }`) fetches the image again and says whether the
 digest moved — **pressing it is the consent**, so it pulls under every policy,
-`never` included. When the digest moved it reads the manifest out of the new
-image and compares it with the stored one, answering `changed`,
-`manifest_differs` and a `note`. Nothing polls in the background and nothing is
+`never` included. `changed` is `true` when the digest moved or the image was not
+on the box before, `false` when it did not, and absent when podman reports no
+digest after the pull. When it is `true` the pull reads the manifest out of the
+new image and compares it with the stored one, answering `manifest_differs` and
+a `note`. `old_digest`, `new_digest` and `recorded_digest` are absent when unknown. Nothing polls in the background and nothing is
 adopted behind your back. A pull deliberately does **not** fill in
 `manifest_path` or `installed_at`: a row with a digest and no `installed_at` is
 an image that was pulled, not a package the row came from.
@@ -2855,7 +2902,7 @@ names them). A copy must not silently inherit a credential.
 | `403 cross_origin_refused` | A **cookie**-authenticated request arrived from another origin — the rule is general to every such request, not only the token ops (§3.6). Including a page on this host at another port, which `SameSite=Strict` does not catch. | Ask from the dashboard's own origin, or from a client that presents a bearer and sends no `Origin`. |
 | `503 agent_service_starting: the app for 'board' could not be started: the container did not answer http://127.0.0.1:41234/healthz within run.service.start_timeout_seconds (30s)` | The health probe never passed; this detail is what the App tab and the `agent_service_start` op show — a request on the public agent origin itself gets the generic form of this 503, with no reason and no path. | Read the `log` on the App tab; raise `start_timeout_seconds`, or `0` to wait as long as it takes. |
 | `502 agent_service_unreachable … It was started and passed its health probe, so it has stopped answering since.` | The container died after coming up. | The entry is evicted; the next request starts a fresh one. Check `agent_service_log`. |
-| `a dev_url has to be on this box: 'dev.lan' is not loopback …` | The app proxy is unauthenticated. | Use a loopback address. |
+| `a dev_url has to be on this box: 'dev.example' is not loopback …` | The app proxy is unauthenticated. | Use a loopback address. |
 | `origin_label_invalid` | The agent id is not a legal DNS label — over 63 characters, or ending in `-`. | Rename the id; the App tab needs it as a host-name label. |
 | `origin_shadows_gateway` | `<id>.<suffix>` equals a name the gateway itself answers on. | Rename the id, or change the agent origin suffix under Settings. |
 | `origin_suffix_shadows_gateway` | The agent origin suffix set under Settings → Agents & tools is itself a name the gateway answers on, or shares a parent domain of two or more labels with one. | Pick a suffix that does not capture the gateway's own address. |

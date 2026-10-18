@@ -8,6 +8,12 @@ use super::*;
 
 mod dev_models_dir;
 pub use dev_models_dir::*;
+mod devices;
+pub use devices::*;
+mod webrtc;
+pub use webrtc::*;
+mod webrtc_audio;
+pub use webrtc_audio::*;
 
 /// Gate for the built-in **self-admin tools** (`lmgw__*`) that the northbound
 /// `/mcp` endpoint exposes alongside the aggregated southbound catalog (§20).
@@ -143,17 +149,17 @@ pub struct Settings {
     #[serde(default)]
     pub global_budget_period: BudgetPeriod,
     pub router: RouterSettings,
-    /// The aux class: the small stateless model kinds — embeddings and
-    /// rerankers (§8). A separate class rather than a separate container:
-    /// every model runs in its own container now, and the class only carries
-    /// the image/models_dir/prefix its members inherit.
+    /// The aux class: the small stateless model kinds — embeddings,
+    /// rerankers and decision models (§8). A separate class rather than a
+    /// separate container: every model runs in its own container now, and the
+    /// class only carries the image/models_dir/prefixes its members inherit.
     ///
     /// Was `embed_router` before rerankers moved in beside the embedders; the
     /// alias reads blobs written under the old key. `migrations/0018` rewrites
     /// the stored key once, so the alias only has to catch a settings JSON
     /// that arrived some other way (hand-edited, restored from a backup).
     #[serde(alias = "embed_router")]
-    pub aux_router: RouterSettings,
+    pub aux_router: AuxRouterSettings,
     /// The audio class: audio.cpp `audiocpp_server` models (TTS/ASR/music/…).
     pub audio: AudioSettings,
     /// The image class: stable-diffusion.cpp `sd-server` models (image
@@ -168,6 +174,11 @@ pub struct Settings {
     /// Settings → MCP.
     #[serde(default)]
     pub mcp: super::McpSettings,
+    /// The device listener and the bounds of its trust (device link design
+    /// §9.1), Settings → Network & access → Devices. Like `bind_addr`, an
+    /// access setting: no self-admin tool changes it.
+    #[serde(default)]
+    pub devices: DevicesSettings,
     /// Hugging Face access token for gated/private repos (empty = anonymous).
     pub hf_token: String,
     /// Poll the release feed for new app versions in the background (§12).
@@ -275,9 +286,20 @@ pub struct Settings {
     /// Seconds between the Chat feed's keep-alive comments (§2.1), said in
     /// its `hello` as `keepalive_s` so a client derives its dead-link
     /// timeout from a stated value. A feed keeps the interval it opened
-    /// with. At least 1.
+    /// with. At least 1, at most `chat_feed_keepalive_max_s`: it is a
+    /// keep-alive a feed could ask for itself (review of WP5, N1).
     #[serde(default = "default_chat_feed_keepalive_s")]
     pub chat_feed_keepalive_s: u32,
+    /// The longest keep-alive a feed may ask for itself
+    /// (`GET /chat/api/feed?keepalive_s=`, device link design §7.1): a phone
+    /// holding its feed in the background asks a long one, so its radio
+    /// wakes less. Between events a stream sends only its keep-alive
+    /// comment, so this bounds how long a stream whose device vanished
+    /// silently can stay open. A request past it is refused, naming this
+    /// setting. Applies to feeds opened after a change. At least 1, at most
+    /// `lmgw_api_types::chat_feed::MAX_KEEPALIVE_S` (a day).
+    #[serde(default = "default_chat_feed_keepalive_max_s")]
+    pub chat_feed_keepalive_max_s: u32,
     /// Records the Chat feed reads per query while a client catches up
     /// (§2.3): a bound on the memory one catch-up holds, not on what it
     /// delivers — every record is sent, page after page. At least 1, at
@@ -437,7 +459,7 @@ pub struct Settings {
     ///
     /// The one reason to change it is a gateway bound to a real address and
     /// opened from another box (§4.10): point a zone with a wildcard record
-    /// (`*.lmgw.lan`) at this host and set it here. Refused on write when it
+    /// (`*.lmgw.example`) at this host and set it here. Refused on write when it
     /// would shadow a name the gateway itself answers on.
     #[serde(default = "default_agent_origin_suffix")]
     pub agent_origin_suffix: String,
@@ -508,11 +530,12 @@ impl Default for Settings {
             global_budget_period: BudgetPeriod::Month,
             jobs_max_rows: default_jobs_max_rows(),
             router: RouterSettings::default(),
-            aux_router: RouterSettings::default_aux(),
+            aux_router: AuxRouterSettings::default(),
             audio: AudioSettings::default(),
             image: ImageSettings::default(),
             realtime: RealtimeSettings::default(),
             mcp: super::McpSettings::default(),
+            devices: DevicesSettings::default(),
             hf_token: String::new(),
             update_check_enabled: true,
             update_token: String::new(),
@@ -529,6 +552,7 @@ impl Default for Settings {
             chat_purge_days: default_chat_purge_days(),
             chat_feed_retention_days: default_chat_feed_retention_days(),
             chat_feed_keepalive_s: default_chat_feed_keepalive_s(),
+            chat_feed_keepalive_max_s: default_chat_feed_keepalive_max_s(),
             chat_feed_page_size: default_chat_feed_page_size(),
             chat_feed_live_buffer: default_chat_feed_live_buffer(),
             chat_system_prompt: None,
@@ -655,6 +679,14 @@ fn default_chat_feed_retention_days() -> i64 {
 /// a dead link within a minute, rare enough to cost nothing.
 fn default_chat_feed_keepalive_s() -> u32 {
     15
+}
+/// Fifteen minutes (device link design §7.1): room for the 120 s a phone in
+/// the background is suggested to ask, and for a longer measured value,
+/// while a stream whose device vanished silently is gone within about half
+/// an hour (one keep-alive, then the write that is never acknowledged
+/// failing).
+fn default_chat_feed_keepalive_max_s() -> u32 {
+    900
 }
 /// A few hundred records: one query's worth of small rows, so a week's
 /// catch-up is a handful of queries.

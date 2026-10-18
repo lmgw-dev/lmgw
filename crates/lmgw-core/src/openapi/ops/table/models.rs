@@ -1,5 +1,5 @@
-//! `ops-models`: the local model classes — chat, aux (embed/rerank), audio,
-//! image — and the load smoke test (api-docs design §4.7).
+//! `ops-models`: the local model classes — chat, aux (embed, rerank,
+//! decision), audio, image — and the load smoke test (api-docs design §4.7).
 
 use lmgw_api_types as dto;
 
@@ -15,7 +15,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__local_model_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::LocalModelPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::LocalModelSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -25,32 +25,16 @@ pub(super) const OPS: &[OpDoc] = &[
     OpDoc {
         name: "aux_model_set",
         tag: TAG,
-        summary: "Create, update, delete, enable or disable an aux (embedding/rerank) model",
+        summary: "Create, update, delete, enable or disable an aux (embedding, rerank or \
+                  decision) model",
         description: None,
         tool: Some("lmgw__aux_model_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::AuxModelPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AuxModelSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
         deprecated: false,
-        example: None,
-    },
-    OpDoc {
-        name: "embed_model_set",
-        tag: TAG,
-        summary: "Deprecated spelling of aux_model_set",
-        description: Some(
-            "The pre-rename spelling of aux_model_set, still accepted so a browser holding an \
-             older SPA bundle keeps working. New callers should use aux_model_set.",
-        ),
-        tool: None,
-        args: OpArgs::AliasOf("aux_model_set"),
-        response: Resp::OpOutcome,
-        writes: true,
-        reveals_secret: false,
-        confirm_note: None,
-        deprecated: true,
         example: None,
     },
     OpDoc {
@@ -67,7 +51,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: Some("lmgw__audio_model_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::AudioPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::AudioModelSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -106,7 +90,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__image_model_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::ImageModelPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::ImageModelSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

@@ -266,10 +266,25 @@ async fn a_run_is_stored_whole_and_the_next_one_is_compared_with_it() {
     assert_eq!(runs["threshold_pct"], 5.0);
 
     // Notes, then delete.
-    w.ok("bench_run_set", json!({"id": first, "notes": "kept"}))
+    let saved = w
+        .ok("bench_run_set", json!({"id": first, "notes": "kept"}))
         .await;
+    assert_eq!(
+        saved["message"],
+        format!("notes of benchmark run {first} of 'qwen' saved"),
+        "{saved}"
+    );
     assert_eq!(w.run(first).await["run"]["notes"], "kept");
-    w.ok("bench_delete", json!({"id": first})).await;
+    let msg = w
+        .refused("bench_run_set", json!({"id": 99_999, "notes": "x"}))
+        .await;
+    assert_eq!(msg, "no benchmark run 99999");
+    let gone = w.ok("bench_delete", json!({"id": first})).await;
+    assert_eq!(
+        gone["message"],
+        format!("benchmark run {first} of 'qwen' deleted"),
+        "{gone}"
+    );
     let msg = w.refused("bench_run", json!({"id": first})).await;
     assert!(msg.contains("no benchmark run"), "{msg}");
 }
@@ -382,6 +397,11 @@ fn aux(id: &str) -> NewAuxModel {
         kind: AuxKind::Embed,
         pooling: None,
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: vec![],
         idle_seconds: 0,
         enabled: true,
@@ -563,6 +583,8 @@ async fn the_hold_switching_on_aborts_the_run_and_removes_its_container() {
     .await;
     let v = w.ok("hold_set", json!({"active": true})).await;
     assert_eq!(v["benchmark_aborted"], run_id, "{v}");
+    let held = common::round_trips::<lmgw_api_types::HoldSet>("POST /api/op/hold_set", &v);
+    assert_eq!(held.benchmark_aborted, Some(run_id), "{v}");
     let name = format!("{}-bench-{run_id}", w.prefix());
     assert!(
         w.launcher.removed(&name),
@@ -638,7 +660,8 @@ async fn a_runs_container_is_lmgws_share_of_the_card() {
     assert_eq!(v["outside_share_bytes"], 2 * GIB, "{v}");
     assert!(v["external_trigger_reason"].is_null(), "{v}");
     assert_eq!(v["benchmark"]["run_id"], run_id, "{v}");
-    let status = lmgw_core::ops::status(w.state()).await.unwrap();
+    let status =
+        lmgw_core::ops::backends::to_json(lmgw_core::ops::status(w.state()).await).unwrap();
     assert_eq!(status["vram"]["lmgw_share_bytes"], 3 * GIB, "{status}");
 
     // Removed, but the driver still lists the process: a tombstone.

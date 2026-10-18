@@ -309,8 +309,8 @@ pub(super) const REALTIME: &[Def] = &[
     )
     .s()
     .unit("ms")
-    .hint("on top of the ping round trip")
-    .terms("barge-in bluetooth echo"),
+    .hint("on top of the round trip: pings on a WebSocket, RTCP on a WebRTC call")
+    .terms("barge-in bluetooth echo webrtc call margin"),
     f(
         "realtime",
         "rt-barge",
@@ -381,8 +381,8 @@ pub(super) const REALTIME: &[Def] = &[
     )
     .s()
     .unit("ms")
-    .hint("audio sent ahead of real time")
-    .terms("pacing"),
+    .hint("audio sent ahead of real time on a WebSocket; not used on a WebRTC call")
+    .terms("pacing webrtc"),
     f(
         "realtime",
         "rt-output",
@@ -430,8 +430,11 @@ pub(super) const REALTIME: &[Def] = &[
     )
     .s()
     .unit("MiB")
-    .hint("0 = no bound")
-    .terms("websocket limit size"),
+    .hint(
+        "A WebSocket message; on a WebRTC call also the largest event lmgw sends and what may \
+         wait for the session. 0 = no bound",
+    )
+    .terms("websocket webrtc call limit size"),
     f(
         "realtime",
         "rt-limits",
@@ -441,7 +444,7 @@ pub(super) const REALTIME: &[Def] = &[
     )
     .s()
     .unit("MiB")
-    .hint("0 = the message limit")
+    .hint("WebSocket only; 0 = the message limit")
     .terms("websocket limit size"),
     f(
         "realtime",
@@ -452,8 +455,11 @@ pub(super) const REALTIME: &[Def] = &[
     )
     .s()
     .unit("s")
-    .hint("0 = no pings and no liveness bound")
-    .terms("websocket ping pong liveness keepalive"),
+    .hint(
+        "also how long a WebRTC call may be silent, connect, open or ask to take over, and when \
+         playout reports count as stopped; 0 = no pings and no liveness bound",
+    )
+    .terms("websocket ping pong liveness keepalive webrtc call silent never opened pending"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -835,13 +841,17 @@ pub(super) fn explain(group: &str) -> Option<(&'static str, String, AnyView)> {
         ),
         "rt-limits" => (
             "settings.explain.realtime-limits",
-            "A message or frame over its limit closes the socket with a reason naming the \
-             setting."
+            "A WebSocket message or frame over its limit closes the socket with a reason naming \
+             the setting; on a WebRTC call one event is at most 256 KiB, the WebRTC stack's fixed \
+             bound."
                 .into(),
             view! {
                 "A frame is always bounded: with max frame at 0 the message limit bounds it, so "
                 "the two cannot both be 0. With pings off nothing ends a session whose client "
-                "stopped reading, and the key's concurrency slot stays taken."
+                "stopped reading, and the key's concurrency slot stays taken. On a call bound to "
+                "a Chat thread a larger event travels as lmgw.event.part messages, which may "
+                "join to max message; an unbound call's client gets the event with its largest "
+                "fields emptied and an event_too_large error for each."
             }
             .into_any(),
         ),

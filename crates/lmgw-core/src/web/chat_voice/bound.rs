@@ -332,15 +332,19 @@ pub(crate) fn record_text(row: &ChatMessageRow) -> Option<String> {
 }
 
 /// Annotate a spoken reply heard whole (§8.3): its `voice` alone, no
-/// generation move. `false` when it is gone.
+/// generation move. `false` when it is gone. `caller`: who the session runs
+/// as, the author the feed's `message.updated` names — the session whose
+/// journal finalizes the reply, even one taken over and draining behind
+/// the fence (client-apps design §4.4).
 pub(crate) async fn annotate(
     state: &SharedState,
     thread_id: i64,
     id: i64,
     voice: &MessageVoice,
+    caller: &Caller,
 ) -> bool {
     ChatRepo::of(thread_id)
-        .set_message_voice(state, thread_id, id, voice)
+        .set_message_voice(state, thread_id, id, voice, caller)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(
@@ -370,12 +374,13 @@ pub(crate) async fn cut_if(
     id: i64,
     content: &str,
     voice: &MessageVoice,
+    caller: &Caller,
 ) -> Guarded {
     let Some(proof) = state.chat_live.write_if(thread_id, generation).await else {
         return Guarded::Moved;
     };
     let done = ChatRepo::of(thread_id)
-        .cut_reply(state, &proof, thread_id, id, content, voice)
+        .cut_reply(state, &proof, thread_id, id, content, voice, caller)
         .await;
     Guarded::Written(done.unwrap_or_else(|e| {
         tracing::warn!(thread = thread_id, "chat voice: the reply was not cut: {e}");
@@ -390,12 +395,13 @@ pub(crate) async fn delete_if(
     thread_id: i64,
     generation: u64,
     id: i64,
+    caller: &Caller,
 ) -> Guarded {
     let Some(proof) = state.chat_live.write_if(thread_id, generation).await else {
         return Guarded::Moved;
     };
     let done = ChatRepo::of(thread_id)
-        .delete_unheard(state, &proof, thread_id, id)
+        .delete_unheard(state, &proof, thread_id, id, caller)
         .await;
     Guarded::Written(done.unwrap_or_else(|e| {
         tracing::warn!(

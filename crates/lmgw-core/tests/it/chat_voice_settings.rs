@@ -39,6 +39,7 @@ pub(crate) async fn gateway(
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -145,10 +146,7 @@ async fn the_voice_keys_have_defaults_and_save_on_both_paths() {
     .await
     .unwrap();
     for key in ["chat_tts_alias", "chat_voice", "chat_turn_detection"] {
-        assert!(
-            res["changed"].as_array().unwrap().contains(&json!(key)),
-            "{res}"
-        );
+        assert!(res.changed.iter().any(|c| c == key), "{res:?}");
     }
     let cur = state.snapshot().settings.clone();
     assert_eq!(
@@ -162,7 +160,7 @@ async fn the_voice_keys_have_defaults_and_save_on_both_paths() {
         ),
         ("my-tts", "alba", "calm", "de", true, "push_to_talk")
     );
-    let read = lmgw_core::ops::settings(&state).await.unwrap();
+    let read = lmgw_core::ops::backends::to_json(lmgw_core::ops::settings(&state).await).unwrap();
     assert_eq!(read["chat_tts_alias"], "my-tts");
     assert_eq!(read["chat_turn_detection"], "push_to_talk");
     let full = get_json(&gw, "/api/settings-full").await;
@@ -736,6 +734,7 @@ async fn editing_a_spoken_reply_clears_unheard_and_timing_continuing_clears_unhe
             model: Some("plain".into()),
             ..Default::default()
         },
+        None,
     )
     .await
     .unwrap();

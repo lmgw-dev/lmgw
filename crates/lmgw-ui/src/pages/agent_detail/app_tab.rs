@@ -1,6 +1,9 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{AgentDetail, SettingsFull};
+use lmgw_api_types::{
+    AgentDetail, AgentDevUrlSet, AgentServiceLog, AgentServiceMount, AgentServiceStarted,
+    AgentServiceStopped, SettingsFull,
+};
 use serde_json::{json, Value};
 
 use super::*;
@@ -32,13 +35,7 @@ use crate::widgets::{use_toasts, Explain};
 /// everywhere else in the runtime — never idle-stop, and wait as long as the
 /// start takes.
 #[component]
-pub(super) fn AppTab(
-    d: AgentDetail,
-    /// What the service container is started with (mounts §5.7, §5.8), read
-    /// from the detail document by the page.
-    mounts: RwSignal<Vec<ServiceMount>>,
-    reload: Callback<()>,
-) -> impl IntoView {
+pub(super) fn AppTab(d: AgentDetail, reload: Callback<()>) -> impl IntoView {
     let Some(svc) = d.service.clone() else {
         return view! {
             <div class="fill-pane">
@@ -48,6 +45,8 @@ pub(super) fn AppTab(
         .into_any();
     };
     let id = StoredValue::new(d.id.clone());
+    // What the service container is started with (mounts §5.7, §5.8).
+    let mounts = StoredValue::new(service_mounts(&d));
     let toasts = use_toasts();
     let busy = RwSignal::new(false);
     // Bumped on every Start/Stop so the iframe is re-created rather than left
@@ -84,24 +83,20 @@ pub(super) fn AppTab(
         }
         busy.set(true);
         spawn_local(async move {
-            let op = if start {
-                "agent_service_start"
+            let body = json!({ "id": id.get_value() });
+            let res = if start {
+                crate::api::post::<AgentServiceStarted, _>("/api/op/agent_service_start", &body)
+                    .await
+                    .map(|v| v.message)
             } else {
-                "agent_service_stop"
+                crate::api::post::<AgentServiceStopped, _>("/api/op/agent_service_stop", &body)
+                    .await
+                    .map(|v| v.message)
             };
-            let res = crate::api::post::<Value, _>(
-                &format!("/api/op/{op}"),
-                &json!({ "id": id.get_value() }),
-            )
-            .await;
             busy.set(false);
             match res {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("done")
-                        .to_string());
+                Ok(message) => {
+                    toasts.ok(message);
                     generation.update(|g| *g += 1);
                     reload.try_run(());
                 }
@@ -132,15 +127,12 @@ pub(super) fn AppTab(
             } else {
                 json!({ "id": id.get_value(), "url": url })
             };
-            let res = crate::api::post::<Value, _>("/api/op/agent_dev_url_set", &body).await;
+            let res =
+                crate::api::post::<AgentDevUrlSet, _>("/api/op/agent_dev_url_set", &body).await;
             busy.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("done")
-                        .to_string());
+                    toasts.ok(v.message);
                     generation.update(|g| *g += 1);
                     reload.try_run(());
                 }
@@ -224,7 +216,7 @@ pub(super) fn AppTab(
         let id = log_id.clone();
         log_busy.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentServiceLog, _>(
                 "/api/op/agent_service_log",
                 &json!({ "id": id, "lines": want }),
             )
@@ -232,12 +224,7 @@ pub(super) fn AppTab(
             log_busy.set(false);
             match res {
                 Ok(v) => {
-                    log.set(
-                        v.get("log")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    );
+                    log.set(v.log);
                     log_shown.set(want);
                 }
                 Err(e) => log.set(e.to_string()),
@@ -400,7 +387,7 @@ pub(super) fn AppTab(
                 // mounts §5.8: what this container can see of the filesystem,
                 // host path to container path — and re-pointing one of these
                 // stops the container.
-                <Show when=move || !mounts.get().is_empty()>
+                <Show when=move || mounts.with_value(|m| !m.is_empty())>
                     <div class="mini-head">"Mounts"</div>
                     <table class="data">
                         <thead>
@@ -411,7 +398,7 @@ pub(super) fn AppTab(
                             </tr>
                         </thead>
                         <tbody>
-                            <For each=move || mounts.get() key=|m: &ServiceMount| m.field.clone() let:m>
+                            <For each=move || mounts.get_value() key=|m: &AgentServiceMount| m.field.clone() let:m>
                                 <tr>
                                     <td class="mono-sm">{m.field.clone()}</td>
                                     <td

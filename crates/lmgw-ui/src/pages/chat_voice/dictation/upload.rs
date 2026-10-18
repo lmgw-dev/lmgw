@@ -3,11 +3,11 @@
 //! recording's transcription (`POST …/transcribe`, the WAV as the body), with
 //! the size check that names `max_body_mb` before anything is uploaded.
 
-use serde::Deserialize;
+use lmgw_api_types::SettingsFull;
 use serde_json::{json, Value};
 
 use super::super::spoken::Transcript;
-use crate::pages::chat_stream::{send_stream, ChatEvent};
+use crate::pages::chat_stream::{send_stream, ChatEvent, VoiceEvent};
 
 /// A transcription that failed: the gateway's code and message, and the
 /// fallback that had the audio — named even when it failed, since the audio
@@ -19,34 +19,15 @@ pub(crate) struct Failure {
     pub answered_by: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct ErrorBody {
-    code: String,
-    message: String,
-    asr_answered_by: Option<String>,
-}
-
 impl Failure {
-    /// Read a refusal's body; `header` is the gate's `x-lmgw-fallback`.
+    /// Read a refusal's `{code, message}` body; `header` is the gate's
+    /// `x-lmgw-fallback`, the only place a fallback that had the audio is named.
     pub(crate) fn of(status: u16, body: &str, header: Option<String>) -> Self {
-        let parsed = serde_json::from_str::<ErrorBody>(body.trim())
-            .ok()
-            .filter(|e| !e.message.is_empty());
-        match parsed {
-            Some(e) => Failure {
-                code: e.code,
-                message: e.message,
-                answered_by: e.asr_answered_by.or(header),
-            },
-            None => {
-                let api = crate::api::parse_error_body(status, body);
-                Failure {
-                    code: api.code,
-                    message: api.message,
-                    answered_by: header,
-                }
-            }
+        let api = crate::api::parse_error_body(status, body);
+        Failure {
+            code: api.code,
+            message: api.message,
+            answered_by: header,
         }
     }
 
@@ -82,8 +63,10 @@ pub(crate) fn over_body_limit(bytes: usize, max_body_mb: u32) -> Option<String> 
 /// `max_body_mb` as the gateway has it now; `None` when it cannot be read
 /// (the gateway's own 413 then says it).
 pub(crate) async fn max_body_mb() -> Option<u32> {
-    let v = crate::api::get::<Value>("/api/settings-full").await.ok()?;
-    v["max_body_mb"].as_u64().map(|n| n as u32)
+    let full = crate::api::get::<SettingsFull>("/api/settings-full")
+        .await
+        .ok()?;
+    Some(full.max_body_mb)
 }
 
 /// Transcribe `wav` with thread `tid`'s ASR. `Err` with a code of `aborted`
@@ -139,7 +122,7 @@ pub(crate) async fn warm(
         &json!({ "stages": ["asr"] }),
         &signal,
         move |ev| {
-            if let ChatEvent::Voice("state", data) = ev {
+            if let ChatEvent::Voice(VoiceEvent::State(data)) = ev {
                 on_state(&data);
             }
         },
@@ -160,8 +143,8 @@ mod tests {
     fn a_failure_names_the_fallback_that_had_the_audio() {
         let f = Failure::of(
             502,
-            r#"{"code":"upstream_error","message":"bad gateway","asr_answered_by":"openai/whisper-1"}"#,
-            None,
+            r#"{"code":"upstream_error","message":"bad gateway"}"#,
+            Some("openai/whisper-1".into()),
         );
         assert_eq!(
             f.text(Some("audio/parakeet")),
@@ -172,13 +155,9 @@ mod tests {
             f.text(None),
             "transcription failed: bad gateway — the audio went to openai/whisper-1, which failed"
         );
-        // The header names it when the body does not.
-        let f = Failure::of(
-            502,
-            r#"{"code":"x","message":"m"}"#,
-            Some("openai/whisper-1".into()),
-        );
-        assert_eq!(f.answered_by.as_deref(), Some("openai/whisper-1"));
+        // Without the header, no fallback had the audio.
+        let f = Failure::of(502, r#"{"code":"x","message":"m"}"#, None);
+        assert_eq!(f.answered_by, None);
         // A hold is its own code.
         let f = Failure::of(
             503,

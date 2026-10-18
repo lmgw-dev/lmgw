@@ -162,12 +162,8 @@ async fn attaching_the_self_admin_toolset_through_the_defaults_takes_the_thread_
     let d = pair(&w, "phone", json!({})).await;
     let folder = ongoing_folder(&w, &owner, "Assistant", 30, json!({})).await;
     let (id, _, _) = current_ok(&w, &d.client, folder, false).await;
-    let bearer = format!("Bearer {}", d.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={id}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={id}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
 

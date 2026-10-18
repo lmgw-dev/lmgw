@@ -16,13 +16,14 @@ use std::collections::{BTreeMap, HashMap};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    DownloadRow, DownloadsView, GgufFile, GgufFiles, JobRow, ModelsFull, PlanResult,
+    DownloadRow, DownloadsView, GgufFile, GgufFiles, HfUpdatesChecked, JobRow, MessageAck,
+    ModelsFull, PlanResult,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 mod revision;
 
-use super::wizard::file_role;
+use super::wizard::{self, file_role, Planned};
 use crate::catalog::use_model_catalog;
 use crate::fmt::grouped;
 use crate::widgets::{
@@ -101,6 +102,14 @@ fn is_primary(target: &str, role: &str) -> bool {
     target == "image" || role == "weights"
 }
 
+/// The targets whose finished weights "Plan & create" turns into a row, as
+/// the wizard does: a chat file, and an aux file planned with `target=aux`
+/// (its kind and five fields read from its header). Audio and image rows
+/// need details one file does not carry.
+fn planable_target(target: &str) -> bool {
+    matches!(target, "chat" | "aux")
+}
+
 /// One tracked file, with what the page knows about it, flattened for the
 /// table.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -123,7 +132,8 @@ struct FileItem {
     used_by: Vec<String>,
     /// `None` when the target's listing did not load: nothing is claimed.
     on_disk: Option<bool>,
-    /// A finished chat weights file no model serves yet.
+    /// A finished chat or aux weights file no model serves yet
+    /// ([`planable_target`]).
     planable: bool,
     companion: bool,
     /// The revision it was asked at and the commit it came from: the short
@@ -189,6 +199,9 @@ fn uses_of(m: &ModelsFull) -> HashMap<String, (String, Vec<String>)> {
     }
     for v in &m.aux {
         add(&v.model.gguf_path, "weights", &v.model.model_id);
+        if let Some(p) = &v.model.mmproj_path {
+            add(p, "mmproj", &v.model.model_id);
+        }
     }
     for v in &m.image {
         for (role, p) in &v.model.files {
@@ -356,7 +369,7 @@ pub fn Downloads() -> impl IntoView {
                         .filter(|u| !u.is_empty())
                         .or_else(|| uses.get(&rel).map(|(_, who)| who.clone()))
                         .unwrap_or_default();
-                    let planable = d.target == "chat"
+                    let planable = planable_target(&d.target)
                         && d.status == "done"
                         && rel.to_lowercase().ends_with(".gguf")
                         && role == "weights"
@@ -533,20 +546,15 @@ pub fn Downloads() -> impl IntoView {
             let mut found = 0u64;
             let mut errs: Vec<String> = Vec::new();
             for target in TARGETS {
-                match crate::api::post::<Value, _>(
+                match crate::api::post::<HfUpdatesChecked, _>(
                     "/api/op/hf_set",
                     &json!({ "action": "check_updates", "target": target }),
                 )
                 .await
                 {
-                    Ok(v) => {
-                        found += v
-                            .get("updates_available")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        if let Some(es) = v.get("errors").and_then(Value::as_array) {
-                            errs.extend(es.iter().filter_map(|e| e.as_str().map(String::from)));
-                        }
+                    Ok(checked) => {
+                        found += checked.updates_available;
+                        errs.extend(checked.errors);
                     }
                     Err(e) => errs.push(e.to_string()),
                 }
@@ -730,7 +738,7 @@ impl RowCtx {
     fn hf_set(self, action: &'static str, f: &FileItem, ok: &'static str) {
         let body = json!({ "action": action, "id": f.id, "target": f.target });
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/hf_set", &body).await {
+            match crate::api::post::<MessageAck, _>("/api/op/hf_set", &body).await {
                 Ok(_) => {
                     self.toasts.ok(ok);
                     self.data.load();
@@ -832,13 +840,12 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
             return;
         }
         planning.set(true);
-        let rel = item.with_value(|f| f.rel.clone());
+        let (rel, target) = item.with_value(|f| (f.rel.clone(), f.target.clone()));
         spawn_local(async move {
-            let plan = match crate::api::get::<PlanResult>(format!(
-                "/api/local-model-plan?path={}",
-                urlenc(&rel)
-            ))
-            .await
+            // Planned and created as the wizard does (`super::wizard`): an
+            // aux file with target=aux, the header's kind and five fields.
+            let plan = match crate::api::get::<PlanResult>(wizard::plan_url(&target, &urlenc(&rel)))
+                .await
             {
                 Ok(p) => p,
                 Err(e) => {
@@ -847,18 +854,28 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
                     return;
                 }
             };
-            let mut args = plan.params.clone();
-            args.insert("action".into(), json!("create"));
-            args.insert("model_id".into(), json!(plan.model_id));
-            args.insert("gguf_path".into(), json!(rel));
-            let res =
-                crate::api::post::<Value, _>("/api/op/local_model_set", &Value::Object(args)).await;
+            let body = match wizard::planned(&plan, &rel) {
+                Planned::Create(body) => body,
+                Planned::AlreadyServed => {
+                    planning.set(false);
+                    ctx.toasts
+                        .ok(format!("a model already serves '{rel}' — nothing created"));
+                    ctx.data.load();
+                    return;
+                }
+            };
+            let res = wizard::post_create(&target, &body).await;
             planning.set(false);
             match res {
                 Ok(_) => {
+                    let warn = match plan.warnings.len() {
+                        0 => String::new(),
+                        n => format!(" ({n} planner warning(s): {})", plan.warnings.join("; ")),
+                    };
                     ctx.toasts.ok(format!(
-                        "'{}' created from the planned parameters — start it from Models when ready",
-                        plan.model_id
+                        "{} created from the planned parameters{warn} — start it from Models \
+                         when ready",
+                        wizard::created_name(&plan, &target)
                     ));
                     ctx.catalog_refresh.try_run(());
                     ctx.data.load();
@@ -904,7 +921,13 @@ fn FileRow(f: FileItem, ctx: RowCtx, #[prop(optional)] with_repo: bool) -> impl 
                     title="Read the GGUF metadata and create a configured model from it"
                     on:click=plan_create
                 >
-                    {move || if planning.get() { "Planning…" } else { "Plan & create" }}
+                    {move || {
+                        if planning.get() {
+                            "Planning…"
+                        } else {
+                            "Plan & create"
+                        }
+                    }}
                 </button>
             }
             .into_any()
@@ -1063,7 +1086,7 @@ fn DeleteModal(confirm: RwSignal<Option<FileItem>>, ctx: RowCtx) -> impl IntoVie
 
 #[cfg(test)]
 mod tests {
-    use super::{human_bin, name_guess, parse_size};
+    use super::{human_bin, name_guess, parse_size, planable_target};
 
     #[test]
     fn sizes_round_trip_through_their_label() {
@@ -1074,6 +1097,15 @@ mod tests {
         );
         assert_eq!(parse_size(""), None);
         assert_eq!(human_bin(512), "512 B");
+    }
+
+    /// "Plan & create" finishes what the wizard would have: chat and aux.
+    #[test]
+    fn chat_and_aux_weights_are_planable() {
+        assert!(planable_target("chat"));
+        assert!(planable_target("aux"));
+        assert!(!planable_target("audio"));
+        assert!(!planable_target("image"));
     }
 
     #[test]

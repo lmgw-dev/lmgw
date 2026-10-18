@@ -31,9 +31,10 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use lmgw_api_types as dto;
+use lmgw_api_types::self_admin::AgentList;
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use crate::agents::batch::{self, BatchShape};
 use crate::agents::ledger::{self, Refusal};
@@ -43,10 +44,15 @@ use crate::agents::{self, manifest, mounts, seed, Agent, ToolSurface};
 // `Refusal` above are "a refusal that names itself"; the ledger's has the short
 // name here because this file is mostly the ledger's, and this one is what the
 // catalog's ops answer with.
+use crate::ops::backends::to_json;
 use crate::principal::Refusal as ApiRefusal;
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 use crate::store;
+
+mod decide;
+mod dev_url;
+mod wire;
 
 /// Keys an export adds around the manifest. Stripped on the way back in, so a
 /// downloaded file re-imports unchanged — the manifest itself refuses unknown
@@ -143,6 +149,7 @@ fn refused(r: &Refusal) -> Response {
         Json(dto::ApiError {
             code: r.code().into(),
             message: r.message(),
+            ..Default::default()
         }),
     )
         .into_response()
@@ -154,6 +161,7 @@ fn bad_request(code: &str, message: String) -> Response {
         Json(dto::ApiError {
             code: code.into(),
             message,
+            ..Default::default()
         }),
     )
         .into_response()
@@ -186,6 +194,7 @@ fn foreign_agent(ctx: &RequestCtx, id: &str) -> Option<Response> {
                 message: format!(
                     "agent '{mine}' may read its own row and its own runs, not '{id}'"
                 ),
+                ..Default::default()
             }),
         )
             .into_response(),
@@ -349,17 +358,7 @@ pub async fn run_open(
     // its id over as though it were freshly opened would have the caller write
     // events into a run with different terms, or into one that takes none.
     if matches!(spawned, crate::jobs::Spawn::AlreadyRunning(_)) {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "code": "already_running",
-                "message": format!(
-                    "'{id}' already has a run in flight (#{job_id}); one live run per agent"
-                ),
-                "run": job_id,
-            })),
-        )
-            .into_response();
+        return (StatusCode::CONFLICT, Json(wire::run_conflict(&id, job_id))).into_response();
     }
     st.agent_ledger.attach(
         job_id,
@@ -676,6 +675,8 @@ fn batch_shape(agent: &Agent, surface: Option<&ToolSurface>) -> Option<dto::Agen
             has_apply: s.has_apply,
             apply_tools: s.apply_tools,
             apply_tools_are_ceiling: s.apply_tools_are_ceiling,
+            // Read by `decide::batch_shape_now`, which knows the store.
+            decide: None,
             columns: s.columns,
             editable: s
                 .editable
@@ -885,6 +886,23 @@ async fn last_run(state: &SharedState, id: &str) -> Option<dto::AgentRunSummary>
         .await
         .ok()
         .and_then(|rows| rows.first().map(run_summary))
+}
+
+/// [`last_run`] as `view` may read it: the agent itself sees a mount refusal
+/// stripped of host paths, exactly as the runs routes strip it.
+async fn last_run_for(state: &SharedState, id: &str, view: View) -> Option<dto::AgentRunSummary> {
+    let rows = store::list_jobs_by_key(&state.db, agents::JOB_KIND, &agents::job_key(id), 1)
+        .await
+        .ok()?;
+    let row = rows.first()?;
+    let mut out = run_summary(row);
+    if view == View::Agent {
+        let input: Value = serde_json::from_str(&row.input).unwrap_or(Value::Null);
+        out.error = RunView::of(state, id, &[&input])
+            .await
+            .error(out.error.take());
+    }
+    Some(out)
 }
 
 async fn live_run(state: &SharedState, id: &str) -> Option<dto::AgentRunSummary> {
@@ -1275,11 +1293,12 @@ pub(crate) async fn detail_inner(
             timeout_seconds: snap.settings.responses_timeout_seconds,
         },
         live_job: live_run(state, id).await,
+        last_run: last_run_for(state, id, view).await,
         threads: store::count_chat_threads_by_agent(&state.db, id)
             .await
             .unwrap_or(0),
         resettable: seed::shipped(id).is_some(),
-        batch: batch_shape(&agent, Some(&surface)),
+        batch: decide::batch_shape_now(state, &agent, Some(&surface)).await,
         warnings: warns,
         runtime,
         service: service_dto(state, &agent).await,
@@ -1290,7 +1309,7 @@ pub(crate) async fn detail_inner(
             let p = agents::package::Provenance::of_row(&agent.row);
             (!p.is_empty()).then_some(dto::AgentProvenance {
                 image: p.image,
-                digest: p.digest,
+                digest: (!p.digest.is_empty()).then_some(p.digest),
                 manifest_path: p.manifest_path,
                 installed_at: p.installed_at,
                 pulled_at: p.pulled_at,
@@ -1488,6 +1507,7 @@ pub async fn run_detail(
             Json(dto::ApiError {
                 code: "not_found".into(),
                 message: format!("no agent run with job id {job_id}"),
+                ..Default::default()
             }),
         )
             .into_response();
@@ -1510,7 +1530,7 @@ pub async fn run_detail(
         // is in flight and only reads `columns`/`editable` from it, so paying
         // for a `tools/list` per poll to fill a ceiling nothing renders would be
         // the wrong trade. The ceiling the page shows comes from the detail.
-        Ok(a) => batch_shape(&a, None),
+        Ok(a) => decide::batch_shape_now(&st, &a, None).await,
         Err(_) => None,
     };
     // A ledger run may have carried column keys the manifest never declared.
@@ -1951,6 +1971,9 @@ pub(crate) async fn import_inner_as(
     // change it or take it away, and one call here covers `agent_set`, the
     // import endpoint and the Definition editor's Save.
     agents::service::resync(state, &m.id).await?;
+    // A dev_url overrides the service block; without the block it can neither
+    // be set nor cleared by the owner, so it goes with the manifest.
+    dev_url::drop_without_service(state, &m.id).await?;
     // A manifest change is a change to what the running container *is*. It is
     // holding the old image's argv, the old limits and the old config; leaving
     // it up would serve the previous agent under the new one's name.
@@ -2098,6 +2121,7 @@ fn not_found_or_bad_request(id: &str, e: String) -> Response {
             Json(dto::ApiError {
                 code: "not_found".into(),
                 message: e,
+                ..Default::default()
             }),
         )
             .into_response();
@@ -2117,29 +2141,29 @@ pub(super) async fn op(state: &SharedState, name: &str, args: Args) -> Result<Va
     let out = async {
         match name {
             "agent_set" => return agent_set(state, &args).await,
-            "agent_duplicate" => return agent_duplicate(state, &args).await,
-            "agent_config_set" => return agent_config_set(state, &args).await,
+            "agent_duplicate" => return wire::coded(agent_duplicate(state, &args).await),
+            "agent_config_set" => return wire::coded(agent_config_set(state, &args).await),
             _ => {}
         }
         Ok(match name {
-            "agent_install" => agent_install(state, &args).await,
-            "agent_pull" => agent_pull(state, &need_id(&args)?).await,
-            "agent_reimport" => agent_reimport(state, &need_id(&args)?).await,
-            "agent_dev_url_set" => agent_dev_url_set(state, &args).await,
-            "agent_enable" => agent_enable(state, &args).await,
-            "agent_delete" => agent_delete(state, &need_id(&args)?).await,
-            "agent_reset" => agent_reset(state, &need_id(&args)?).await,
+            "agent_install" => to_json(agent_install(state, &args).await),
+            "agent_pull" => to_json(agent_pull(state, &need_id(&args)?).await),
+            "agent_reimport" => to_json(agent_reimport(state, &need_id(&args)?).await),
+            "agent_dev_url_set" => to_json(agent_dev_url_set(state, &args).await),
+            "agent_enable" => to_json(agent_enable(state, &args).await),
+            "agent_delete" => to_json(agent_delete(state, &need_id(&args)?).await),
+            "agent_reset" => to_json(agent_reset(state, &need_id(&args)?).await),
             "agent_open_chat" => {
-                agents::chat::open(state, &need_id(&args)?, &values_arg(&args)?).await
+                to_json(agents::chat::open(state, &need_id(&args)?, &values_arg(&args)?).await)
             }
-            "agent_run" => agent_run(state, &args).await,
-            "agent_run_cancel" => agent_run_cancel(state, &need_id(&args)?).await,
-            "agent_token_get" => agent_token(state, &need_id(&args)?, false).await,
-            "agent_token_rotate" => agent_token(state, &need_id(&args)?, true).await,
-            "agent_service_start" => agent_service(state, &need_id(&args)?, true).await,
-            "agent_service_stop" => agent_service(state, &need_id(&args)?, false).await,
-            "agent_service_log" => agent_service_log(state, &args).await,
-            "agents_restore" => seed::restore(state).await,
+            "agent_run" => to_json(agent_run(state, &args).await),
+            "agent_run_cancel" => to_json(agent_run_cancel(state, &need_id(&args)?).await),
+            "agent_token_get" => to_json(agent_token_get(state, &need_id(&args)?).await),
+            "agent_token_rotate" => to_json(agent_token_rotate(state, &need_id(&args)?).await),
+            "agent_service_start" => to_json(agent_service_start(state, &need_id(&args)?).await),
+            "agent_service_stop" => to_json(agent_service_stop(state, &need_id(&args)?).await),
+            "agent_service_log" => to_json(agent_service_log(state, &args).await),
+            "agents_restore" => to_json(seed::restore(state).await),
             other => Err(format!("unknown op '{other}'")),
         }?)
     }
@@ -2255,7 +2279,10 @@ async fn agent_set(state: &SharedState, args: &Args) -> Result<Value, ApiRefusal
 /// `agent_set`'s: the id being installed is the one inside the image, which the
 /// caller has not read yet, so overwriting an existing agent has to be asked
 /// for.
-pub(crate) async fn agent_install(state: &SharedState, args: &Args) -> Result<Value, String> {
+pub(crate) async fn agent_install(
+    state: &SharedState,
+    args: &Args,
+) -> Result<dto::AgentInstalled, String> {
     agent_install_as(state, args, None).await
 }
 
@@ -2265,7 +2292,7 @@ pub(crate) async fn agent_install_as(
     state: &SharedState,
     args: &Args,
     by_device: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<dto::AgentInstalled, String> {
     use agents::package::{self, Provenance};
 
     let image = arg_str(args, "image")
@@ -2351,26 +2378,7 @@ pub(crate) async fn agent_install_as(
             .await
             .map_err(|e| e.to_string())?;
     }
-    let id = report.id.clone();
-    let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert("image".into(), json!(image));
-        obj.insert("digest".into(), json!(digest.unwrap_or_default()));
-        // A download is not a detail to infer from how long the call took.
-        obj.insert("pulled".into(), json!(pulled));
-        obj.insert("manifest_path".into(), json!(package::MANIFEST_INSIDE));
-        obj.insert(
-            "message".into(),
-            json!(if report.validate_only {
-                format!("'{id}' is what '{image}' would install — nothing written")
-            } else if report.replaced {
-                format!("installed '{id}' from '{image}', keeping its config")
-            } else {
-                format!("installed '{id}' from '{image}'")
-            }),
-        );
-    }
-    Ok(out)
+    Ok(wire::installed(report, &image, digest, pulled))
 }
 
 /// `agent_pull { id }` (§3.4, §8, §12) — fetch this agent's image again and say
@@ -2387,7 +2395,7 @@ pub(crate) async fn agent_install_as(
 /// automatic re-import — the answer names `agent_reimport` and stops there,
 /// because adopting a new document over a row an owner may have edited is their
 /// decision, exactly as §5.1's built-in upgrade is.
-async fn agent_pull(state: &SharedState, id: &str) -> Result<Value, String> {
+async fn agent_pull(state: &SharedState, id: &str) -> Result<dto::AgentPulled, String> {
     use agents::package::{self, Provenance};
 
     let agent = load_agent(state, id).await?;
@@ -2425,14 +2433,11 @@ async fn agent_pull(state: &SharedState, id: &str) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let moved = match (&before, &after) {
-        (Some(b), Some(a)) => b != a,
-        _ => false,
-    };
-    // Only asked when it moved: reading the manifest is three more podman
+    let changed = wire::moved(&before, &after);
+    // Only asked when it changed: reading the manifest is three more podman
     // invocations, and an image that did not move cannot be carrying a
     // different document than the one that was read from it.
-    let (manifest_differs, note) = if moved {
+    let (manifest_differs, note) = if changed == Some(true) {
         match package::read_manifest(state, &image).await {
             Ok(text) => match manifest::load(&text) {
                 Ok(m) => {
@@ -2477,26 +2482,14 @@ async fn agent_pull(state: &SharedState, id: &str) -> Result<Value, String> {
         (None, String::new())
     };
 
-    let message = match (&before, &after) {
-        (Some(b), Some(a)) if b == a => format!("'{image}' is unchanged ({a})"),
-        (Some(b), Some(a)) => format!("'{image}' moved: {b} → {a}"),
-        (None, Some(a)) => format!("pulled '{image}' ({a}); it was not on this box before"),
-        (_, None) => format!("pulled '{image}'; podman could not report a digest for it"),
-    };
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "image": image,
-        "old_digest": before.unwrap_or_default(),
-        "new_digest": after.unwrap_or_default(),
-        // What the row said before this pull — different from `old_digest`
-        // whenever something else on the box moved the image.
-        "recorded_digest": recorded,
-        "changed": moved,
-        "manifest_differs": manifest_differs,
-        "note": note,
-        "message": message,
-    }))
+    Ok(wire::pulled(
+        id,
+        &image,
+        (before, after),
+        recorded,
+        manifest_differs,
+        note,
+    ))
 }
 
 /// `agent_reimport { id }` (§12's answer, WP5) — run the install path again
@@ -2510,7 +2503,7 @@ async fn agent_pull(state: &SharedState, id: &str) -> Result<Value, String> {
 /// A package whose manifest carries a *different id* is refused naming both:
 /// importing it would write a second row and leave this one pointing at an
 /// image that no longer describes it.
-async fn agent_reimport(state: &SharedState, id: &str) -> Result<Value, String> {
+async fn agent_reimport(state: &SharedState, id: &str) -> Result<dto::AgentReimported, String> {
     use agents::package::{self, Provenance};
 
     let agent = load_agent(state, id).await?;
@@ -2555,20 +2548,7 @@ async fn agent_reimport(state: &SharedState, id: &str) -> Result<Value, String> 
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert("image".into(), json!(image));
-        obj.insert("changed".into(), json!(changed));
-        obj.insert(
-            "message".into(),
-            json!(if changed {
-                format!("re-imported '{id}' from '{image}', keeping its config")
-            } else {
-                format!("'{id}' already matches '{image}'; nothing changed")
-            }),
-        );
-    }
-    Ok(out)
+    Ok(wire::reimported(report, &image, changed))
 }
 
 /// `agent_dev_url_set { id, url? }` (§3.4, §8) — point this agent's app at a
@@ -2582,7 +2562,10 @@ async fn agent_reimport(state: &SharedState, id: &str) -> Result<Value, String> 
 ///
 /// Setting one **stops a running app container**: it was started from the image
 /// this override replaces, and leaving it up would burn memory serving nobody.
-async fn agent_dev_url_set(state: &SharedState, args: &Args) -> Result<Value, String> {
+async fn agent_dev_url_set(
+    state: &SharedState,
+    args: &Args,
+) -> Result<dto::AgentDevUrlSet, String> {
     let id = need_id(args)?;
     let agent = load_agent(state, &id).await?;
     let raw = match args.get("url") {
@@ -2591,6 +2574,12 @@ async fn agent_dev_url_set(state: &SharedState, args: &Args) -> Result<Value, St
         Some(Value::String(s)) => Some(s.clone()),
         Some(_) => return Err("url must be a string, or null to clear it".to_string()),
     };
+    if agents::service::service_of(&agent).is_none() {
+        return Err(format!(
+            "'{id}' declares no run.service, so it has no app to point at a dev server. Add a \
+             service block to its manifest first."
+        ));
+    }
     let Some(raw) = raw else {
         store::set_agent_dev_url(&state.db, &id, None)
             .await
@@ -2598,43 +2587,16 @@ async fn agent_dev_url_set(state: &SharedState, args: &Args) -> Result<Value, St
         // Answered: whatever a bind-address change had to take away, the owner
         // has now decided about (§3.4).
         agents::service::forget_cleared_dev_url(state, &id).await;
-        return Ok(json!({
-            "ok": true,
-            "id": id,
-            "dev_url": "",
-            "message": format!(
-                "'{id}' is served from its image again; the next request to {} starts the \
-                 container",
-                agents::service::agent_origin(&state.snapshot().settings, &id)
-            ),
-        }));
+        let origin = agents::service::agent_origin(&state.snapshot().settings, &id);
+        return Ok(wire::dev_url_cleared(&id, &origin));
     };
-    if agents::service::service_of(&agent).is_none() {
-        return Err(format!(
-            "'{id}' declares no run.service, so it has no app to point at a dev server. Add a \
-             service block to its manifest first."
-        ));
-    }
     let url = agents::service::validate_dev_url(&raw, &state.snapshot().settings.bind_addr)?;
     store::set_agent_dev_url(&state.db, &id, Some(&url))
         .await
         .map_err(|e| e.to_string())?;
     agents::service::forget_cleared_dev_url(state, &id).await;
     let stopped = agents::service::stop(state, &id, "a dev_url was set for this agent").await;
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "dev_url": url,
-        "stopped": stopped.as_ref().and_then(|s| s.container.clone()),
-        "message": match &stopped {
-            Some(s) => format!(
-                "'{id}' is served from {url}; its app container was started from the image, so \
-                 it was stopped ({})",
-                s.describe()
-            ),
-            None => format!("'{id}' is served from {url}; no container is started for its app"),
-        },
-    }))
+    Ok(wire::dev_url_set(&id, &url, stopped))
 }
 
 /// `agent_config_set` — a sparse patch over the stored values (§2.6).
@@ -2646,7 +2608,10 @@ async fn agent_dev_url_set(state: &SharedState, args: &Args) -> Result<Value, St
 /// secrets: any field can be reset to its schema default this way, and a
 /// required field with no default then fails validation naming itself, which
 /// is the honest answer to "clear the thing the agent cannot run without".
-async fn agent_config_set(state: &SharedState, args: &Args) -> Result<Value, ApiRefusal> {
+async fn agent_config_set(
+    state: &SharedState,
+    args: &Args,
+) -> Result<dto::AgentConfigSaved, ApiRefusal> {
     let id = need_id(args)?;
     let incoming = match args.get("values") {
         Some(Value::Object(m)) => m.clone(),
@@ -2755,43 +2720,23 @@ async fn agent_config_set(state: &SharedState, args: &Args) -> Result<Value, Api
                 .await
         }
     };
-    let mut message = if undeclared.is_empty() {
-        "config saved".to_string()
-    } else {
-        format!(
-            "config saved; {} {} not declared by this manifest and {} removed from the stored \
-             config",
-            undeclared.join(", "),
-            if undeclared.len() == 1 { "is" } else { "are" },
-            if undeclared.len() == 1 { "was" } else { "were" },
-        )
-    };
-    if let Some(s) = &stopped {
-        message.push_str(&format!(
-            "; the app container was holding the mount for {} and was stopped ({})",
-            repointed.join(", "),
-            s.describe()
-        ));
-    }
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "token_scope": token::scope_note(mode, &patterns),
-        "mounts_repointed": repointed,
-        "service_stopped": stopped.as_ref().and_then(|s| s.container.clone()),
+    Ok(wire::config_saved(
+        &id,
+        token::scope_note(mode, &patterns),
+        repointed,
+        stopped,
         // What is now stored, masked — echoing the pre-merge values would make
         // a saved change look like it had not been saved.
-        "config": manifest::masked_values(&fields, &merged),
+        manifest::masked_values(&fields, &merged),
         // Said rather than silent: clearing a name the schema does not declare
         // is legitimate (it is how a value orphaned by a manifest change goes
         // away) but it is not the ordinary case, and a typo in `clear` looks
         // exactly like it.
-        "cleared_undeclared": undeclared,
-        "message": message,
-    }))
+        undeclared,
+    ))
 }
 
-async fn agent_enable(state: &SharedState, args: &Args) -> Result<Value, String> {
+async fn agent_enable(state: &SharedState, args: &Args) -> Result<dto::AgentEnabled, String> {
     let id = need_id(args)?;
     let enabled = args
         .get("enabled")
@@ -2813,17 +2758,9 @@ async fn agent_enable(state: &SharedState, args: &Args) -> Result<Value, String>
     let stopped = if enabled {
         None
     } else {
-        agents::service::stop(state, &id, "the agent was disabled")
-            .await
-            .map(|s| s.describe())
+        agents::service::stop(state, &id, "the agent was disabled").await
     };
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "enabled": enabled,
-        "service_stopped": stopped,
-        "message": if enabled { "agent enabled" } else { "agent disabled" },
-    }))
+    Ok(wire::enabled(&id, enabled, stopped))
 }
 
 /// A built-in is deleted like any other agent, and **stays** deleted: the seed
@@ -2836,7 +2773,10 @@ async fn agent_enable(state: &SharedState, args: &Args) -> Result<Value, String>
 /// rule is the one the rest of the app follows for user data: a conversation is
 /// what was said, an agent is only the preset it was said through. The op
 /// reports the count rather than doing it quietly.
-pub(crate) async fn agent_delete(state: &SharedState, id: &str) -> Result<Value, String> {
+pub(crate) async fn agent_delete(
+    state: &SharedState,
+    id: &str,
+) -> Result<dto::AgentDeleted, String> {
     agent_delete_as(state, id, None).await
 }
 
@@ -2849,7 +2789,7 @@ pub(crate) async fn agent_delete_as(
     state: &SharedState,
     id: &str,
     by_device: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<dto::AgentDeleted, String> {
     let existed = match by_device {
         None => store::delete_agent(&state.db, id).await,
         Some(device) => store::delete_agent_created_by(&state.db, id, device).await,
@@ -2884,21 +2824,7 @@ pub(crate) async fn agent_delete_as(
         .await
         .map_err(|e| e.to_string())?;
     state.chat_feed.wake();
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "threads_kept": unlinked,
-        "message": match unlinked {
-            0 => format!("deleted agent '{id}'"),
-            1 => format!("deleted agent '{id}'; its 1 chat thread was kept, on the Chat page"),
-            n => format!("deleted agent '{id}'; its {n} chat threads were kept, on the Chat page"),
-        },
-        "hint": if seed::shipped(id).is_some() {
-            "this was a shipped agent; 'Restore shipped agents' (agents_restore) brings it back"
-        } else {
-            "gone; import the exported file to bring it back"
-        },
-    }))
+    Ok(wire::deleted(id, unlinked, seed::shipped(id).is_some()))
 }
 
 /// `agent_duplicate` — same manifest under a new id, config copied **minus
@@ -2908,7 +2834,10 @@ pub(crate) async fn agent_delete_as(
 /// The second op that can answer with an origin code: the copy's id is a new
 /// host name, and a manifest that declares `run.service` has to earn it the
 /// same way an import does.
-async fn agent_duplicate(state: &SharedState, args: &Args) -> Result<Value, ApiRefusal> {
+async fn agent_duplicate(
+    state: &SharedState,
+    args: &Args,
+) -> Result<dto::AgentDuplicated, ApiRefusal> {
     let id = need_id(args)?;
     let new_id = arg_str(args, "new_id")
         .filter(|s| !s.is_empty())
@@ -2969,17 +2898,11 @@ async fn agent_duplicate(state: &SharedState, args: &Args) -> Result<Value, ApiR
     store::set_agent_config(&state.db, &new_id, &Value::Object(config).to_string())
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({
-        "ok": true,
-        "id": new_id,
-        "name": m.name,
-        "config_omitted": dropped,
-        "message": format!("duplicated '{id}' as '{new_id}'"),
-    }))
+    Ok(wire::duplicated(&id, new_id, m.name, dropped))
 }
 
 /// `agent_reset` — a built-in back to its shipped manifest, keeping the config.
-async fn agent_reset(state: &SharedState, id: &str) -> Result<Value, String> {
+async fn agent_reset(state: &SharedState, id: &str) -> Result<dto::AgentReset, String> {
     let Some(m) = seed::shipped(id) else {
         return Err(format!(
             "'{id}' is not a shipped agent, so there is no original to reset to"
@@ -3008,22 +2931,8 @@ async fn agent_reset(state: &SharedState, id: &str) -> Result<Value, String> {
     // A different manifest can name a different model-alias field (§3.1).
     token::resync(state, id).await?;
     agents::service::resync(state, id).await?;
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "dropped_config": dropped.clone(),
-        "message": format!(
-            "'{id}' restored to the shipped manifest; its config was kept{}",
-            if dropped.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " except {}, which the shipped schema no longer declares",
-                    dropped.join(", ")
-                )
-            }
-        ),
-    }))
+    dev_url::drop_without_service(state, id).await?;
+    Ok(wire::reset(id, dropped))
 }
 
 // ---------------------------------------------------------------------------
@@ -3076,7 +2985,10 @@ async fn with_base_config(
 /// thing an op is better placed to answer than a job — that a run is already in
 /// flight, which is reported as the running job rather than as an error (§2.4,
 /// "one live run per agent").
-pub(crate) async fn agent_run(state: &SharedState, args: &Args) -> Result<Value, String> {
+pub(crate) async fn agent_run(
+    state: &SharedState,
+    args: &Args,
+) -> Result<dto::AgentRunStarted, String> {
     agent_run_as(state, args, None).await
 }
 
@@ -3089,7 +3001,7 @@ pub(crate) async fn agent_run_as(
     state: &SharedState,
     args: &Args,
     by_device: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<dto::AgentRunStarted, String> {
     let id = need_id(args)?;
     let phase = match arg_str(args, "phase") {
         Some(p) => batch::Phase::parse(p)
@@ -3209,22 +3121,20 @@ pub(crate) async fn agent_run_as(
     )
     .await?;
     let already = matches!(spawned, crate::jobs::Spawn::AlreadyRunning(_));
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "job_id": spawned.id(),
-        "phase": phase.as_str(),
-        "already_running": already,
-        "message": if already {
-            format!("a run of '{id}' is already in flight; showing that one")
-        } else {
-            format!("started the {} run of '{id}'", phase.as_str())
-        },
-    }))
+    // The run in flight may be of another phase than the one asked for: ask the
+    // job `spawned` names (its input never changes), not whatever is active by
+    // the time of the read. A database error falls back to the phase asked.
+    let phase = if already {
+        match store::get_job(&state.db, spawned.id()).await {
+            Ok(Some(row)) => run_summary(&row).phase,
+            _ => phase.as_str().to_string(),
+        }
+    } else {
+        phase.as_str().to_string()
+    };
+    Ok(wire::run_started(&id, spawned.id(), &phase, already))
 }
 
-/// `agent_run_cancel` — ask this agent's run to stop. Cooperative: the executor
-/// stops between items and keeps the rows it has (§4.1).
 /// `agent_token_get` / `agent_token_rotate` (§8).
 ///
 /// A read of a column that already holds the value, not a reveal-once: lmgw has
@@ -3232,49 +3142,35 @@ pub(crate) async fn agent_run_as(
 /// it did not start at all. Both ops are deliberately **not** exposed as
 /// `lmgw__*` self-admin tools — defence in depth, not a boundary, since they
 /// sit on the unauthenticated `/api` plane either way (§8).
-async fn agent_token(state: &SharedState, id: &str, rotate: bool) -> Result<Value, String> {
+async fn agent_token_get(state: &SharedState, id: &str) -> Result<dto::AgentTokenRead, String> {
     let agent = load_agent(state, id).await?;
-    let (plaintext, scope_warning) = if rotate {
-        token::rotate(state, &agent).await?
-    } else {
-        (token::ensure(state, &agent).await?, None)
-    };
+    let plaintext = token::ensure(state, &agent).await?;
+    Ok(wire::token_got(id, plaintext, token::derive_scope(&agent)))
+}
+
+async fn agent_token_rotate(
+    state: &SharedState,
+    id: &str,
+) -> Result<dto::AgentTokenIssued, String> {
+    let agent = load_agent(state, id).await?;
+    let (plaintext, scope_warning) = token::rotate(state, &agent).await?;
     // §12's open question, answered: **rotation stops the service container.**
     // There is one `(key_hash, key_plain)` pair per agent and rotation replaces
     // both in one write, so a running service is holding a token that stopped
     // working a moment ago and can now only fail. Leaving it up would trade a
     // visible restart for an invisible 401 on its next gateway call. The next
     // request to the agent's origin starts it again with the new token.
-    let service_stopped = if rotate {
-        agents::service::stop(state, id, "the agent's token was rotated").await
-    } else {
-        None
-    };
-    let service_note = service_stopped.as_ref().map(|s| s.describe());
-    let (mode, patterns) = token::derive_scope(&agent);
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "name": token::key_name(id),
-        "token": plaintext,
-        "scope_mode": mode.as_str(),
-        "scope_patterns": patterns,
-        "scope_note": token::scope_note(mode, &patterns),
-        "service_stopped": service_stopped.as_ref().and_then(|s| s.container.clone()),
-        // A rotation that could not re-derive the scope still rotated: the
-        // token above is the live one, and this says what did not happen.
-        "warning": scope_warning,
-        "message": match (&service_note, rotate) {
-            (Some(note), _) => format!(
-                "rotated the token for '{id}' — the previous one stopped working now, and its \
-                 app was holding it: {note}"
-            ),
-            (None, true) => {
-                format!("rotated the token for '{id}' — the previous one stopped working now")
-            }
-            (None, false) => format!("the token for '{id}'"),
-        },
-    }))
+    let service_stopped = agents::service::stop(state, id, "the agent's token was rotated").await;
+    let scope = token::derive_scope(&agent);
+    // A rotation that could not re-derive the scope still rotated: the token is
+    // the live one, and `scope_warning` says what did not happen.
+    Ok(wire::token_issued(
+        id,
+        plaintext,
+        scope,
+        service_stopped,
+        scope_warning,
+    ))
 }
 
 /// `agent_service_log { id, lines? }` (§3.3, §7) — the App tab's log block, as
@@ -3290,7 +3186,10 @@ async fn agent_token(state: &SharedState, id: &str, rotate: bool) -> Result<Valu
 ///
 /// The count is echoed back with the text so the caller can say what it is
 /// showing rather than implying it is everything.
-async fn agent_service_log(state: &SharedState, args: &Args) -> Result<Value, String> {
+async fn agent_service_log(
+    state: &SharedState,
+    args: &Args,
+) -> Result<dto::AgentServiceLog, String> {
     let id = need_id(args)?;
     let agent = load_agent(state, &id).await?;
     if agents::service::service_of(&agent).is_none() {
@@ -3306,28 +3205,14 @@ async fn agent_service_log(state: &SharedState, args: &Args) -> Result<Value, St
         },
     };
     let Some(live) = state.agent_services.get(&id) else {
-        return Ok(json!({
-            "ok": true,
-            "id": id,
-            "lines": lines,
-            "running": false,
-            "log": "",
-            "message": format!("'{id}' has no app container running, so there is no log to read"),
-        }));
+        return Ok(wire::service_log(&id, lines, None));
     };
     let log = agents::service::log_tail(state, &id, &live.container, lines).await;
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "lines": lines,
-        "running": true,
-        "container": live.container,
-        "log": log,
-        "message": match lines {
-            0 => format!("the whole log of '{}'", live.container),
-            n => format!("the last {n} lines of '{}'", live.container),
-        },
-    }))
+    Ok(wire::service_log(
+        &id,
+        lines,
+        Some((live.container.clone(), log)),
+    ))
 }
 
 /// `agent_service_start` / `agent_service_stop` (§3.3, §8) — the App tab's two
@@ -3338,27 +3223,21 @@ async fn agent_service_log(state: &SharedState, args: &Args) -> Result<Value, St
 /// and the manifest's `start_timeout_seconds` bounding the wait. Stop is the
 /// stop ladder. Stopping something that is not running is success — "make sure
 /// this is not running" is what the button means.
-async fn agent_service(state: &SharedState, id: &str, start: bool) -> Result<Value, String> {
-    let agent = load_agent(state, id).await?;
-    if agents::service::service_of(&agent).is_none() {
-        return Err(format!(
-            "'{id}' declares no run.service, so it has no app to start or stop"
-        ));
-    }
-    if !start {
-        let stopped = agents::service::stop(state, id, "asked to stop from the App tab").await;
-        return Ok(json!({
-            "ok": true,
-            "id": id,
-            "running": false,
-            "stopped": stopped.as_ref().and_then(|s| s.container.clone()),
-            "cancelled_start": stopped.as_ref().is_some_and(|s| s.cancelled_start),
-            "message": match &stopped {
-                Some(s) => s.describe(),
-                None => format!("'{id}' had no app container running"),
-            },
-        }));
-    }
+async fn agent_service_stop(
+    state: &SharedState,
+    id: &str,
+) -> Result<dto::AgentServiceStopped, String> {
+    service_agent(state, id).await?;
+    let stopped = agents::service::stop(state, id, "asked to stop from the App tab").await;
+    Ok(wire::service_stopped(id, stopped))
+}
+
+/// `agent_service_stop`'s other button: see there for what the two share.
+async fn agent_service_start(
+    state: &SharedState,
+    id: &str,
+) -> Result<dto::AgentServiceStarted, String> {
+    let agent = service_agent(state, id).await?;
     // §3.4: with a dev_url set there is nothing to start — the app is served
     // from the owner's own server and a container started here would be one
     // nothing routes to. Refused with the reason rather than started silently.
@@ -3369,20 +3248,14 @@ async fn agent_service(state: &SharedState, id: &str, start: bool) -> Result<Val
         ));
     }
     match agents::service::ensure(state, &agent).await {
-        Ok(live) => Ok(json!({
-            "ok": true,
-            "id": id,
-            "running": true,
-            "container": live.container,
-            "host_port": live.host_port,
-            // Where it is now answering (§7): the published host port is
-            // lmgw's business, the origin is the reader's.
-            "origin": agents::service::agent_origin(&state.snapshot().settings, id),
-            "message": format!(
-                "'{id}' is serving on 127.0.0.1:{} as {}",
-                live.host_port, live.container
-            ),
-        })),
+        // Where it is now answering (§7): the published host port is lmgw's
+        // business, the origin is the reader's.
+        Ok(live) => Ok(wire::service_started(
+            id,
+            live.container.clone(),
+            live.host_port,
+            agents::service::agent_origin(&state.snapshot().settings, id),
+        )),
         Err(e) => Err(if e.log.trim().is_empty() {
             e.reason.clone()
         } else {
@@ -3391,9 +3264,23 @@ async fn agent_service(state: &SharedState, id: &str, start: bool) -> Result<Val
     }
 }
 
-async fn agent_run_cancel(state: &SharedState, id: &str) -> Result<Value, String> {
+/// The agent behind `agent_service_start` and `agent_service_stop`, which has to
+/// declare an app.
+async fn service_agent(state: &SharedState, id: &str) -> Result<Agent, String> {
+    let agent = load_agent(state, id).await?;
+    if agents::service::service_of(&agent).is_none() {
+        return Err(format!(
+            "'{id}' declares no run.service, so it has no app to start or stop"
+        ));
+    }
+    Ok(agent)
+}
+
+/// `agent_run_cancel` — ask this agent's run to stop. Cooperative: the executor
+/// stops between items and keeps the rows it has (§4.1).
+async fn agent_run_cancel(state: &SharedState, id: &str) -> Result<dto::AgentRunCancelled, String> {
     let message = batch::cancel_for_agent(state, id).await?;
-    Ok(json!({ "ok": true, "id": id, "message": message }))
+    Ok(wire::run_cancelled(id, message))
 }
 
 // ---------------------------------------------------------------------------
@@ -3402,36 +3289,13 @@ async fn agent_run_cancel(state: &SharedState, id: &str) -> Result<Value, String
 
 /// `lmgw__agents` — the catalog, trimmed to what a model needs to decide what
 /// to call next.
-pub(crate) async fn tool_list(state: &SharedState) -> Result<Value, String> {
-    let cards = list_inner(state).await?;
-    let agents: Vec<Value> = cards
-        .iter()
-        .map(|c| {
-            json!({
-                "id": c.id,
-                "name": c.name,
-                "description": c.description,
-                "kind": c.kind,
-                "model": c.effective_model,
-                "enabled": c.enabled,
-                "source": c.source,
-                "tools": c.labels,
-                "requires_ok": c.requires_ok,
-                "error": c.error,
-            })
-        })
-        .collect();
-    Ok(json!({
-        "agents": agents,
-        "count": agents.len(),
-        "next_step": "lmgw__agent_get id=<id> for the manifest and the config form",
-    }))
+pub(crate) async fn tool_list(state: &SharedState) -> Result<AgentList, String> {
+    Ok(wire::agent_list(list_inner(state).await?))
 }
 
 /// `lmgw__agent_get` — the manifest and the masked config for one agent.
-pub(crate) async fn tool_get(state: &SharedState, id: &str) -> Result<Value, String> {
+pub(crate) async fn tool_get(state: &SharedState, id: &str) -> Result<dto::AgentDetail, String> {
     // The self-admin plane is the owner's own (§3.7), so it reads the owner's
     // document.
-    let d = detail_inner(state, id, View::Admin).await?;
-    serde_json::to_value(d).map_err(|e| e.to_string())
+    detail_inner(state, id, View::Admin).await
 }

@@ -7,6 +7,13 @@
 //! row, the `(kind, key)` guard, `mcp::exec::resolve`, the in-process model
 //! call and its `request_logs` row — with no container and no network beyond
 //! loopback.
+//!
+//! The children: `decide` (classifying through a question set on
+//! `decision_lab`'s decision container, labs-store design §4) and
+//! `labelled_set` (an apply run's rows saved as a labelled set run).
+
+mod decide;
+mod labelled_set;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -55,7 +62,7 @@ async fn get_json(base: &Gw, path: &str) -> Value {
 }
 
 /// A gateway with `m1` routed at `upstream_base`.
-async fn gateway(upstream_base: &str, protocol: Protocol) -> SharedState {
+pub(crate) async fn gateway(upstream_base: &str, protocol: Protocol) -> SharedState {
     gateway_with_timeout(upstream_base, protocol, 5_000).await
 }
 
@@ -82,6 +89,7 @@ async fn gateway_with_timeout(
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -108,13 +116,20 @@ async fn gateway_with_timeout(
 /// Counts its `tools/call`s, which is how "refused before any tool call" is
 /// checked.
 async fn mcp_stub() -> (String, Arc<AtomicUsize>) {
+    mcp_stub_of(2).await
+}
+
+/// [`mcp_stub`] whose search lists `n` messages, `m1` to `m<n>`.
+async fn mcp_stub_of(n: usize) -> (String, Arc<AtomicUsize>) {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
+    let messages: Vec<Value> = (1..=n).map(|i| json!({ "id": format!("m{i}") })).collect();
 
     let handler = move |body: String| {
         let calls = counter.clone();
+        let messages = messages.clone();
         async move {
             let req: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
             let Some(id) = req.get("id").cloned() else {
@@ -145,9 +160,7 @@ async fn mcp_stub() -> (String, Arc<AtomicUsize>) {
                     if name == "search" {
                         json!({
                             "content": [],
-                            "structuredContent": {
-                                "messages": [{"id": "m1"}, {"id": "m2"}],
-                            },
+                            "structuredContent": { "messages": messages },
                             "isError": false,
                         })
                     } else {
@@ -215,7 +228,7 @@ async fn register_stub(state: &SharedState, url: &str) {
 }
 
 /// The test agent: the mail shape, over the stub's two tools.
-fn doc(model_default: &str) -> String {
+pub(crate) fn doc(model_default: &str) -> String {
     format!(
         r#"{{
   "schema_version": 1,
@@ -246,7 +259,7 @@ fn doc(model_default: &str) -> String {
     )
 }
 
-async fn install(base: &Gw, doc: &str) {
+pub(crate) async fn install(base: &Gw, doc: &str) {
     let resp = base
         .client()
         .post(format!("{base}/api/agents/import?replace=1"))
@@ -261,7 +274,7 @@ async fn install(base: &Gw, doc: &str) {
 }
 
 /// Poll the job row until it leaves `queued`/`running`.
-async fn settle(state: &SharedState, job_id: i64) -> store::JobRow {
+pub(crate) async fn settle(state: &SharedState, job_id: i64) -> store::JobRow {
     for _ in 0..400 {
         let row = store::get_job(&state.db, job_id).await.unwrap().unwrap();
         if !matches!(row.status.as_str(), "queued" | "running") {

@@ -115,6 +115,7 @@ async fn add_claude(state: &SharedState, mock: &MockServer) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

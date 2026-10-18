@@ -319,6 +319,8 @@ fn secret_inputs_per_operation() {
         ("post /api/op/agent_config_set", &["body.values"][..]),
         ("post /api/op/agent_open_chat", &["body.values"][..]),
         ("post /api/op/agent_run", &["body.values"][..]),
+        // The pairing token (device link design §3.4).
+        ("post /devices/enrol", &["body.token"][..]),
     ]);
 
     let doc = admin_doc();
@@ -342,6 +344,34 @@ fn secret_inputs_per_operation() {
     let view = &doc["components"]["schemas"]["McpServerView"]["properties"];
     assert_eq!(view["env"][ext::SECRET], true);
     assert_eq!(view["headers"][ext::SECRET], true);
+}
+
+/// The credentials an answer hands out are flagged at their field: a key's
+/// plaintext, an owner key revealed, a device's pairing link (which carries
+/// its one-time token), and an agent's token (flagged by its name). The
+/// first three are flagged per field, not by name, so a broad name like
+/// `key` does not flag every unrelated property called that.
+#[test]
+fn the_answers_that_hand_out_a_credential_flag_it() {
+    let doc = admin_doc();
+    for (answer, field) in [
+        ("KeyCreated", "key"),
+        ("KeySecret", "key"),
+        ("DevicePaired", "link"),
+        ("AgentTokenIssued", "token"),
+        ("AgentTokenRead", "token"),
+    ] {
+        let schemas = common::documented_schemas(doc, answer);
+        assert!(!schemas.is_empty(), "the document has no schema {answer}");
+        for schema in schemas {
+            let prop = &schema["properties"][field];
+            assert_eq!(
+                prop.get(ext::SECRET),
+                Some(&Value::Bool(true)),
+                "{answer}.{field} is a credential and must say so: {prop}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

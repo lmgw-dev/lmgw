@@ -318,76 +318,9 @@ pub struct ImageLabModels<C = crate::status::ImageCapabilities> {
     pub hold: bool,
 }
 
-/// What the lab answers for a generation that succeeded: what was sent next
-/// to what came back. A failure is not wrapped; it is the gateway's own error
-/// envelope with its status.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ImageGenerateResult {
-    /// The route the request was dispatched to: `/v1/images/generations`.
-    pub endpoint: String,
-    /// The exact JSON body sent to that route.
-    pub request: Value,
-    /// How long the dispatch took in the gateway, in milliseconds.
-    pub latency_ms: u64,
-    /// The `x-lmgw-*` headers the gateway stamped on the answer (which model
-    /// really served it, which upstream, ...), which the lab would otherwise
-    /// drop.
-    pub headers: std::collections::BTreeMap<String, String>,
-    /// The route's answer: the OpenAI images response.
-    pub response: Value,
-}
-
-/// One text field of an edit, as sent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ImageEditField {
-    pub name: String,
-    pub value: String,
-}
-
-/// One file part of an edit, as sent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ImageEditFile {
-    /// `image` or `mask`.
-    pub name: String,
-    pub filename: String,
-    /// The part's content type as the upload declared it; `null` if it
-    /// declared none.
-    #[serde(rename = "type")]
-    pub content_type: Option<String>,
-    /// The part's size in bytes.
-    pub bytes: usize,
-}
-
-/// What an edit sent, in place of a JSON body: its text fields and each file
-/// by name and size.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ImageEditSummary {
-    pub fields: Vec<ImageEditField>,
-    pub files: Vec<ImageEditFile>,
-}
-
-/// What the lab answers for an edit that succeeded; as
-/// [`ImageGenerateResult`], with a summary of the multipart in `request`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ImageEditResult {
-    /// The route the request was dispatched to: `/v1/images/edits`.
-    pub endpoint: String,
-    pub request: ImageEditSummary,
-    /// How long the dispatch took in the gateway, in milliseconds.
-    pub latency_ms: u64,
-    /// The `x-lmgw-*` headers the gateway stamped on the answer.
-    pub headers: std::collections::BTreeMap<String, String>,
-    /// The route's answer: the OpenAI images response.
-    pub response: Value,
-}
+/// The lab's kept shapes: the group's form, the answer of a dispatch.
+pub mod kept;
+pub use kept::{ImageLabAnswer, ImageLabForm, EDIT_VARIANT, GENERATE_VARIANT};
 
 #[cfg(test)]
 mod tests {

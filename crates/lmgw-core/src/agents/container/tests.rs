@@ -518,7 +518,7 @@ fn the_base_url_takes_the_port_from_the_bind_addr_and_never_guesses() {
         ("http://host.containers.internal:8787".to_string(), vec![])
     );
     assert_eq!(
-        gateway_access("10.0.0.5:9000").unwrap(),
+        gateway_access("203.0.113.5:9000").unwrap(),
         ("http://host.containers.internal:9000".to_string(), vec![])
     );
     // A loopback-bound gateway — lmgw's own default — is *not* reachable at

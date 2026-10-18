@@ -265,3 +265,51 @@ async fn the_speech_and_warm_frames_are_the_documented_types() {
     round_trip::<frames::WarmDone>("done", &done.1);
     assert_eq!(done.1, json!({}));
 }
+
+/// `Caller::sse` wraps every Chat turn, read-aloud and warm-up stream, and
+/// ends one of them with a last `error` frame when the caller's key is
+/// revoked or the gateway stops. So every one lists `error`, with the same
+/// schema the send route gives it. The enumeration is the document's own:
+/// every `/chat/api/` operation that streams, bar the feed, which is not
+/// wrapped by `Caller::sse` and ends on its own `revoked` event.
+#[test]
+fn every_chat_stream_wrapped_by_caller_sse_lists_the_error_frame() {
+    let doc = lmgw_core::openapi::admin_doc();
+    let error_of = |route: &str, method: &str| -> Option<Value> {
+        doc.pointer(&format!(
+            "/paths/{}/{method}/responses/200/x-lmgw-sse-events/error",
+            route.replace('~', "~0").replace('/', "~1")
+        ))
+        .cloned()
+    };
+    let send_error = error_of("/chat/api/threads/{id}/send", "post")
+        .expect("the send route lists its error frame");
+    let mut streams = Vec::new();
+    for (route, methods) in doc["paths"].as_object().unwrap() {
+        if !route.starts_with("/chat/api/") || route == "/chat/api/feed" {
+            continue;
+        }
+        for (method, op) in methods.as_object().unwrap() {
+            if op.pointer("/responses/200/x-lmgw-sse-events").is_some() {
+                streams.push((route.clone(), method.clone()));
+            }
+        }
+    }
+    for pinned in [
+        "/chat/api/threads/{id}/send",
+        "/chat/api/threads/{id}/messages/{mid}/speak",
+        "/chat/api/threads/{id}/voice/warm",
+    ] {
+        assert!(
+            streams.iter().any(|(route, _)| route == pinned),
+            "{pinned} is not found among the Chat streams {streams:?}"
+        );
+    }
+    for (route, method) in streams {
+        assert_eq!(
+            error_of(&route, &method).as_ref(),
+            Some(&send_error),
+            "{method} {route} streams through Caller::sse and must list the error frame"
+        );
+    }
+}

@@ -9,7 +9,8 @@ set -euo pipefail
 # The list follows Tauri's Fedora prerequisites, which is the only reason
 # openssl-devel is on it: nothing in lmgw's build links OpenSSL (its TLS is
 # rustls, ort's build-time download included), and neither does tauri-cli with
-# its default features.
+# its default features. opus-devel is lmgw's own: WebRTC calls link the
+# system libopus (realtime calls design §11; the RPM depends on `opus`).
 dnf -y install \
   rust cargo \
   rust-std-static-wasm32-unknown-unknown \
@@ -19,6 +20,7 @@ dnf -y install \
   libayatana-appindicator-gtk3-devel \
   librsvg2-devel \
   openssl-devel \
+  opus-devel \
   pkgconf-pkg-config \
   rpm-build \
   gcc gcc-c++ make \

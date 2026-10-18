@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lmgw_core::config::{AudioModel, AudioSettings, LlamaParams, Settings};
+use lmgw_core::erased::Erased;
 use lmgw_core::ops::{self, LocalModelPatch};
 use lmgw_core::runtime::argv::{render_engine_args, LlamaArgs};
 use lmgw_core::runtime::descriptor::{model_runtime, ModelRuntime};
@@ -89,72 +90,76 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Podman {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman", "the registry only ever shells podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args[0].as_str() {
-            // Applies the label filter for real: that is what proves
-            // reconciliation never falls back to matching names.
-            "ps" => {
-                let filter = flag_value(args, "--filter")
-                    .and_then(|f| f.strip_prefix("label="))
-                    .map(|kv| {
-                        let (k, v) = kv.split_once('=').expect("label filter is key=value");
-                        (k.to_string(), v.to_string())
-                    });
-                let rows: Vec<serde_json::Value> = self
-                    .containers
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|c| match &filter {
-                        Some((k, v)) => c.labels.get(k).is_some_and(|got| got == v),
-                        None => true,
-                    })
-                    .map(|c| {
-                        json!({
-                            "Names": [c.name],
-                            "Labels": c.labels,
-                            "State": c.state,
-                            // Fields reconciliation must not read, present so a
-                            // test would notice if it started to.
-                            "Id": "deadbeef",
-                            "Image": "some/image:tag",
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman", "the registry only ever shells podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args[0].as_str() {
+                // Applies the label filter for real: that is what proves
+                // reconciliation never falls back to matching names.
+                "ps" => {
+                    let filter = flag_value(args, "--filter")
+                        .and_then(|f| f.strip_prefix("label="))
+                        .map(|kv| {
+                            let (k, v) = kv.split_once('=').expect("label filter is key=value");
+                            (k.to_string(), v.to_string())
+                        });
+                    let rows: Vec<serde_json::Value> = self
+                        .containers
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| match &filter {
+                            Some((k, v)) => c.labels.get(k).is_some_and(|got| got == v),
+                            None => true,
                         })
-                    })
-                    .collect();
-                Ok(ok(&serde_json::to_string(&rows).unwrap()))
-            }
-            "inspect" => {
-                let name = args.last().cloned().unwrap_or_default();
-                if let Some(stderr) = self.inspect_broken.lock().unwrap().clone() {
-                    return Ok(CmdOutput {
-                        status: 125,
-                        stdout: String::new(),
-                        stderr,
-                    });
+                        .map(|c| {
+                            json!({
+                                "Names": [c.name],
+                                "Labels": c.labels,
+                                "State": c.state,
+                                // Fields reconciliation must not read, present so a
+                                // test would notice if it started to.
+                                "Id": "deadbeef",
+                                "Image": "some/image:tag",
+                            })
+                        })
+                        .collect();
+                    Ok(ok(&serde_json::to_string(&rows).unwrap()))
                 }
-                let found = self
-                    .containers
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|c| c.name == name)
-                    .cloned();
-                // Read the row first, then park: an adoption that resumes here
-                // is deciding on the container it saw, which is exactly the
-                // stale view the identity-checked insert has to catch.
-                let gate = self.inspect_gate.lock().unwrap().clone();
-                if let Some(mut rx) = gate {
-                    while !*rx.borrow_and_update() {
-                        if rx.changed().await.is_err() {
-                            break;
+                "inspect" => {
+                    let name = args.last().cloned().unwrap_or_default();
+                    if let Some(stderr) = self.inspect_broken.lock().unwrap().clone() {
+                        return Ok(CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr,
+                        });
+                    }
+                    let found = self
+                        .containers
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|c| c.name == name)
+                        .cloned();
+                    // Read the row first, then park: an adoption that resumes here
+                    // is deciding on the container it saw, which is exactly the
+                    // stale view the identity-checked insert has to catch.
+                    let gate = self.inspect_gate.lock().unwrap().clone();
+                    if let Some(mut rx) = gate {
+                        while !*rx.borrow_and_update() {
+                            if rx.changed().await.is_err() {
+                                break;
+                            }
                         }
                     }
-                }
-                match found {
+                    match found {
                     None => Ok(no_such(&name)),
                     Some(c) => Ok(ok(&serde_json::to_string(&json!([{
                         "Config": {"Cmd": c.cmd},
@@ -164,69 +169,70 @@ impl CommandRunner for Podman {
                     }]))
                     .unwrap())),
                 }
-            }
-            // A throwaway probe container (§3.6's probe/help: `run --rm`,
-            // foreground, no published port) is not a managed container and
-            // must not land in the map. Answering with empty output is what a
-            // box with no image pulled would do, and the caller degrades to
-            // "no vocabulary to check against" exactly as it does in
-            // production.
-            "run" if args.iter().any(|a| a == "--rm") => Ok(ok("")),
-            "run" => {
-                let name = flag_value(args, "--name").unwrap_or_default().to_string();
-                let host_port: u16 = flag_value(args, "-p")
-                    .and_then(|p| p.rsplit(':').nth(1))
-                    .and_then(|p| p.parse().ok())
-                    .expect("every managed container publishes a host port");
-                let labels: HashMap<String, String> = args
-                    .iter()
-                    .zip(args.iter().skip(1))
-                    .filter(|(f, _)| *f == "--label")
-                    .filter_map(|(_, kv)| kv.split_once('='))
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                // The image is the token right after the last `:ro` mount; the
-                // container command is everything after it.
-                let image_at = args
-                    .iter()
-                    .rposition(|a| a.ends_with(":ro"))
-                    .expect("every managed container mounts /models")
-                    + 1;
-                let mut list = self.containers.lock().unwrap();
-                list.retain(|c| c.name != name); // --replace
-                list.push(FakeContainer {
-                    name,
-                    labels,
-                    state: "running".into(),
-                    cmd: args[image_at + 1..].to_vec(),
-                    host_port,
-                });
-                Ok(ok("c0ffee\n"))
-            }
-            "stop" => {
-                let name = args.last().cloned().unwrap_or_default();
-                let mut list = self.containers.lock().unwrap();
-                match list.iter_mut().find(|c| c.name == name) {
-                    Some(c) => {
-                        c.state = "exited".into();
+                }
+                // A throwaway probe container (§3.6's probe/help: `run --rm`,
+                // foreground, no published port) is not a managed container and
+                // must not land in the map. Answering with empty output is what a
+                // box with no image pulled would do, and the caller degrades to
+                // "no vocabulary to check against" exactly as it does in
+                // production.
+                "run" if args.iter().any(|a| a == "--rm") => Ok(ok("")),
+                "run" => {
+                    let name = flag_value(args, "--name").unwrap_or_default().to_string();
+                    let host_port: u16 = flag_value(args, "-p")
+                        .and_then(|p| p.rsplit(':').nth(1))
+                        .and_then(|p| p.parse().ok())
+                        .expect("every managed container publishes a host port");
+                    let labels: HashMap<String, String> = args
+                        .iter()
+                        .zip(args.iter().skip(1))
+                        .filter(|(f, _)| *f == "--label")
+                        .filter_map(|(_, kv)| kv.split_once('='))
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                    // The image is the token right after the last `:ro` mount; the
+                    // container command is everything after it.
+                    let image_at = args
+                        .iter()
+                        .rposition(|a| a.ends_with(":ro"))
+                        .expect("every managed container mounts /models")
+                        + 1;
+                    let mut list = self.containers.lock().unwrap();
+                    list.retain(|c| c.name != name); // --replace
+                    list.push(FakeContainer {
+                        name,
+                        labels,
+                        state: "running".into(),
+                        cmd: args[image_at + 1..].to_vec(),
+                        host_port,
+                    });
+                    Ok(ok("c0ffee\n"))
+                }
+                "stop" => {
+                    let name = args.last().cloned().unwrap_or_default();
+                    let mut list = self.containers.lock().unwrap();
+                    match list.iter_mut().find(|c| c.name == name) {
+                        Some(c) => {
+                            c.state = "exited".into();
+                            Ok(ok(""))
+                        }
+                        None => Ok(no_such(&name)),
+                    }
+                }
+                "rm" => {
+                    let name = args.last().cloned().unwrap_or_default();
+                    let mut list = self.containers.lock().unwrap();
+                    let before = list.len();
+                    list.retain(|c| c.name != name);
+                    if list.len() == before {
+                        Ok(no_such(&name))
+                    } else {
                         Ok(ok(""))
                     }
-                    None => Ok(no_such(&name)),
                 }
+                _ => Ok(ok("")),
             }
-            "rm" => {
-                let name = args.last().cloned().unwrap_or_default();
-                let mut list = self.containers.lock().unwrap();
-                let before = list.len();
-                list.retain(|c| c.name != name);
-                if list.len() == before {
-                    Ok(no_such(&name))
-                } else {
-                    Ok(ok(""))
-                }
-            }
-            _ => Ok(ok("")),
-        }
+        })
     }
 }
 
@@ -1343,12 +1349,8 @@ async fn deleting_a_model_removes_its_container_now() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true);
-    assert!(
-        out["message"].as_str().unwrap().contains("removed"),
-        "{}",
-        out["message"]
-    );
+    assert!(out.ok);
+    assert!(out.message.contains("removed"), "{}", out.message);
 
     assert_eq!(f.podman.stopped(), vec![doomed.clone()]);
     assert_eq!(f.podman.removed(), vec![doomed.clone()]);
@@ -1384,11 +1386,7 @@ async fn disabling_a_model_removes_its_container_and_updating_a_busy_one_does_no
     )
     .await
     .unwrap();
-    assert!(
-        out["message"].as_str().unwrap().contains("stopped"),
-        "{}",
-        out["message"]
-    );
+    assert!(out.message.contains("stopped"), "{}", out.message);
     assert!(!f
         .state
         .runtime()
@@ -1411,11 +1409,7 @@ async fn disabling_a_model_removes_its_container_and_updating_a_busy_one_does_no
     )
     .await
     .unwrap();
-    assert!(
-        out["message"].as_str().unwrap().contains("removed"),
-        "{}",
-        out["message"]
-    );
+    assert!(out.message.contains("removed"), "{}", out.message);
     assert_eq!(f.podman.removed(), vec![off.clone()]);
     assert!(!f.podman.names().contains(&off));
 }
@@ -1461,7 +1455,7 @@ async fn renaming_a_busy_model_takes_its_old_container_with_it() {
     .await
     .unwrap();
 
-    let message = out["message"].as_str().unwrap();
+    let message = out.message.as_str();
     assert!(
         message.contains("renamed") && message.contains("removed"),
         "the rename has to say what happened to the old container: {message}"
@@ -1531,6 +1525,11 @@ async fn renaming_a_running_aux_model_takes_its_old_container_with_it() {
             kind: lmgw_core::config::AuxKind::Embed,
             pooling: None,
             ctx_size: None,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: vec![],
             idle_seconds: 0,
             enabled: true,
@@ -1649,7 +1648,7 @@ async fn updating_a_busy_model_says_so_instead_of_cutting_the_request_short() {
     )
     .await
     .unwrap();
-    let message = out["message"].as_str().unwrap();
+    let message = out.message.as_str();
     assert!(message.contains("still serving 1 request"), "{message}");
     assert!(
         f.state

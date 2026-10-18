@@ -1,19 +1,32 @@
 //! The Chat change feed's wire shapes:
 //! `GET /chat/api/feed`, one SSE stream per client.
 //!
-//! A **stored** event (threads, folders, profiles, approvals, tasks) has an SSE
-//! `id:` — its [`Cursor`] — and is rendered when it is delivered:
-//! `thread.created` and `thread.updated` carry the thread as
+//! A **stored** event (threads, folders, messages, profiles, approvals,
+//! tasks) has an SSE `id:` — its [`Cursor`] — and is rendered when it is
+//! delivered: `thread.created` and `thread.updated` carry the thread as
 //! `GET /chat/api/threads` lists it now, with the change's author beside it
-//! as `by`, or a [`ThreadGone`] once the thread is gone; `profile.*` carry
+//! as `by`, or a [`ThreadGone`] once the thread is gone; `message.added` and
+//! `message.updated` the messages whole, as `GET /chat/api/threads/{id}`
+//! lists them now, with the thread's title ([`MessagesChanged`]), and
+//! `message.deleted` the ids that went ([`MessagesDeleted`]); `profile.*` carry
 //! the profile's id and name as the write left them ([`FeedProfile`]);
 //! `approval.*` the call as the reply's pending state holds it
 //! ([`ApprovalRequested`], [`ApprovalDecided`]); `task.*` an MCP task a
 //! turn started and its result entering the thread, as the record's write
 //! left them ([`TaskStarted`], [`TaskDone`]); `device.revoked` a paired
 //! device whose key was deleted ([`DeviceRevoked`]). A **live** event (`turn.*`, `voice.*`, `hold`, `state`,
-//! `resync`, `revoked`) has no `id:`; what is live now is in [`Hello`] and
+//! `resync`, `revoked`, `caught_up`) has no `id:`; what is live now is in [`Hello`] and
 //! [`LiveState`].
+//!
+//! **The open approvals** (device link design §7.3): [`Hello::open_approvals`]
+//! is every call still waiting for a decision at the head the stream opened
+//! at, and [`CaughtUp`] says when the catch-up up to that head is over. The
+//! `approval.*` events of the catch-up are already reflected in the set; from
+//! `caught_up` on, `approval.requested` adds to it and `approval.decided`
+//! removes from it. Every `state` carries the set again as it is when it is
+//! sent ([`LiveState::open_approvals`]), and the feed sends one whenever
+//! what a reader may see moved or a `resync` passed records, so a set a
+//! reader keeps never stays short.
 //!
 //! The shapes the gateway writes and a client reads, so the two cannot
 //! drift: a sans-IO client needs nothing else to follow the feed.
@@ -42,6 +55,9 @@ pub mod event {
     pub const FOLDER_UPDATED: &str = "folder.updated";
     pub const FOLDER_DELETED: &str = "folder.deleted";
     pub const FOLDER_CURRENT: &str = "folder.current";
+    pub const MESSAGE_ADDED: &str = "message.added";
+    pub const MESSAGE_UPDATED: &str = "message.updated";
+    pub const MESSAGE_DELETED: &str = "message.deleted";
     pub const PROFILE_CREATED: &str = "profile.created";
     pub const PROFILE_UPDATED: &str = "profile.updated";
     pub const PROFILE_DELETED: &str = "profile.deleted";
@@ -50,7 +66,16 @@ pub mod event {
     pub const TASK_STARTED: &str = "task.started";
     pub const TASK_DONE: &str = "task.done";
     pub const DEVICE_REVOKED: &str = "device.revoked";
+    pub const CAUGHT_UP: &str = "caught_up";
 }
+
+/// The largest value `chat_feed_keepalive_max_s` may take, so the longest
+/// keep-alive a stream may ask (`?keepalive_s=`): a day. Between events a
+/// stream sends only its keep-alive comment, so this bounds how long a
+/// stream whose device vanished silently can stay open on lmgw before a
+/// keep-alive it never acknowledges ends it.
+// Shared with the dashboard, which shows it as the field's maximum.
+pub const MAX_KEEPALIVE_S: u32 = 86_400;
 
 // Review W4-1.
 /// The most live events `chat_feed_live_buffer` may hold.
@@ -68,10 +93,11 @@ pub const MAX_LIVE_BUFFER: u32 = 65_536;
 
 // Review W4-1.
 /// The most records `chat_feed_page_size` may read per catch-up query: a
-/// page is held in memory, each record rendered as the
-/// thread or folder it names (a few KB at most), so 10 000 records are some
-/// tens of MiB for one catching-up client. Every record is still sent,
-/// page after page.
+/// page of records is held in memory (a few hundred bytes each) until each
+/// is rendered and sent, one at a time, as the thread, folder or messages
+/// it names — a `message.*` event carries its messages whole, which can be
+/// large, so a stream holds one rendered event, never a page of them. Every
+/// record is still sent, page after page.
 pub const MAX_PAGE_SIZE: u32 = 10_000;
 
 /// A position in the feed, `"<epoch>:<seq>:<tag>"`: what a stored event's
@@ -202,8 +228,11 @@ pub struct Hello {
     /// or the newest record when it gave none (or one the feed answers with
     /// `resync`).
     pub cursor: String,
-    /// Seconds between keep-alive comments (`chat_feed_keepalive_s`, fixed
-    /// for this stream): a client derives its dead-link timeout from it.
+    /// Seconds between keep-alive comments, fixed for this stream: the
+    /// `keepalive_s` the request asked for, else the gateway's
+    /// `chat_feed_keepalive_s`. A client derives its dead-link timeout from
+    /// it. Stored events are never held back for it: the stream reads the
+    /// table at the gateway's own interval whatever this one is.
     pub keepalive_s: u32,
     /// How many days the feed keeps its records (`chat_feed_retention_days`,
     /// `0` = all): a client away longer gets a `resync`.
@@ -233,6 +262,60 @@ pub struct Hello {
     pub voice: Vec<LiveVoice>,
     /// The turns running now.
     pub turns: Vec<LiveTurn>,
+    /// Every call still waiting for a decision at [`Self::cursor`], in the
+    /// threads this reader may see, oldest reply first and each reply's
+    /// calls in the model's order, as `approval.requested` renders it (the
+    /// thread's title as it was then). Read with the head, so it is the open
+    /// set there: the `approval.*` events of the catch-up up to `caught_up`
+    /// are already reflected in it; after `caught_up`, `approval.requested`
+    /// adds to it and `approval.decided` removes from it, as does the
+    /// thread's deletion or its reply's, and every `state` replaces it
+    /// ([`LiveState::open_approvals`]). A waiting call is one of the
+    /// thread's last message: a reply a later message followed waits no
+    /// more (a new message declines its calls).
+    pub open_approvals: Vec<ApprovalRequested>,
+    /// A device's lmgw URLs as its row holds them now: `https` base URLs in
+    /// the owner's order (device link design §7.2). The device replaces its
+    /// list with them (`lmgw-client`'s `refresh_urls`). Empty on a feed that
+    /// is not a device's.
+    pub urls: Vec<String>,
+    /// The dates of the certificate the device connected with (§5.3); `null`
+    /// on a feed that is not a device's.
+    pub cert: Option<HelloCert>,
+    /// Where the dashboard is, for a client that offers to open it: the
+    /// plain listener's address as a URL (`http://127.0.0.1:8001/`), derived
+    /// from `bind_addr`. Sent to a device paired as "this computer"
+    /// (`local_only`) and to every other device when `bind_addr` is not
+    /// loopback, since a loopback address reaches nothing from another host.
+    /// `null` otherwise, and on a feed that is not a device's.
+    pub dashboard_url: Option<String>,
+}
+
+/// [`Hello::cert`]: the device certificate's dates, RFC 3339 UTC.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HelloCert {
+    /// When the certificate lapses.
+    pub not_after: String,
+    /// From when the device says "this certificate lapses on `<not_after>`;
+    /// pair it again before then" (two thirds of its validity).
+    pub notice_after: String,
+}
+
+/// `caught_up`: the stream has delivered, or passed as not for this reader,
+/// every stored event up to the head it opened at ([`Hello::cursor`] when
+/// the client gave no cursor). Live, so no `id:`; sent once per stream: right
+/// after `hello` (and the `resync` and profile list a cursor may owe) when
+/// there was nothing to catch up, else right after the catch-up's last
+/// event. From here on every `approval.*` changes [`Hello::open_approvals`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CaughtUp {
+    /// Where the stream stands now (`"<epoch>:<seq>:<tag>"`): a client may
+    /// resume from it, as from a keep-alive's `id:`.
+    pub cursor: String,
 }
 
 /// `state`: [`Hello`]'s live part again. Sent when the stream could not
@@ -240,8 +323,13 @@ pub struct Hello {
 /// happened past `chat_feed_live_buffer`, or the buffer was resized — and
 /// to a device when what it may see or do changed: a thread it reaches took
 /// or lost the self-admin toolset, its own admin-tools level moved, or the
-/// gateway's self-admin level moved what its admin tools may do. Stored
-/// events are never lost; `reason` says what happened and names the
+/// gateway's self-admin level moved what its admin tools may do. Also after
+/// a `resync` that passed records (the retention pruned past a stream still
+/// catching up, which gets it before `caught_up`; a change that could not be
+/// read, after `caught_up`), and to a device after a thread or folder came
+/// into its reach after `caught_up` (its `*.created`), so the open
+/// approvals in it arrive.
+/// Stored events are never lost; `reason` says what happened and names the
 /// setting.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -254,6 +342,18 @@ pub struct LiveState {
     pub voice: Vec<LiveVoice>,
     pub turns: Vec<LiveTurn>,
     pub reason: Option<String>,
+    /// The calls waiting for a decision as they are when this `state` is
+    /// sent, in the threads this reader may see now, as
+    /// [`Hello::open_approvals`] lists them: they replace the set a client
+    /// keeps. Read at sending, which may be a little past the stream's
+    /// cursor: match by `approval_request_id`, and an `approval.*` event
+    /// that follows changes nothing it already says. `null` when lmgw
+    /// could not read them for a `state` sent for another reason (a lag, a
+    /// resize, a refresh of what is live; said in its log): keep the set
+    /// you have. A `state` sent because the set may have moved never says
+    /// `null`: lmgw ends the stream instead, and the reconnect's `hello`
+    /// carries the set.
+    pub open_approvals: Option<Vec<ApprovalRequested>>,
 }
 
 /// `turn.started`.
@@ -391,6 +491,57 @@ pub struct FolderCurrent {
     pub by: Option<String>,
 }
 
+/// `message.added` and `message.updated`: messages of a thread were written
+/// (client-apps design §2.2). Added: a user message as it is stored (typed,
+/// dictated or spoken in a bound session), a reply as it is saved, a late
+/// MCP task result entering the thread (role `tool`). Updated in place: an
+/// edit, a continue, a resumed turn saved onto its reply, a spoken reply
+/// cut to what was heard or annotated with how it was spoken, a user
+/// message's retrieval stored, a call the reply waits on decided (or
+/// declined by a new message, or closed as not run). A reply still being
+/// generated is in no event until it is saved: its tokens are the send
+/// stream's.
+///
+/// Rendered at delivery, so a catch-up never replays a stale copy: each
+/// message as `GET /chat/api/threads/{id}` lists it now, whole, so a client
+/// shows it, or a notification, without a fetch. A message gone by then is
+/// left out (its `message.deleted` follows), and an event whose messages
+/// are all gone, or whose thread is, is not delivered. Two events may carry
+/// the same state of a message: apply them by id.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MessagesChanged {
+    pub thread_id: i64,
+    /// The thread's title at delivery, so a notification names the
+    /// conversation without a fetch.
+    pub thread_title: String,
+    /// The messages written, oldest first, each as the thread lists it now.
+    pub messages: Vec<crate::chat_threads::Message>,
+    /// Who wrote them: the sender of a user message, the starter of the
+    /// turn whose reply it is, the client that edited one or decided a call,
+    /// the client whose voice session cut or annotated a spoken reply (that
+    /// session's, even after another client took the thread over); `null`
+    /// for the gateway's own (a task result entering the thread, a call
+    /// closed as not run).
+    pub by: Option<String>,
+}
+
+/// `message.deleted`: messages of a thread were deleted (client-apps design
+/// §2.2): one by itself, every one after a point (an edit's resend, a
+/// regenerate), or a spoken reply nobody heard. Their attachments went with
+/// them. A thread deleted whole says so with `thread.deleted` alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MessagesDeleted {
+    pub thread_id: i64,
+    /// The messages that went, ascending.
+    pub message_ids: Vec<i64>,
+    /// Who deleted them; `null` for the gateway's own.
+    pub by: Option<String>,
+}
+
 /// `profile.created`, `profile.updated` and `profile.deleted`: a
 /// personality profile (`GET /chat/api/profiles`) was created, changed or
 /// deleted, named as that write left it. Every reader receives them,
@@ -411,13 +562,18 @@ pub struct FeedProfile {
 
 /// `approval.requested`: a turn in the thread stopped on a call that waits
 /// for an approval (client-apps design §6.5). Rendered from the reply's
-/// pending state at delivery; a reply gone by then (deleted, regenerated)
-/// is not delivered.
+/// pending state at delivery; a reply gone by then (deleted, regenerated),
+/// or a call decided by then (its `approval.decided` follows),
+/// is not delivered. With `thread_title`, `server_label`, `name` and
+/// `arguments` a client shows it, or a notification, without a fetch. Also
+/// the shape of [`Hello::open_approvals`]' entries.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApprovalRequested {
     pub thread_id: i64,
+    /// The thread's title at delivery (in `hello`, at the head it read).
+    pub thread_title: String,
     /// The reply that waits.
     pub message_id: i64,
     pub approval_request_id: String,
@@ -429,6 +585,7 @@ pub struct ApprovalRequested {
     /// The call's id, as the turn's `ready`, `approval` and `result` frames
     /// carry it. Absent from an lmgw before 2026-10-09.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub call_id: Option<String>,
 }
 
@@ -458,6 +615,7 @@ pub struct ApprovalDecided {
     /// The call's id, as `approval.requested` has it. Absent from an lmgw
     /// before 2026-10-09.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub call_id: Option<String>,
 }
 
@@ -580,8 +738,8 @@ pub enum FolderNow {
 
 /// One event of the feed, by its `event:` name, its data typed.
 ///
-/// Non-exhaustive: a newer gateway adds events (messages), and
-/// a client built against this one reads them as [`FeedEvent::Unknown`].
+/// Non-exhaustive: a newer gateway adds events, and a client built against
+/// this one reads them as [`FeedEvent::Unknown`].
 #[derive(Debug, Clone, PartialEq)]
 // Owned values, no boxes: a client (or an FFI wrapper) matches them as they are.
 #[allow(clippy::large_enum_variant)]
@@ -595,6 +753,9 @@ pub enum FeedEvent {
     FolderUpdated(FolderNow),
     FolderDeleted(FolderGone),
     FolderCurrent(FolderCurrent),
+    MessageAdded(MessagesChanged),
+    MessageUpdated(MessagesChanged),
+    MessageDeleted(MessagesDeleted),
     ProfileCreated(FeedProfile),
     ProfileUpdated(FeedProfile),
     ProfileDeleted(FeedProfile),
@@ -611,6 +772,7 @@ pub enum FeedEvent {
     State(LiveState),
     Resync(Resync),
     Revoked(Revoked),
+    CaughtUp(CaughtUp),
     /// An event this build does not know (a newer gateway's), as sent: a
     /// client skips it, and may log it.
     Unknown {
@@ -648,6 +810,9 @@ pub const EVENTS: &[&str] = &[
     event::FOLDER_UPDATED,
     event::FOLDER_DELETED,
     event::FOLDER_CURRENT,
+    event::MESSAGE_ADDED,
+    event::MESSAGE_UPDATED,
+    event::MESSAGE_DELETED,
     event::PROFILE_CREATED,
     event::PROFILE_UPDATED,
     event::PROFILE_DELETED,
@@ -664,6 +829,7 @@ pub const EVENTS: &[&str] = &[
     event::STATE,
     event::RESYNC,
     event::REVOKED,
+    event::CAUGHT_UP,
 ];
 
 impl FeedEvent {
@@ -709,6 +875,9 @@ impl FeedEvent {
             event::FOLDER_UPDATED => Self::FolderUpdated(folder(name, data)?),
             event::FOLDER_DELETED => Self::FolderDeleted(read(name, data)?),
             event::FOLDER_CURRENT => Self::FolderCurrent(read(name, data)?),
+            event::MESSAGE_ADDED => Self::MessageAdded(read(name, data)?),
+            event::MESSAGE_UPDATED => Self::MessageUpdated(read(name, data)?),
+            event::MESSAGE_DELETED => Self::MessageDeleted(read(name, data)?),
             event::PROFILE_CREATED => Self::ProfileCreated(read(name, data)?),
             event::PROFILE_UPDATED => Self::ProfileUpdated(read(name, data)?),
             event::PROFILE_DELETED => Self::ProfileDeleted(read(name, data)?),
@@ -725,6 +894,7 @@ impl FeedEvent {
             event::STATE => Self::State(read(name, data)?),
             event::RESYNC => Self::Resync(read(name, data)?),
             event::REVOKED => Self::Revoked(read(name, data)?),
+            event::CAUGHT_UP => Self::CaughtUp(read(name, data)?),
             other => Self::Unknown {
                 event: other.to_string(),
                 data: data.to_string(),
@@ -743,6 +913,9 @@ impl FeedEvent {
             Self::FolderUpdated(_) => event::FOLDER_UPDATED,
             Self::FolderDeleted(_) => event::FOLDER_DELETED,
             Self::FolderCurrent(_) => event::FOLDER_CURRENT,
+            Self::MessageAdded(_) => event::MESSAGE_ADDED,
+            Self::MessageUpdated(_) => event::MESSAGE_UPDATED,
+            Self::MessageDeleted(_) => event::MESSAGE_DELETED,
             Self::ProfileCreated(_) => event::PROFILE_CREATED,
             Self::ProfileUpdated(_) => event::PROFILE_UPDATED,
             Self::ProfileDeleted(_) => event::PROFILE_DELETED,
@@ -759,6 +932,7 @@ impl FeedEvent {
             Self::State(_) => event::STATE,
             Self::Resync(_) => event::RESYNC,
             Self::Revoked(_) => event::REVOKED,
+            Self::CaughtUp(_) => event::CAUGHT_UP,
             Self::Unknown { event, .. } => event,
         }
     }
@@ -822,6 +996,84 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(ev, FeedEvent::FolderUpdated(FolderNow::Gone(_))));
+    }
+
+    /// `message.*` (client-apps design §2.2, WP10): the messages whole with
+    /// the thread's title, or the ids that went.
+    #[test]
+    fn a_message_event_carries_its_messages_or_their_ids() {
+        let ev = FeedEvent::parse(
+            event::MESSAGE_ADDED,
+            r#"{"thread_id": 7, "thread_title": "Kai", "by": "device 'phone'",
+                "messages": [{"id": 41, "thread_id": 7, "role": "assistant",
+                              "content": "It is late.", "attachments": []}]}"#,
+        )
+        .unwrap();
+        let FeedEvent::MessageAdded(m) = &ev else {
+            panic!("message.added: {ev:?}")
+        };
+        assert_eq!((m.thread_id, m.thread_title.as_str()), (7, "Kai"));
+        assert_eq!(m.messages.len(), 1);
+        assert_eq!(
+            (m.messages[0].id, m.messages[0].content.as_str()),
+            (41, "It is late.")
+        );
+        assert_eq!(ev.name(), "message.added");
+        let ev = FeedEvent::parse(
+            event::MESSAGE_DELETED,
+            r#"{"thread_id": 7, "message_ids": [41, 42], "by": null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ev,
+            FeedEvent::MessageDeleted(MessagesDeleted {
+                thread_id: 7,
+                message_ids: vec![41, 42],
+                by: None,
+            })
+        );
+        let e = FeedEvent::parse(event::MESSAGE_UPDATED, r#"{"messages": 3}"#).unwrap_err();
+        assert_eq!(e.event, "message.updated");
+    }
+
+    /// Device link §7.3, §7.4: `hello` carries the open approvals, each
+    /// with its thread's title, `approval.requested` the title too, and
+    /// `caught_up` the cursor; a `hello` without the list (an older
+    /// gateway's) reads as none open.
+    #[test]
+    fn hello_names_the_open_approvals_and_caught_up_its_cursor() {
+        let ev = FeedEvent::parse(
+            event::HELLO,
+            r#"{"epoch": "e", "cursor": "e:9:00aa", "keepalive_s": 120,
+                "open_approvals": [{"thread_id": 7, "thread_title": "Kai", "message_id": 41,
+                    "approval_request_id": "mcpr_1", "server_label": "desktop",
+                    "name": "open_file", "arguments": "{\"path\":\"a\"}", "call_id": "c1"}]}"#,
+        )
+        .unwrap();
+        let FeedEvent::Hello(h) = &ev else {
+            panic!("hello: {ev:?}")
+        };
+        assert_eq!(h.keepalive_s, 120);
+        let [open] = h.open_approvals.as_slice() else {
+            panic!("{h:?}")
+        };
+        assert_eq!(
+            (
+                open.thread_title.as_str(),
+                open.approval_request_id.as_str()
+            ),
+            ("Kai", "mcpr_1")
+        );
+        let older = FeedEvent::parse(event::HELLO, r#"{"epoch": "e", "cursor": "e:0"}"#).unwrap();
+        assert!(matches!(older, FeedEvent::Hello(h) if h.open_approvals.is_empty()));
+        let ev = FeedEvent::parse(event::CAUGHT_UP, r#"{"cursor": "e:9:00aa"}"#).unwrap();
+        assert_eq!(
+            ev,
+            FeedEvent::CaughtUp(CaughtUp {
+                cursor: "e:9:00aa".into()
+            })
+        );
+        assert_eq!(ev.name(), "caught_up");
     }
 
     #[test]

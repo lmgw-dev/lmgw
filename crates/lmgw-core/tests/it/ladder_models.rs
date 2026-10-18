@@ -80,7 +80,7 @@ async fn creating_a_valid_ladder_persists_every_rung() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
 
     let m = get_by_id(&state, "laddered").await;
     assert!(m.is_ladder());
@@ -151,7 +151,7 @@ async fn clear_ladder_round_trips_back_to_not_a_ladder() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
 
     let m = get_by_id(&state, "shrinking").await;
     assert!(!m.is_ladder(), "clear: \"ladder\" must reset it to empty");
@@ -175,7 +175,7 @@ async fn clear_ladder_round_trips_back_to_not_a_ladder() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
     let m = get_by_id(&state, "shrinking").await;
     assert!(m.is_ladder());
     assert_eq!(m.top_rung(), 1);
@@ -257,7 +257,7 @@ async fn a_missing_rung_file_never_blocks_disable() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
     let m = get_by_id(&state, "going-stale").await;
     assert!(!m.enabled);
     // The ladder itself is untouched by the disable — only enabled flipped.
@@ -317,7 +317,7 @@ async fn an_update_that_disables_never_blocks_on_a_stale_rung_file_either() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
     let m = get_by_id(&state, "editor-disabled").await;
     assert!(!m.enabled);
     assert_eq!(m.ladder, two_rung_ladder());
@@ -344,7 +344,7 @@ async fn a_freeform_spec_type_no_longer_bypasses_rule_6() {
             ctx_size: Some(32768),
             parallel: Some(2),
             n_predict: Some(4096),
-            extra_args: Some("--spec-type draft-mtp".into()),
+            extra_args: Some(vec!["--spec-type".into(), "draft-mtp".into()]),
             ladder: Some(two_rung_ladder()),
             ..Default::default()
         },
@@ -380,7 +380,12 @@ async fn a_non_ladder_row_with_freeform_spec_type_is_unhoisted_and_unchanged() {
             gguf_path: Some("base.gguf".into()),
             ctx_size: Some(32768),
             n_predict: Some(4096),
-            extra_args: Some("--spec-type draft-mtp --model-draft mid.gguf".into()),
+            extra_args: Some(vec![
+                "--spec-type".into(),
+                "draft-mtp".into(),
+                "--model-draft".into(),
+                "mid.gguf".into(),
+            ]),
             // Deliberately no `ladder` field at all.
             ..Default::default()
         },
@@ -526,7 +531,7 @@ async fn ladder_rung_plan_resolves_its_companion_paths_like_gguf_path() {
     )
     .await
     .unwrap();
-    assert!(ok["footprint"].is_object(), "{ok}");
+    assert!(ok.footprint.weights_bytes > 0, "{ok:?}");
 
     // Refused: `..` reaching outside the models dir.
     let err = ops::ladder_rung_plan(
@@ -578,7 +583,7 @@ async fn ladder_rung_plan_resolves_its_companion_paths_like_gguf_path() {
     )
     .await
     .unwrap();
-    assert!(ok["footprint"].is_object(), "{ok}");
+    assert!(ok.footprint.weights_bytes > 0, "{ok:?}");
 }
 
 /// Review third pass, T4: `local_model_get`'s per-slot context and

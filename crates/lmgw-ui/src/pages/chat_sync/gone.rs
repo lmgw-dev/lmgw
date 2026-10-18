@@ -38,6 +38,7 @@ mod flow;
 mod landing;
 
 use leptos::prelude::*;
+use lmgw_api_types::chat::Thread;
 use serde_json::json;
 
 use super::super::chat::{sync_url, ChatThread, Msg, Stats};
@@ -206,9 +207,9 @@ struct Made {
 /// The page's own New chat in no folder, on `alias`.
 async fn new_plain(alias: &str) -> Result<Made, crate::api::Error> {
     let body = json!({ "model_alias": alias, "kind": "chat" });
-    let t = crate::api::post::<ChatThread, _>("/chat/api/threads", &body).await?;
+    let t = crate::api::post::<Thread, _>("/chat/api/threads", &body).await?;
     Ok(Made {
-        id: t.id,
+        id: t.row.id,
         folder: None,
         note: None,
     })

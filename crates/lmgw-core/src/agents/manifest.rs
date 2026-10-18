@@ -607,6 +607,12 @@ pub struct ItemOutput {
     /// needing attention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<Value>,
+    /// `config.<field>` naming the config field that holds a question set's
+    /// id (format `lmgw-question-set`): with a set, the item is classified
+    /// through the set's question of this output's `field` instead of the
+    /// model call (labs-store design §4). Empty classifies as without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decide: Option<String>,
 }
 
 impl ItemOutput {
@@ -747,10 +753,15 @@ pub enum Format {
     Directory,
     /// A single host file, same deal.
     File,
+    /// A Decision lab question set's id, on an integer field: what an
+    /// output's `decide` reads (labs-store design §4). A select of the
+    /// owner's sets.
+    #[serde(rename = "lmgw-question-set")]
+    QuestionSet,
 }
 
 /// The formats a manifest may name, for the sentence an unknown one earns.
-const FORMAT_NAMES: &str = "secret, model_alias, multiline, directory, file";
+const FORMAT_NAMES: &str = "secret, model_alias, multiline, directory, file, lmgw-question-set";
 
 impl Format {
     pub fn as_str(self) -> &'static str {
@@ -760,6 +771,15 @@ impl Format {
             Self::Multiline => "multiline",
             Self::Directory => "directory",
             Self::File => "file",
+            Self::QuestionSet => lmgw_api_types::QUESTION_SET_FORMAT,
+        }
+    }
+    /// The type a field of this format is: an integer for a question set's
+    /// id, a string for everything else.
+    pub fn field_type(self) -> FieldType {
+        match self {
+            Self::QuestionSet => FieldType::Integer,
+            _ => FieldType::String,
         }
     }
     /// The format this name spells, or `None` for a name no manifest may use.
@@ -775,6 +795,7 @@ impl Format {
             "multiline" => Self::Multiline,
             "directory" => Self::Directory,
             "file" => Self::File,
+            lmgw_api_types::QUESTION_SET_FORMAT => Self::QuestionSet,
             _ => return None,
         })
     }
@@ -968,9 +989,13 @@ impl ConfigSchema {
             let mut format = None;
             if let Some(raw_format) = &f.format {
                 match Format::parse(raw_format) {
-                    Some(fmt) if ty == FieldType::String => format = Some(fmt),
-                    Some(_) => errors.push(format!(
-                        "{at}: format '{raw_format}' applies to a string field, not {}",
+                    Some(fmt) if ty == fmt.field_type() => format = Some(fmt),
+                    Some(fmt) => errors.push(format!(
+                        "{at}: format '{raw_format}' applies to {} field, not {}",
+                        match fmt.field_type() {
+                            FieldType::Integer => "an integer",
+                            _ => "a string",
+                        },
                         ty.as_str()
                     )),
                     None => errors.push(format!(
@@ -2149,11 +2174,20 @@ fn validate_item_output(
                      unconvinced call answers"
                 )),
             }
+            if let Some(path) = &o.decide {
+                decide::check(path, names, fields, errors);
+            }
             vec![field.clone()]
         }
         (None, Some(schema)) => {
             if o.field.is_some() {
                 errors.push(format!("{at}.field belongs to the enum_from form"));
+            }
+            if o.decide.is_some() {
+                errors.push(format!(
+                    "{at}.decide belongs to the enum_from form: a question set's choice \
+                     question answers its one field"
+                ));
             }
             check_output_schema(schema, at, errors);
             schema
@@ -2174,6 +2208,9 @@ fn validate_item_output(
         }
     }
 }
+
+/// `decide`: classifying through a question set (labs-store design §4).
+mod decide;
 
 #[cfg(test)]
 mod tests;

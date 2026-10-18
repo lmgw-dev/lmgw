@@ -1,7 +1,7 @@
 # Benchmark for models and llama-server builds — design (2026-09-29)
 
 **Status:** Implemented and merged to main on 2026-09-29 (WP1–WP6, two
-review rounds, live-verified on the RTX 4090). Decisions are in §13; 25, 44,
+review rounds, live-verified on a 24 GB GPU). Decisions are in §13; 25, 44,
 48 and 57 are approved, the rest are implementation decisions.
 
 Builds on [2026-08-30-per-model-containers-design.md](2026-08-30-per-model-containers-design.md)
@@ -117,7 +117,7 @@ lmgw-built images carry their provenance as labels: `dev.lmgw.repo`,
 
 ### 2.3 GPU
 
-- RTX 4090, driver 615.71.09, 450 W limit, ~11 W idle.
+- a 24 GB GPU, a 615-series driver, 450 W limit, ~11 W idle.
 - NVML (`nvml-wrapper` 0.12.1) is already loaded. lmgw reads memory only today.
 - `nvidia-smi` has no query field for the total energy counter, but NVML has
   `nvmlDeviceGetTotalEnergyConsumption` (mJ since driver load, Volta and newer).

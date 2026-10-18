@@ -168,6 +168,10 @@ pub(super) fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
             scope_patterns: row.get("scope_patterns"),
             tool_scope_mode: ScopeMode::parse(row.get::<String, _>("tool_scope_mode").as_str()),
             tool_scope_patterns: row.get("tool_scope_patterns"),
+            // Written by the key ops as a JSON list; anything else reads as
+            // no grant.
+            device_tools: serde_json::from_str(&row.get::<String, _>("device_tools"))
+                .unwrap_or_default(),
             budget_micro: row.get("budget_micro"),
             budget_period: BudgetPeriod::parse(row.get::<String, _>("budget_period").as_str()),
             rpm_limit: row.get("rpm_limit"),
@@ -178,6 +182,29 @@ pub(super) fn api_key_from_row(row: &sqlx::sqlite::SqliteRow) -> ApiKey {
         note: row.get("note"),
         hosts_label: row.get("hosts_label"),
         self_admin: crate::config::DeviceAdmin::from_column(row.get::<i64, _>("self_admin")),
+        link: crate::config::DeviceLink {
+            // Written by the key ops as a JSON list; anything else reads as
+            // none, which the Devices card shows.
+            urls: serde_json::from_str(&row.get::<String, _>("urls")).unwrap_or_default(),
+            local_only: row.get::<i64, _>("local_only") != 0,
+            cert_serial: row.get("cert_serial"),
+            cert_not_after: row.get("cert_not_after"),
+            cert_notice_after: row.get("cert_notice_after"),
+            enrolled_at: row.get("enrolled_at"),
+            enrolled_from: row.get("enrolled_from"),
+            client_info: row.get("client_info"),
+            confirmed_at: row.get("confirmed_at"),
+            contested_at: row.get("contested_at"),
+            contested_from: row.get("contested_from"),
+            waiting: row
+                .get::<Option<String>, _>("waiting_key_hash")
+                .map(|key_hash| crate::config::WaitingKey {
+                    key_hash,
+                    cert_serial: row.get("waiting_cert_serial"),
+                    cert_not_after: row.get("waiting_cert_not_after"),
+                    cert_notice_after: row.get("waiting_cert_notice_after"),
+                }),
+        },
     }
 }
 

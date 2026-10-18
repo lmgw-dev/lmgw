@@ -31,8 +31,9 @@
 //! surface's state (§6.2), owned by the page and handed down; [`page`] is
 //! [`AgentDetailPage`] itself; [`run_tab`] is the Run tab's config form and
 //! run column; [`runtime`] is the Runtime block; [`review_pane`] and
-//! [`review_row`] are the batch run surface (§6.2) a run opens into;
-//! [`app_tab`] is App; [`runs_tab`] is Runs/Threads; [`definition_tab`] is
+//! [`review_row`] are the batch run surface (§6.2) a run opens into, and
+//! [`save_labelled`] its "Save as labelled set" on a finished apply run
+//! (labs-store design §4); [`app_tab`] is App; [`runs_tab`] is Runs/Threads; [`definition_tab`] is
 //! Definition.
 
 mod shared;
@@ -57,6 +58,9 @@ use review_pane::*;
 
 mod review_row;
 use review_row::*;
+
+mod save_labelled;
+use save_labelled::*;
 
 mod app_tab;
 use app_tab::*;

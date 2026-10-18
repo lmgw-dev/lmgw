@@ -138,14 +138,17 @@ pub(super) fn context_json(c: Option<&ChatContext>) -> Option<String> {
 
 /// Set one message's `kb_refs` and `context` together. `false` when no such
 /// message is in this thread. Not activity: the thread's `updated_at` is
-/// left alone (the turn that wrote it already moved it).
+/// left alone (the turn that wrote it already moved it). The feed hears
+/// `message.updated`, `by` the turn's starter.
 pub async fn set_chat_message_knowledge(
     pool: &SqlitePool,
     thread_id: i64,
     id: i64,
     kb_refs: &[i64],
     context: Option<&ChatContext>,
+    by: feed::By<'_>,
 ) -> DbResult<bool> {
+    let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET kb_refs = ?3, context = ?4 WHERE id = ?1 AND thread_id = ?2",
     )
@@ -153,8 +156,12 @@ pub async fn set_chat_message_knowledge(
     .bind(thread_id)
     .bind(id_list_json(kb_refs))
     .bind(context_json(context))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    if n > 0 {
+        feed::record_updated(&mut tx, thread_id, id, by).await?;
+    }
+    tx.commit().await?;
     Ok(n > 0)
 }

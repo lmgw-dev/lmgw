@@ -261,7 +261,7 @@ pub fn parse_origin(origin: &str) -> Result<(String, String), OriginError> {
 ///
 /// `'none'` would break the App tab, which shows this page in an iframe; the
 /// desktop window loads the dashboard from `http://127.0.0.1:<port>`. A
-/// dashboard opened from a LAN address (`http://192.168.1.20:8001/`) is not
+/// dashboard opened from a LAN address (`http://198.51.100.20:8001/`) is not
 /// listed and cannot frame the app — its App tab shows a refused frame, and
 /// "Open full page" opens the app at its own origin instead. Listing LAN
 /// addresses would let any page served at them frame this one.

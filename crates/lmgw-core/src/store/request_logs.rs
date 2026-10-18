@@ -85,6 +85,9 @@ pub struct RequestLogRow {
     /// §6.3), as `<kind>:<name>`; `NULL` for a call no approval decided —
     /// migration 0074.
     pub approved_by: Option<String>,
+    /// The listener the request came in on (device link design §4.5):
+    /// `plain` or `devices` — migration 0081.
+    pub via: String,
 }
 
 fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
@@ -137,6 +140,7 @@ fn log_from_row(row: &sqlx::sqlite::SqliteRow) -> RequestLogRow {
         price_per_image: row.get("price_per_image"),
         price_per_request: row.get("price_per_request"),
         approved_by: row.get("approved_by"),
+        via: row.get("via"),
     }
 }
 
@@ -200,6 +204,9 @@ pub struct NewRequestLog {
     pub images_out: Option<i64>,
     /// Who approved the tool call this row records ([`RequestLogRow::approved_by`]).
     pub approved_by: Option<String>,
+    /// The listener the request came in on (device link design §4.5): the
+    /// plain one, or the device listener.
+    pub via: crate::server::Via,
 }
 
 impl Default for NewRequestLog {
@@ -236,6 +243,7 @@ impl Default for NewRequestLog {
             chars_in: None,
             images_out: None,
             approved_by: None,
+            via: crate::server::Via::Plain,
         }
     }
 }
@@ -318,10 +326,10 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
             predicted_n, fallback_reason, rung, degraded,
             audio_in_ms, chars_in, images_out, cost_units_micro,
             price_per_audio_minute, price_per_mchar, price_per_image, price_per_request,
-            approved_by)
+            approved_by, via)
          VALUES (?39,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,
-                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51)",
+                 ?38,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51,?52)",
     )
     .bind(&l.client_key)
     .bind(&l.ingress_proto)
@@ -353,9 +361,9 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(l.cached_in_tokens)
     .bind(l.cache_write_tokens)
     .bind(l.reasoning_tokens)
-    .bind(l.timings.map(|t| t.prompt_ms))
-    .bind(l.timings.map(|t| t.predicted_ms))
-    .bind(l.timings.map(|t| t.predicted_per_second))
+    .bind(l.timings.and_then(|t| t.prompt_ms))
+    .bind(l.timings.and_then(|t| t.predicted_ms))
+    .bind(l.timings.and_then(|t| t.predicted_per_second))
     .bind(l.timings.map(|t| t.prompt_n as i64))
     .bind(l.timings.and_then(|t| t.cache_n).map(|v| v as i64))
     .bind(l.timings.and_then(|t| t.draft_n).map(|v| v as i64))
@@ -378,6 +386,7 @@ pub async fn insert_request_log(pool: &SqlitePool, l: &NewRequestLog) -> DbResul
     .bind(l.cost.used_units.image)
     .bind(l.cost.used_units.request)
     .bind(&l.approved_by)
+    .bind(l.via.as_str())
     .execute(&mut *tx)
     .await?;
     let id = res.last_insert_rowid();
@@ -536,9 +545,16 @@ async fn roll_up(
     .bind(l.total_ms.unwrap_or(0))
     .bind(i64::from(l.total_ms.is_some()))
     .bind(l.total_ms)
-    .bind(l.timings.map(|t| t.predicted_n as i64).unwrap_or(0))
-    .bind(l.timings.map(|t| t.predicted_ms).unwrap_or(0.0))
-    .bind(l.timings.map(|t| t.prompt_ms).unwrap_or(0.0))
+    // The rollup's rate is `decode_tokens / decode_ms`: tokens whose time
+    // nobody measured would raise it, so they are not counted.
+    .bind(
+        l.timings
+            .filter(|t| t.predicted_ms.is_some())
+            .map(|t| t.predicted_n as i64)
+            .unwrap_or(0),
+    )
+    .bind(l.timings.and_then(|t| t.predicted_ms).unwrap_or(0.0))
+    .bind(l.timings.and_then(|t| t.prompt_ms).unwrap_or(0.0))
     .bind(l.timings.map(|t| t.prompt_n as i64).unwrap_or(0))
     .bind(l.timings.and_then(|t| t.cache_n).unwrap_or(0) as i64)
     .bind(l.timings.and_then(|t| t.draft_n).unwrap_or(0) as i64)

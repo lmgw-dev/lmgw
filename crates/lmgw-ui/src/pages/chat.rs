@@ -6,19 +6,22 @@
 
 mod open;
 mod settings_rebase;
+mod stats;
+mod wire;
 
 use std::cell::Cell;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
-use lmgw_api_types::chat::{Ack, MessageTask, ThreadTask};
+use lmgw_api_types::chat::{Ack, ContinueState, MessageTask, ThreadTask};
 use lmgw_api_types::chat_approvals::ApprovalRequest;
-use serde::{Deserialize, Serialize};
+use lmgw_api_types::chat_threads::{AttachmentMeta, SettingsAck};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use wasm_bindgen::{JsCast, JsValue};
 
-use super::chat_actions::{ActionEnv, ContinueState, EditReq, MsgActions, MsgEditor, MsgOps};
+use super::chat_actions::{ActionEnv, EditReq, MsgActions, MsgEditor, MsgOps};
 use super::chat_approvals::{self, Approval, ApprovalBatch, ToolCardView};
 use super::chat_attach::{
     draft_blockers, draft_from_attachment, draft_hints, new_draft, refresh_drafts, BlockerNote,
@@ -50,7 +53,13 @@ use crate::widgets::{
 };
 pub(super) use open::Opener;
 use open::{Landed, OpenEnv};
+pub(super) use wire::post_thread;
 
+/// A thread as the page holds it: built from the gateway's `Thread` and
+/// `ThreadRow` (`wire`), without the two times of the row that its
+/// `PartialEq` must not see (`chat_sync`'s `row_take` and `rows::merge`
+/// decide on it). Read from JSON only for a folder's defaults
+/// (`chat_folders::thread_from_defaults`).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ChatThread {
@@ -115,38 +124,10 @@ pub struct ChatThread {
     pub profile_id: Option<i64>,
 }
 
-/// A file dropped, pasted or picked into a message — either uploaded and
-/// already bound to a sent message, or still a draft on the composer
-/// (chat-archive-pin-attachments §2).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub(super) struct Attachment {
-    pub(super) id: i64,
-    /// "image" | "text" | "pdf" | "office" | "audio" — decided server-side
-    /// from the bytes, never the name or the browser's guessed MIME.
-    pub(super) kind: String,
-    pub(super) name: String,
-    pub(super) mime: String,
-    pub(super) size: i64,
-    /// A text-class PDF's choice, "text" | "images"; `None` = not applicable
-    /// or not chosen yet.
-    pub(super) mode: Option<String>,
-    /// What extraction found (chat_attach::chip_facts).
-    pub(super) meta: Value,
-    pub(super) extracted_tokens: Option<i64>,
-    /// Drafts only: why this cannot be sent to the thread's current model.
-    /// `None` = the server has not said (a sent file, or a fresh upload).
-    pub(super) blockers: Option<Vec<String>>,
-    /// Drafts only: what this becomes on the way, sent all the same (an
-    /// image as a placeholder for a fallback that cannot see).
-    pub(super) hints: Option<Vec<String>>,
-}
-
 /// `GET /chat/api/threads[?archived=1]`: the list plus how many threads sit
 /// in the *other* view, so the toolbar toggle can say "Archived (n)" without
 /// a second round trip.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct ThreadsResponse {
     pub(super) threads: Vec<ChatThread>,
     pub(super) archived_count: i64,
@@ -344,7 +325,7 @@ pub(super) struct MsgRow {
     /// A reply a fallback that cannot see answered: what it got in the
     /// images' place, in a sentence.
     pub(super) images_note: Option<String>,
-    pub(super) attachments: Vec<Attachment>,
+    pub(super) attachments: Vec<AttachmentMeta>,
     /// A user message's own knowledge bases and what they retrieved.
     pub(super) kb_refs: Vec<i64>,
     pub(super) context: Option<KbContext>,
@@ -363,10 +344,11 @@ pub(super) struct MsgRow {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct ThreadDetail {
+    #[serde(deserialize_with = "wire::thread_of")]
     pub(super) thread: ChatThread,
     pub(super) messages: Vec<MsgRow>,
     /// Uploaded, not yet sent — the composer's chips on a reopened thread.
-    pub(super) draft_attachments: Vec<Attachment>,
+    pub(super) draft_attachments: Vec<AttachmentMeta>,
     /// Its MCP tasks still running or on their way in (`chat_tasks`).
     pub(super) tasks: Vec<ThreadTask>,
 }
@@ -399,7 +381,7 @@ pub(super) struct Msg {
     pub(super) streaming: RwSignal<bool>,
     pub(super) tokens: RwSignal<Option<(i64, i64)>>,
     /// A user message's bound files, upload order — empty for the assistant.
-    pub(super) attachments: RwSignal<Vec<Attachment>>,
+    pub(super) attachments: RwSignal<Vec<AttachmentMeta>>,
     /// A user message's own knowledge bases (`#` picks).
     pub(super) kb_refs: RwSignal<Vec<i64>>,
     /// What the turn that answers a message retrieved — on the answer, so its
@@ -637,31 +619,6 @@ pub(super) struct Stats {
     pub(super) reasoning_note: Option<String>,
 }
 
-impl Stats {
-    /// Map a llama.cpp `timings` block (cache_n prompt tokens were KV-reused;
-    /// full prompt = processed + cached). First-token decode rates are noise.
-    pub(super) fn from_timings(t: &Value, ctx_max: Option<i64>) -> Stats {
-        let cached = t["cache_n"].as_i64().unwrap_or(0);
-        let predicted_n = t["predicted_n"].as_i64().unwrap_or(0);
-        Stats {
-            server: true,
-            ctx_max,
-            prefill: t["prompt_per_second"].as_f64().filter(|v| v.is_finite()),
-            tps: if predicted_n >= 2 {
-                t["predicted_per_second"].as_f64().filter(|v| v.is_finite())
-            } else {
-                None
-            },
-            prompt_tokens: Some(t["prompt_n"].as_i64().unwrap_or(0) + cached),
-            completion_tokens: t["predicted_n"].as_i64(),
-            cached: (cached > 0).then_some(cached),
-            draft_n: t["draft_n"].as_i64().filter(|n| *n > 0),
-            draft_accepted: t["draft_n_accepted"].as_i64(),
-            ..Default::default()
-        }
-    }
-}
-
 /// Shared with the docs playground, which renders the exact markdown a
 /// `docs__query` caller receives.
 pub(super) use super::chat_markdown::md_to_html;
@@ -765,7 +722,7 @@ pub fn Chat() -> impl IntoView {
     let viewer_name = RwSignal::new(String::new());
     let viewer_src = RwSignal::new(String::new());
     // The open non-image attachment: its header (tokens, Download original).
-    let viewer_att = RwSignal::new(None::<Attachment>);
+    let viewer_att = RwSignal::new(None::<AttachmentMeta>);
     let viewer_loading = RwSignal::new(false);
     // Bumped on every open; a text fetch only applies its answer if it is
     // still the current one (review nit: opening a text attachment then an
@@ -997,7 +954,7 @@ pub fn Chat() -> impl IntoView {
     // a pin or an archive both move where (or whether) a thread is listed.
     let pin_thread = move |id: i64, pinned: bool| {
         scope.spawn(async move {
-            match crate::api::post::<ChatThread, _>(
+            match post_thread(
                 format!("/chat/api/threads/{id}/pin"),
                 &json!({ "pinned": pinned }),
             )
@@ -1020,7 +977,7 @@ pub fn Chat() -> impl IntoView {
     };
     let archive_thread = move |id: i64, archived: bool| {
         scope.spawn(async move {
-            match crate::api::post::<ChatThread, _>(
+            match post_thread(
                 format!("/chat/api/threads/{id}/archive"),
                 &json!({ "archived": archived }),
             )
@@ -1049,7 +1006,8 @@ pub fn Chat() -> impl IntoView {
     // model filter finds (code:A4). A refusal is the caller's to say.
     let save_settings = move |id: i64, body: Value| async move {
         let answer =
-            crate::api::post::<Value, _>(format!("/chat/api/threads/{id}/settings"), &body).await?;
+            crate::api::post::<SettingsAck, _>(format!("/chat/api/threads/{id}/settings"), &body)
+                .await?;
         if body.get("model_alias").is_none() {
             toasts.ok("thread settings saved");
         }
@@ -1059,9 +1017,7 @@ pub fn Chat() -> impl IntoView {
                 apply_settings(t, &body);
                 // The new model or reasoning may change whether the last
                 // reply can be continued.
-                if let Ok(c) = serde_json::from_value::<ContinueState>(answer["continue"].clone()) {
-                    t.cont = Some(c);
-                }
+                t.cont = Some(answer.continue_state.clone());
                 // The voice as the server took it, and what it resolves to
                 // now.
                 super::chat_voice::apply_answer(t, &answer);
@@ -1223,7 +1179,7 @@ pub fn Chat() -> impl IntoView {
                 .as_string()
                 .unwrap_or_default();
             let url = format!("/chat/api/threads/{tid}/attachments?name={encoded}");
-            match crate::api::post_raw::<Attachment>(url, file).await {
+            match crate::api::post_raw::<AttachmentMeta>(url, file).await {
                 Ok(a) => chip.uploaded(a),
                 Err(e) => {
                     chip.uploading.set(false);
@@ -1265,7 +1221,7 @@ pub fn Chat() -> impl IntoView {
     // A sent chip's own click: an image opens full-size, a text file's
     // content is fetched (it is served as plain bytes, not JSON) and shown
     // in a `<pre>`.
-    let open_attachment = Callback::new(move |a: Attachment| {
+    let open_attachment = Callback::new(move |a: AttachmentMeta| {
         let gen = viewer_gen.get_value() + 1;
         viewer_gen.set_value(gen);
         viewer_name.set(a.name.clone());
@@ -1475,7 +1431,7 @@ pub fn Chat() -> impl IntoView {
             return;
         };
         let ids: Vec<i64> = ready.iter().filter_map(|c| c.id.get_untracked()).collect();
-        let att_meta: Vec<Attachment> = ready.iter().map(DraftChip::as_attachment).collect();
+        let att_meta: Vec<AttachmentMeta> = ready.iter().map(DraftChip::as_attachment).collect();
         // Kept to restore the composer if the send is refused outright
         // (review finding: a refusal used to silently lose the typed text
         // and the draft chips).
@@ -2869,7 +2825,7 @@ fn MsgView(
     /// history image then carries a note that it will not be resent.
     #[prop(into)]
     vision_no: Signal<bool>,
-    on_open: Callback<Attachment>,
+    on_open: Callback<AttachmentMeta>,
     ops: MsgOps,
 ) -> impl IntoView {
     // The message opened for editing in place (chat_actions.rs).

@@ -19,7 +19,6 @@ quickdoc-core = { path = "../quickdoc-core", features = ["http"] }
 lmgw-update = { path = "../lmgw-update" }
 anyhow = "1.0.102"
 arc-swap = "1.9.1"
-async-trait = "0.1.89"
 # `ws`: `GET /v1/realtime` (realtime design §13) speaks OpenAI's Realtime
 # protocol over a WebSocket and has to parse every frame, which is exactly what
 # axum's extractor (over tokio-tungstenite) is for.
@@ -36,6 +35,9 @@ chrono = { version = "0.4.45", features = ["serde"] }
 # id (gateway design §7.1): a truncated id reads as unsigned, not as a corrupt
 # signature. Already in the lock through flate2 and zip.
 crc32fast = "1.5.0"
+# A set run's CSV input (labs-store design §3.3, Decision 28): RFC 4180 with
+# quoted fields, line breaks inside them and the record's line for a refusal.
+csv = "1.4"
 futures = "0.3.32"
 hex = "0.4.3"
 # `Limited`, the body wrapper enforcing the `max_body_mb` setting (§13). Same
@@ -50,8 +52,26 @@ http-body-util = "0.1.3"
 # `hyper::upgrade::on` on the axum request + `reqwest::Response::upgrade` on
 # the outbound one + `copy_bidirectional` is the byte pipe this actually is.
 # Both versions are already in the lock, pulled in by axum and reqwest.
-hyper = "1.10.1"
+#
+# The device listener (device link design §4.3) serves each TLS connection
+# with hyper's own HTTP/1 connection: `server` and `http1`, its
+# `header_read_timeout` on hyper-util's `TokioTimer`, and its upgrades for
+# the WebSockets. Not hyper-util's `auto::Builder`: its version sniff reads
+# the first bytes before hyper's header timer starts, and it would serve
+# HTTP/2 by prior knowledge, which the design leaves for later.
+hyper = { version = "1.10.1", features = ["server", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
+# The device listener's TLS accept (device link design §4.2, §11), with the
+# aws-lc-rs provider and without TLS 1.2: the configurations are TLS 1.3
+# only. The version reqwest already locks.
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs"] }
+# The device listener's sockets (dual-stack `[::]`, the loopback pair) and a
+# device connection's `TCP_USER_TIMEOUT` (device link design §4.1, §7.1):
+# `all` for `set_tcp_user_timeout`. The version and feature the tree has.
+socket2 = { version = "0.6.4", features = ["all"] }
+# The device listener's per-connection service: the router called with
+# `oneshot`, as `axum::serve` does. The version and feature axum brings.
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 if-addrs = "0.15.0"
 # `statfs` (is the builds dir a tmpfs?) and `kill` (SIGTERM to a spawned
 # `podman build` on cancel) — container-builds design §5, §10. Already in the
@@ -106,6 +126,57 @@ regex = "1.12.4"
 # a model's native rate). The FFT resampler, rubato's default feature, is not
 # used (`realtime/audio/resample.rs` says why).
 rubato = { version = "5", default-features = false }
+# WebRTC realtime calls (calls design §3, §11): str0m, sans-IO, as the
+# server side in ICE-lite — DTLS-SRTP, SCTP data channels, RTCP. Its default
+# features also pull in its examples' web server, so only the crypto backend
+# the tree already uses (aws-lc-rs, which `str0m-aws-lc-rs` shares with
+# rustls and rcgen, `cargo tree -d`). A git revision of main rather than
+# 0.24.1: the release lacks #1065 (the receiver report's loss fraction
+# wraparound, which the Opus FEC tuning reads); move to the first release
+# that ships it.
+str0m = { git = "https://github.com/algesten/str0m", rev = "634e76bb830e167e2208c6e743acfb4678e2675c", default-features = false, features = ["aws-lc-rs"] }
+# Each datagram's destination address on a wildcard-bound socket (the
+# packet info, calls design §3.3), which str0m's ICE agent checks against
+# the call's candidate, and the source a reply leaves from. The version
+# already in the lock (an optional dependency of reqwest's http3).
+quinn-udp = "0.5"
+# Opus for WebRTC calls (calls design §4.1, §5.2, §11): libopus through
+# opusic-c, linked against the system's libopus (`-lopus`, dynamically:
+# Fedora's opus-devel to build, the RPM's `opus` to run). Its default
+# `bundled` feature builds a vendored libopus with cmake instead; the
+# `opus-bundled` feature below turns it back on for a build host without
+# opus-devel. Not the `opus` crate: its opusic-sys dependency keeps `bundled`
+# on, which Cargo cannot turn off from downstream.
+opusic-c = { version = "1.6.1", default-features = false }
+# lmgw's device CA, its server leaves and the devices' client certificates
+# (device link design §2, §11): key generation, self-signing, signing for a
+# key lmgw does not hold (`SubjectPublicKeyInfo::from_der`) and an issuer
+# read back from the CA's own certificate (`Issuer::from_ca_cert_der`, the
+# `x509-parser` feature). aws-lc-rs as the provider, no ring; it raises
+# aws-lc-rs to 1.18, which rustls and quinn share (`cargo tree -d`).
+rcgen = { version = "0.14.10", default-features = false, features = [
+    "aws_lc_rs",
+    "x509-parser",
+    "pem",
+] }
+# What rcgen parses with, read directly: a certificate's SubjectPublicKeyInfo
+# (the pin `fp`) and its dates (device link design D5). The version rcgen
+# brings, so nothing new is built.
+x509-parser = "0.18"
+# `ca.crt` and `ca.key` as PEM (device link design §2.1), the version rcgen's
+# `pem` feature brings.
+pem = "4"
+# The CA key's wrapping (AES-256-GCM) and the random serials (device link
+# design D2, §2.1). The provider rustls already uses; rcgen needs 1.18.
+aws-lc-rs = "1.18"
+# The CA key's wrapping key, an item in the session's Secret Service (device
+# link design D2, §2.1), as Kai keeps its own: zbus 5 underneath, which the
+# tree has.
+secret-service = { version = "5.2", features = ["rt-tokio-crypto-rust"] }
+# The device listener's server configurations, built with each leaf (device
+# link design §2.2, §4.2): TLS 1.3, `WebPkiClientVerifier` over the device
+# CA, no resumption. The rustls reqwest already builds, aws-lc-rs provider.
+rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "multipart"] }
 # Southbound MCP client (§5). `transport-streamable-http-client-reqwest`
 # transitively enables `transport-streamable-http-client` + `client-side-sse`
@@ -159,16 +230,23 @@ unicode-segmentation = "1.13.3"
 # version.
 unicode-normalization = "0.1.25"
 
+[features]
+# The vendored libopus 1.6.1, built with cmake and linked statically, for a
+# build host without opus-devel (calls design §11). Not the default.
+opus-bundled = ["opusic-c/bundled"]
+
 [dev-dependencies]
-async-trait = "0.1.89"
 # The service-mode proxy tests stand up a fake container that speaks a raw
-# HTTP upgrade, which needs the same two crates the proxy itself uses.
-hyper = "1.10.1"
+# HTTP upgrade, which needs the same two crates the proxy itself uses. The
+# device suites' proxy (tests/it/support/device_pair.rs) is a client too.
+hyper = { version = "1.10.1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 insta = "1.47.2"
 # The client crate read against the real gateway: its readers (refusals in
-# both shapes, the feed) checked on the bodies the routes answer with.
-lmgw-client = { path = "../lmgw-client" }
+# both shapes, the feed) checked on the bodies the routes answer with, and
+# its `tls` feature's pinned enrolment and device configuration, which the
+# device suites pair and connect with (device link design §6.3).
+lmgw-client = { path = "../lmgw-client", features = ["tls"] }
 # Validates the OpenAPI description's examples against its own schemas
 # (api-docs design §7.1 `every_example_validates_against_its_schema`, WP8).
 # `default-features = false`: lmgw never validates a remote `$schema` URI

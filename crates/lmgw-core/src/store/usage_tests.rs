@@ -248,11 +248,11 @@ async fn a_rebuild_keeps_the_decode_count_a_short_turn_produced() {
     let mut r = log("qwen", 100, 1, Cost::unknown());
     r.timings = Some(Timings {
         prompt_n: 100,
-        prompt_ms: 40.0,
-        prompt_per_second: 2500.0,
+        prompt_ms: Some(40.0),
+        prompt_per_second: Some(2500.0),
         predicted_n: 1,
-        predicted_ms: 24.25,
-        predicted_per_second: 41.23,
+        predicted_ms: Some(24.25),
+        predicted_per_second: Some(41.23),
         cache_n: Some(60),
         draft_n: None,
         draft_n_accepted: None,
@@ -267,6 +267,39 @@ async fn a_rebuild_keeps_the_decode_count_a_short_turn_produced() {
         1,
         "the rebuild reads the stored count, not rate x duration"
     );
+}
+
+#[tokio::test]
+async fn tokens_without_a_measured_time_stay_out_of_the_decode_rate() {
+    // The rate is `decode_tokens / decode_ms`: a turn whose time llama.cpp did
+    // not give would raise it, on the write path and in a rebuild alike. Its
+    // stored rate is NULL, not a measured zero.
+    let pool = db().await;
+    let mut r = log("qwen", 100, 1, Cost::unknown());
+    r.timings = Some(Timings {
+        prompt_n: 100,
+        prompt_ms: None,
+        prompt_per_second: None,
+        predicted_n: 50,
+        predicted_ms: None,
+        predicted_per_second: None,
+        cache_n: None,
+        draft_n: None,
+        draft_n_accepted: None,
+    });
+    insert_request_log(&pool, &r).await.unwrap();
+    let totals =
+        |pool: sqlx::SqlitePool| async move { usage_totals(&pool, &window()).await.unwrap() };
+    let before = totals(pool.clone()).await;
+    assert_eq!((before.decode_tokens, before.decode_ms), (0, 0.0));
+    rebuild_usage(&pool).await.unwrap();
+    let after = totals(pool.clone()).await;
+    assert_eq!((after.decode_tokens, after.decode_ms), (0, 0.0));
+    let rate: Option<f64> = sqlx::query_scalar("SELECT decode_tok_s FROM request_logs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rate, None);
 }
 
 #[tokio::test]

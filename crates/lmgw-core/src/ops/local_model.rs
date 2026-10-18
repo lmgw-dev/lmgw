@@ -3,7 +3,7 @@
 //! `local_model_set` ops themselves.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use lmgw_api_types as dto;
 
@@ -97,10 +97,10 @@ pub struct LocalModelPatch {
     pub spec_draft_ngl: Option<String>,
 
     // -- everything else --
-    /// Raw llama-server flags with no dedicated field, one option per line.
-    /// Validated against the running build; prefer a real field where one
-    /// exists.
-    pub extra_args: Option<String>,
+    /// Raw llama-server flags with no dedicated field, one argument per entry.
+    /// Absent leaves them unchanged and an empty list clears them. Validated
+    /// against the running build; prefer a real field where one exists.
+    pub extra_args: Option<Vec<String>>,
     pub idle_seconds: Option<i64>,
     pub enabled: Option<bool>,
     pub public: Option<bool>,
@@ -112,11 +112,11 @@ pub struct LocalModelPatch {
     /// absent) leaves it unset; `clear` is what reverts a previously set
     /// override back to inheriting the class image.
     pub image: Option<String>,
-    /// `podman run` args override, one per line — same convention as
-    /// `extra_args`. Empty (or absent) leaves it unchanged; `clear` reverts a
+    /// `podman run` args override, one entry per argument. Absent leaves it
+    /// unchanged; an empty list is no override either, and `clear` reverts a
     /// previously set override back to inheriting the class's
     /// `extra_run_args`. An override is never stored as an empty list.
-    pub extra_run_args: Option<String>,
+    pub extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch, once the per-model
     /// runtime exists.
     pub warm_start: Option<bool>,
@@ -482,6 +482,7 @@ pub async fn local_model_get(
     let command_line = command_line_preview(state, Class::Chat, &m.model_id);
     let rungs_detail = ladder_rungs_detail(state, &models_dir, m).await;
 
+    let licence = crate::modelinfo::licence::of_file(state, &models_dir, &m.gguf_path).await;
     Ok(dto::LocalModelRead::Chat(dto::LocalModelDetail {
         id: m.id,
         model_id: m.model_id.clone(),
@@ -489,19 +490,20 @@ pub async fn local_model_get(
         gguf_present: std::path::Path::new(&models_dir)
             .join(&m.gguf_path)
             .is_file(),
+        licence,
         source: if origin.is_some() { "hf" } else { "manual" }.to_string(),
         downloaded_from: origin,
         mmproj_present: exists(&m.params.mmproj_path),
         draft_present: exists(&m.params.draft_gguf_path),
         params: mirror(&m.params)?,
-        extra_args: argv::args_to_lines(&m.args),
+        extra_args: m.args.clone(),
         idle_seconds: m.idle_seconds,
         enabled: m.enabled,
         public: m.public,
         // Per-model container overrides (§3.1); `null` means "inherit the
         // chat class settings".
         image: m.image.clone(),
-        extra_run_args: m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
         // GPU-hold fallback (gpu-hold design §2/§3.2): `inherit` | `none` |
         // `alias`, plus the alias when the mode is `alias`.
@@ -644,8 +646,9 @@ async fn ladder_rungs_detail(
 /// the row is read into the mirror and written back, and a key the mirror
 /// drops (a field added on the core side only) is an error rather than a
 /// silent omission. `config_mirrors_match` in the tests compares the two
-/// types' key sets ahead of any row.
-pub(super) fn mirror<T: serde::Serialize, U: serde::Serialize + serde::de::DeserializeOwned>(
+/// types' key sets ahead of any row. Every row of `GET /api/models/full` goes
+/// through it too (`models_full_wire` sets every field of one of each).
+pub(crate) fn mirror<T: serde::Serialize, U: serde::Serialize + serde::de::DeserializeOwned>(
     row: &T,
 ) -> Result<U, String> {
     let err = |e: serde_json::Error| format!("reading a row as its API shape: {e}");
@@ -835,12 +838,14 @@ pub async fn local_model_check(
             .count(),
         models: results,
         note: "Static checks only — paths, file roles, speculative-decoding \
-                 consistency, the embed/rerank flag rules for aux models, and for \
+                 consistency, the kind flag rules of aux models (embed, rerank, \
+                 decision), and for \
                  image models the files/args key vocabulary. A model with no \
                  problems here can still fail to load; lmgw__local_model_test is \
                  the only proof. 'advisories' are not problems: the model starts, \
                  but misbehaves under some input (a chat model's batch sizes too \
-                 small for its projector's largest image, for one), so they never \
+                 small for its projector's largest image, for one, or an aux GGUF on \
+                 a chat row that still loads and serves), so they never \
                  set ok=false or count as broken. Models with nothing to report are \
                  omitted unless you asked for one by name."
             .to_string(),
@@ -861,7 +866,10 @@ fn unique_copy_id(base: &str, existing: &[String]) -> String {
         .expect("infinite range always yields a free id")
 }
 
-pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<Value, String> {
+pub async fn local_model_set(
+    state: &SharedState,
+    p: LocalModelPatch,
+) -> Result<dto::LocalModelSaved, String> {
     let all = store::list_local_models(&state.db)
         .await
         .map_err(|e| e.to_string())?;
@@ -931,7 +939,12 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                 .ok_or("gguf_path must not be empty")?;
             let mut params = crate::config::LlamaParams::default();
             overlay_params(&mut params, &p)?;
-            let mut args = argv::parse_args_text(p.extra_args.as_deref().unwrap_or_default())?;
+            let mut args = p
+                .extra_args
+                .as_deref()
+                .map(arg_list)
+                .transpose()?
+                .unwrap_or_default();
             // A freeform `--kv-unified`/`-kvu` (or any other promoted flag)
             // must not bypass the refusal below — fold it into `params`
             // first, exactly as this row's next load would
@@ -973,9 +986,9 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                 image: opt(&p.image),
                 // A named clear wins over the value on create as on update,
                 // and text that holds no args is no override either.
-                extra_run_args: match opt(&p.extra_run_args) {
+                extra_run_args: match &p.extra_run_args {
                     _ if clear_has(p.clear.as_deref(), "extra_run_args") => None,
-                    Some(text) => run_args_override(Some(argv::parse_args_text(&text)?)),
+                    Some(list) => run_args_override(Some(arg_list(list)?)),
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
@@ -995,17 +1008,20 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(json!({
-                "ok": true, "id": id, "warnings": warnings,
+            Ok(dto::LocalModelSaved {
+                ok: true,
+                id,
+                warnings: Some(warnings),
                 // Saved and loadable, but misbehaving under some input; kept
                 // apart from `warnings`, which are reasons it may not load.
-                "advisories": advisories,
-                "message": format!(
+                advisories: Some(advisories),
+                message: format!(
                     "local model '{model_id}' created — run lmgw__container \
                      model={model_id} action=start to load it into llama-server, \
                      then lmgw__local_model_test to confirm it loads"
                 ),
-            }))
+                ..Default::default()
+            })
         }
         "update" | "enable" | "disable" => {
             let cur = find()?;
@@ -1017,7 +1033,7 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
             let mut params = cur.params.clone();
             overlay_params(&mut params, &p)?;
             let mut args = match p.extra_args.as_deref() {
-                Some(text) => argv::parse_args_text(text)?,
+                Some(list) => arg_list(list)?,
                 None if clear_has(p.clear.as_deref(), "extra_args") => vec![],
                 None => cur.args,
             };
@@ -1093,8 +1109,8 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
             let extra_run_args = if clear_has(p.clear.as_deref(), "extra_run_args") {
                 None
             } else {
-                match opt(&p.extra_run_args) {
-                    Some(text) => Some(argv::parse_args_text(&text)?),
+                match &p.extra_run_args {
+                    Some(list) => Some(arg_list(list)?),
                     None => cur.extra_run_args,
                 }
             };
@@ -1187,18 +1203,26 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                     cur.model_id
                 ))
             };
-            Ok(json!({
-                "ok": true, "id": cur.id, "warnings": warnings,
-                "advisories": advisories,
-                "container_kept_previous_config": kept_previous,
-                "message": match note {
-                    Some(note) => format!("local model '{}' updated — {note}", new.model_id),
+            Ok(dto::LocalModelSaved {
+                ok: true,
+                id: cur.id,
+                warnings: Some(warnings),
+                advisories: Some(advisories),
+                container_kept_previous_config: Some(kept_previous),
+                message: match note {
+                    Some(note) => format!(
+                        "local model '{}' {} — {note}",
+                        new.model_id,
+                        saved_verb(&p.action)
+                    ),
                     None => format!(
-                        "local model '{}' updated — it is not running, so the next request \
-                         starts it with the new configuration", new.model_id
+                        "local model '{}' {} — it is not running, so the next request \
+                         starts it with the new configuration",
+                        new.model_id,
+                        saved_verb(&p.action)
                     ),
                 },
-            }))
+            })
         }
         "delete" => {
             let cur = find()?;
@@ -1210,13 +1234,15 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
             // only ever collects a same-name container on a *next start*, and
             // for a deleted model there is none.
             lifecycle::drop_model(state, Class::Chat, &cur.model_id).await;
-            Ok(json!({
-                "ok": true, "id": cur.id,
-                "message": format!(
+            Ok(dto::LocalModelSaved {
+                ok: true,
+                id: cur.id,
+                message: format!(
                     "local model '{}' deleted — its container was stopped and removed",
                     cur.model_id
                 ),
-            }))
+                ..Default::default()
+            })
         }
         // Clone a local model under a fresh id (same GGUF, params, args, and
         // flags), so the same GGUF can back several presets (reasoning vs
@@ -1249,13 +1275,16 @@ pub async fn local_model_set(state: &SharedState, p: LocalModelPatch) -> Result<
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(json!({
-                "ok": true, "id": id,
-                "message": format!(
+            Ok(dto::LocalModelSaved {
+                ok: true,
+                id,
+                message: format!(
                     "local model '{}' duplicated as '{model_id}' — adjust parameters, \
-                     then start it", cur.model_id
+                     then start it",
+                    cur.model_id
                 ),
-            }))
+                ..Default::default()
+            })
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable|duplicate)"

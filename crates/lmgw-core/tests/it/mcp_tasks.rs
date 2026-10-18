@@ -166,13 +166,10 @@ pub(crate) struct TaskDevice {
 impl TaskDevice {
     /// Connect with `key` and `script`, and wait until the row is `Ready`.
     pub(crate) async fn link(w: &World, d: &Device, script: Arc<Mutex<Script>>) -> Self {
-        let mut req = format!("ws://{}/mcp/host", w.addr())
+        // Over the device listener with the device's certificate.
+        let req = format!("ws://{}/mcp/host", d.addr)
             .into_client_request()
             .unwrap();
-        req.headers_mut().insert(
-            "authorization",
-            format!("Bearer {}", d.key).parse().unwrap(),
-        );
         let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
         let dev = Self::run(ws, script);
         let id = device_row(w, d.id).id;

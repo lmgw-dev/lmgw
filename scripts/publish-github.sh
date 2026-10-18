@@ -16,11 +16,16 @@
 #                     object created locally and printed; exits 3 when the gate would refuse
 #   --approve SHA     record that the diff for this tree (its full sha, as a run prints it) was
 #                     audited; --ack-scan acknowledges every hit of that tree's scan
-#   --install-guard   for another clone: add the github remote if it is missing, disable its push
-#                     URL and its tag auto-follow, install scripts/pre-push-github.sh as pre-push
+#   --install-guard   for another clone: add the github remote if it is missing (an existing one
+#                     must already name the public URL, else this refuses), disable its push URL
+#                     and its tag auto-follow, install scripts/pre-push-github.sh as pre-push
 #
 # The commit is `git commit-tree <ref>^{tree} -p github/main`: a tree copy, never a merge, so
-# the private history never reaches GitHub. A run fetches github's main (read-only, no tags),
+# the private history never reaches GitHub. A run fetches main from the very URL it pushes to
+# (read-only, no tags; the github remote must name that URL, so its remote-tracking ref is that
+# repository's and the gate and the push see the same repository), refuses when that public tip
+# or the commit to push descends from the archived pre-public root commit (checked without
+# replace refs, as the pre-push hook does),
 # writes target/publish/<tree12>.diff (the whole diff from the public tip), .binaries (the added
 # or changed binary files) and .scan (scripts/publish_scan.py: secret shapes, every non-GitHub
 # remote host, and the private denylist), then gates: the diff and scan must be the ones
@@ -33,16 +38,26 @@
 # The denylist is private and lives outside the repo: LMGW_PUBLISH_DENYLIST, else
 # ${XDG_CONFIG_HOME:-~/.config}/lmgw/publish-denylist, one case-insensitive regular expression
 # per line, '#' comments (format and examples: scripts/publish_scan.py). LMGW_PUBLISH_URL
-# overrides the push URL (tests point it at a local bare repo).
+# overrides the public URL (tests point it at a local bare repo): the github remote must name it,
+# and every fetch and the push go to it.
 set -euo pipefail
 
 REMOTE=github
 PUBLIC_URL=git@github.com:lmgw-dev/lmgw.git
 URL="${LMGW_PUBLISH_URL:-$PUBLIC_URL}"
+# The archived pre-public history's root commit (as in scripts/pre-push-github.sh): nothing that
+# descends from it is ever published.
+PRIVATE_ROOT=27871c7e621eec8795e34f811d16e7812d68a019
 OUT=target/publish
 DENYLIST="${LMGW_PUBLISH_DENYLIST:-${XDG_CONFIG_HOME:-$HOME/.config}/lmgw/publish-denylist}"
 
 die() { echo "publish-github: $*" >&2; exit 1; }
+# The commit $1 carries the pre-public history: it descends from PRIVATE_ROOT (real ancestry, no
+# replace refs). A clone without that root has nothing of it to carry.
+private_history() {
+    git --no-replace-objects cat-file -e "$PRIVATE_ROOT^{commit}" 2>/dev/null || return 1
+    git --no-replace-objects merge-base --is-ancestor "$PRIVATE_ROOT" "$1"
+}
 sha256() { sha256sum < "$1" | cut -d' ' -f1; }
 
 ref=main msg="" tag="" dry=false approve="" note="" ack=false guard=false
@@ -68,7 +83,12 @@ cd "$(dirname "$0")/.."
 
 # --- --install-guard -----------------------------------------------------------------------------
 if $guard; then
-    git remote get-url "$REMOTE" >/dev/null 2>&1 || git remote add "$REMOTE" "$PUBLIC_URL"
+    if have="$(git remote get-url "$REMOTE" 2>/dev/null)"; then
+        [[ "$have" == "$URL" ]] \
+            || die "the $REMOTE remote names $have, not the public $URL: fix it first (git remote set-url $REMOTE $URL)"
+    else
+        git remote add "$REMOTE" "$URL"
+    fi
     git config "remote.$REMOTE.pushurl" DISABLED-publish-with-scripts/publish-github.sh
     # A public tag sits on the public commit, a local one on the private commit of the same
     # name: auto-following github's tags would clash with the local ones.
@@ -119,9 +139,17 @@ case "$(realpath "$DENYLIST")" in
     "$(pwd -P)"/*) die "the denylist $DENYLIST is inside the repo: it holds private words, keep it outside" ;;
 esac
 
-git fetch --quiet --no-tags "$REMOTE" "+refs/heads/main:refs/remotes/$REMOTE/main"
+# The parent is read from where the commit goes: the push URL, which the remote must name too.
+have="$(git remote get-url "$REMOTE" 2>/dev/null)" \
+    || die "no $REMOTE remote: run scripts/publish-github.sh --install-guard first"
+[[ "$have" == "$URL" ]] \
+    || die "the $REMOTE remote names $have, but the push goes to $URL: the public parent must come from the push target (git remote set-url $REMOTE $URL)"
+git fetch --quiet --no-tags "$URL" "+refs/heads/main:refs/remotes/$REMOTE/main"
 public="$(git rev-parse --verify -q "refs/remotes/$REMOTE/main^{commit}")" \
     || die "$REMOTE has no main: this script only ever extends the public history"
+if private_history "$public"; then
+    die "$URL's main ($public) carries the pre-public history (it descends from $PRIVATE_ROOT): that is no public repository, refusing to build on it"
+fi
 src="$(git rev-parse --verify -q "$ref^{commit}")" || die "no commit $ref"
 tree="$(git rev-parse "$src^{tree}")"
 t12="${tree:0:12}"
@@ -220,6 +248,13 @@ else
         reasons+=("the scan is not the one approved (new hits, or a changed denylist): read $scan and re-approve")
     fi
     target="$(git commit-tree "$tree" -p "$public" -F "$msg")"
+fi
+
+if private_history "$target"; then
+    die "the commit to push ($target) carries the pre-public history (it descends from $PRIVATE_ROOT): refusing"
+fi
+if $fresh && [[ "$(git rev-list --count "$public..$target")" != 1 ]]; then
+    die "the publish must add exactly one new commit on top of the public tip ($public), but $public..$target holds $(git rev-list --count "$public..$target"): refusing"
 fi
 
 tag_obj=""

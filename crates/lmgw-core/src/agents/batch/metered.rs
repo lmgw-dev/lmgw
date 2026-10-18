@@ -6,9 +6,8 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
-
 use crate::agent::{DeltaSink, TurnRunner};
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ir::{ChatRequest, Completion, Usage};
 use crate::pricing::RowCost;
@@ -45,46 +44,47 @@ impl<'a> MeteredRunner<'a> {
     }
 }
 
-#[async_trait]
 impl TurnRunner for MeteredRunner<'_> {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        let mut billed = Billed {
-            sink,
-            usage: None,
-            cost: None,
-        };
-        let out = self.inner.run_turn(ir, deadline, &mut billed).await;
-        // What the turn's row was billed, a stopped or failed turn's too
-        // (WP11 server review n4: a cancelled turn writes its row with the
-        // cost so far, and the job's meter must not be lower than its
-        // rows); a runner that does not say leaves its completion's usage.
-        let usage = billed.usage.or_else(|| out.as_ref().ok().map(|c| c.usage));
-        // What the row adds to a total, by the rollup's own rule
-        // (`NewRequestLog::row_cost`): its cost, or — unpriced — a gap where
-        // it did work: answered, stopped, or spent tokens or a quantity. A
-        // runner that never said is judged by how the turn ended: answered or
-        // stopped leaves the run unknown, a failure knows nothing to add.
-        let row = billed.cost.unwrap_or_else(|| {
-            let worked = out
-                .as_ref()
-                .map_or_else(crate::proxy::is_canceled, |_| true);
-            RowCost::of(None, worked)
-        });
-        let mut tally = self.tally.lock().unwrap();
-        if let Some(u) = usage {
-            tally.usage.add(&u);
-        }
-        tally.add_cost(row);
-        // A model call is an answer without an error, as the HTTP run meters
-        // count one (`RunMeters::note_row`): a turn that failed or was
-        // stopped is none, though its row's cost counts.
-        tally.model_calls += u32::from(out.is_ok());
-        out
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            let mut billed = Billed {
+                sink,
+                usage: None,
+                cost: None,
+            };
+            let out = self.inner.run_turn(ir, deadline, &mut billed).await;
+            // What the turn's row was billed, a stopped or failed turn's too
+            // (WP11 server review n4: a cancelled turn writes its row with the
+            // cost so far, and the job's meter must not be lower than its
+            // rows); a runner that does not say leaves its completion's usage.
+            let usage = billed.usage.or_else(|| out.as_ref().ok().map(|c| c.usage));
+            // What the row adds to a total, by the rollup's own rule
+            // (`NewRequestLog::row_cost`): its cost, or — unpriced — a gap where
+            // it did work: answered, stopped, or spent tokens or a quantity. A
+            // runner that never said is judged by how the turn ended: answered or
+            // stopped leaves the run unknown, a failure knows nothing to add.
+            let row = billed.cost.unwrap_or_else(|| {
+                let worked = out
+                    .as_ref()
+                    .map_or_else(crate::proxy::is_canceled, |_| true);
+                RowCost::of(None, worked)
+            });
+            let mut tally = self.tally.lock().unwrap();
+            if let Some(u) = usage {
+                tally.usage.add(&u);
+            }
+            tally.add_cost(row);
+            // A model call is an answer without an error, as the HTTP run meters
+            // count one (`RunMeters::note_row`): a turn that failed or was
+            // stopped is none, though its row's cost counts.
+            tally.model_calls += u32::from(out.is_ok());
+            out
+        })
     }
 }
 

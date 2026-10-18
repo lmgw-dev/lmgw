@@ -23,6 +23,14 @@ pub enum CoreSource {
 }
 
 impl CoreSource {
+    /// The spelling `host_cpu.source` has on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Topology => "topology",
+            Self::Logical => "logical",
+        }
+    }
+
     /// What a surface calls the figure ("16 · physical cores").
     pub fn describe(self) -> &'static str {
         match self {
@@ -44,6 +52,20 @@ pub struct HostCpu {
     /// Online logical CPUs, SMT siblings included.
     pub logical_cpus: usize,
     pub source: CoreSource,
+}
+
+/// The CPUs as `GET /api/settings-full` reports them. The counts are
+/// `usize` here and `u32` there; no machine has 2^32 CPUs (the kernel's
+/// limit is a few thousand), so the conversion never saturates.
+impl From<HostCpu> for lmgw_api_types::HostCpu {
+    fn from(c: HostCpu) -> Self {
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        lmgw_api_types::HostCpu {
+            physical_cores: count(c.physical_cores),
+            logical_cpus: count(c.logical_cpus),
+            source: c.source.as_str().to_string(),
+        }
+    }
 }
 
 /// The host's CPUs, read from sysfs on first use.
@@ -137,6 +159,27 @@ mod tests {
         // An offline CPU is not counted, even with its topology present.
         let t = tree("0-1,3", &[(0, "0"), (1, "1"), (2, "2"), (3, "3")]);
         assert_eq!(read_cpu(t.path()).physical_cores, 3);
+    }
+
+    #[test]
+    fn the_wire_spelling_of_the_source_is_the_serialized_one() {
+        for source in [CoreSource::Topology, CoreSource::Logical] {
+            assert_eq!(serde_json::to_value(source).unwrap(), source.as_str());
+        }
+        let wire: lmgw_api_types::HostCpu = HostCpu {
+            physical_cores: 4,
+            logical_cpus: 8,
+            source: CoreSource::Topology,
+        }
+        .into();
+        assert_eq!(
+            wire,
+            lmgw_api_types::HostCpu {
+                physical_cores: 4,
+                logical_cpus: 8,
+                source: "topology".into(),
+            }
+        );
     }
 
     #[test]

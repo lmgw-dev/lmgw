@@ -6,10 +6,10 @@
 //! reranker over the aux router's `/v1/rerank`. Everything here is `async` and
 //! object-safe so those arrive as `Arc<dyn …>` with no signature churn.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{QuickdocError, Result};
+use crate::BoxFut;
 
 /// The resolved model behind a set of vectors — not the alias that was asked
 /// for. A corpus pins this at ingest and every query verifies it (§4).
@@ -36,7 +36,6 @@ impl std::fmt::Display for EmbedIdentity {
     }
 }
 
-#[async_trait]
 pub trait Embedder: Send + Sync {
     /// Who is actually answering. Resolved through the router, so an alias
     /// remap shows up here as a different identity.
@@ -44,30 +43,39 @@ pub trait Embedder: Send + Sync {
 
     /// One vector per input, in order. Vectors need not be normalised — the
     /// store does that before narrowing to f16.
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFut<'a, Result<Vec<Vec<f32>>>>;
 }
 
 /// The optional cross-encoder stage (§6). The real implementation calls the aux
 /// router's `/v1/rerank`; retrieval is defined to work without one.
-#[async_trait]
 pub trait Reranker: Send + Sync {
     fn model(&self) -> String;
 
     /// One score per document, in the order given. Higher is better.
-    async fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<f32>>;
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFut<'a, Result<Vec<f32>>>;
 
     /// [`rerank`](Self::rerank) for a reranker that may leave some documents
     /// **unscored** (a pair over its input limit): one entry per document,
     /// `None` for one it did not score. The pipeline keeps such a candidate's
     /// fused (RRF) score and marks it `rerank_skipped` — a score is never
     /// invented for it. The default scores every document.
-    async fn rerank_scores(&self, query: &str, documents: &[String]) -> Result<Vec<Option<f32>>> {
-        Ok(self
-            .rerank(query, documents)
-            .await?
-            .into_iter()
-            .map(Some)
-            .collect())
+    fn rerank_scores<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFut<'a, Result<Vec<Option<f32>>>> {
+        Box::pin(async move {
+            Ok(self
+                .rerank(query, documents)
+                .await?
+                .into_iter()
+                .map(Some)
+                .collect())
+        })
     }
 }
 
@@ -159,14 +167,13 @@ impl FixtureEmbedder {
     }
 }
 
-#[async_trait]
 impl Embedder for FixtureEmbedder {
     fn identity(&self) -> EmbedIdentity {
         EmbedIdentity::new("fixture", self.model.clone(), self.dims)
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(texts.iter().map(|t| self.embed_one(t)).collect())
+    fn embed<'a>(&'a self, texts: &'a [String]) -> BoxFut<'a, Result<Vec<Vec<f32>>>> {
+        Box::pin(async move { Ok(texts.iter().map(|t| self.embed_one(t)).collect()) })
     }
 }
 
@@ -174,16 +181,21 @@ impl Embedder for FixtureEmbedder {
 /// pretending to judge anything.
 pub struct NoopReranker;
 
-#[async_trait]
 impl Reranker for NoopReranker {
     fn model(&self) -> String {
         "noop".into()
     }
 
-    async fn rerank(&self, _query: &str, documents: &[String]) -> Result<Vec<f32>> {
-        Ok((0..documents.len())
-            .map(|i| 1.0 / (1.0 + i as f32))
-            .collect())
+    fn rerank<'a>(
+        &'a self,
+        _query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFut<'a, Result<Vec<f32>>> {
+        Box::pin(async move {
+            Ok((0..documents.len())
+                .map(|i| 1.0 / (1.0 + i as f32))
+                .collect())
+        })
     }
 }
 
@@ -192,27 +204,32 @@ impl Reranker for NoopReranker {
 /// changed the ranking and shows up in the trace.
 pub struct FixtureReranker;
 
-#[async_trait]
 impl Reranker for FixtureReranker {
     fn model(&self) -> String {
         "fixture-jaccard".into()
     }
 
-    async fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<f32>> {
-        let q: std::collections::BTreeSet<String> = tokenize(query).into_iter().collect();
-        Ok(documents
-            .iter()
-            .map(|d| {
-                let t: std::collections::BTreeSet<String> = tokenize(d).into_iter().collect();
-                let inter = q.intersection(&t).count() as f32;
-                let union = q.union(&t).count() as f32;
-                if union == 0.0 {
-                    0.0
-                } else {
-                    inter / union
-                }
-            })
-            .collect())
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> BoxFut<'a, Result<Vec<f32>>> {
+        Box::pin(async move {
+            let q: std::collections::BTreeSet<String> = tokenize(query).into_iter().collect();
+            Ok(documents
+                .iter()
+                .map(|d| {
+                    let t: std::collections::BTreeSet<String> = tokenize(d).into_iter().collect();
+                    let inter = q.intersection(&t).count() as f32;
+                    let union = q.union(&t).count() as f32;
+                    if union == 0.0 {
+                        0.0
+                    } else {
+                        inter / union
+                    }
+                })
+                .collect())
+        })
     }
 }
 

@@ -2,8 +2,6 @@
 //! refusal, the freeform-flag helpers rule 6 depends on, and every rung
 //! check from `validate_ladder` through `ladder_rung_plan`.
 
-use serde_json::{json, Value};
-
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store::NewLocalModel;
@@ -132,7 +130,7 @@ fn effective_spec_type<'a>(
     params
         .spec_type
         .as_deref()
-        .or_else(|| crate::modelinfo::arg_value(args, &["spec-type"]))
+        .or_else(|| crate::runtime::argv::flag_value(args, "spec-type"))
 }
 
 /// Whether the row names a draft model at all, from the typed field or a
@@ -141,7 +139,7 @@ fn effective_spec_type<'a>(
 /// itself.
 fn effective_draft_path_is_set(params: &crate::config::LlamaParams, args: &[String]) -> bool {
     params.draft_gguf_path.is_some()
-        || crate::modelinfo::arg_value(args, &["model-draft", "md"]).is_some()
+        || crate::runtime::argv::flag_value(args, "model-draft").is_some()
 }
 
 pub(super) async fn validate_ladder(
@@ -385,7 +383,8 @@ async fn read_tokenizer_signature(
         .map_err(|e| format!("gguf '{gguf_path}' could not be read: {e}"))
 }
 
-/// Advisory-only half of §4.3: a rung whose footprint (weights + KV) exceeds
+/// Advisory-only half of §4.3: a rung whose footprint (weights + KV + compute
+/// buffers, [`crate::vram::plan::chat`]) exceeds
 /// the card's capacity minus headroom. Never refuses — VRAM is measured at
 /// climb time, not at save time (§4.2) — so a failure to even measure
 /// (`!view.active`, no GPU telemetry) is silently "nothing to warn about",
@@ -480,7 +479,7 @@ pub struct RungPlanInput<'a> {
 pub async fn ladder_rung_plan(
     state: &SharedState,
     input: RungPlanInput<'_>,
-) -> Result<Value, String> {
+) -> Result<lmgw_api_types::RungPlan, String> {
     if input.ctx_size <= 0 {
         return Err("ctx_size must be a positive token count".into());
     }
@@ -541,9 +540,9 @@ pub async fn ladder_rung_plan(
     let footprint = crate::vram::plan::PlanCache::default()
         .local(&models_dir, &probe)
         .await;
-    Ok(json!({
-        "footprint": footprint,
-        "has_mtp_layers": has_mtp_layers,
-        "trained_context": trained_context,
-    }))
+    Ok(lmgw_api_types::RungPlan {
+        footprint: footprint.into(),
+        has_mtp_layers,
+        trained_context,
+    })
 }

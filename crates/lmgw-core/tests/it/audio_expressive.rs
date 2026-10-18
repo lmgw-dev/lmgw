@@ -337,6 +337,7 @@ async fn cloud_alias(w: &World, cloud: &MockServer, alias: &str, speech: Option<
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

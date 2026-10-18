@@ -655,8 +655,8 @@ included, like any request; so does the barge-in word check of a bound session.
     fallback that had any part stays named). The composer's tooltip carries the mark's facts
     (§9.5's "`asr_ms` on the inserted text's tooltip"), and a "dictated" chip on the status line
     drops the mark on ✕.
-  - A transcription error shows its message, and with `asr_answered_by` (or the `x-lmgw-fallback`
-    header) "the audio went to <alias>, which answered in its place"; `gpu_hold` is the amber hold
+  - A transcription error shows its message, and with the `x-lmgw-fallback`
+    header (the only signal on a failed call) "the audio went to <alias>, which answered in its place"; `gpu_hold` is the amber hold
     chip. The warm's `state` frames are status notes ("loading …", "… loaded in 3.0 s", the hold, a
     fallback). Esc, another key, a thread switch and leaving the page discard; the microphone is
     released on every path.
@@ -730,8 +730,8 @@ included, like any request; so does the barge-in word check of a bound session.
     WP3 review (m5):* the call runs in its own task with a stop the handler holds, so a page that
     aborts the upload stops it at its next await and its row is still written, `canceled` (the
     WP2-M1 rule). *Fixed after the WP3 review (M1):* an error body is
-    `{code, message, asr_answered_by}`, and every answer carries the gate's `x-lmgw-fallback`
-    headers: a fallback that had the audio is named even when it failed, since the audio may
+    the Chat's plain `{code, message}`, and every answer carries the gate's `x-lmgw-fallback`
+    headers, the only signal of which fallback had the audio on a failed call: a fallback that had the audio is named even when it failed, since the audio may
     have left the machine with no text back. The request row has said so all along
     (`fallback_reason`). A body over `max_body_mb` is `413 body_limit`, whose message
     names the setting and its value. The row is the Chat's, labelled as the thread's model turns

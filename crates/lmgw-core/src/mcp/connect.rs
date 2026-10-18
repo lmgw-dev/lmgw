@@ -304,6 +304,13 @@ impl McpManager {
                 }
                 let mut cmd = tokio::process::Command::new(&program);
                 cmd.args(&args);
+                if container.is_some() {
+                    crate::child::system_tool_tokio(&mut cmd);
+                } else {
+                    // The owner's own program: none of lmgw's descriptors,
+                    // but its environment as the owner set it up.
+                    crate::child::stdio_only(cmd.as_std_mut());
+                }
                 if !server.is_isolated() {
                     // Bare subprocess: env + cwd are the spawner's responsibility.
                     if !server.env.is_empty() {

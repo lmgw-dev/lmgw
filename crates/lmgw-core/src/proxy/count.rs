@@ -239,13 +239,54 @@ pub(crate) async fn count_texts(
     alias: &str,
     texts: &[&str],
 ) -> Result<(Vec<Count>, GateHeaders), (GateHeaders, GatewayError)> {
+    let (counts, headers) = count_texts_if(state, proto, ctx, alias, texts, IfCold::Start).await?;
+    // `Start` counts whatever the route: never `None`.
+    Ok((counts.unwrap_or_default(), headers))
+}
+
+/// What [`count_texts_if`] does when the route the gate settled on, after
+/// the hold's swap, is a local model whose container is not ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IfCold {
+    /// Bring it up and count, as every counter does.
+    Start,
+    /// Count nothing and start nothing: the counts come back `None`. The
+    /// Decision lab's gauge, which loads a model only when asked
+    /// (labs-store design §2.5).
+    Skip,
+}
+
+/// [`count_texts`], with what to do about a cold route said: the rule is
+/// applied to the route the count would hit — a fallback the hold swapped
+/// in, a candidate picked — not to the name asked. `None` for the counts
+/// when it skipped; a skip leaves no row.
+pub(crate) async fn count_texts_if(
+    state: &SharedState,
+    proto: ClientProto,
+    ctx: &RequestCtx,
+    alias: &str,
+    texts: &[&str],
+    cold: IfCold,
+) -> Result<(Option<Vec<Count>>, GateHeaders), (GateHeaders, GatewayError)> {
     let mut row = counter_row(state, proto, ctx, &json!({ "model": alias }));
     if let Some(e) = counter_policy(state, ctx, alias) {
         row.failed(&e).await;
         return Err((GateHeaders::default(), e));
     }
-    let check = crate::gate::RouteCheck::Text("/v1/count_tokens");
-    let opened = match admit_counter(state, alias, check, false, Some(&mut row)).await {
+    let check = crate::gate::RouteCheck::Count("/v1/count_tokens");
+    let routed = match crate::gate::resolve(state, alias, check).await {
+        Ok(r) => r,
+        Err(f) => {
+            row.failed(&f.error).await;
+            return Err((f.headers, f.error));
+        }
+    };
+    if cold == IfCold::Skip && !ready_or_cloud(state, routed.resolved()) {
+        let headers = routed.headers().clone();
+        row.answered(200, None).await;
+        return Ok((None, headers));
+    }
+    let opened = match admit_routed(state, routed, false, Some(&mut row)).await {
         Ok(o) => o,
         Err((headers, e)) => {
             row.failed(&e).await;
@@ -263,7 +304,7 @@ pub(crate) async fn count_texts(
         }
     }
     row.answered(200, None).await;
-    Ok((counts, opened.headers))
+    Ok((Some(counts), opened.headers))
 }
 
 /// Count `input`'s tokens on the upstream `alias` resolves to, using that
@@ -283,15 +324,20 @@ pub(crate) async fn count_texts(
 /// fallback when VRAM outside lmgw's control is short — it waits for room
 /// ([`crate::gate::Routed::admit_pinned`]). Ingest refuses the hold itself,
 /// before it counts.
-pub(crate) async fn count_tokens_inner(
-    state: &SharedState,
-    alias: &str,
-    input: &str,
+///
+/// Erased ([`crate::erased`]): every input-limit check and ingest count
+/// awaits it.
+pub(crate) fn count_tokens_inner<'a>(
+    state: &'a SharedState,
+    alias: &'a str,
+    input: &'a str,
     pinned: bool,
-) -> Result<(u64, GateHeaders), (GateHeaders, GatewayError)> {
-    count_alias(state, alias, input, pinned, None)
-        .await
-        .map(|(count, headers)| (count.tokens, headers))
+) -> crate::erased::Erased<'a, Result<(u64, GateHeaders), (GateHeaders, GatewayError)>> {
+    futures::FutureExt::boxed(async move {
+        count_alias(state, alias, input, pinned, None)
+            .await
+            .map(|(count, headers)| (count.tokens, headers))
+    })
 }
 
 /// [`count_tokens_inner`] with the count's [`Approx`] flags kept, for the
@@ -309,7 +355,7 @@ async fn count_alias(
     // `/tokenize` is answered by the model's own container, so counting
     // tokens on a cold local model loads it — metadata call or not, that is a
     // load, and it goes through admission like any other (§9b).
-    let check = crate::gate::RouteCheck::Text("/v1/count_tokens");
+    let check = crate::gate::RouteCheck::Count("/v1/count_tokens");
     let opened = admit_counter(state, alias, check, pinned, row).await?;
     // Everything past the resolve can fail *on the fallback*, so the count and
     // its failure both leave through one place that names it — see [`Failed`].

@@ -25,13 +25,17 @@ Two shapes for `/chat/completions`, picked off the request body:
   Lets a live check drive a hosted MCP tool through a Chat turn or a bound
   realtime turn with no model.
 
-Four more routes, matched on the request path (before the shapes above, which
+More routes, matched on the request path (before the shapes above, which
 never look at the path at all and would otherwise swallow them): `/tokenize`
 and `/apply-template` answer in llama-server's own shape (api-docs design
 §7.5) — this is what a `kind: llama_server` upstream row needs for the
 `/api-reference` tester's `post_tokenize` and the count-tokens compat routes
 to have something real to call. `/embeddings` and `/audio/speech` answer
 OpenAI-shaped, for `post_v1_embeddings` and `post_v1_audio_speech`.
+`/audio/transcriptions` answers `{"text": TRANSCRIPT}` whatever it hears, and
+`GET /audio/voices` lists VOICES, so one mock is a whole realtime cascade
+(chat, speech to text, text to speech) for a live check with no model
+(scripts/webrtc-interop.sh).
 
 Environment:
   MODE=slow          per-call delay so the live progress view can be caught mid-run
@@ -63,6 +67,12 @@ Environment:
                      retrieval) is answered with the question plus citations
                      "[1]" and "[9]" (scripts/drive/chat-knowledge.json)
 
+  SPEECH_WAV=<path>  `/audio/speech` answers this WAV (a real voice, for a check that
+                     listens to the answer or measures its level) instead of 0.5 s
+                     of silence
+  TRANSCRIPT=<text>  what `/audio/transcriptions` hears (default "Hello there.")
+  VOICES=<a,b>       the voices `GET /audio/voices` lists (default "alba")
+
 Usage: mock-openai.py <port>
 """
 import io
@@ -84,6 +94,9 @@ STREAM_TOKENS = int(os.environ.get("STREAM_TOKENS", "80"))
 STREAM_CODE = os.environ.get("STREAM_CODE", "1") != "0"
 ECHO = os.environ.get("ECHO", "0") == "1"
 EMBED_DIMS = int(os.environ.get("EMBED_DIMS", "0"))
+SPEECH_WAV = os.environ.get("SPEECH_WAV", "")
+TRANSCRIPT = os.environ.get("TRANSCRIPT", "Hello there.")
+VOICES = [v.strip() for v in os.environ.get("VOICES", "alba").split(",") if v.strip()]
 
 
 def load_tool_script():
@@ -315,7 +328,9 @@ class Handler(BaseHTTPRequestHandler):
         self._chunk(b"data: " + json.dumps(obj).encode() + b"\n\n")
 
     def do_GET(self):
-        if self.path.endswith("/models"):
+        if self.path.split("?", 1)[0].endswith("/audio/voices"):
+            self._json(200, {"voices": VOICES})
+        elif self.path.endswith("/models"):
             self._json(200, {"object": "list", "data": [{"id": "triage", "object": "model"}]})
         else:
             self._json(404, {"error": {"message": "not found"}})
@@ -347,12 +362,21 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def audio_speech(self, req):
-        self._binary(200, "audio/wav", silent_wav())
+        if SPEECH_WAV:
+            with open(SPEECH_WAV, "rb") as f:
+                self._binary(200, "audio/wav", f.read())
+        else:
+            self._binary(200, "audio/wav", silent_wav())
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(n) or b"{}"
         path = self.path.split("?", 1)[0]
+
+        # A multipart upload, not JSON: answered before the body is parsed.
+        if path.endswith("/audio/transcriptions"):
+            self._json(200, {"text": TRANSCRIPT})
+            return
 
         routes = {
             "/tokenize": self.tokenize,

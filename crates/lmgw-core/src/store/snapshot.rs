@@ -55,6 +55,9 @@ pub async fn load_snapshot(pool: &SqlitePool) -> DbResult<Snapshot> {
     };
     for r in &upstream_rows {
         let u = upstream_from_row(r);
+        if r.get::<i64, _>("catalog_all_modalities") == 0 {
+            snap.catalog_bare.insert(u.id);
+        }
         snap.upstreams.insert(u.id, u);
     }
     for r in &alias_rows {
@@ -158,6 +161,10 @@ pub async fn load_settings(pool: &SqlitePool) -> DbResult<Settings> {
     // The Chat feed's buffer and page, into their stated range (review
     // W4-1): a stored value past it would allocate at every start.
     crate::ops::clamp_loaded_chat_feed(&mut settings);
+    // The device link's bounds, likewise (device link design §9.1).
+    crate::ops::clamp_loaded_devices(&mut settings.devices);
+    // A WebRTC call's reorder window and bitrate (calls design §9).
+    settings.realtime.webrtc_audio.clamp_loaded();
     // Both WebSocket limits at "no bound" leaves nothing to bound a frame
     // with, and tungstenite reserves a frame's declared length up front — one
     // header could abort the process (realtime design §10.4,

@@ -1098,10 +1098,19 @@ pub struct EvalRun {
     pub regression: bool,
     /// The §6 stage parameters it was measured under, as JSON — two runs under
     /// different parameters are not comparable, so they are stored with it.
-    pub params: Value,
-    /// The full per-query breakdown.
-    pub report: Value,
+    /// `None` when the stored text does not parse as JSON (or is JSON `null`).
+    pub params: Option<Value>,
+    /// The full per-query breakdown; `None` on the same terms as `params`.
+    pub report: Option<Value>,
     pub created_at: String,
+}
+
+/// A stored JSON column as a value, or `None` when it is not one — absent
+/// rather than a made-up empty object a reader would take for a real value.
+fn parse_json_value(s: &str) -> Option<Value> {
+    serde_json::from_str(s)
+        .ok()
+        .filter(|v: &Value| !v.is_null())
 }
 
 fn eval_run_from_row(row: &sqlx::sqlite::SqliteRow) -> EvalRun {
@@ -1114,8 +1123,8 @@ fn eval_run_from_row(row: &sqlx::sqlite::SqliteRow) -> EvalRun {
         mrr: row.get("mrr"),
         orphaned_queries: row.get("orphaned_queries"),
         regression: row.get::<i64, _>("regression") != 0,
-        params: parse_json_or(row.get::<String, _>("params").as_str()),
-        report: parse_json_or(row.get::<String, _>("report").as_str()),
+        params: parse_json_value(row.get::<String, _>("params").as_str()),
+        report: parse_json_value(row.get::<String, _>("report").as_str()),
         created_at: row.get("created_at"),
     }
 }

@@ -69,7 +69,8 @@ pub(crate) struct Now {
 impl Now {
     /// As `state` says it, to a reader whose admin tools may do
     /// `self_admin` now — its own level capped by the gateway's (`off` for
-    /// one that is no device).
+    /// one that is no device). The open approvals are the stream's to read
+    /// as it sends the frame (`stream`).
     pub(crate) fn state(self, self_admin: SelfAdmin, reason: Option<String>) -> LiveState {
         LiveState {
             self_admin: self_admin.into(),
@@ -77,6 +78,7 @@ impl Now {
             voice: self.voice,
             turns: self.turns,
             reason,
+            open_approvals: None,
         }
     }
 }
@@ -222,7 +224,6 @@ impl LiveFeed {
     pub(crate) fn capacity(&self) -> usize {
         self.lock().capacity
     }
-
     /// A published snapshot's settings: the hold, when it differs from the
     /// one before (§2.2, R17: a fallback changed through the settings patch
     /// is a change too), and the live buffer, replaced when its size moved.

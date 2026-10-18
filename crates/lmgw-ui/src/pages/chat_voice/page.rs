@@ -15,6 +15,7 @@ use serde_json::Value;
 use wasm_bindgen::JsCast;
 
 use super::super::chat::ChatThread;
+use super::super::chat_stream::VoiceEvent;
 use super::devices::use_voice_devices;
 use super::dictation::{Dictation, DictationParts, Trigger};
 use super::keys::{key_down, key_up_releases, KeyDown, DICTATE_KEY_LABEL};
@@ -100,11 +101,11 @@ impl PageVoice {
 
     /// A voice frame of a turn's stream: a read-aloud's own, or a `state`
     /// of the turn's model for the status line.
-    pub(crate) fn turn_frame(&self, speech: Option<&LiveSpeech>, name: &str, data: &Value) {
-        match speech {
-            Some(s) => s.frame(name, data),
-            None if name == "state" => self.status.state_frame(data),
-            None => {}
+    pub(crate) fn turn_frame(&self, speech: Option<&LiveSpeech>, ev: &VoiceEvent) {
+        match (speech, ev) {
+            (Some(s), ev) => s.frame(ev),
+            (None, VoiceEvent::State(data)) => self.status.state_frame(data),
+            (None, _) => {}
         }
     }
 }

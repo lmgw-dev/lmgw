@@ -70,6 +70,8 @@ use key_line::*;
 
 mod key_editor;
 use key_editor::*;
+/// A key's device-tools grant: the hosted labels it reaches.
+mod device_tools;
 mod scope_editor;
 
 /// The Devices card on `/usage/keys` (client-apps design §1.4).

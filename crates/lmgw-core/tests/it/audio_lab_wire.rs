@@ -6,7 +6,7 @@
 
 use lmgw_api_types::audio_lab::{
     AudioLabModels, ClipList, ClipTranscribed, ClipTranscription, ClipsAck, ClipsUploaded,
-    LabError, VoicesNotRunning,
+    LabError, LabVoices,
 };
 use lmgw_api_types::OpenAiError;
 use serde_json::{json, Value};
@@ -15,6 +15,14 @@ use wiremock::{Mock, ResponseTemplate};
 
 use crate::common::round_trips;
 use crate::support::audio_world::{wav_bytes, world, World};
+
+/// A hand-off's model checked against its group's, a task's audio kept as
+/// files, an upload's parts told apart, a run kept when its client goes.
+mod hand_offs;
+/// The lab's hand-offs kept in the lab store with `?group=`.
+mod kept;
+/// The voice list: lmgw's catalog, no start, the hold, the engine's extras.
+mod voices;
 
 async fn get(w: &World, route: &str) -> reqwest::Response {
     w.gw.client()
@@ -105,15 +113,14 @@ async fn the_model_list_and_the_voices_answer_their_types() {
     back_rest["runtime"] = json!([]);
     assert_eq!(live_rest, back_rest);
 
-    // A local model that is not running answers nothing and starts nothing.
+    // Listing voices starts nothing (the lab's voice list: `voices`).
     let runs = w.runs();
     let live: Value = get(&w, "/audio-lab/api/voices?model=audio/asr")
         .await
         .json()
         .await
         .unwrap_or(Value::Null);
-    assert_eq!(live["running"], json!(false), "{live}");
-    round_trips::<VoicesNotRunning>("voices (not running)", &live);
+    round_trips::<LabVoices>("voices", &live);
     assert_eq!(w.runs(), runs, "listing voices started a container");
 }
 

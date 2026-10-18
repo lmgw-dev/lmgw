@@ -51,18 +51,10 @@ async fn search_waits(w: &World, tid: i64) {
     );
 }
 
-/// A device paired on `w`, unscoped: a client presenting its key.
-async fn device(w: &World) -> reqwest::Client {
-    let r =
-        w.gw.client()
-            .post(format!("{}/api/op/key_create", w.gw))
-            .json(&json!({ "kind": "device", "name": "phone" }))
-            .send()
-            .await
-            .unwrap();
-    assert_eq!(r.status(), 200);
-    let v: Value = r.json().await.unwrap();
-    crate::device_chat::bearer(v["key"].as_str().unwrap())
+/// A device paired on `w`, unscoped: it, with a client that reaches the
+/// device listener as it.
+async fn device(w: &World) -> crate::support::device_pair::Paired {
+    crate::support::device_pair::pair(&w.state, &w.gw, "phone", json!({})).await
 }
 
 /// `client`'s settings write to `tid`.
@@ -109,10 +101,11 @@ async fn a_device_dropping_the_kb_entry_for_tool_mode_is_still_gated() {
         )
         .await;
     assert_eq!(status, 200, "{v}");
-    let phone = device(&w).await;
+    let paired = device(&w).await;
+    let phone = &paired.client;
     let (status, v) = settings_as(
         &w,
-        &phone,
+        phone,
         tid,
         json!({"mcp_tools": [], "kb_ids": [taxes], "kb_mode": "tool"}),
     )
@@ -138,18 +131,19 @@ async fn a_spaced_kb_label_is_the_kb_toolset_and_stays_gated() {
         )
         .await;
     assert_eq!(status, 200, "{v}");
-    let phone = device(&w).await;
+    let paired = device(&w).await;
+    let phone = &paired.client;
     let spaced = |ra: &str| {
         json!({"mcp_tools": [{"server_label": " kb", "require_approval": ra}],
                "kb_ids": [taxes], "kb_mode": "tool"})
     };
-    let (status, v) = settings_as(&w, &phone, tid, spaced("never")).await;
+    let (status, v) = settings_as(&w, phone, tid, spaced("never")).await;
     assert_eq!(
         (status, v["code"].as_str()),
         (403, Some("approval_loosen_refused")),
         "{v}"
     );
-    let (status, v) = settings_as(&w, &phone, tid, spaced("always")).await;
+    let (status, v) = settings_as(&w, phone, tid, spaced("always")).await;
     assert_eq!(status, 200, "{v}");
     assert_eq!(
         w.thread_json(tid).await["thread"]["mcp_tools"][0]["server_label"],

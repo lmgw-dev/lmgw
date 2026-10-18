@@ -11,9 +11,8 @@ use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use async_trait::async_trait;
-
 use crate::agents::container::{Spawned, Spawner};
+use crate::erased::Erased;
 use crate::runtime::registry::CmdOutput;
 use crate::state::AppState;
 use crate::store::AgentRow;
@@ -78,45 +77,52 @@ fn failed(status: i32, stderr: &str) -> std::io::Result<CmdOutput> {
     })
 }
 
-#[async_trait]
 impl Spawner for Fake {
-    async fn spawn(&self, _p: &str, _a: &[String]) -> std::io::Result<Spawned> {
-        panic!("reading a package must never start anything");
+    fn spawn<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            panic!("reading a package must never start anything");
+        })
     }
 
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args.first().map(String::as_str) {
-            // `podman image exists` answers with its exit code alone. The
-            // reference is the **last** argument, after the `--` terminator.
-            Some("image") if args.get(1).map(String::as_str) == Some("exists") => {
-                if self.absent {
-                    failed(1, "")
-                } else {
-                    ok("")
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args.first().map(String::as_str) {
+                // `podman image exists` answers with its exit code alone. The
+                // reference is the **last** argument, after the `--` terminator.
+                Some("image") if args.get(1).map(String::as_str) == Some("exists") => {
+                    if self.absent {
+                        failed(1, "")
+                    } else {
+                        ok("")
+                    }
                 }
-            }
-            Some("image") => ok(&self.digest),
-            Some("create") if self.create_fails => failed(
-                125,
-                "Error: short-name resolution enforced but cannot prompt",
-            ),
-            Some("create") => ok("6158a95fea92\n"),
-            Some("cp") => match &self.manifest {
-                Some(text) => {
-                    let dest = args.last().expect("cp has a destination");
-                    std::fs::write(dest, text).expect("the run dir is writable");
-                    ok("")
-                }
-                None => failed(
+                Some("image") => ok(&self.digest),
+                Some("create") if self.create_fails => failed(
                     125,
-                    "Error: \"/lmgw/agent.json\" could not be found on container \
-                     lmgw-pkg-x: no such file or directory",
+                    "Error: short-name resolution enforced but cannot prompt",
                 ),
-            },
-            _ => ok(""),
-        }
+                Some("create") => ok("6158a95fea92\n"),
+                Some("cp") => match &self.manifest {
+                    Some(text) => {
+                        let dest = args.last().expect("cp has a destination");
+                        std::fs::write(dest, text).expect("the run dir is writable");
+                        ok("")
+                    }
+                    None => failed(
+                        125,
+                        "Error: \"/lmgw/agent.json\" could not be found on container \
+                     lmgw-pkg-x: no such file or directory",
+                    ),
+                },
+                _ => ok(""),
+            }
+        })
     }
 }
 

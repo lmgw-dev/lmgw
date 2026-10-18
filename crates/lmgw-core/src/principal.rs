@@ -232,6 +232,17 @@ pub struct Refusal {
 }
 
 impl Refusal {
+    /// `404 not_found` — an id the caller named has no row. Ops answer it as a
+    /// `Refusal` (the way the agent and credential ops answer theirs), so the
+    /// HTTP layer can tell it from the flat `400 op_failed`.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: message.into(),
+        }
+    }
+
     /// `401` — the route needs a principal and the request brought none.
     pub fn session_required() -> Self {
         Self {
@@ -298,18 +309,34 @@ impl Refusal {
         }
     }
 
-    /// `401` — a bearer that is a device key by its prefix
-    /// (`devices::KEY_PREFIX`) and matches no row: the device was
-    /// rotated or deleted. Said as what the device does next, not as the
-    /// dashboard's login hint `session_required` gives, and without saying
-    /// which of the two happened.
+    /// `401` — a device's credential that opens no device row: a bearer
+    /// that is a device key by its prefix (`devices::KEY_PREFIX`), which no
+    /// device presents any more (device link design D12), or on the device
+    /// listener a certificate whose key no row holds (re-paired, or the row
+    /// deleted). Said as what the device does next, not as the dashboard's
+    /// login hint `session_required` gives, and without saying which
+    /// happened.
     pub fn device_key_unknown() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "device_key_unknown",
-            message: "this device key is no longer valid (rotated or deleted) — pair the device \
-                      again"
+            message: "this device's key is no longer valid (re-paired or deleted) — pair the \
+                      device again"
                 .into(),
+        }
+    }
+
+    /// `401 device_key_unknown` for the bearer of a device row paired with a
+    /// link from before TLS (device link design §4.8, §12), naming it.
+    pub fn device_paired_before_tls(name: &str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "device_key_unknown",
+            message: format!(
+                "device '{}' was paired with a link from before TLS, which this lmgw no longer \
+                 accepts — pair it again on Usage → Keys → Devices",
+                crate::devices::short_name(name)
+            ),
         }
     }
 
@@ -383,6 +410,7 @@ impl IntoResponse for Refusal {
             Json(dto::ApiError {
                 code: self.code.into(),
                 message: self.message,
+                ..Default::default()
             }),
         )
             .into_response()
@@ -406,18 +434,34 @@ pub fn session_cookie(headers: &HeaderMap) -> Option<&str> {
         .map(|(_, value)| value.trim())
 }
 
-/// The row a presented credential matches, **skipping `internal` by kind
-/// before any hash is compared** (§3.1).
+/// The row a presented credential matches, **skipping `internal` and
+/// `device` by kind before any hash is compared** (§3.1).
 ///
 /// That order is the invariant, not an optimisation: an `internal` row's
 /// `key_hash` is `''` today, but a build that ever wrote a real hash into one
 /// — or an owner who edited the database — must not thereby turn an
-/// attribution identity into a credential.
+/// attribution identity into a credential. A device authenticates by its
+/// client certificate on the device listener alone (device link design D12,
+/// §4.8): its row's hash carries a prefix no bearer's has, and no bearer is
+/// ever compared with it.
 fn matching_row<'a>(snap: &'a Snapshot, presented: &str) -> Option<&'a ApiKey> {
     let hash = crate::config::hash_api_key(presented);
+    snap.api_keys.iter().find(|k| {
+        !matches!(k.kind, ApiKeyKind::Internal | ApiKeyKind::Device) && k.key_hash == hash
+    })
+}
+
+/// The device row a bearer key from a pairing before TLS names: one marked
+/// `v1:` with that key's hash (device link design §12).
+fn v1_device<'a>(snap: &'a Snapshot, presented: &str) -> Option<&'a ApiKey> {
+    let marked = format!(
+        "{}{}",
+        crate::config::DeviceLink::V1_PREFIX,
+        crate::config::hash_api_key(presented)
+    );
     snap.api_keys
         .iter()
-        .find(|k| k.kind != ApiKeyKind::Internal && k.key_hash == hash)
+        .find(|k| k.kind == ApiKeyKind::Device && k.key_hash == marked)
 }
 
 /// Resolve the credential on a request into its principal (§3.3).
@@ -447,13 +491,17 @@ pub fn resolve(headers: &HeaderMap, snap: &Snapshot) -> Result<Principal, Refusa
 pub fn from_bearer(snap: &Snapshot, bearer: &str) -> Result<Principal, Refusal> {
     let Some(key) = matching_row(snap, bearer) else {
         // A device key is known by its prefix even with no row behind it:
-        // it was rotated or deleted, and the device is told to pair again
-        // rather than handed the dashboard's login hint. Like a disabled
-        // row, the refusal waits for the route's gate (a `Public` route
-        // drops it).
+        // no bearer authenticates a device any more (device link design
+        // D12), and the device is told to pair again rather than handed the
+        // dashboard's login hint — naming itself when its row is one paired
+        // before TLS. Like a disabled row, the refusal waits for the route's
+        // gate (a `Public` route drops it).
         if bearer.starts_with(crate::devices::KEY_PREFIX) {
             tracing::debug!("a presented device key matched no key row");
-            return Err(Refusal::device_key_unknown());
+            return Err(match v1_device(snap, bearer) {
+                Some(row) => Refusal::device_paired_before_tls(&row.name),
+                None => Refusal::device_key_unknown(),
+            });
         }
         tracing::debug!("a presented bearer matched no key row");
         return Ok(Principal::Anonymous);
@@ -562,8 +610,17 @@ mod tests {
         }
     }
 
-    /// One gateway holding one of each kind, all enabled.
+    /// One gateway holding one of each kind, all enabled; the device paired
+    /// before TLS, its row marked `v1:` (device link design §12).
     fn snap() -> Snapshot {
+        let mut device = key(
+            5,
+            "device:phone",
+            ApiKeyKind::Device,
+            "lmgw-device-phone",
+            true,
+        );
+        device.key_hash = format!("v1:{}", device.key_hash);
         Snapshot {
             api_keys: vec![
                 key(1, "laptop", ApiKeyKind::Key, "lmgw-client", true),
@@ -582,13 +639,7 @@ mod tests {
                     true,
                 ),
                 key(4, "internal:agents", ApiKeyKind::Internal, "", true),
-                key(
-                    5,
-                    "device:phone",
-                    ApiKeyKind::Device,
-                    "lmgw-device-phone",
-                    true,
-                ),
+                device,
             ],
             ..Default::default()
         }
@@ -618,7 +669,6 @@ mod tests {
             ("lmgw-client", 1, ApiKeyKind::Key),
             ("lmgw-agent-board", 2, ApiKeyKind::Agent),
             ("lmgw-owner-dash", 3, ApiKeyKind::Owner),
-            ("lmgw-device-phone", 5, ApiKeyKind::Device),
         ] {
             let p = resolve(&with_bearer(token), &s).unwrap();
             assert_eq!(p.key_id(), Some(id), "{token}");
@@ -717,10 +767,28 @@ mod tests {
             !e.message.contains("login link"),
             "not the dashboard's hint"
         );
-        // Its row matches: it is the device.
-        assert!(resolve(&with_bearer("lmgw-device-phone"), &s)
-            .unwrap()
-            .is_device_key());
+        // Device link D12: its row paired before TLS opens nothing any
+        // more, and the refusal names it.
+        let e = resolve(&with_bearer("lmgw-device-phone"), &s).unwrap_err();
+        assert_eq!(
+            (e.status, e.code),
+            (StatusCode::UNAUTHORIZED, "device_key_unknown")
+        );
+        assert_eq!(
+            e.message,
+            "device 'phone' was paired with a link from before TLS, which this lmgw no longer \
+             accepts — pair it again on Usage → Keys → Devices"
+        );
+        // A row whose hash were the bearer's own still opens nothing: no
+        // bearer is compared with a device row.
+        let mut bare = s.clone();
+        bare.api_keys[4].key_hash = hash_api_key("lmgw-device-phone");
+        assert_eq!(
+            resolve(&with_bearer("lmgw-device-phone"), &bare)
+                .unwrap_err()
+                .code,
+            "device_key_unknown"
+        );
         // Any other unknown bearer, and a device key in the cookie, stay
         // anonymous.
         assert_eq!(
@@ -761,12 +829,8 @@ mod tests {
         assert!(e.message.contains("client key 'laptop'"), "{}", e.message);
 
         // A device says it is a device, by the name its card shows.
-        s.api_keys[4].enabled = false;
-        let e = resolve(&with_bearer("lmgw-device-phone"), &s).unwrap_err();
-        assert_eq!(e.code, "device_disabled");
-        assert_eq!(e.status, StatusCode::UNAUTHORIZED);
         assert_eq!(
-            e.message,
+            Refusal::device_disabled("device:phone").message,
             "device 'phone' is disabled — enable it on Usage → Keys"
         );
 
@@ -791,7 +855,7 @@ mod tests {
         // The dashboard itself, on loopback and on a LAN bind alike.
         for (origin, host) in [
             ("http://127.0.0.1:8001", "127.0.0.1:8001"),
-            ("http://192.168.1.10:8001", "192.168.1.10:8001"),
+            ("http://198.51.100.10:8001", "198.51.100.10:8001"),
         ] {
             assert!(
                 same_origin(&headers(&[("origin", origin), ("host", host)])).is_ok(),

@@ -66,6 +66,7 @@ async fn cloud_asr(w: &World) -> MockServer {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -441,6 +442,7 @@ async fn admissions_fallback_that_does_not_transcribe_never_hears_a_clip() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

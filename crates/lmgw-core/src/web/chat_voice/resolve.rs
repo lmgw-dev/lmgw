@@ -39,6 +39,8 @@ mod tests;
 mod languages;
 /// The profile tier (personality-profiles design D8).
 mod profile;
+/// The resolution as the API's types write it.
+mod wire;
 pub(crate) use languages::{language, reply_language, turn_language};
 
 /// Which level of the chain a value came from.
@@ -62,7 +64,9 @@ pub(crate) enum Source {
     SpeechIn,
 }
 
-/// A thread's voice, resolved — `voice_resolved` in the thread JSON.
+/// A thread's voice, resolved — `voice_resolved` in the thread JSON. This is
+/// the gateway's logic; the API writes it as `lmgw_api_types::voice_resolved`
+/// through `VoiceConfig::wire` (the `wire` module).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct VoiceConfig {
     pub asr: Stage,

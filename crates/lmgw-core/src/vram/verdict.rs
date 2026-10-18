@@ -192,6 +192,22 @@ impl VramScheduler {
                 e.resident_key.as_deref(),
             ));
         }
+        if e.class == Class::Aux {
+            // By the container's own placement, as audio above: a row
+            // switched to (or from) `backend: cpu` while its container runs
+            // keeps the placement it was started with (decision-models
+            // design §3.3), and the plan reads `backend`.
+            let mut row = snap
+                .aux_models
+                .iter()
+                .find(|m| m.model_id == e.model_id)?
+                .clone();
+            row.backend = match e.placement {
+                crate::runtime::Placement::Cpu => Some(crate::config::AuxBackend::Cpu),
+                crate::runtime::Placement::Gpu => None,
+            };
+            return Some(self.plans.aux(&snap.settings.aux_router, &row).await);
+        }
         self.footprint_at(snap, e.class, &e.model_id, e.charge.as_ref())
             .await
     }
@@ -244,7 +260,7 @@ impl VramScheduler {
             }
             Class::Aux => {
                 let row = snap.aux_models.iter().find(|m| m.model_id == model_id)?;
-                Some(self.plans.aux(&s.aux_router.models_dir, row).await)
+                Some(self.plans.aux(&s.aux_router, row).await)
             }
             Class::Audio => {
                 let row = snap.audio_models.iter().find(|m| m.model_id == model_id)?;

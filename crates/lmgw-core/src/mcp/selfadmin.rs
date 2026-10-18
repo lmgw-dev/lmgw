@@ -8,13 +8,14 @@
 //! and nothing else; every action behind it is a call into [`crate::ops`],
 //! which the dashboard's HTML handlers share.
 //!
-//! **Schema shape.** Every argument is a flat scalar: string, integer, boolean,
-//! or a string `enum`. No nested objects, no arrays. A tool whose parameters
+//! **Schema shape.** Every argument is a flat scalar (string, integer, boolean,
+//! or a string `enum`) or a list of strings. No nested objects. A tool whose parameters
 //! need hand-built JSON is a tool a small local model cannot call reliably, and
 //! these are meant to be callable by whatever is pointed at the gateway. Where
-//! the underlying record genuinely holds a list (an MCP server's `args`, `env`,
-//! `headers`), the argument is newline-delimited text in the same syntax the
-//! dashboard's textareas accept.
+//! the underlying record holds a list of run arguments (`extra_run_args`,
+//! `extra_args`), the argument is a list of strings, as the dashboard's answers
+//! have it; an MCP server's `args`, `env` and `headers` are newline-delimited
+//! text in the syntax the dashboard's textareas accept.
 //!
 //! **Gating.** [`SelfAdmin`] decides what is listed and what is callable;
 //! `read_only` (the default) exposes the read tools and refuses the rest with
@@ -31,6 +32,7 @@
 //! a returned payload, or an error message. Tool results therefore carry
 //! `message`/`hint`/`next_step` fields naming the tool to call next.
 
+use lmgw_api_types::WithNextStep;
 use serde_json::{json, Map, Value};
 
 use crate::config::SelfAdmin;
@@ -88,6 +90,12 @@ fn int_p(desc: &str) -> Value {
 }
 fn bool_p(desc: &str) -> Value {
     json!({ "type": "boolean", "description": desc })
+}
+/// A list of strings, one entry per element (a run argument, say). The one
+/// array shape the tools take: a list is the type the dashboard's answers use
+/// for the same data, and entries need no quoting.
+fn strs_p(desc: &str) -> Value {
+    json!({ "type": "array", "items": { "type": "string" }, "description": desc })
 }
 /// A fractional number. Distinct from [`int_p`] because a sampler value like
 /// `top_p: 0.95` rejected as "must be an integer" is a confusing dead end.
@@ -442,7 +450,12 @@ pub async fn call_capped(
         }
     }
 
-    Ok(match run(state, name, args, caller).await {
+    // Erased (`crate::erased`): every op behind one future, which both
+    // callers (Admin Chat's executor, `/mcp/admin`) then need not prove
+    // `Send` through.
+    let dispatched: crate::erased::Erased<'_, _> =
+        futures::FutureExt::boxed(run(state, name, args, caller));
+    Ok(match dispatched.await {
         Ok(v) => ok_result(&v),
         Err(e) => err_result(&e),
     })
@@ -459,30 +472,32 @@ async fn run(
 ) -> Result<Value, String> {
     let a = args.clone().unwrap_or_default();
     match name {
-        "lmgw__status" => ops::status(state).await,
+        "lmgw__status" => ops::backends::to_json(ops::status(state).await),
         "lmgw__models" => {
             let kind = arg_str(&a, "kind")?;
             let search = arg_str(&a, "search")?;
-            ops::models(state, kind, search).await
+            ops::backends::to_json(ops::models(state, kind, search).await)
         }
-        "lmgw__upstreams" => ops::upstreams(state).await,
-        "lmgw__agents" => ops::agents(state).await,
-        "lmgw__agent_get" => {
-            ops::agent_get(state, arg_str(&a, "id")?.ok_or("id is required")?).await
-        }
+        "lmgw__upstreams" => ops::backends::to_json(ops::upstreams(state).await),
+        "lmgw__agents" => ops::backends::to_json(ops::agents(state).await),
+        "lmgw__agent_get" => ops::backends::to_json(
+            ops::agent_get(state, arg_str(&a, "id")?.ok_or("id is required")?).await,
+        ),
         "lmgw__agent_set" => {
             // Not `arg_str`: an object is accepted too, with the ordering
             // warning `manifest_arg` attaches to it.
-            ops::agent_set(
-                state,
-                a.get("manifest").ok_or("manifest is required")?,
-                arg_bool(&a, "replace")?,
-                arg_bool(&a, "validate_only")?,
-                caller.device,
+            ops::backends::to_json(
+                ops::agent_set(
+                    state,
+                    a.get("manifest").ok_or("manifest is required")?,
+                    arg_bool(&a, "replace")?,
+                    arg_bool(&a, "validate_only")?,
+                    caller.device,
+                )
+                .await,
             )
-            .await
         }
-        "lmgw__agent_install" => {
+        "lmgw__agent_install" => ops::backends::to_json(
             ops::agent_install(
                 state,
                 arg_str(&a, "image")?.ok_or("image is required")?,
@@ -491,27 +506,27 @@ async fn run(
                 arg_bool(&a, "validate_only")?,
                 caller.device,
             )
-            .await
-        }
-        "lmgw__agent_run" => {
+            .await,
+        ),
+        "lmgw__agent_run" => ops::backends::to_json(
             ops::agent_run(
                 state,
                 arg_str(&a, "id")?.ok_or("id is required")?,
                 arg_str(&a, "phase")?.ok_or("phase is required")?,
                 caller.device,
             )
-            .await
-        }
-        "lmgw__agent_delete" => {
+            .await,
+        ),
+        "lmgw__agent_delete" => ops::backends::to_json(
             ops::agent_delete(
                 state,
                 arg_str(&a, "id")?.ok_or("id is required")?,
                 caller.device,
             )
-            .await
-        }
-        "lmgw__mcp_servers" => ops::mcp_servers(state).await,
-        "lmgw__logs" => {
+            .await,
+        ),
+        "lmgw__mcp_servers" => ops::backends::to_json(ops::mcp_servers(state).await),
+        "lmgw__logs" => ops::backends::to_json(
             ops::logs(
                 state,
                 arg_i64(&a, "limit")?,
@@ -519,9 +534,9 @@ async fn run(
                 arg_str(&a, "alias")?,
                 arg_i64(&a, "before_id")?,
             )
-            .await
-        }
-        "lmgw__settings" => ops::settings(state).await,
+            .await,
+        ),
+        "lmgw__settings" => ops::backends::to_json(ops::settings(state).await),
         "lmgw__local_model_get" => ops::backends::to_json(
             ops::local_model_get(
                 state,
@@ -541,24 +556,12 @@ async fn run(
         "lmgw__model_inspect" => {
             let path = arg_str(&a, "gguf_path")?.ok_or("gguf_path is required")?;
             ops::backends::to_json(
-                crate::modelinfo::model_inspect(
-                    state,
-                    path,
-                    arg_bool(&a, "probe")?.unwrap_or(true),
-                    arg_str(&a, "target")?,
-                )
-                .await,
+                crate::modelinfo::model_inspect(state, path, arg_str(&a, "target")?).await,
             )
         }
         "lmgw__local_model_plan" => {
             let path = arg_str(&a, "gguf_path")?.ok_or("gguf_path is required")?;
-            crate::modelinfo::local_model_plan(
-                state,
-                path,
-                arg_bool(&a, "probe")?.unwrap_or(true),
-                arg_str(&a, "target")?,
-            )
-            .await
+            crate::modelinfo::local_model_plan(state, path, arg_str(&a, "target")?).await
         }
         "lmgw__local_model_test" => {
             let mid = arg_str(&a, "model_id")?.ok_or("model_id is required")?;
@@ -571,21 +574,25 @@ async fn run(
         ),
         "lmgw__hf_repo" => {
             let repo = arg_str(&a, "repo")?.ok_or("repo is required (owner/name)")?;
-            ops::hf_repo(
-                state,
-                repo,
-                arg_str(&a, "search")?,
-                arg_str(&a, "target")?.unwrap_or("chat"),
+            ops::backends::to_json(
+                ops::hf_repo(
+                    state,
+                    repo,
+                    arg_str(&a, "search")?,
+                    arg_str(&a, "target")?.unwrap_or("chat"),
+                )
+                .await,
             )
-            .await
         }
-        "lmgw__hf_downloads" => ops::hf_downloads(state).await,
-        "lmgw__image_recipes" => ops::image_recipes(state).await,
+        "lmgw__hf_downloads" => ops::backends::to_json(ops::hf_downloads(state).await),
+        "lmgw__image_recipes" => ops::backends::to_json(ops::image_recipes(state).await),
         "lmgw__image_recipe_add" => {
             let key = arg_str(&a, "key")?.ok_or("key is required (see lmgw__image_recipes)")?;
-            ops::image_recipe_add(state, key, arg_str(&a, "diffusion_file")?).await
+            ops::backends::to_json(
+                ops::image_recipe_add(state, key, arg_str(&a, "diffusion_file")?).await,
+            )
         }
-        "lmgw__usage" => {
+        "lmgw__usage" => ops::backends::to_json(
             ops::usage(
                 state,
                 arg_str(&a, "from")?,
@@ -595,49 +602,61 @@ async fn run(
                 arg_str(&a, "alias")?,
                 arg_i64(&a, "limit")?,
             )
-            .await
-        }
-        "lmgw__prices" => ops::prices(state).await,
+            .await,
+        ),
+        "lmgw__prices" => ops::backends::to_json(ops::prices(state).await),
         "lmgw__hf_add" => {
             let repo = arg_str(&a, "repo")?.ok_or("repo is required (owner/name)")?;
-            ops::hf_add(
-                state,
-                repo,
-                arg_str(&a, "file")?,
-                arg_str(&a, "quant")?,
-                arg_str(&a, "target")?.unwrap_or("chat"),
-                arg_bool(&a, "companions")?.unwrap_or(true),
+            ops::backends::to_json(
+                ops::hf_add(
+                    state,
+                    repo,
+                    arg_str(&a, "file")?,
+                    arg_str(&a, "quant")?,
+                    arg_str(&a, "target")?.unwrap_or("chat"),
+                    arg_bool(&a, "companions")?.unwrap_or(true),
+                )
+                .await,
             )
-            .await
         }
         "lmgw__hf_set" => {
             let action = arg_str(&a, "action")?
                 .ok_or("action is required (redownload|delete|check_updates)")?;
-            ops::hf_set(
-                state,
-                action,
-                arg_i64(&a, "id")?,
-                arg_str(&a, "target")?.unwrap_or("chat"),
+            ops::backends::to_json(
+                ops::hf_set(
+                    state,
+                    action,
+                    arg_i64(&a, "id")?,
+                    arg_str(&a, "target")?.unwrap_or("chat"),
+                )
+                .await,
             )
-            .await
         }
-        "lmgw__upstream_set" => {
-            ops::upstream_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await
+        "lmgw__upstream_set" => ops::backends::to_json(
+            ops::upstream_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await,
+        ),
+        "lmgw__model_set" => {
+            ops::backends::to_json(ops::model_set(state, ops::patch_from_args(args)?).await)
         }
-        "lmgw__model_set" => ops::model_set(state, ops::patch_from_args(args)?).await,
-        "lmgw__candidate_alias_set" => {
-            ops::candidate_alias_set(state, ops::patch_from_args(args)?).await
-        }
+        "lmgw__candidate_alias_set" => ops::backends::to_json(
+            ops::candidate_alias_set(state, ops::patch_from_args(args)?).await,
+        ),
         "lmgw__local_model_set" => {
             let mut a = args.unwrap_or_default();
             hoist_json_arg(&mut a, "ladder")?;
-            ops::local_model_set(state, ops::patch_from_args(Some(a))?).await
+            ops::backends::to_json(
+                ops::local_model_set(state, ops::patch_from_args(Some(a))?).await,
+            )
         }
-        "lmgw__aux_model_set" => ops::aux_model_set(state, ops::patch_from_args(args)?).await,
-        "lmgw__image_model_set" => ops::image_model_set(state, ops::patch_from_args(args)?).await,
-        "lmgw__mcp_server_set" => {
-            ops::mcp_server_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await
+        "lmgw__aux_model_set" => {
+            ops::backends::to_json(ops::aux_model_set(state, ops::patch_from_args(args)?).await)
         }
+        "lmgw__image_model_set" => {
+            ops::backends::to_json(ops::image_model_set(state, ops::patch_from_args(args)?).await)
+        }
+        "lmgw__mcp_server_set" => ops::backends::to_json(
+            ops::mcp_server_set(state, ops::patch_from_args(args)?, ops::RowWriter::Tool).await,
+        ),
         "lmgw__container" => {
             let target = arg_str(&a, "target")?;
             let model = arg_str(&a, "model")?;
@@ -649,75 +668,89 @@ async fn run(
         }
         "lmgw__hold_set" => {
             let active = arg_bool(&a, "active")?.ok_or("active is required (true|false)")?;
-            ops::hold_set(state, active).await
+            ops::backends::to_json(ops::hold_set(state, active).await)
         }
         "lmgw__settings_set" => {
             let mut a = args.unwrap_or_default();
             hoist_json_arg(&mut a, "realtime")?;
-            ops::settings_set(state, ops::patch_from_args(Some(a))?).await
+            ops::backends::to_json(ops::settings_set(state, ops::patch_from_args(Some(a))?).await)
         }
-        "lmgw__prices_sync" => ops::prices_sync(state).await,
+        "lmgw__prices_sync" => ops::backends::to_json(ops::prices_sync(state).await),
         "lmgw__price_set" => {
             let scope_kind = arg_str(&a, "scope_kind")?
                 .ok_or("scope_kind is required (alias|upstream_model)")?;
-            ops::price_set(
-                state,
-                scope_kind,
-                arg_str(&a, "scope_key")?,
-                arg_str(&a, "unit")?,
-                ops::PriceRates {
-                    price_in: arg_f64(&a, "price_in")?,
-                    price_out: arg_f64(&a, "price_out")?,
-                    price_cache_read: arg_f64(&a, "price_cache_read")?,
-                    price_cache_write: arg_f64(&a, "price_cache_write")?,
-                    price: arg_f64(&a, "price")?,
-                },
-                arg_str(&a, "note")?,
+            ops::backends::to_json(
+                ops::price_set(
+                    state,
+                    scope_kind,
+                    arg_str(&a, "scope_key")?,
+                    arg_str(&a, "unit")?,
+                    ops::PriceRates {
+                        price_in: arg_f64(&a, "price_in")?,
+                        price_out: arg_f64(&a, "price_out")?,
+                        price_cache_read: arg_f64(&a, "price_cache_read")?,
+                        price_cache_write: arg_f64(&a, "price_cache_write")?,
+                        price: arg_f64(&a, "price")?,
+                    },
+                    arg_str(&a, "note")?,
+                )
+                .await,
             )
-            .await
         }
         "lmgw__price_delete" => {
             let id = arg_i64(&a, "id")?.ok_or("id is required")?;
-            ops::price_delete(state, id).await
+            ops::backends::to_json(
+                ops::price_delete(state, id)
+                    .await
+                    .map_err(|refusal| refusal.message),
+            )
         }
-        "lmgw__docs_corpora" => ops::docs_corpora(state, arg_str(&a, "corpus")?).await,
-        "lmgw__docs_requests" => ops::docs_requests(state, arg_str(&a, "status")?).await,
-        "lmgw__docs_corpus_set" => ops::docs_corpus_set(state, ops::patch_from_args(args)?).await,
-        "lmgw__docs_ingest" => {
+        "lmgw__docs_corpora" => {
+            ops::backends::to_json(ops::docs_corpora(state, arg_str(&a, "corpus")?).await)
+        }
+        "lmgw__docs_requests" => {
+            ops::backends::to_json(ops::docs_requests(state, arg_str(&a, "status")?).await)
+        }
+        "lmgw__docs_corpus_set" => {
+            ops::backends::to_json(ops::docs_corpus_set(state, ops::patch_from_args(args)?).await)
+        }
+        "lmgw__docs_ingest" => ops::backends::to_json(
             ops::docs_ingest(
                 state,
                 arg_str(&a, "corpus")?,
                 arg_str(&a, "action")?.unwrap_or_default(),
                 arg_str(&a, "embed_model")?,
             )
-            .await
-        }
-        "lmgw__docs_request_set" => {
+            .await,
+        ),
+        "lmgw__docs_request_set" => ops::backends::to_json(
             ops::docs_request_set(
                 state,
                 arg_i64(&a, "id")?,
                 arg_str(&a, "status")?.unwrap_or_default(),
             )
-            .await
-        }
-        "lmgw__builds" => {
+            .await,
+        ),
+        "lmgw__builds" => ops::backends::to_json(
             ops::backends::builds_tool(
                 state,
                 arg_i64(&a, "id")?,
                 arg_i64(&a, "limit")?,
                 arg_i64(&a, "before")?,
             )
-            .await
-        }
+            .await,
+        ),
         "lmgw__build_log" => {
             let run_id = arg_i64(&a, "run_id")?.ok_or("run_id is required")?;
-            ops::backends::build_log_tool(
-                state,
-                run_id,
-                arg_i64(&a, "offset")?,
-                arg_i64(&a, "tail")?,
+            ops::backends::to_json(
+                ops::backends::build_log_tool(
+                    state,
+                    run_id,
+                    arg_i64(&a, "offset")?,
+                    arg_i64(&a, "tail")?,
+                )
+                .await,
             )
-            .await
         }
         "lmgw__container_images" => {
             let engine = arg_str(&a, "engine")?
@@ -734,7 +767,7 @@ async fn run(
                 .await,
             )
         }
-        "lmgw__forge_prs" => {
+        "lmgw__forge_prs" => ops::backends::to_json(
             ops::backends::forge_prs_tool(
                 state,
                 arg_i64(&a, "id")?,
@@ -743,9 +776,11 @@ async fn run(
                 arg_str(&a, "query")?,
                 arg_i64(&a, "page")?,
             )
-            .await
-        }
-        "lmgw__build_set" => ops::backends::build_patch(state, ops::patch_from_args(args)?).await,
+            .await,
+        ),
+        "lmgw__build_set" => ops::backends::to_json(
+            ops::backends::build_patch(state, ops::patch_from_args(args)?).await,
+        ),
         "lmgw__build_run" => {
             let id = arg_i64(&a, "id")?.ok_or("id is required (see lmgw__builds)")?;
             let rebuild = arg_bool(&a, "rebuild")?.unwrap_or(false);
@@ -755,14 +790,13 @@ async fn run(
                 lmgw_api_types::builds::BuildTrigger::Mcp,
             )
             .await?;
-            let mut v = ops::backends::to_json(Ok(started))?;
-            v["next_step"] = serde_json::json!(format!(
+            let next_step = format!(
                 "follow the output with lmgw__build_log run_id={} offset=0 (then each \
                  next_offset), and the outcome with lmgw__builds id={id} until live_job_id is \
                  null",
                 started.run_id
-            ));
-            Ok(v)
+            );
+            ops::backends::to_json(Ok(WithNextStep::new(started, next_step)))
         }
         "lmgw__build_check_merge" => {
             let id = arg_i64(&a, "id")?.ok_or("id is required (see lmgw__builds)")?;
@@ -799,14 +833,13 @@ async fn run(
                 },
             )
             .await?;
-            let mut v = ops::backends::to_json(Ok(started.clone()))?;
-            v["next_step"] = serde_json::json!(format!(
+            let next_step = format!(
                 "the pull runs in the background (job {}); lmgw__container_images shows the new \
                  image and registry_update.update_available=false once it is done. Containers of \
                  the old image keep it until recreated: lmgw__container model=<id> action=apply",
                 started.job_id
-            ));
-            Ok(v)
+            );
+            ops::backends::to_json(Ok(WithNextStep::new(started, next_step)))
         }
         bench if bench.starts_with("lmgw__bench_") => self::bench::run(state, bench, args).await,
         "lmgw__audio_catalog" | "lmgw__audio_model_set" | "lmgw__voice_transcribe" => {
@@ -845,14 +878,16 @@ mod tests {
     }
 
     /// The constraint that shapes this whole module: a small local model has to
-    /// be able to fill these in, which means no hand-built JSON arguments.
+    /// be able to fill these in, which means no hand-built JSON arguments. A
+    /// list of strings is the one exception (`strs_p`).
     #[test]
     fn all_parameters_are_flat_scalars() {
         for t in catalog() {
             for (key, spec) in &t.props {
                 let ty = spec["type"].as_str().unwrap_or("");
+                let string_list = ty == "array" && spec["items"]["type"] == "string";
                 assert!(
-                    matches!(ty, "string" | "integer" | "boolean" | "number"),
+                    string_list || matches!(ty, "string" | "integer" | "boolean" | "number"),
                     "{}.{key} has non-scalar type '{ty}' — tool arguments must stay flat",
                     t.name
                 );

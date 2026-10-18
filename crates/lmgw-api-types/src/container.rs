@@ -130,15 +130,19 @@ pub struct ModelDone {
     pub model_id: String,
     /// The port, when the action left the container up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub port: Option<u16>,
     /// `apply` only: whether the configuration was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub applied: Option<bool>,
     /// `apply` only: whether the container is running afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub running: Option<bool>,
     /// `apply` only: the GPU hold kept the container from starting again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub held: Option<bool>,
     pub message: String,
 }

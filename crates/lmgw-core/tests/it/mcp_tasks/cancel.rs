@@ -46,7 +46,12 @@ async fn a_linked_cancel_ends_the_row_cancelled_by_who() {
         result_text(&row),
         "job t1 (desktop__build) cancelled\ncancelled by the owner"
     );
-    assert!(!w.state.mcp.has_open_tasks(server));
+    // The row is written first and the follower forgotten right after: the
+    // registry is read once that has happened, not in the gap between.
+    patience::until("its follower stopped", || {
+        !w.state.mcp.has_open_tasks(server)
+    })
+    .await;
 }
 
 /// The work finished first: the device's `-32602` to the cancel, and the

@@ -131,9 +131,10 @@ async fn the_rows_route_answers_the_named_rows_as_the_list_lists_them() {
     assert_eq!((s, v["code"].as_str()), (400, Some("bad_request")), "{v}");
     assert!(v["message"].as_str().unwrap().contains("'x'"), "{v}");
 
-    // The owner's alone: a device's own feed carries rows.
+    // The owner's alone, off the device listener's face (device link
+    // design §4.6): a device's own feed carries rows.
     let (s, v) = get(&w, &d.client, &format!("/chat/api/threads/rows?ids={a}")).await;
-    assert_eq!(s, 403, "{v}");
+    assert_eq!(s, 404, "{v}");
 }
 
 /// The server's side of the rescue, request by request: Kai deletes the

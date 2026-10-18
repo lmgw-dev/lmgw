@@ -5,10 +5,34 @@
 //! A namespace of its own, like [`crate::bench_ops`]: `RealtimeSettings`
 //! beside the glob-exported `AudioSettings` would read as one more class,
 //! and it is not one.
+//!
+//! Also the session's close codes, and a bound session's own wire
+//! (`binding`): `session.lmgw.turn_mode` and the bind and close events of a
+//! call bound to a Chat thread; and a bound call's other events (`calls`):
+//! the stop, the playout reports, the underrun and the parts; and the
+//! status block's `webrtc`, the calls' UDP socket groups (`status`).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+mod binding;
+mod calls;
+mod status;
+
+pub use binding::{
+    BindPending, ClosedKind, SessionClosed, TakeOver, TurnMode, BIND_PENDING, SESSION_CLOSED,
+    TAKE_OVER,
+};
+pub use calls::{
+    CallRequest, EventPart, OutputAudioBuffer, OutputAudioPlayout, OutputAudioStarved,
+    ResponseStop, EVENT_PART, OUTPUT_AUDIO_BUFFER_CLEARED, OUTPUT_AUDIO_BUFFER_STARTED,
+    OUTPUT_AUDIO_BUFFER_STOPPED, OUTPUT_AUDIO_PLAYOUT, OUTPUT_AUDIO_STARVED, RESPONSE_STOP,
+};
+pub use status::{
+    PlayoutSource, WebRtcCallState, WebRtcCallStatus, WebRtcGroup, WebRtcGroupState,
+    WebRtcGroupStatus, WebRtcStatus,
+};
 
 /// The close code of a bound realtime session that another client took over
 /// by binding its thread. The close's reason names who: "voice mode moved to
@@ -36,6 +60,9 @@ pub const CLOSE_OUT_OF_REACH: u16 = 4004;
 /// - `key_expired`: a paired device's key passed its expiry;
 /// - `key_unknown`: a paired device's key was rotated or deleted: pair the
 ///   device again;
+/// - `certificate_expired`: a paired device's client certificate passed its
+///   `notAfter` while the connection was open (device link design §5.1):
+///   pair the device again;
 /// - `revoked`: any other kind of key, for any of these.
 ///
 /// Forward compatible like every enum a client reads: a token a newer
@@ -51,6 +78,7 @@ pub enum RevokeKind {
     DeviceDisabled,
     KeyExpired,
     KeyUnknown,
+    CertificateExpired,
     Revoked,
     /// A token this build does not know (a newer gateway's), as sent; empty
     /// where the gateway sent none.
@@ -68,12 +96,13 @@ impl Default for RevokeKind {
 
 impl RevokeKind {
     /// The wire token: `device_disabled`, `key_expired`, `key_unknown`,
-    /// `revoked`, or the unknown token as sent.
+    /// `certificate_expired`, `revoked`, or the unknown token as sent.
     pub fn as_str(&self) -> &str {
         match self {
             Self::DeviceDisabled => "device_disabled",
             Self::KeyExpired => "key_expired",
             Self::KeyUnknown => "key_unknown",
+            Self::CertificateExpired => "certificate_expired",
             Self::Revoked => "revoked",
             Self::Unknown(v) => v,
         }
@@ -105,6 +134,7 @@ impl RevokeKind {
             Some("device_disabled") => Self::DeviceDisabled,
             Some("key_expired") => Self::KeyExpired,
             Some("key_unknown") => Self::KeyUnknown,
+            Some("certificate_expired") => Self::CertificateExpired,
             Some("revoked") => Self::Revoked,
             Some(other) => Self::Unknown(other.to_string()),
             None => Self::default(),
@@ -340,6 +370,9 @@ pub struct RealtimeSettings {
     pub barge_in_min_ms: u32,
     pub barge_in_guard_ms: u32,
     pub half_duplex: bool,
+    /// The barge-in margin's tail on top of the round trip, in ms: the round
+    /// trip from pings on a WebSocket, from RTCP receiver reports on a
+    /// WebRTC call.
     pub echo_tail_ms: u32,
     /// `words` | `duration`.
     pub barge_in_check: String,
@@ -350,18 +383,45 @@ pub struct RealtimeSettings {
     pub barge_in_check_timeout_ms: u32,
     /// Empty = the session's own ASR alias.
     pub barge_in_check_alias: String,
+    /// How far a WebSocket session's audio runs ahead of real time, in ms;
+    /// not used on a WebRTC call, whose frame clock sends in real time.
     pub output_lead_ms: u32,
     /// `0` = no bound.
     pub synthesis_ahead_s: u32,
     /// `0` = keep the engine's silences.
     pub longest_pause_ms: u32,
     pub warm_on_connect: bool,
-    /// In MiB; `0` = no bound (not both).
+    /// In MiB; `0` = no bound (not both). The largest WebSocket message; on
+    /// a WebRTC call also the largest event lmgw sends in one message and
+    /// what may wait for the call's session.
     pub max_message_mb: u32,
-    /// In MiB; `0` = bounded by the message limit (not both).
+    /// In MiB; `0` = bounded by the message limit (not both). WebSocket
+    /// only: a WebRTC call's single message is bounded by its stack, 256 KiB.
     pub max_frame_mb: u32,
-    /// `0` = no pings and no liveness bound at all.
+    /// `0` = no pings and no liveness bound at all. On a WebRTC call also how
+    /// long it may stay silent, take to connect and open its events channel,
+    /// or wait on a held thread, how long a closing call waits for its last
+    /// event's delivery, and when playout reports count as stopped.
     pub ping_interval_s: u32,
+    /// The UDP listener for WebRTC calls, beside the HTTP listener and
+    /// beside the device listener (its sockets follow that one's addresses
+    /// and port); applies at the next start.
+    pub webrtc_enabled: bool,
+    /// The UDP port WebRTC calls use beside the HTTP listener: `null` =
+    /// the HTTP port's number, `0` = chosen by the OS. Calls over a paired
+    /// device's listener use that listener's port instead. Applies at the
+    /// next start.
+    pub webrtc_port: Option<u16>,
+    /// How long a WebRTC call's frame waits for a missing earlier one, in
+    /// ms; `0` = no wait. Applies to the next call.
+    pub webrtc_reorder_ms: u32,
+    /// How far past its stamp a push-to-talk commit on a WebRTC call takes
+    /// frames, and how long it waits for them, in ms. Applies to the next
+    /// call.
+    pub webrtc_commit_window_ms: u32,
+    /// A WebRTC call's Opus output bitrate in kbps, capped by the phone's
+    /// `maxaveragebitrate`. Applies to the next call.
+    pub webrtc_output_kbps: u32,
 }
 
 /// `realtime_budget`'s arguments: the cascade to size. An argument left out

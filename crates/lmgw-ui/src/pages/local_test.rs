@@ -12,14 +12,15 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde_json::{json, Value};
+use lmgw_api_types::{ModelTest, RungTest};
+use serde_json::json;
 
 use crate::ops_state::{model_key, OpsState};
 use crate::widgets::{Modal, Toasts};
 
-/// One test's answer: when it ran (local time) and what the op said — its
-/// JSON, or why it refused outright (a hold, a disabled row, an unknown id).
-pub(super) type Outcome = (String, Result<Value, String>);
+/// One test's answer: when it ran (local time) and what the op said, or why
+/// it refused outright (a hold, a disabled row, an unknown id).
+pub(super) type Outcome = (String, Result<ModelTest, String>);
 
 /// The busy key of a test of the chat-class row `model_id`.
 pub(super) fn test_key(model_id: &str) -> String {
@@ -41,7 +42,7 @@ pub(super) fn run_load_test(
     }
     spawn_local(async move {
         let body = json!({ "model_id": model_id, "target": "chat" });
-        let res = crate::api::post::<Value, _>("/api/op/local_model_test", &body)
+        let res = crate::api::post::<ModelTest, _>("/api/op/local_model_test", &body)
             .await
             .map_err(|e| e.to_string());
         ops.finish(&key);
@@ -72,27 +73,24 @@ fn now() -> String {
 
 /// Passed or not, and one line on it — the toast of an answer that arrived
 /// after the editor was left.
-fn summary(res: &Result<Value, String>) -> (bool, String) {
+fn summary(res: &Result<ModelTest, String>) -> (bool, String) {
     match res {
         Err(e) => (false, e.clone()),
-        Ok(v) if v.get("ok").and_then(Value::as_bool) == Some(true) => {
-            if v.get("ladder").and_then(Value::as_bool) == Some(true) {
-                (true, "every rung loads and generates".into())
-            } else {
-                (true, passed_line(v))
-            }
-        }
-        Ok(v) => {
-            let err = text(v, "error");
-            (
-                false,
-                if err.is_empty() {
-                    "failed — open the model to see why".into()
-                } else {
-                    format!("failed — {err}")
-                },
-            )
-        }
+        Ok(ModelTest::Ladder(l)) if l.ok => (true, "every rung loads and generates".into()),
+        Ok(ModelTest::Passed(p)) => (true, passed_line(p.latency_ms, &p.probe)),
+        Ok(ModelTest::ChatPassed(c)) => (true, passed_line(c.base.latency_ms, &c.base.probe)),
+        Ok(ModelTest::ImagePassed(i)) => (true, passed_line(i.latency_ms, &i.probe)),
+        Ok(ModelTest::Failed(f)) => (false, failed_line(&f.error)),
+        Ok(ModelTest::Ladder(_)) => (false, failed_line("")),
+    }
+}
+
+/// What a failure says in one line.
+fn failed_line(error: &str) -> String {
+    if error.is_empty() {
+        "failed — open the model to see why".into()
+    } else {
+        format!("failed — {error}")
     }
 }
 
@@ -212,41 +210,20 @@ pub(super) fn LoadTestCard(
     }
 }
 
-/// Whether a test passed: the op answered and said `ok`.
+/// Whether a test passed: the op answered and said so.
 fn verdict(o: &Outcome) -> bool {
-    o.1.as_ref()
-        .is_ok_and(|v| v.get("ok").and_then(Value::as_bool) == Some(true))
-}
-
-/// A string field of the answer, empty when absent.
-fn text(v: &Value, key: &str) -> String {
-    v.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// A list-of-strings field of the answer.
-fn lines(v: &Value, key: &str) -> Vec<String> {
-    v.get(key)
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|l| l.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    match &o.1 {
+        Ok(ModelTest::Ladder(l)) => l.ok,
+        Ok(ModelTest::Failed(_)) | Err(_) => false,
+        Ok(ModelTest::ImagePassed(_) | ModelTest::ChatPassed(_) | ModelTest::Passed(_)) => true,
+    }
 }
 
 /// The one-line summary of a single (non-ladder) test that passed.
-fn passed_line(v: &Value) -> String {
-    let ms = v
-        .get("latency_ms")
-        .and_then(Value::as_u64)
-        .map(|ms| format!(" in {}", duration(ms)))
-        .unwrap_or_default();
-    match v.get("probe").and_then(Value::as_str) {
-        Some("embed") => format!("Loads and embeds{ms}."),
+fn passed_line(latency_ms: u64, probe: &str) -> String {
+    let ms = format!(" in {}", duration(latency_ms));
+    match probe {
+        "embed" => format!("Loads and embeds{ms}."),
         _ => format!("Loads and generates{ms}."),
     }
 }
@@ -261,24 +238,43 @@ fn duration(ms: u64) -> String {
 }
 
 /// One rung of a ladder test, as a line.
-fn rung_line(r: &Value) -> String {
-    let mut parts = vec![format!(
-        "rung {}/{}",
-        r.get("rung").and_then(Value::as_u64).unwrap_or(0),
-        r.get("of").and_then(Value::as_u64).unwrap_or(0)
-    )];
-    if let Some(c) = r.get("ctx_size").and_then(Value::as_i64) {
+fn rung_line(r: &RungTest) -> String {
+    let mut parts = vec![format!("rung {}/{}", r.rung, r.of)];
+    if let Some(c) = r.ctx_size {
         parts.push(format!("ctx {}", crate::fmt::grouped(c as u64)));
     }
-    if let Some(s) = r.get("load_seconds").and_then(Value::as_f64) {
-        parts.push(format!("ready after {s:.1} s"));
-    }
+    parts.push(format!("ready after {:.1} s", r.load_seconds));
     parts.join(" · ")
 }
 
+/// A single test that passed: its line, where the running build disagrees
+/// with what lmgw publishes (a chat model's `/props` against the static
+/// derivation) and a note.
+fn passed_view(line: String, disagreements: Vec<String>, note: String) -> AnyView {
+    view! {
+        <p>{line}</p>
+        {(!disagreements.is_empty())
+            .then(|| {
+                view! {
+                    <div class="notice warn">
+                        <b>"The running build disagrees with what lmgw publishes:"</b>
+                        <ul>
+                            {disagreements
+                                .into_iter()
+                                .map(|d| view! { <li>{d}</li> })
+                                .collect_view()}
+                        </ul>
+                    </div>
+                }
+            })}
+        {(!note.is_empty()).then(|| view! { <p class="dim mini-note">{note}</p> })}
+    }
+    .into_any()
+}
+
 #[component]
-fn OutcomeView(at: String, res: Result<Value, String>) -> impl IntoView {
-    let v = match res {
+fn OutcomeView(at: String, res: Result<ModelTest, String>) -> impl IntoView {
+    let test = match res {
         Err(e) => {
             return view! {
                 <div class="problem">{e}</div>
@@ -286,83 +282,66 @@ fn OutcomeView(at: String, res: Result<Value, String>) -> impl IntoView {
             }
             .into_any()
         }
-        Ok(v) => v,
+        Ok(test) => test,
     };
-    let ok = v.get("ok").and_then(Value::as_bool) == Some(true);
-    let ladder = v.get("ladder").and_then(Value::as_bool) == Some(true);
-    let body = if ladder {
-        let rungs = v
-            .get("rungs")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let reset = v.get("reset_to_base").and_then(Value::as_bool) == Some(false);
-        view! {
-            <ul class="load-test-rungs">
-                {rungs
-                    .into_iter()
-                    .map(|r| {
-                        let rung_ok = r.get("ok").and_then(Value::as_bool) == Some(true);
-                        let err = text(&r, "error");
+    let body = match test {
+        ModelTest::Ladder(ladder) => {
+            let reset = !ladder.reset_to_base;
+            view! {
+                <ul class="load-test-rungs">
+                    {ladder
+                        .rungs
+                        .into_iter()
+                        .map(|r| {
+                            let err = r.error.clone().unwrap_or_default();
+                            view! {
+                                <li>
+                                    <span class=if r.ok { "chip ok" } else { "chip err" }>
+                                        {if r.ok { "ok" } else { "failed" }}
+                                    </span>
+                                    " "
+                                    <span class="mono-sm">{rung_line(&r)}</span>
+                                    {(!err.is_empty()).then(|| view! { <div class="problem">{err}</div> })}
+                                </li>
+                            }
+                        })
+                        .collect_view()}
+                </ul>
+                {reset
+                    .then(|| {
                         view! {
-                            <li>
-                                <span class=if rung_ok { "chip ok" } else { "chip err" }>
-                                    {if rung_ok { "ok" } else { "failed" }}
-                                </span>
-                                " "
-                                <span class="mono-sm">{rung_line(&r)}</span>
-                                {(!err.is_empty()).then(|| view! { <div class="problem">{err}</div> })}
-                            </li>
+                            <p class="dim mini-note">
+                                "The container could not be put back on the base rung after the test; the next request starts from where it is."
+                            </p>
                         }
-                    })
-                    .collect_view()}
-            </ul>
-            {reset
+                    })}
+            }
+            .into_any()
+        }
+        ModelTest::Passed(p) => passed_view(
+            passed_line(p.latency_ms, &p.probe),
+            Vec::new(),
+            String::new(),
+        ),
+        ModelTest::ChatPassed(c) => passed_view(
+            passed_line(c.base.latency_ms, &c.base.probe),
+            c.disagreements,
+            c.note.unwrap_or_default(),
+        ),
+        ModelTest::ImagePassed(i) => {
+            passed_view(passed_line(i.latency_ms, &i.probe), Vec::new(), i.note)
+        }
+        ModelTest::Failed(f) => view! {
+            <div class="problem">{f.error}</div>
+            {(!f.hint.is_empty()).then(|| view! { <p class="mini-note">{f.hint}</p> })}
+            {(!f.container_log.is_empty())
                 .then(|| {
                     view! {
-                        <p class="dim mini-note">
-                            "The container could not be put back on the base rung after the test; the next request starts from where it is."
-                        </p>
+                        <pre class="preset load-test-log">{f.container_log.join("\n")}</pre>
                     }
                 })}
         }
-        .into_any()
-    } else if ok {
-        let disagreements = lines(&v, "disagreements");
-        let note = text(&v, "note");
-        view! {
-            <p>{passed_line(&v)}</p>
-            {(!disagreements.is_empty())
-                .then(|| {
-                    view! {
-                        <div class="notice warn">
-                            <b>"The running build disagrees with what lmgw publishes:"</b>
-                            <ul>
-                                {disagreements
-                                    .into_iter()
-                                    .map(|d| view! { <li>{d}</li> })
-                                    .collect_view()}
-                            </ul>
-                        </div>
-                    }
-                })}
-            {(!note.is_empty()).then(|| view! { <p class="dim mini-note">{note}</p> })}
-        }
-        .into_any()
-    } else {
-        let log = lines(&v, "container_log");
-        let hint = text(&v, "hint");
-        view! {
-            <div class="problem">{text(&v, "error")}</div>
-            {(!hint.is_empty()).then(|| view! { <p class="mini-note">{hint}</p> })}
-            {(!log.is_empty())
-                .then(|| {
-                    view! {
-                        <pre class="preset load-test-log">{log.join("\n")}</pre>
-                    }
-                })}
-        }
-        .into_any()
+        .into_any(),
     };
     view! {
         {body}
@@ -375,26 +354,60 @@ fn OutcomeView(at: String, res: Result<Value, String>) -> impl IntoView {
 mod tests {
     use super::*;
 
+    /// The op's answers, as the gateway writes them.
+    fn answer(v: serde_json::Value) -> ModelTest {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn passed(probe: &str, latency_ms: u64) -> ModelTest {
+        answer(json!({
+            "ok": true, "loaded": true, "model_id": "m", "class": "aux",
+            "probe": probe, "latency_ms": latency_ms,
+        }))
+    }
+
+    fn failed(error: &str) -> ModelTest {
+        answer(json!({
+            "ok": false, "loaded": false, "model_id": "m", "class": "chat",
+            "probe": "generate", "latency_ms": 7, "error": error,
+            "container_log": [], "hint": "",
+        }))
+    }
+
+    fn ladder(ok: bool) -> ModelTest {
+        answer(json!({
+            "ok": ok, "model_id": "m", "class": "chat", "ladder": true, "top_rung": 2,
+            "rungs": [], "was_running_rung": null, "reset_to_base": true,
+        }))
+    }
+
     #[test]
     fn a_test_passes_only_when_the_op_says_ok() {
         let at = String::new();
-        assert!(verdict(&(at.clone(), Ok(json!({ "ok": true })))));
-        assert!(!verdict(&(
-            at.clone(),
-            Ok(json!({ "ok": false, "error": "x" }))
-        )));
+        assert!(verdict(&(at.clone(), Ok(passed("embed", 5)))));
+        assert!(verdict(&(at.clone(), Ok(ladder(true)))));
+        assert!(!verdict(&(at.clone(), Ok(ladder(false)))));
+        assert!(!verdict(&(at.clone(), Ok(failed("x")))));
         assert!(!verdict(&(at, Err("held".into()))));
     }
 
     #[test]
     fn a_late_answer_is_one_line() {
         assert_eq!(
-            summary(&Ok(json!({ "ok": false, "error": "HTTP 500: boom" }))),
+            summary(&Ok(failed("HTTP 500: boom"))),
             (false, "failed — HTTP 500: boom".to_string())
         );
         assert_eq!(
-            summary(&Ok(json!({ "ok": true, "ladder": true }))),
+            summary(&Ok(failed(""))),
+            (false, "failed — open the model to see why".to_string())
+        );
+        assert_eq!(
+            summary(&Ok(ladder(true))),
             (true, "every rung loads and generates".to_string())
+        );
+        assert_eq!(
+            summary(&Ok(ladder(false))),
+            (false, "failed — open the model to see why".to_string())
         );
         assert_eq!(summary(&Err("held".into())), (false, "held".to_string()));
     }
@@ -402,19 +415,25 @@ mod tests {
     #[test]
     fn the_summary_names_the_probe_and_the_time() {
         assert_eq!(
-            passed_line(&json!({ "ok": true, "probe": "generate", "latency_ms": 1500 })),
+            passed_line(1500, "generate"),
             "Loads and generates in 1.5 s."
         );
+        assert_eq!(passed_line(850, "embed"), "Loads and embeds in 850 ms.");
         assert_eq!(
-            passed_line(&json!({ "ok": true, "probe": "embed" })),
-            "Loads and embeds."
+            summary(&Ok(passed("embed", 850))),
+            (true, "Loads and embeds in 850 ms.".to_string())
         );
     }
 
     #[test]
     fn a_rung_line_carries_its_context_and_load_time() {
+        let rung: RungTest = serde_json::from_value(json!({
+            "rung": 2, "of": 3, "gguf_path": null, "ctx_size": 65536, "per_slot_ctx": null,
+            "switchover": null, "load_seconds": 4.25, "ok": true,
+        }))
+        .unwrap();
         assert_eq!(
-            rung_line(&json!({ "rung": 2, "of": 3, "ctx_size": 65536, "load_seconds": 4.25 })),
+            rung_line(&rung),
             format!(
                 "rung 2/3 · ctx {} · ready after 4.2 s",
                 crate::fmt::grouped(65536)

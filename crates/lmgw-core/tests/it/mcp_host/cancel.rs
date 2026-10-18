@@ -174,7 +174,7 @@ async fn a_takeover_mid_call_says_so() {
     dev.auto.store(false, Ordering::SeqCst);
     let pending = call_in_background(&w);
     dev.next_call().await;
-    let _newer = super::FakeDevice::connect(&w.addr(), &d.key, vec![super::tool("echo")]).await;
+    let _newer = super::FakeDevice::connect(&d, vec![super::tool("echo")]).await;
     let (code, _) = dev.closed().await;
     assert_eq!(code, 4000);
     let answer = patience::within("the call's answer", pending)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pre-push guard for the public GitHub repo; scripts/publish-github.sh --install-guard installs it
-# as .git/hooks/pre-push. Two rules for any push to a github.com URL:
+# as .git/hooks/pre-push. Two rules for any push to a github.com URL (however its case is spelled):
 # 1. Nothing goes there by accident: only scripts/publish-github.sh pushes, with LMGW_PUBLISH=1
 #    set. GitHub gets one squashed commit per publish; the granular history stays private. The
 #    `github` remote's pushurl is disabled as well, so `git push github` fails before this runs.
@@ -9,7 +9,9 @@
 #    must neither hide it nor make every push look tainted.
 set -euo pipefail
 remote="$1" url="$2"
+shopt -s nocasematch
 case "$url" in *github.com*) ;; *) exit 0 ;; esac
+shopt -u nocasematch
 if [[ "${LMGW_PUBLISH:-}" != "1" ]]; then
     echo "pre-push: refusing to push to GitHub ($url). Publish with scripts/publish-github.sh." >&2
     exit 1

@@ -20,6 +20,7 @@ use crate::config::{ApiKeyKind, Snapshot};
 use crate::principal::{Cap, Principal};
 use crate::server::CAPABILITY_TABLE;
 
+use super::descriptions;
 use super::exclusions::UNDOCUMENTED;
 use super::headers::Direction;
 use super::ops::{self, OpArgs, OpDoc};
@@ -116,6 +117,9 @@ fn build_admin() -> Value {
         (openapi_ext::UNDOCUMENTED): undocumented_json(),
     });
     mark_secrets(&mut doc);
+    // Last, over the finished document (the v1 one is cut from this one): a
+    // doc comment's Rust links are plain text here.
+    descriptions::plain_links(&mut doc);
     doc
 }
 
@@ -234,11 +238,11 @@ fn security_schemes() -> Value {
         "bearer": {
             "type": "http",
             "scheme": "bearer",
-            "description": "An lmgw API key of any kind. A paired device's key is refused \
-                with 401 device_key_unknown once it matches no device (the device was rotated \
-                or deleted: pair it again), 401 device_disabled while the device is disabled \
-                (the same key works once it is enabled again), and 401 key_expired past its \
-                expiry date. A retry with the same key does not help with any of the three.",
+            "description": "An lmgw API key: a client, owner or agent key. A paired device \
+                presents none: it authenticates by its client certificate on the device \
+                listener, which refuses a bearer there 400 credential_on_device_listener. A \
+                bearer key a device was paired with before TLS (lmgw-device-…) is refused \
+                401 device_key_unknown on every listener: pair the device again.",
         },
         "apiKeyHeader": {
             "type": "apiKey",
@@ -350,6 +354,7 @@ fn route_operation(
             route.method,
             route.path,
             is_inference,
+            route.errors,
             sent,
         ),
     );
@@ -485,6 +490,19 @@ fn request_body(
             "required": true,
             "content": { mime: { "schema": { "type": "string", "format": "binary" } } },
         })),
+        Req::RawOrMultipart { raw, multipart } => {
+            let mut schema = schemas::embed(g, multipart);
+            if let Some(ex) = example {
+                schema["example"] = ex;
+            }
+            Some(json!({
+                "required": true,
+                "content": {
+                    raw: { "schema": { "type": "string" } },
+                    "multipart/form-data": { "schema": schema },
+                },
+            }))
+        }
         Req::JsonRpc => {
             // WP1 bug, fixed in WP6: this used to `schemas::named_ref` a
             // component named "JsonRpcRequest" that nothing ever registered
@@ -503,7 +521,40 @@ fn request_body(
     }
 }
 
+/// The operation's `responses`: the success arm, the dialect's `default`
+/// error, and each documented error status with its own schema.
+#[allow(clippy::too_many_arguments)]
 fn responses_object(
+    g: &mut schemars::SchemaGenerator,
+    resp: Resp,
+    dialect: Dialect,
+    method: &str,
+    path: &str,
+    is_inference: bool,
+    errors: &[(u16, registry::SchemaFn)],
+    sent: &mut schemas::Sent,
+) -> Value {
+    let mut responses = responses_base(g, resp, dialect, method, path, is_inference, sent);
+    if let Value::Object(map) = &mut responses {
+        for (status, schema_fn) in errors {
+            let schema = sent.embed(g, *schema_fn);
+            debug_assert!(
+                !map.contains_key(&status.to_string()),
+                "{method} {path}: status {status} is documented twice"
+            );
+            map.insert(
+                status.to_string(),
+                json!({
+                    "description": "Error, with this body rather than the default one.",
+                    "content": { "application/json": { "schema": schema } },
+                }),
+            );
+        }
+    }
+    responses
+}
+
+fn responses_base(
     g: &mut schemars::SchemaGenerator,
     resp: Resp,
     dialect: Dialect,
@@ -521,22 +572,11 @@ fn responses_object(
                 Some(json!({ "application/json": { "schema": schema } })),
             )
         }
-        // WP1 bug, fixed in WP5: `named_ref` alone builds a `$ref` string
-        // with nothing registered behind it (the same dangling-ref shape
-        // `schemas::error_ref`'s own doc comment describes) — `OPS` was
-        // still empty in WP1, so nothing exercised this arm. `subschema_for`
-        // is what `v1::errors::api_error` already uses for a plain
-        // `JsonSchema`-derived api-types struct: it registers the schema
-        // under the type's own name and returns the `$ref` in one call.
-        Resp::OpOutcome => {
-            sent.touch(|g| g.subschema_for::<lmgw_api_types::OpOutcome>());
+        Resp::CreatedJson(schema_fn) => {
+            let schema = sent.embed(g, schema_fn);
             (
-                "200",
-                Some(json!({
-                    "application/json": {
-                        "schema": g.subschema_for::<lmgw_api_types::OpOutcome>().to_value(),
-                    },
-                })),
+                "201",
+                Some(json!({ "application/json": { "schema": schema } })),
             )
         }
         Resp::Untyped(why) => (
@@ -714,6 +754,31 @@ fn responses_object(
             );
             return Value::Object(responses);
         }
+        Resp::Empty => ("200", None),
+        Resp::Created { mime, location } => {
+            let created = json!({
+                "description": "Created.",
+                "headers": {
+                    "Location": {
+                        "description": location,
+                        "schema": { "type": "string" },
+                    },
+                },
+                "content": { mime: { "schema": { "type": "string" } } },
+            });
+            responses.insert(
+                "201".to_string(),
+                with_headers(created, method, path, is_inference),
+            );
+            responses.insert(
+                "default".to_string(),
+                json!({
+                    "description": "Error.",
+                    "content": { "application/json": { "schema": schemas::error_ref(g, dialect) } },
+                }),
+            );
+            return Value::Object(responses);
+        }
         Resp::Doc => (
             "200",
             Some(json!({ "application/json": { "schema": { "type": "object" } } })),
@@ -727,12 +792,19 @@ fn responses_object(
         status.to_string(),
         with_headers(response, method, path, is_inference),
     );
+    // The error carries the same headers: a failed call names the fallback
+    // that had the request in `x-lmgw-fallback`.
     responses.insert(
         "default".to_string(),
-        json!({
-            "description": "Error.",
-            "content": { "application/json": { "schema": schemas::error_ref(g, dialect) } },
-        }),
+        with_headers(
+            json!({
+                "description": "Error.",
+                "content": { "application/json": { "schema": schemas::error_ref(g, dialect) } },
+            }),
+            method,
+            path,
+            is_inference,
+        ),
     );
     Value::Object(responses)
 }
@@ -787,6 +859,7 @@ fn op_operation(
             "POST",
             "/api/op/{name}",
             false,
+            &[],
             sent,
         ),
     );
@@ -808,9 +881,6 @@ fn op_operation(
     }
     if op.deprecated {
         obj.insert("deprecated".into(), json!(true));
-    }
-    if let OpArgs::AliasOf(target) = op.args {
-        obj.insert(openapi_ext::ALIAS_OF.into(), json!(target));
     }
     Value::Object(obj)
 }
@@ -850,7 +920,7 @@ fn op_request_body(g: &mut schemars::SchemaGenerator, op: &OpDoc) -> Option<Valu
             ops::tool_schema(tool)
         }
         OpArgs::Hand(schema_fn) => schema_fn(),
-        OpArgs::NoArgs | OpArgs::AliasOf(_) => return None,
+        OpArgs::NoArgs => return None,
     };
     if let Some(text) = op.example {
         schema["example"] = serde_json::from_str::<Value>(text)
@@ -1032,8 +1102,10 @@ fn prune_v1_root(doc: &mut Value) {
 /// other public operation is the dashboard's browser-session login
 /// (`/api/session*`). The one list [`is_developer_op`] and the
 /// classification test both read, so a new public route has to be put on one
-/// side or the test fails.
-const PUBLIC_DEVELOPER_OPS: &[(&str, &str)] = &[("get", "/api/version")];
+/// side or the test fails. A device's enrolment is a client's (device link
+/// design §3.4): the token decides, not a session.
+const PUBLIC_DEVELOPER_OPS: &[(&str, &str)] =
+    &[("get", "/api/version"), ("post", "/devices/enrol")];
 
 /// Which operations belong in the developer document: everything intended for
 /// external clients and agents building on lmgw, i.e. every operation a

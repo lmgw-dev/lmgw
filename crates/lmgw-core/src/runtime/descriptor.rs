@@ -18,7 +18,9 @@ use crate::config::{AudioModel, AudioSettings, AuxModel, ImageModel, LocalModel,
 use crate::sdcpp_caps::SdcppCaps;
 
 use super::argv::{EngineArgs, ImageArgs, LlamaArgs, RenderSpec};
-use super::{audio as audio_cfg, container_name, image as image_cfg, Class, Placement};
+use super::{
+    audio as audio_cfg, aux as aux_cfg, container_name, image as image_cfg, Class, Placement,
+};
 
 /// The binary inside the stable-diffusion.cpp image (§2.5): its `ENTRYPOINT`
 /// is `/sd-cli`, so the server has to be named explicitly.
@@ -134,9 +136,13 @@ pub(crate) fn file_name(path: &str) -> &str {
 
 impl ModelRuntime {
     /// Where a container started from this descriptor computes: `Cpu` for an
-    /// audio row whose backend in effect is `cpu`, `Gpu` for every other row
-    /// and class.
+    /// audio row whose backend in effect is `cpu` and for an aux row whose
+    /// `backend` is `cpu` (decision-models design §3.3), `Gpu` for every
+    /// other row and class.
     pub fn placement(&self) -> Placement {
+        if let Some(LlamaArgs::Aux { backend, .. }) = &self.llama {
+            return aux_cfg::placement(*backend);
+        }
         self.audio_settings
             .as_ref()
             .map_or(Placement::Gpu, |s| Placement::of_backend(&s.backend))
@@ -440,16 +446,15 @@ pub fn higher_rungs(snap: &Snapshot) -> Vec<ModelRuntime> {
         .collect()
 }
 
-fn aux_runtime(snap: &Snapshot, m: &AuxModel) -> ModelRuntime {
+pub(crate) fn aux_runtime(snap: &Snapshot, m: &AuxModel) -> ModelRuntime {
     let r = &snap.settings.aux_router;
     ModelRuntime {
         class: Class::Aux,
         model_id: m.model_id.clone(),
         image: m.image.clone().unwrap_or_else(|| r.image.clone()),
-        extra_run_args: m
-            .extra_run_args
-            .clone()
-            .unwrap_or_else(|| r.extra_run_args.clone()),
+        // A CPU row inheriting the class's args runs without its GPU
+        // passthrough (`aux_cfg::run_args`).
+        extra_run_args: aux_cfg::run_args(m, r),
         idle_seconds: m.idle_seconds,
         warm_start: m.warm_start,
         enabled: m.enabled,
@@ -458,6 +463,11 @@ fn aux_runtime(snap: &Snapshot, m: &AuxModel) -> ModelRuntime {
             kind: m.kind,
             pooling: m.pooling.clone(),
             ctx_size: m.ctx_size,
+            ubatch_size: m.ubatch_size,
+            batch_size: m.batch_size,
+            mmproj_path: m.mmproj_path.clone(),
+            backend: m.backend,
+            threads: aux_cfg::rendered_threads(m, crate::host::cpu()),
             args: m.args.clone(),
         }),
         audio: None,

@@ -55,6 +55,7 @@ pub struct ApprovalRequest {
     /// session's `mcp_approval_request` item (OpenAI's shape has none):
     /// there the `lmgw.chat.frame` relaying the `approval` frame has it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub call_id: Option<String>,
 }
 

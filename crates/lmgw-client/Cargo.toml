@@ -3,11 +3,44 @@ name = "lmgw-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Sans-IO rules for lmgw's clients: the realtime protocol, the derived voice state, the truncate bookkeeping, the Chat change feed and request builders"
+description = "Sans-IO rules for lmgw's clients: the realtime protocol, the derived voice state, the truncate bookkeeping, the Chat change feed, the device link's pairing and request builders"
 
 # Sans-IO (client-apps design §4.1): no clock, no I/O, no runtime. It builds
 # for wasm32 (the dashboard's voice panel) and natively (a desktop client),
 # and its public types are owned, for a later FFI wrapper.
 [dependencies]
 lmgw-api-types = { path = "../lmgw-api-types" }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The pairing link's parser and its base-URL rules (device link design
+# §6.3): url's own query decoding and URL parsing. Builds for wasm32.
+url = "2.5.8"
+# SHA-256 of a SubjectPublicKeyInfo, for `fp` and the confirmation code. The
+# enrolment's reader checks `fp` where the `tls` feature is off, so it cannot
+# borrow a TLS crypto provider's digest. Pure Rust, wasm32 too; the version
+# lmgw-core uses.
+sha2 = "0.11.0"
+# The `tls` feature (device link design §6.3): the pinned verifiers and the
+# client configuration. No crypto provider feature of its own: the app
+# brings its provider (Kai desktop aws-lc-rs, Kai mobile ring, which spares
+# building aws-lc-sys with the NDK), so none is built for it here.
+rustls = { version = "0.23.40", optional = true, default-features = false, features = ["std"] }
+
+[features]
+# The device link's TLS: `tls::EnrolVerifier`, `tls::client_config`. Off by
+# default and for wasm32. The crate's own tests always build the module
+# (`cfg(test)`), with the provider below, so `cargo test --workspace` runs
+# them without this feature.
+tls = ["dep:rustls"]
+
+[dev-dependencies]
+# Real certificates for the `tls` tests: a CA, server leaves, device
+# certificates. ring backs rcgen's signatures here because aws-lc-rs would
+# have to move to rcgen's floor (1.18) for a test-only crate; the lock
+# already holds ring.
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
+# The tests' providers: aws-lc-rs (lmgw's and Kai desktop's) and ring (Kai
+# mobile's). The workspace's rustls already builds with both (reqwest brings
+# aws-lc-rs, ureq ring), so the tests change nothing there. `tls12` for the
+# case that a TLS 1.2 server is refused.
+rustls = { version = "0.23.40", default-features = false, features = ["std", "aws_lc_rs", "ring", "tls12"] }

@@ -57,17 +57,14 @@ impl McpStub {
         self.release.send_replace(true);
     }
 
-    /// Until it has seen `n` `tools/call`s; fails after 5 s.
+    /// Until it has seen `n` `tools/call`s, as long as the harness lets the
+    /// test run (`common::patience`): a box that is slow to get a run as far
+    /// as its first call is not a failure.
     pub async fn wait_calls(&self, n: usize) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.calls.lock().unwrap().len() < n {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the server saw {} tools/call, not {n}",
-                self.calls.lock().unwrap().len()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        crate::common::patience::until(&format!("the server to see {n} tools/call"), || {
+            self.calls.lock().unwrap().len() >= n
+        })
+        .await;
     }
 }
 
@@ -217,7 +214,8 @@ pub fn dead_url() -> (String, tokio::net::TcpSocket) {
 }
 
 /// Register an HTTP MCP server `name` with tool prefix `prefix` at `url`,
-/// `agent` naming the service agent it belongs to, if any.
+/// `agent` naming the service agent it belongs to, if any. A call it takes
+/// is ended by the gateway after 5 s ([`register_timing_out_after`]).
 pub async fn register(
     state: &SharedState,
     name: &str,
@@ -225,6 +223,20 @@ pub async fn register(
     url: &str,
     enabled: bool,
     agent: Option<&str>,
+) {
+    register_timing_out_after(state, name, prefix, url, enabled, agent, 5_000).await;
+}
+
+/// [`register`], with the server's own `timeout_ms` spelled out: how long the
+/// gateway lets one of its calls (and its handshake) take before it ends it.
+pub async fn register_timing_out_after(
+    state: &SharedState,
+    name: &str,
+    prefix: &str,
+    url: &str,
+    enabled: bool,
+    agent: Option<&str>,
+    timeout_ms: u64,
 ) {
     store::insert_mcp_server(
         &state.db,
@@ -241,7 +253,7 @@ pub async fn register(
             url: Some(url.into()),
             headers: vec![],
             tool_prefix: prefix.into(),
-            timeout_ms: 5_000,
+            timeout_ms,
             autostart: false,
             idle_seconds: 300,
             allow_sampling: false,

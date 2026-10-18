@@ -6,7 +6,7 @@
 //! resident together (§9), so on one card the LLM and the voice are a
 //! sliding scale. Every figure here is one lmgw already charges at
 //! admission — [`crate::vram::VramScheduler::footprint`]: a chat row's GGUF
-//! weights + KV cache, an audio row's learned residency or, before it has
+//! weights + KV cache + compute buffers, an audio row's learned residency or, before it has
 //! one, its on-disk size (§9.4). Nothing is guessed: a stage lmgw has no
 //! figure for is reported unknown, and the total is then a lower bound. A
 //! cloud stage holds nothing here; turn detection runs on the CPU.
@@ -199,10 +199,11 @@ async fn basis(
         Class::Chat => {
             let mut s = match fp.ctx_tokens {
                 Some(ctx) => format!(
-                    "GGUF weights {} + KV cache {} at {ctx} tokens — a lower bound: compute \
-                     buffers and the CUDA context are the headroom's",
+                    "GGUF weights {} + KV cache {} + compute buffers {} at {ctx} tokens; the \
+                     CUDA context and a projector's compute buffer are the headroom's",
                     fmt_bytes(fp.weights_bytes),
-                    fmt_bytes(fp.kv_cache_bytes)
+                    fmt_bytes(fp.kv_cache_bytes),
+                    fmt_bytes(fp.compute_bytes)
                 ),
                 None => format!("GGUF weights {}", fmt_bytes(fp.weights_bytes)),
             };
@@ -222,7 +223,23 @@ async fn basis(
             }
             s
         }
-        Class::Aux | Class::Image => fp.note.clone().unwrap_or_default(),
+        Class::Aux => {
+            let mut s = match fp.ctx_tokens {
+                Some(ctx) => format!(
+                    "GGUF weights {} + KV cache {} + compute buffer {} at {ctx} tokens; the \
+                     CUDA context is the headroom's",
+                    fmt_bytes(fp.weights_bytes),
+                    fmt_bytes(fp.kv_cache_bytes),
+                    fmt_bytes(fp.compute_bytes)
+                ),
+                None => format!("GGUF weights {}", fmt_bytes(fp.weights_bytes)),
+            };
+            if let Some(n) = &fp.note {
+                s.push_str(&format!(" ({n})"));
+            }
+            s
+        }
+        Class::Image => fp.note.clone().unwrap_or_default(),
     }
 }
 
@@ -445,6 +462,6 @@ mod tests {
         assert!(loopback("http://localhost:8080"));
         assert!(loopback("http://[::1]:8080/v1"));
         assert!(!loopback("https://api.openai.com/v1"));
-        assert!(!loopback("http://192.168.1.20:8080/v1"));
+        assert!(!loopback("http://198.51.100.20:8080/v1"));
     }
 }

@@ -381,8 +381,9 @@ pub(crate) fn blocker(resolved: Option<&VoiceResolved>, stage: &str) -> Option<S
 
 #[cfg(test)]
 mod tests {
-    use super::super::{FallbackResolved, FallbackUnusable, VoiceProblem};
+    use super::super::VoiceProblem;
     use super::*;
+    use lmgw_api_types::voice_resolved::{Fallback, FallbackUnusable};
     use serde_json::json;
 
     fn frame(v: serde_json::Value) -> ModelState {
@@ -482,7 +483,7 @@ mod tests {
             alias: Some("nemotron".into()),
             local: Some(true),
             managed: true,
-            fallback: Some(FallbackResolved {
+            fallback: Some(Fallback {
                 alias: "openai/whisper-1".into(),
                 local: false,
             }),

@@ -5,7 +5,7 @@
 //! (`an_unlisted_op_is_refused_before_dispatch`). `every_listed_op_is_
 //! documented_and_vice_versa`, `tool_and_op_arguments_agree_except_listed_
 //! divergences` and `writes_agree_with_the_tool` are WP5's, now that
-//! `ops/table.rs`'s `table()` has its 83 entries.
+//! `ops/table.rs`'s `table()` has its 82 entries.
 
 use crate::common;
 
@@ -90,7 +90,7 @@ fn matching(text: &str, open_idx: usize, open: u8, close: u8) -> usize {
 
 /// Every string literal in `body` that is a match arm's own pattern: one
 /// followed (after whitespace) by `=>`, by `|` (an or-pattern:
-/// `"aux_model_set" | "embed_model_set" =>`), or by an `if` guard
+/// `"upstream_set" | "model_set" =>`), or by an `if` guard
 /// (`"x" if cond =>`, review R2 #6).
 fn arm_names(body: &str) -> BTreeSet<&str> {
     let mut out = BTreeSet::new();
@@ -274,8 +274,8 @@ async fn an_unlisted_op_is_refused_before_dispatch() {
     }
 }
 
-/// Review R2 #2: an op documented with no `requestBody` (`OpArgs::NoArgs`,
-/// `AliasOf`) is called with no body — that is what the tester's Send and its
+/// Review R2 #2: an op documented with no `requestBody` (`OpArgs::NoArgs`)
+/// is called with no body — that is what the tester's Send and its
 /// copied curl do — and used to get `Json<_>`'s `415` for the missing
 /// `Content-Type`. No body is `{}` now; a non-empty body still goes through
 /// the JSON extractor's own checks.
@@ -355,7 +355,7 @@ fn every_listed_op_is_documented_and_vice_versa() {
         documented, listed,
         "the doc's x-lmgw-op set and web::op_names::all() have drifted"
     );
-    assert_eq!(listed.len(), 83, "web::op_names::all() should name 83 ops");
+    assert_eq!(listed.len(), 86, "web::op_names::all() should name 86 ops");
 }
 
 /// The property *names* a JSON Schema object declares (`properties`'s keys) —
@@ -550,6 +550,7 @@ fn reveals_secret_and_writes_flags_are_pinned() {
             [
                 "agent_token_get",
                 "agent_token_rotate",
+                "device_token",
                 "key_create",
                 "key_reveal",
                 "key_rotate",

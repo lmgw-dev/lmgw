@@ -47,7 +47,7 @@ impl Container {
         let argv = server
             .container_create_argv(&labels)
             .ok_or("stdio server has no container image")?;
-        let out = tokio::process::Command::new("podman")
+        let out = crate::child::system_tool_tokio(&mut tokio::process::Command::new("podman"))
             .args(&argv)
             .stdin(Stdio::null())
             .kill_on_drop(true)
@@ -102,7 +102,7 @@ impl Drop for Container {
         if self.disarmed {
             return;
         }
-        let spawned = std::process::Command::new("podman")
+        let spawned = crate::child::system_tool(&mut std::process::Command::new("podman"))
             .args(["rm", "--force", "--ignore", "--time", "0", &self.id])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -124,7 +124,7 @@ impl Drop for Container {
 /// stop signal, `grace_secs` to end and then a kill; one gone already (it
 /// is created `--rm`) is no error.
 async fn remove(id: &str, grace_secs: u64, after: &str) {
-    let out = tokio::process::Command::new("podman")
+    let out = crate::child::system_tool_tokio(&mut tokio::process::Command::new("podman"))
         .args(["rm", "--force", "--ignore", "--time"])
         .arg(grace_secs.to_string())
         .arg(id)

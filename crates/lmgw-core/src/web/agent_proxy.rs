@@ -135,6 +135,7 @@ fn err(status: StatusCode, code: &str, message: String) -> Response {
         Json(dto::ApiError {
             code: code.into(),
             message,
+            ..Default::default()
         }),
     )
         .into_response()
@@ -499,10 +500,7 @@ async fn proxy_agent(
     let id = agent.row.id.clone();
     // The server this request came in on: an app's streamed answer ends at
     // its stop (review F-4), as every other long-lived stream does.
-    let served_at = req
-        .extensions()
-        .get::<crate::server::ServedAt>()
-        .map(|crate::server::ServedAt(at)| *at);
+    let served_at = req.extensions().get::<crate::server::ServedAt>().copied();
     if service::service_of(&agent).is_none() {
         return err(
             StatusCode::NOT_FOUND,
@@ -684,8 +682,9 @@ fn unreachable(id: &str, container: &str, e: reqwest::Error, evicted: bool) -> R
 
 /// The IP address of the TCP peer this request arrived from.
 ///
-/// Read from the `ConnectInfo` [`server::run`](crate::server::run) attaches
-/// to every connection (`into_make_service_with_connect_info`). A router
+/// Read from the `ConnectInfo<Conn>` [`server::run`](crate::server::run)
+/// attaches to every connection (`into_make_service_with_connect_info`), its
+/// `peer` already canonical. A router
 /// served without it has no address to tell, and then none is told: an app
 /// that checks `X-Forwarded-For` reads a missing one as "not through lmgw" and
 /// refuses, which is the right way for that mistake to fail.
@@ -695,8 +694,8 @@ fn unreachable(id: &str, container: &str, e: reqwest::Error, evicted: bool) -> R
 /// to an app whatever the bind address.
 fn peer_ip(req: &Request) -> Option<std::net::IpAddr> {
     req.extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().to_canonical())
+        .get::<axum::extract::ConnectInfo<crate::server::Conn>>()
+        .map(|ci| ci.0.peer.ip().to_canonical())
 }
 
 /// A `Connection: Upgrade` + `Upgrade: websocket` request (case-insensitive,
@@ -831,7 +830,7 @@ async fn upgrade(
     // awake and no counter to hold (§4.7).
     guard: Option<service::InFlight>,
     (origin, container_base): (&str, &str),
-    served_at: Option<u64>,
+    served_at: Option<crate::server::ServedAt>,
 ) -> Response {
     let Some(inbound) = inbound else {
         return err(

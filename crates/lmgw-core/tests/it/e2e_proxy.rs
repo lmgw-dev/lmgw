@@ -38,6 +38,7 @@ pub(crate) async fn setup_kind(
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -1624,6 +1625,7 @@ async fn setup_with_timeout(upstream_base: &str, timeout_ms: u64) -> (SharedStat
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

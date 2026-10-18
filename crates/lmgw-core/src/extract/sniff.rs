@@ -158,6 +158,25 @@ pub fn sniff(bytes: &[u8]) -> Result<Sniffed, SniffError> {
     }
 }
 
+/// [`sniff`] for the labs' stored files (artifacts): additionally a Standard
+/// MIDI File (`MThd` + header length 6) is `audio/midi`, `.mid`. Chat uploads
+/// and knowledge bases use [`sniff`], which does not know MIDI, so a MIDI
+/// upload there is the unrecognised binary it always was.
+pub fn sniff_artifact(bytes: &[u8]) -> Result<Sniffed, SniffError> {
+    if smf_header(bytes) {
+        return ok(Kind::Audio, "audio/midi", "mid");
+    }
+    sniff(bytes)
+}
+
+/// [`sniff_artifact`] on the blocking pool.
+pub async fn sniff_artifact_async(bytes: Bytes) -> Result<Sniffed, SniffError> {
+    match tokio::task::spawn_blocking(move || sniff_artifact(&bytes)).await {
+        Ok(r) => r,
+        Err(_) => Err(SniffError::Unrecognised),
+    }
+}
+
 /// [`sniff`] on the blocking pool: a ZIP is inflated (bounded, but
 /// synchronous), which an async handler must not do on its worker.
 pub async fn sniff_async(bytes: Bytes) -> Result<Sniffed, SniffError> {
@@ -228,6 +247,11 @@ fn ogg_page_header(b: &[u8]) -> bool {
 /// last-block flag either way) of length 34.
 fn flac_streaminfo(b: &[u8]) -> bool {
     b.len() >= 8 && &b[0..4] == b"fLaC" && b[4] & 0x7F == 0 && b[5..8] == [0, 0, 34]
+}
+
+/// A Standard MIDI File header: the `MThd` chunk type and its length, always 6.
+fn smf_header(b: &[u8]) -> bool {
+    b.len() >= 8 && &b[0..4] == b"MThd" && b[4..8] == [0, 0, 0, 6]
 }
 
 /// An ISO base media file (`ftyp`): audio when the major brand, or any
@@ -558,6 +582,20 @@ mod tests {
         assert_eq!(sub(b"fLaC\x80\0\0\x22\x10\0"), (Kind::Audio, "flac"));
         // An ID3 header with a bad size byte is not a tag.
         assert!(sniff(b"ID3\x04\0\0\xFF\0\0\0rest").is_err());
+    }
+
+    #[test]
+    fn midi_is_an_smf_header_with_length_six() {
+        let smf = b"MThd\0\0\0\x06\0\x01\0\x02\x01\xE0";
+        let s = sniff_artifact(smf).unwrap();
+        assert_eq!((s.kind, s.mime, s.sub), (Kind::Audio, "audio/midi", "mid"));
+        // The plain sniff (chat, knowledge) does not know MIDI.
+        assert_eq!(sniff(smf).unwrap_err(), SniffError::Unrecognised);
+        // Another header length, or a head cut short, is no MIDI.
+        assert!(sniff_artifact(b"MThd\0\0\0\x07\0\x01\0\x02").is_err());
+        assert!(sniff_artifact(b"MThd\0\0\0").is_err());
+        // Plain text that starts `MThd` stays text.
+        assert_eq!(sniff_artifact(b"MThd is a chunk").unwrap().kind, Kind::Text);
     }
 
     #[test]

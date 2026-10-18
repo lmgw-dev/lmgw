@@ -76,6 +76,7 @@ fn refuse(status: StatusCode, code: &str, message: String) -> Response {
         Json(lmgw_api_types::ApiError {
             code: code.to_string(),
             message,
+            ..Default::default()
         }),
     )
         .into_response()

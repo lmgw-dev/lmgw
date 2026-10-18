@@ -54,8 +54,8 @@ fn the_agent_name_prefix_is_reserved() {
 fn self_loop_wildcard_bind_matches_any_host() {
     // Bound to every interface: every host on that port reaches us.
     let s = snap_bound("0.0.0.0:8001");
-    assert!(reject_self_loop(&s, "http://192.168.1.5:8001/mcp").is_err());
-    assert!(reject_self_loop(&s, "http://192.168.1.5:8002/mcp").is_ok());
+    assert!(reject_self_loop(&s, "http://198.51.100.5:8001/mcp").is_err());
+    assert!(reject_self_loop(&s, "http://198.51.100.5:8002/mcp").is_ok());
 }
 
 #[test]
@@ -636,7 +636,7 @@ async fn the_rung_plan_reports_the_trained_context_the_slot_is_capped_at() {
     )
     .await
     .unwrap();
-    assert_eq!(plan["trained_context"], 4096, "{plan}");
+    assert_eq!(plan.trained_context, Some(4096), "{plan:?}");
 }
 
 #[tokio::test]

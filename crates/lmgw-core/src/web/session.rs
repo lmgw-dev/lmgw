@@ -24,7 +24,8 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use serde::{Deserialize, Serialize};
+use lmgw_api_types::SessionView;
+use serde::Deserialize;
 
 use crate::agents::token::OWNER_DASHBOARD;
 use crate::config::{ApiKey, ApiKeyKind, Snapshot};
@@ -299,19 +300,6 @@ async fn sign_in(
         StatusCode::NO_CONTENT.into_response(),
         set_cookie(&body.token),
     )
-}
-
-/// What `GET /api/session` answers: the current principal, as the dashboard's
-/// load check reads it.
-#[derive(Debug, Default, Serialize, schemars::JsonSchema)]
-pub(crate) struct SessionView {
-    authenticated: bool,
-    /// `key`, `agent`, `owner` — empty when nobody is signed in. Present
-    /// and empty rather than absent, so the response has one shape.
-    kind: String,
-    /// The name of the API key in use (`owner:dashboard` for the dashboard's
-    /// own), empty when nobody is signed in.
-    name: String,
 }
 
 /// `GET /api/session` — never a `401`, whatever the request carried (§3.4).

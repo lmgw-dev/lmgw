@@ -11,6 +11,11 @@
 //! turns show up in Logs. Only the auth middleware and the HTTP hop are skipped
 //! (same trade as the Chat tab, which drives `proxy::drive_upstream` directly).
 //!
+//! With `?group=<id>` a hand-off is kept in the lab store (labs-store design
+//! §5): the page makes the group first ([`groups`]), and the hand-off records
+//! its request and tees its answer into the group's run ([`kept`],
+//! [`record`]), the answer still relayed as it streams.
+//!
 //! Reference audio is the one piece with no route behind it: audio.cpp takes
 //! `voice_ref` as a path *on the server*, not an upload. The audio models dir
 //! is bind-mounted into the container at `/models`, so a clip written under
@@ -18,15 +23,15 @@
 //! `/models/voices/<name>` — the voice library below is exactly that directory.
 
 use axum::body::Body;
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{Multipart, Path, Query, Request, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::audio_lab::{
-    AudioLabModel, AudioLabModels, Clip, ClipFailed, ClipList, ClipTranscribed, ClipTranscription,
-    ClipWritten, ClipsAck, ClipsUploaded, DetailsQuery, LabError, LabVoicesQuery, SetRefText,
-    TaskRunQuery, TranscribeRef, VoicesNotRunning,
+    AudioLabModel, AudioLabModels, AudioRoute, Clip, ClipFailed, ClipList, ClipTranscribed,
+    ClipTranscription, ClipWritten, ClipsAck, ClipsUploaded, DetailsQuery, GroupQuery, LabError,
+    LabVoicesQuery, SetRefText, TaskRunQuery, TranscribeRef,
 };
 use serde_json::Value;
 
@@ -35,6 +40,14 @@ use crate::state::SharedState;
 use crate::store;
 
 mod extract;
+/// `POST /audio-lab/api/groups`: a kept group, made before its request.
+pub(super) mod groups;
+/// The hand-offs with `?group=`: claim, read, dispatch, tee.
+mod kept;
+/// A kept hand-off's run: the claim, the request as kept, the teed answer.
+mod record;
+/// A task answer's base64 audio found in its text, for its artifacts.
+mod task_audio;
 pub(crate) mod transcribe;
 
 use extract::{LabJson, LabOptJson};
@@ -112,46 +125,21 @@ pub async fn list_models(State(state): State<SharedState>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// Voice presets (upstream `GET /v1/audio/voices`)
+// Voices of a model (the picker's list)
 // ---------------------------------------------------------------------------
 
-/// `GET /audio-lab/api/voices?model=<alias>[&start=1]` — the model's built-in
-/// voice ids and configured server presets, for the voice picker. An empty
-/// list is normal: it means the model carries no cached voice ids and wants a
-/// `voice_ref` clip instead.
-///
-/// The answer comes out of the model's own container, and admission starts
-/// that container when it is down. Here that would mean *opening the page*
-/// loads a model onto the GPU, so without `start` the list is read only from
-/// a container that is up and answering ([`proxy::audio_voices_if_running`]:
-/// no admission, no claim, no dead-container restart). A local model that is
-/// not running answers `{"voices": [], "running": false}` instead, and the
-/// panel offers an explicit "load voices" that sends `start=1` — the public
-/// route's `probe=engine`. (The public `GET /v1/audio/voices` answers a local
-/// row from lmgw's own catalog by default, starting nothing.)
+/// `GET /audio-lab/api/voices?model=<alias>` — the model's voice names for
+/// the picker, read the moment a model is selected and never starting
+/// anything: a local row is answered from lmgw's own catalog (its presets,
+/// the voices its package ships, embeddings, the voice library), also under
+/// the GPU hold, and names only a container that is already up reports are
+/// added to it ([`proxy::lab_voices`]). An empty list is normal: the model
+/// carries no cached voice ids and wants a `voice_ref` clip instead.
 pub async fn list_voices(
     State(state): State<SharedState>,
     Query(q): Query<LabVoicesQuery>,
 ) -> Response {
-    let alias = q.model.trim();
-    let start = q
-        .start
-        .as_deref()
-        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
-    if start {
-        // "Load voices": the model's own list, which starts it — the public
-        // route's `probe=engine`.
-        return proxy::handle_audio_voices(state, alias, proxy::VoicesProbe::Engine).await;
-    }
-    proxy::audio_voices_if_running(state, alias)
-        .await
-        .unwrap_or_else(|| {
-            Json(VoicesNotRunning {
-                voices: Vec::new(),
-                running: false,
-            })
-            .into_response()
-        })
+    proxy::lab_voices(state, q.model.trim()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -620,12 +608,21 @@ pub async fn get_ref(State(state): State<SharedState>, Path(name): Path<String>)
 
 /// `POST /audio-lab/api/speech` — the panel's synthesis call, handed straight to
 /// the `/v1/audio/speech` handler. The response (a WAV body, a JSON envelope or
-/// an SSE stream, per `response_format` / `stream_format`) is relayed verbatim.
+/// an SSE stream, per `response_format` / `stream_format`) is relayed verbatim;
+/// with `?group=` it is kept as that group's run as it streams.
 pub async fn speech(
     State(state): State<SharedState>,
-    body: Result<Json<Value>, JsonRejection>,
+    q: Result<Query<GroupQuery>, QueryRejection>,
+    req: Request<Body>,
 ) -> Response {
-    let body = match extract::openai_body(body) {
+    let q = match extract::openai_query(q) {
+        Ok(q) => q,
+        Err(refusal) => return refusal,
+    };
+    if let Some(group) = q.group {
+        return kept::speech(state, group, req).await;
+    }
+    let body = match extract::openai_body(Json::<Value>::from_request(req, &state).await) {
         Ok(b) => b,
         Err(refusal) => return refusal,
     };
@@ -642,20 +639,42 @@ pub async fn speech(
 /// produces any.
 pub async fn transcriptions(
     State(state): State<SharedState>,
-    Query(q): Query<DetailsQuery>,
+    q: Result<Query<DetailsQuery>, QueryRejection>,
     req: Request<Body>,
 ) -> Response {
-    let which = if q.details {
-        proxy::AudioUpload::TranscriptionDetails
-    } else {
-        proxy::AudioUpload::Transcription
+    let q = match extract::openai_query(q) {
+        Ok(q) => q,
+        Err(refusal) => return refusal,
     };
+    let (which, route) = if q.details {
+        (
+            proxy::AudioUpload::TranscriptionDetails,
+            AudioRoute::TranscriptionDetails,
+        )
+    } else {
+        (proxy::AudioUpload::Transcription, AudioRoute::Transcription)
+    };
+    if let Some(group) = q.group {
+        return kept::upload(state, group, route, which, req).await;
+    }
     proxy::handle_audio_upload(state, RequestCtx::default(), req, which).await
 }
 
 /// `POST /audio-lab/api/alignments` — the multipart forced-alignment route,
 /// for an `align` model. Upload-only, exactly like `/v1/audio/alignments`.
-pub async fn alignments(State(state): State<SharedState>, req: Request<Body>) -> Response {
+pub async fn alignments(
+    State(state): State<SharedState>,
+    q: Result<Query<GroupQuery>, QueryRejection>,
+    req: Request<Body>,
+) -> Response {
+    let q = match extract::openai_query(q) {
+        Ok(q) => q,
+        Err(refusal) => return refusal,
+    };
+    if let Some(group) = q.group {
+        let which = proxy::AudioUpload::Alignment;
+        return kept::upload(state, group, AudioRoute::Alignment, which, req).await;
+    }
     proxy::handle_audio_upload(
         state,
         RequestCtx::default(),
@@ -670,10 +689,17 @@ pub async fn alignments(State(state): State<SharedState>, req: Request<Body>) ->
 /// which a streaming-mode model answers with its buffered event list.
 pub async fn tasks_run(
     State(state): State<SharedState>,
-    Query(q): Query<TaskRunQuery>,
-    body: Result<Json<Value>, JsonRejection>,
+    q: Result<Query<TaskRunQuery>, QueryRejection>,
+    req: Request<Body>,
 ) -> Response {
-    let body = match extract::openai_body(body) {
+    let q = match extract::openai_query(q) {
+        Ok(q) => q,
+        Err(refusal) => return refusal,
+    };
+    if let Some(group) = q.group {
+        return kept::task(state, group, q.stream, req).await;
+    }
+    let body = match extract::openai_body(Json::<Value>::from_request(req, &state).await) {
         Ok(b) => b,
         Err(refusal) => return refusal,
     };

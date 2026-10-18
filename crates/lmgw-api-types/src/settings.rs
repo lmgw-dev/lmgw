@@ -70,10 +70,21 @@ pub struct SettingsFull {
     /// The personality profile new Chat threads start with
     /// (`GET /chat/api/profiles`); `null` for none ("Default").
     pub chat_profile: Option<i64>,
+    /// Archive a Chat thread this many days after its last activity; `0`
+    /// disables auto-archive. Reversible: a pin, a restore or a message sent
+    /// into the thread brings it back.
+    pub chat_archive_days: i64,
+    /// Delete an archived, unpinned Chat thread this many days after it was
+    /// archived; `0` keeps archived threads forever.
+    pub chat_purge_days: i64,
     /// Days the Chat change feed keeps its records; `0` = all.
     pub chat_feed_retention_days: i64,
-    /// Seconds between the Chat feed's keep-alive comments (≥ 1).
+    /// Seconds between the Chat feed's keep-alive comments (1 to
+    /// `chat_feed_keepalive_max_s`).
     pub chat_feed_keepalive_s: u32,
+    /// The longest keep-alive a feed may ask for itself (`?keepalive_s=`),
+    /// in seconds (1 to `chat_feed::MAX_KEEPALIVE_S`).
+    pub chat_feed_keepalive_max_s: u32,
     /// Records the Chat feed reads per query while a client catches up
     /// (≥ 1).
     pub chat_feed_page_size: u32,
@@ -141,7 +152,7 @@ pub struct SettingsFull {
     /// `docker.io/library/node:24-alpine`.
     pub agent_script_image: String,
     pub router: RouterSettings,
-    pub aux_router: RouterSettings,
+    pub aux_router: AuxRouterSettings,
     pub audio: AudioSettings,
     /// The stable-diffusion.cpp class.
     pub image: ImageSettings,
@@ -149,6 +160,9 @@ pub struct SettingsFull {
     pub realtime: crate::realtime::RealtimeSettings,
     /// The device MCP host link's limits (client-apps design §5.1).
     pub mcp: crate::mcp_host::HostSettings,
+    /// The device listener and the bounds of its trust (Settings → Network
+    /// & access → Devices, device link design §9.1).
+    pub devices: crate::device_link::DevicesSettings,
     pub api_keys: Vec<ApiKeyRow>,
     pub data_dir: String,
     pub version: String,
@@ -230,6 +244,33 @@ pub struct RouterSettings {
     pub request_timeout_seconds: u64,
 }
 
+/// The aux class settings: the chat/aux class fields, flat beside the prefix
+/// of the decision rows (decision-models design §3.10). Dereferences to the
+/// class fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AuxRouterSettings {
+    #[serde(flatten)]
+    pub base: RouterSettings,
+    /// Namespace of the decision rows (`decide` → `decide/<model id>`);
+    /// embedders and rerankers are under `public_prefix`. Empty = bare ids.
+    pub decision_prefix: String,
+}
+
+impl std::ops::Deref for AuxRouterSettings {
+    type Target = RouterSettings;
+    fn deref(&self) -> &RouterSettings {
+        &self.base
+    }
+}
+
+impl std::ops::DerefMut for AuxRouterSettings {
+    fn deref_mut(&mut self) -> &mut RouterSettings {
+        &mut self.base
+    }
+}
+
 /// The audio class settings: the same fields as the chat/aux class settings,
 /// plus the engine fields that flow into every audio model's own
 /// `server.json`.
@@ -295,4 +336,58 @@ pub struct ApiKeyRow {
     pub id: i64,
     pub name: String,
     pub enabled: bool,
+}
+
+/// A write to the gateway's settings through the tool plane's patch:
+/// `POST /api/op/settings_set` (and `lmgw__settings_set`). A patch that names
+/// no setting, or one the checks refuse, is an error answer instead.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SettingsSaved {
+    /// Always `true`; a refusal is an error answer instead.
+    pub ok: bool,
+    /// The settings the call wrote, in the order the op applies them, by the
+    /// patch's field names (`retention_days`, `hold_fallback_alias`, …); a
+    /// section's field is named under it (`realtime.asr_alias`).
+    pub changed: Vec<String>,
+    /// What was done, for a person to read; it says so when the rest of the
+    /// configuration could not be reloaded after the save.
+    pub message: String,
+}
+
+/// Engaging or releasing the GPU hold: `POST /api/op/hold_set` (and
+/// `lmgw__hold_set`). The hold already being in the state asked for is not an
+/// error: the answer reports the state and what is still working.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HoldSet {
+    /// Always `true`; a refusal is an error answer instead.
+    pub ok: bool,
+    /// Whether the hold is on now.
+    pub active: bool,
+    /// The alias a held chat request falls back to; `null` when none is set.
+    pub fallback_alias: Option<String>,
+    /// The containers this call stopped, as `class/model` (empty when it
+    /// stopped none, and when the hold was released or already as asked).
+    pub stopped: Vec<String>,
+    /// The containers left running because they are still working, as
+    /// `class/model`; the next reaper tick stops them. When the hold was
+    /// already as asked this is the registry's own view of what is working.
+    pub draining: Vec<String>,
+    /// The containers whose stop failed, as `class/model: reason`; they still
+    /// hold GPU memory.
+    pub failed: Vec<String>,
+    /// The containers on the CPU, left running: they use no VRAM.
+    pub kept_on_cpu: Vec<String>,
+    /// The id of the benchmark run that engaging the hold aborted. Absent
+    /// when no run was aborted: none was running, the hold was released, or it
+    /// was already as asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub benchmark_aborted: Option<i64>,
+    /// What was done, for a person to read: the failures are in the sentence
+    /// as well as in `failed`.
+    pub message: String,
 }

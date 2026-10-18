@@ -353,6 +353,13 @@ pub struct LmgwExt {
     /// text is `resolved.speech.tag_hint`. Off, cues still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag_hint: Option<bool>,
+    /// How a session bound to a Chat thread ends its turns: `automatic` or
+    /// `push_to_talk` (realtime calls design §2.2), resolved by lmgw at the
+    /// bind and switched by an update, `audio.input.turn_detection` following
+    /// it (`thread::turn_mode`). Absent on a session bound to no thread,
+    /// which refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_mode: Option<lmgw_api_types::realtime::TurnMode>,
     /// Server-written: what the session's names resolved to (§5.1). Accepted
     /// on input — a client that sends back the session it was given carries
     /// it — and always replaced by the server's own.

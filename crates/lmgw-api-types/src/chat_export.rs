@@ -56,6 +56,10 @@ pub struct ChatExport {
     pub thread: ExportThread,
     /// The thread's folder; absent when it is in none.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub folder: Option<ExportRef>,
     /// The thread's personality profile; `null` for none.
     pub profile: Option<ExportRef>,
@@ -129,15 +133,27 @@ pub struct ExportMessage {
     /// Set (to `true`) only when `ir_messages` is the raw text of a record
     /// that did not parse.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub ir_messages_unparsed: Option<bool>,
     pub kb_refs: Vec<i64>,
     pub context: Option<MessageContext>,
     pub model: Option<String>,
     pub answered_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub images_note: Option<String>,
     pub voice: Option<MessageVoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub task: Option<MessageTask>,
     pub created_at: String,
     pub attachments: Vec<ExportAttachment>,

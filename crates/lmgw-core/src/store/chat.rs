@@ -880,7 +880,8 @@ pub async fn set_chat_thread_title(
 }
 
 /// Append a message and bump the thread's `updated_at` so it floats to the top
-/// of the sidebar. Token counts are `None` for user/system turns.
+/// of the sidebar, in one transaction with its `message.added` record (the
+/// gateway's own: no author). Token counts are `None` for user/system turns.
 #[allow(clippy::too_many_arguments)]
 pub async fn append_chat_message(
     pool: &SqlitePool,
@@ -892,6 +893,7 @@ pub async fn append_chat_message(
     completion_tokens: Option<i64>,
     ir_messages: Option<&str>,
 ) -> DbResult<i64> {
+    let mut tx = super::begin_write(pool).await?;
     let res = sqlx::query(
         "INSERT INTO chat_messages
            (thread_id, role, content, reasoning, prompt_tokens, completion_tokens, ir_messages)
@@ -904,13 +906,16 @@ pub async fn append_chat_message(
     .bind(prompt_tokens)
     .bind(completion_tokens)
     .bind(ir_messages)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    let id = res.last_insert_rowid();
     sqlx::query("UPDATE chat_threads SET updated_at=datetime('now') WHERE id=?1")
         .bind(thread_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(res.last_insert_rowid())
+    feed::record_added(&mut tx, thread_id, id, None).await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 pub async fn list_chat_messages(

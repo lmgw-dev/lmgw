@@ -382,6 +382,9 @@ async fn non_turn_routes_call_models_as_the_device_too() {
     assert_eq!(resp.status(), 403);
     let v: Value = resp.json().await.unwrap();
     assert_eq!(v["code"], "key_scope", "{v}");
+    // The Chat's flat `{code, message}`, nothing more.
+    let refused: lmgw_api_types::ApiError = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&refused).unwrap(), v);
 
     // The press's warm: refused, nothing warmed.
     let (s, v) = post(

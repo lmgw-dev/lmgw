@@ -167,7 +167,7 @@ async fn with_the_switch_off_an_outside_shortfall_queues_as_before() {
         "{v}"
     );
     assert!(v["lmgw_share_bytes"].is_null() && v["outside_share_bytes"].is_null());
-    let status = lmgw_core::ops::status(&f.state).await.unwrap();
+    let status = lmgw_core::ops::backends::to_json(lmgw_core::ops::status(&f.state).await).unwrap();
     assert_eq!(status["vram"]["external_trigger_active"], false);
 }
 
@@ -252,7 +252,7 @@ async fn the_status_view_shows_the_measured_share_and_reads_each_pid_once() {
     assert_eq!(v["lmgw_share_bytes"], 6 * GIB, "{v}");
     assert_eq!(v["outside_share_bytes"], GIB, "{v}");
     assert!(v["external_trigger_reason"].is_null(), "{v}");
-    let status = lmgw_core::ops::status(&f.state).await.unwrap();
+    let status = lmgw_core::ops::backends::to_json(lmgw_core::ops::status(&f.state).await).unwrap();
     assert_eq!(status["vram"]["lmgw_share_bytes"], 6 * GIB);
 
     let asked = f.pid_inspects().len();
@@ -518,6 +518,11 @@ async fn set_embed_fallback(f: &Fixture, alias: &str) {
             kind: aux.kind,
             pooling: aux.pooling.clone(),
             ctx_size: aux.ctx_size,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: aux.args.clone(),
             idle_seconds: aux.idle_seconds,
             enabled: aux.enabled,
@@ -829,6 +834,7 @@ async fn a_fallback_the_endpoint_cannot_use_leaves_the_request_waiting_for_the_l
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -1459,6 +1465,11 @@ async fn the_pinned_reranker_and_ingest_count_never_swap_on_outside_use() {
             kind: AuxKind::Rerank,
             pooling: None,
             ctx_size: None,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: vec![],
             idle_seconds: 0,
             enabled: true,
@@ -1489,7 +1500,7 @@ async fn the_pinned_reranker_and_ingest_count_never_swap_on_outside_use() {
     let counted = lmgw_core::gate::open_pinned(
         &f.state,
         "chat-model",
-        lmgw_core::gate::RouteCheck::Text("/v1/count_tokens"),
+        lmgw_core::gate::RouteCheck::Count("/v1/count_tokens"),
     )
     .await;
     let failed = counted.expect_err("pinned: it waits for room, and there is none");

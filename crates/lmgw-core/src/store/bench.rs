@@ -232,6 +232,17 @@ pub async fn get_bench_run(pool: &SqlitePool, id: i64) -> DbResult<Option<BenchR
     row.as_ref().map(run_from_row).transpose()
 }
 
+/// The model a run measured, without decoding the rest of the row; `None`
+/// when there is no such run.
+pub async fn bench_run_model_id(pool: &SqlitePool, id: i64) -> DbResult<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT model_id FROM bench_runs WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
 /// Runs newest first, without their timelines: all of them, or one row's
 /// (`model_id`), older than `before`, at most `limit`.
 pub async fn list_bench_runs(

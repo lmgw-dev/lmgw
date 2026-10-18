@@ -296,6 +296,19 @@ pub fn VoiceInput(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn voice_entries_accept_ids_or_objects() {
+        assert_eq!(
+            voice_name(&Value::from("af_heart")).as_deref(),
+            Some("af_heart")
+        );
+        assert_eq!(
+            voice_name(&serde_json::json!({"id": "am_adam"})).as_deref(),
+            Some("am_adam")
+        );
+        assert_eq!(voice_name(&serde_json::json!({"x": 1})), None);
+    }
+
     use super::*;
 
     #[test]

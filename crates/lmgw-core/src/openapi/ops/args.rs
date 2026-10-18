@@ -177,7 +177,8 @@ pub(crate) fn price_set() -> Value {
 // ---------------------------------------------------------------------------
 
 /// `key_create { name*, kind }` — a client key (default), an owner key, or a
-/// device key with its policy and pairing URL (client-apps design §1.4).
+/// device with its policy, its URLs and a pairing token (device link design
+/// §3.2).
 pub(crate) fn key_create() -> Value {
     obj(
         json!({
@@ -201,6 +202,7 @@ pub(crate) fn key_create() -> Value {
                 "Newline-delimited `*` globs over exposed tool names (e.g. `docs__*`, \
                  `github__search`), for tool_scope_mode allow/deny.",
             ),
+            "device_tools": device_tools_p(),
             "budget_micro": int_p(
                 "Device keys: the budget in currency micro-units, 0 for none (the default).",
             ),
@@ -236,13 +238,43 @@ pub(crate) fn key_create() -> Value {
                  kind of key.",
                 &["off", "read_only", "full"],
             ),
-            "url": str_p(
-                "Device keys: the address the pairing link points the device at. Default: this \
-                 gateway's primary address; a phone needs the name it reaches the gateway by.",
+            "local_only": bool_p(
+                "Device keys: paired as \"this computer\" — the device reaches lmgw on a \
+                 loopback address only. Default false.",
             ),
+            "urls": urls_p(),
         }),
         &["name"],
     )
+}
+
+/// `device_tools`: the device-hosted labels a key reaches (client-apps
+/// design L16 as changed 2026-10-15).
+fn device_tools_p() -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Client and device keys: the device-hosted labels whose tools the key \
+             reaches (e.g. [\"kai\"] for Kai desktop's tools), whatever tool_scope_mode says; \
+             the tool scope then filters which of those tools it sees, as it does any \
+             server's. Without it no key reaches another device's hosted tools, whatever its \
+             tool scope names. Any label a device could host is taken (letters, digits, '_' \
+             and '-', no '__', no trailing '_', none of lmgw's own namespaces), hosted now or \
+             not. Default none; refused for an owner key.",
+    })
+}
+
+/// `urls`: a device's lmgw URLs (device link design §3.1).
+fn urls_p() -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Device keys: the device's lmgw URLs, https base URLs of the device \
+             listener in the order the device tries them (a LAN or WireGuard address, or a \
+             name; IP addresses and names of letters, digits and hyphens, which every server \
+             certificate carries). Default: for this computer https://127.0.0.1:<device port>; \
+             for another device every network address of this machine on the device port.",
+    })
 }
 
 /// `key_delete { id* }`.
@@ -261,18 +293,61 @@ pub(crate) fn key_reveal() -> Value {
     )
 }
 
-/// `key_rotate { id*, url? }`.
+/// `key_rotate { id* }`.
 pub(crate) fn key_rotate() -> Value {
     obj(
+        json!({ "id": int_p("Owner key id, from the Keys table.") }),
+        &["id"],
+    )
+}
+
+/// `device_token { id*, end_current, local_only, urls }` (device link design
+/// §5.2).
+pub(crate) fn device_token() -> Value {
+    obj(
         json!({
-            "id": int_p("Owner or device key id, from the Keys table."),
-            "url": str_p(
-                "Device keys: the address the new pairing link points the device at. Default: \
-                 this gateway's primary address.",
+            "id": int_p("Device id, from the Keys table."),
+            "end_current": bool_p(
+                "End the device's current key now: its connections close and its requests are \
+                 refused until the new token enrols (a lost or stolen device). Default false: \
+                 the current key works until the new token's enrolment replaces it.",
             ),
+            "local_only": bool_p(
+                "Replace the device's \"this computer\" flag; default: as it is.",
+            ),
+            "urls": urls_p(),
         }),
         &["id"],
     )
+}
+
+/// `device_token_end { id* }`.
+pub(crate) fn device_id() -> Value {
+    obj(
+        json!({ "id": int_p("Device id, from the Keys table.") }),
+        &["id"],
+    )
+}
+
+/// `device_confirm { id*, confirm_code* }` (device link design §3.5).
+pub(crate) fn device_confirm() -> Value {
+    obj(
+        json!({
+            "id": int_p("Device id, from the Keys table."),
+            "confirm_code": str_p(
+                "The code the device shows, compared with the Keys list's \
+                 pairing.confirm_code: eight hex digits, e.g. 7F3A-91C2 (either case; the \
+                 hyphen and spaces optional). The key waiting for the confirmation must have \
+                 it, or nothing is confirmed (409 confirm_code_mismatch).",
+            ),
+        }),
+        &["id", "confirm_code"],
+    )
+}
+
+/// `device_ca_rotate {}`.
+pub(crate) fn device_ca_rotate() -> Value {
+    obj(json!({}), &[])
 }
 
 // ---------------------------------------------------------------------------

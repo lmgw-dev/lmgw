@@ -571,6 +571,13 @@ impl Gateway {
 mod tests {
     use super::*;
 
+    /// Every generation of the plain listener: what a wait for all of its
+    /// sessions and turns names.
+    const EVERY_PLAIN_GENERATION: lmgw_core::server::ServedAt = lmgw_core::server::ServedAt {
+        via: lmgw_core::server::Via::Plain,
+        at: u64::MAX,
+    };
+
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
     }
@@ -735,9 +742,10 @@ mod tests {
         // A session that takes a moment to end after the stop, as a bound
         // session writing its last turns does.
         let session = state.stops.running();
+        let served = state.stops.now();
         let stops = state.clone();
         tokio::spawn(async move {
-            stops.stops.stopped_after(0).await;
+            stops.stops.stopped_after(served).await;
             tokio::time::sleep(Duration::from_millis(300)).await;
             drop(session);
         });
@@ -746,7 +754,7 @@ mod tests {
         let st = state.clone();
         let started = std::time::Instant::now();
         quit(&g, async move {
-            let running = st.stops.ended(u64::MAX, Duration::ZERO).await;
+            let running = st.stops.ended(EVERY_PLAIN_GENERATION, Duration::ZERO).await;
             *at_stop.lock().unwrap() = Some(running);
         })
         .await;
@@ -791,9 +799,10 @@ mod tests {
         let hello = read_until(&mut feed, "event: hello").await;
         assert!(hello.starts_with("HTTP/1.1 200"), "{hello}");
         let session = state.stops.running();
+        let served = state.stops.now();
         let stops = state.clone();
         tokio::spawn(async move {
-            stops.stops.stopped_after(0).await;
+            stops.stops.stopped_after(served).await;
             tokio::time::sleep(Duration::from_millis(300)).await;
             drop(session);
         });
@@ -806,7 +815,7 @@ mod tests {
         run_quit(
             &g,
             async move {
-                let running = st.stops.ended(u64::MAX, Duration::ZERO).await;
+                let running = st.stops.ended(EVERY_PLAIN_GENERATION, Duration::ZERO).await;
                 at_stop
                     .lock()
                     .unwrap()

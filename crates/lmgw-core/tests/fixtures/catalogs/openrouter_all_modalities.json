@@ -1,0 +1,379 @@
+{
+ "_fixture": "OpenRouter GET /api/v1/models?output_modalities=all as captured on 2026-10-14: Jev in both ids (its entry as in decision-models design Appendix B.3), the chat-shaped typesafe/jev-router, and the first entry of each output modality the full list adds, trimmed to the fields lmgw reads",
+ "data": [
+  {
+   "id": "typesafe/jev-router",
+   "name": "TypeSafe: Jev Router",
+   "created": 1790363560,
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "audio",
+     "file",
+     "image",
+     "text",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Router",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "-1",
+    "completion": "-1"
+   },
+   "top_provider": {
+    "context_length": null,
+    "max_completion_tokens": null,
+    "is_moderated": false
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_a",
+    "top_k",
+    "top_logprobs",
+    "top_p",
+    "verbosity"
+   ]
+  },
+  {
+   "id": "~typesafe/jev-latest",
+   "name": "TypeSafe: Jev Latest",
+   "created": 1789689685,
+   "context_length": 64000,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Router",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000000042",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 64000,
+    "max_completion_tokens": 57600,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "typesafe/jev-1.13",
+   "name": "TypeSafe: Jev 1.13",
+   "created": 1789689684,
+   "context_length": 64000,
+   "architecture": {
+    "modality": "text->decisions",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "decisions"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000000042",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 64000,
+    "max_completion_tokens": 57600,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "liquid/lfm-2.5-24b-a2b",
+   "name": "LiquidAI: LFM2.5-24B-A2B",
+   "created": 1791912025,
+   "context_length": 128000,
+   "architecture": {
+    "modality": "text->text",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0.0000007",
+    "input_cache_read": "0.000000025"
+   },
+   "top_provider": {
+    "context_length": 128000,
+    "max_completion_tokens": 8192,
+    "is_moderated": false
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs"
+   ]
+  },
+  {
+   "id": "liquid/lfm-2.5-embedding-350m:free",
+   "name": "LiquidAI: LFM2.5-Embedding-350M (free)",
+   "created": 1787077908,
+   "context_length": 512,
+   "architecture": {
+    "modality": "text->embeddings",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "embeddings"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 512,
+    "max_completion_tokens": 460,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "voyageai/rerank-3-lite",
+   "name": "VoyageAI by MongoDB: rerank-3-lite",
+   "created": 1790785569,
+   "context_length": 32000,
+   "architecture": {
+    "modality": "text->rerank",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "rerank"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 32000,
+    "max_completion_tokens": 28800,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "fish-audio/drama-3",
+   "name": "Fish Audio: Drama 3",
+   "created": 1791910176,
+   "context_length": 0,
+   "architecture": {
+    "modality": "text->speech",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "speech"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 0,
+    "max_completion_tokens": 0,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "elevenlabs/scribe-v2",
+   "name": "ElevenLabs: Scribe v2",
+   "created": 1791386190,
+   "context_length": 0,
+   "architecture": {
+    "modality": "audio->transcription",
+    "input_modalities": [
+     "audio"
+    ],
+    "output_modalities": [
+     "transcription"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00003055555555555",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 0,
+    "max_completion_tokens": 0,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "tencent/hy-image-v3.5-preview",
+   "name": "Tencent: Hy Image 3.5 Preview",
+   "created": 1791232017,
+   "context_length": 100000,
+   "architecture": {
+    "modality": "text+image->image",
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "image"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0",
+    "image_token": "0.0000016",
+    "image_output": "0.0000016"
+   },
+   "top_provider": {
+    "context_length": 100000,
+    "max_completion_tokens": 90000,
+    "is_moderated": false
+   },
+   "supported_parameters": []
+  },
+  {
+   "id": "x-ai/grok-imagine-video-1.5-lite",
+   "name": "SpaceXAI: Grok Imagine Video 1.5 Lite",
+   "created": 1791309778,
+   "context_length": 0,
+   "architecture": {
+    "modality": "text+image->video",
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "video"
+    ],
+    "tokenizer": "Grok",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 0,
+    "max_completion_tokens": 0,
+    "is_moderated": false
+   },
+   "supported_parameters": [
+    "logprobs",
+    "max_tokens",
+    "response_format",
+    "seed",
+    "temperature",
+    "top_logprobs",
+    "top_p"
+   ]
+  },
+  {
+   "id": "google/gemini-nano-banana-2.1",
+   "name": "Google: Nano Banana 2.1",
+   "created": 1791300825,
+   "context_length": 65536,
+   "architecture": {
+    "modality": "text+image->text+image",
+    "input_modalities": [
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "image",
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.0000015",
+    "completion": "0.0000075",
+    "image_output": "0.00003",
+    "web_search": "0.014"
+   },
+   "top_provider": {
+    "context_length": 65536,
+    "max_completion_tokens": 58982,
+    "is_moderated": false
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ]
+  }
+ ]
+}

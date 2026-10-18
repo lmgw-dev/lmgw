@@ -1,14 +1,151 @@
 //! The parts of the handshake that read headers (realtime design §10.1,
 //! §10.2, §10.4): the browser's subprotocol credential, the beta refusal, the
 //! anonymous cross-origin rule, the HTTP error shape, and the explicit
-//! WebSocket size limits.
+//! WebSocket size limits. And what the WebSocket's upgrade and a WebRTC
+//! call's POST share (realtime calls design §2.2): the door ([`door`]), the
+//! query ([`query`]), and what an unbound session starts with
+//! ([`unbound`]).
 
+use axum::extract::rejection::QueryRejection;
+use axum::extract::Query;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use super::asr::{self, AsrResolution};
+use super::resolve::{self, ChatResolution};
+use super::session::speech::{self, Speech};
+use super::RealtimeQuery;
 use crate::config::RealtimeSettings;
+use crate::ingress::ClientProto;
+use crate::principal::Principal;
+use crate::proxy::RequestCtx;
+use crate::state::SharedState;
+
+/// Which request [`door`] judges, for its words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Door {
+    /// `GET /v1/realtime`'s upgrade.
+    Upgrade,
+    /// `POST /v1/realtime/calls`.
+    Call,
+}
+
+/// The first two refusals, before anything else is read (§10.1, §10.2;
+/// calls §2.2): a beta client, and — with **Require API key** off, where an
+/// anonymous session is legal and CORS is permissive, so any page the owner
+/// visits could open one against their models — an anonymous request from
+/// another page's `Origin`. An SDK client sends no `Origin` and is
+/// unaffected. `None`: neither.
+pub(super) async fn door(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    headers: &HeaderMap,
+    door: Door,
+) -> Option<Response> {
+    if is_beta_client(headers) {
+        return Some(http_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "beta_protocol_unsupported",
+            "lmgw speaks the GA Realtime protocol, and `OpenAI-Beta: realtime=v1` marks a beta \
+             client, whose events are not wire-compatible — use the SDK's GA client \
+             (`client.realtime.connect()` in openai-python) and drop the header"
+                .into(),
+        ));
+    }
+    if ctx.principal != Principal::Anonymous {
+        return None;
+    }
+    let origin = foreign_origin(headers)?;
+    let message = match door {
+        Door::Upgrade => format!(
+            "an anonymous realtime session may only be opened from this gateway's own origin, \
+             and this upgrade came from '{origin}' — present an API key (the \
+             openai-insecure-api-key subprotocol in a browser), or open it from the dashboard"
+        ),
+        Door::Call => format!(
+            "an anonymous realtime call may only be made from this gateway's own origin, and \
+             this one came from '{origin}' — present an API key"
+        ),
+    };
+    let e = crate::error::GatewayError::Refused {
+        status: 403,
+        code: "cross_origin_refused",
+        message,
+    };
+    crate::proxy::record_middleware_refusal(state, ctx, &e, ClientProto::Realtime).await;
+    Some((e.http_status(), Json(e.to_openai_json())).into_response())
+}
+
+/// The query read, or its refusal: 400 `invalid_value` for one that does not
+/// parse, 400 `sideband_unsupported` for `call_id` (calls §2.7).
+pub(super) fn query(
+    query: Result<Query<RealtimeQuery>, QueryRejection>,
+) -> Result<RealtimeQuery, Response> {
+    let query = match query {
+        Ok(Query(q)) => q,
+        Err(why) => {
+            return Err(http_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_value",
+                format!("the query string did not parse: {}", why.body_text()),
+            ))
+        }
+    };
+    query.sideband()?;
+    Ok(query)
+}
+
+/// What an unbound session starts with, resolved before the 101 or the
+/// call's answer (§10.2).
+pub(super) struct Unbound {
+    pub chat: ChatResolution,
+    pub asr: AsrResolution,
+    pub speech: Speech,
+}
+
+/// Resolve an unbound session's models for `requested` (`?model=`) and
+/// check the key's scope and budget for them (§10.2), or the refusal.
+pub(super) async fn unbound(
+    state: &SharedState,
+    ctx: &RequestCtx,
+    requested: Option<&str>,
+) -> Result<Unbound, Response> {
+    let refused =
+        |e: crate::error::GatewayError| (e.http_status(), Json(e.to_openai_json())).into_response();
+    let chat = match resolve::resolve_chat(&state.snapshot(), requested) {
+        Ok(r) => r,
+        Err(e) => {
+            // The row names what the client asked for, so "which model did
+            // it want" is answerable from Logs.
+            crate::proxy::record_request_failure(
+                state,
+                ctx,
+                ClientProto::Realtime.as_str(),
+                requested.unwrap_or_default(),
+                None,
+                None,
+                std::time::Instant::now(),
+                &e,
+            )
+            .await;
+            return Err(refused(e));
+        }
+    };
+    // No transcription model is named at the handshake: the default chain,
+    // which never refuses — a text session needs no ASR (§5.2).
+    let asr = asr::resolve_asr(state, None).await.map_err(refused)?;
+    // The TTS setting and the voice a session starts with: also never a
+    // refusal — a text session never speaks (§5.3).
+    let speech = speech::initial(state).await.map_err(refused)?;
+    super::policy::check_session(state, ctx, &chat, &asr, &speech.tts)
+        .await
+        .map_err(refused)?;
+    Ok(Unbound { chat, asr, speech })
+}
 
 /// The subprotocol a browser carries its key in (§2.1).
 const KEY_PROTOCOL_PREFIX: &str = "openai-insecure-api-key.";
@@ -222,6 +359,3 @@ impl Limits {
         }
     }
 }
-
-/// RFC 6455's "message too big" close code.
-pub const CLOSE_TOO_BIG: u16 = 1009;

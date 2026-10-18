@@ -1,9 +1,8 @@
 //! quickdoc — the docs plane (`/api/docs/…`, quickdoc §10 + §11)
 //!
-//! Tolerant mirrors of what `web/api_docs.rs` serializes (which is in turn
-//! `quickdoc_core::store` / `retrieve` / `portability`). Same convention as
-//! `downloads` and `jobs`: the server serializes its own structs, these stay
-//! field-compatible, and every field is `default` so one side can grow first.
+//! What `web/api_docs.rs` answers, built from these types (`web/api_docs/wire.rs`
+//! turns the rows of `quickdoc_core::store` into them) and read by the
+//! dashboard. Every field is `default` so one side can grow first.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +55,7 @@ pub struct DocsOverview {
     pub corpora: Vec<CorpusView>,
     /// Pending `docs__request` rows — the tab badge.
     pub pending_requests: u64,
-    /// Alias the rerank stage would call, absent when there is none.
+    /// Alias the rerank stage would call; `null` when there is none.
     pub rerank_model: Option<String>,
     pub schema_version: i64,
 }
@@ -71,7 +70,7 @@ pub struct CorpusView {
     pub corpus_id: String,
     pub library: String,
     pub version: String,
-    /// `ready | ingesting | re_embed_required | …` — free-form, a chip.
+    /// `ready | ingesting | failed | re_embed_required` — free-form, a chip.
     pub status: String,
     pub chunk_count: i64,
     /// Chunks with no vector yet; non-zero means the KNN stage sees only part
@@ -90,10 +89,22 @@ pub struct CorpusView {
     pub crawl_date: String,
     pub source_kind: String,
     /// Latest measured hit@k; absent = never evaluated, which is not zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub eval_score: Option<f64>,
+    /// The best hit@k ever measured; absent = never evaluated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub eval_best: Option<f64>,
-    pub eval_k: i64,
-    pub eval_at: String,
+    /// The depth `eval_score` was measured at; absent when no depth was
+    /// recorded (never evaluated, or a score stored without one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub eval_k: Option<i64>,
+    /// When it was measured; absent when no instant was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub eval_at: Option<String>,
     pub eval_regression: bool,
     /// `ok | re_embed_required` — the same flag `docs__resolve` reports.
     pub embed_status: String,
@@ -260,9 +271,15 @@ pub struct EvalRunRow {
     /// reason that is not "retrieval got worse".
     pub orphaned_queries: i64,
     pub regression: bool,
-    pub params: serde_json::Value,
-    /// Full per-query breakdown.
-    pub report: serde_json::Value,
+    /// The stage parameters it was measured under; absent when the stored text
+    /// does not parse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub params: Option<serde_json::Value>,
+    /// Full per-query breakdown; absent on the same terms as `params`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub report: Option<serde_json::Value>,
     pub created_at: String,
 }
 
@@ -360,6 +377,7 @@ pub struct SearchTraceView {
     /// Why the vector stage did not run, so BM25 alone answered. Absent when
     /// it ran.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub knn_skipped: Option<String>,
     pub knn: Vec<StageHitView>,
     pub fused: Vec<FusedHitView>,
@@ -458,6 +476,12 @@ pub struct StageHitView {
     pub chunk_id: String,
     /// 1-based within the stage.
     pub rank: u64,
+    /// `null` when the embedder or reranker returned NaN, which `serde_json`
+    /// writes as `null`.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::nullable)
+    )]
     pub score: f32,
     /// Rerank stage only: the reranker did not score this candidate (its pair
     /// was over the model's input limit); `score` is then its fused score and
@@ -547,17 +571,32 @@ pub struct ImportedCorpus {
     pub replaced: bool,
 }
 
-/// What the ingest / re-embed / eval triggers answer: the job that is now
-/// running, or the one that already was.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// What the ingest / re-embed / eval / golden-generate triggers answer: the job
+/// that is now running, or the one that already was.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DocsJobStarted {
+    /// Always `true`; a refusal is an error answer instead.
     pub ok: bool,
-    pub job_id: Option<i64>,
+    pub job_id: i64,
+    /// `true` when a job of that kind for the corpus was already in flight:
+    /// `job_id` is that one's.
     pub already_running: bool,
-    /// Present on corpus creation.
-    pub corpus: Option<CorpusView>,
+}
+
+/// `POST /api/docs/corpora` — the corpus that now exists, and the ingest job
+/// when it was asked to start one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CorpusCreated {
+    /// Always `true`; a refusal is an error answer instead.
+    pub ok: bool,
+    pub corpus: CorpusView,
+    /// The ingest job queued with the corpus; `null` when `start` was not
+    /// asked for (the corpus is then empty until an ingest is started).
+    pub job_id: Option<i64>,
 }
 
 /// A golden query written: `POST /api/docs/golden` and accepting a

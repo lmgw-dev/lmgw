@@ -60,7 +60,7 @@ pub async fn update_key_policy(
             SET enabled = ?2, scope_mode = ?3, scope_patterns = ?4, budget_micro = ?5,
                 budget_period = ?6, rpm_limit = ?7, tpm_limit = ?8, concurrency_limit = ?9,
                 expires_at = ?10, note = ?11, tool_scope_mode = ?12, tool_scope_patterns = ?13,
-                hosts_label = ?14, self_admin = ?15
+                hosts_label = ?14, self_admin = ?15, device_tools = ?16
           WHERE id = ?1",
     )
     .bind(id)
@@ -78,6 +78,7 @@ pub async fn update_key_policy(
     .bind(&policy.tool_scope_patterns)
     .bind(hosts_label)
     .bind(self_admin.column())
+    .bind(device_tools_column(policy))
     .execute(&mut *tx)
     .await?;
     if let Some(was) = was.filter(|_| res.rows_affected() > 0) {
@@ -114,6 +115,11 @@ pub async fn delete_api_key(pool: &SqlitePool, id: i64) -> DbResult<()> {
             .await?;
     if let Some(name) = device {
         super::feed::record_device_revoked(&mut tx, id, &name, Some(super::feed::BY_OWNER)).await?;
+        // Its pairing token goes with it (device link design §5.1).
+        sqlx::query("DELETE FROM device_pairing_tokens WHERE key_id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
     }
     sqlx::query("DELETE FROM api_keys WHERE id = ?1")
         .bind(id)
@@ -297,16 +303,32 @@ pub async fn insert_device_key(
     name: &str,
     key_hash: &str,
     policy: &KeyPolicy,
-    (hosts_label, self_admin): (Option<&str>, crate::config::DeviceAdmin),
+    grant: (Option<&str>, crate::config::DeviceAdmin),
     note: &str,
 ) -> DbResult<i64> {
     let mut tx = super::begin_write(pool).await?;
+    let id = insert_device_row(&mut tx, name, key_hash, policy, grant, note).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// [`insert_device_key`] in `tx`, the pairing's transaction
+/// (`insert_paired_device`) or its own.
+pub(super) async fn insert_device_row(
+    tx: &mut SqliteConnection,
+    name: &str,
+    key_hash: &str,
+    policy: &KeyPolicy,
+    (hosts_label, self_admin): (Option<&str>, crate::config::DeviceAdmin),
+    note: &str,
+) -> DbResult<i64> {
     let row = sqlx::query(
         "INSERT INTO api_keys
               (name, key_hash, enabled, kind, scope_mode, scope_patterns, budget_micro,
                budget_period, rpm_limit, tpm_limit, concurrency_limit, expires_at, note,
-               tool_scope_mode, tool_scope_patterns, hosts_label, self_admin)
-         VALUES (?1, ?2, 1, 'device', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+               tool_scope_mode, tool_scope_patterns, hosts_label, self_admin, device_tools)
+         VALUES (?1, ?2, 1, 'device', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                 ?16)
          RETURNING id",
     )
     .bind(name)
@@ -324,30 +346,15 @@ pub async fn insert_device_key(
     .bind(&policy.tool_scope_patterns)
     .bind(hosts_label)
     .bind(self_admin.column())
+    .bind(device_tools_column(policy))
     .fetch_one(&mut *tx)
     .await?;
     let id: i64 = row.get("id");
     // Born with its hosted-tools row when it is born with a grant (§5.2).
     if hosts_label.is_some() {
-        super::sync_device_server(&mut tx, id, name, (hosts_label, true)).await?;
+        super::sync_device_server(tx, id, name, (hosts_label, true)).await?;
     }
-    tx.commit().await?;
     Ok(id)
-}
-
-/// Replace a device key's hash — Rotate on a hash-only row (L1), which is a
-/// re-pairing: the old value matches nothing from this write on. The row, its
-/// id, its policy and its history stay.
-///
-/// Returns the number of rows written, so a caller can tell a row that went
-/// away from a rotation that happened.
-pub async fn set_device_key_hash(pool: &SqlitePool, id: i64, key_hash: &str) -> DbResult<u64> {
-    let res = sqlx::query("UPDATE api_keys SET key_hash = ?2 WHERE id = ?1 AND kind = 'device'")
-        .bind(id)
-        .bind(key_hash)
-        .execute(pool)
-        .await?;
-    Ok(res.rows_affected())
 }
 
 /// Stamp `last_seen_at` with now (L15): a device's connection opened or
@@ -450,4 +457,9 @@ pub async fn device_self_admin(
             .fetch_optional(conn)
             .await?;
     Ok(crate::config::DeviceAdmin::from_column(level.unwrap_or(0)))
+}
+
+/// A policy's device-tools grant as its column holds it: a JSON list.
+fn device_tools_column(policy: &KeyPolicy) -> String {
+    serde_json::to_string(&policy.device_tools).unwrap_or_else(|_| "[]".to_string())
 }

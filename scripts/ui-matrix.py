@@ -57,9 +57,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import chrome_profile  # noqa: E402
 
 SIZES = ["1024x700", "1280x800", "1440x900", "1920x1080", "2560x1400", "1440x600", "900x1200"]
-# `{agent}`, `{agent_tab}`, `{local}` and `{kb}` are filled from the instance's own data.
+# `{agent}`, `{agent_tab}`, `{local}`, `{kb}` and `{batch}` are filled from the instance's own data.
 ROUTES = [
-    "/", "/chat", "/audio-lab", "/image-lab", "/agents", "/agents/{agent}", "/agents/{agent_tab}",
+    "/", "/chat", "/audio-lab", "/image-lab", "/decision-lab", "/decision-lab/batches/{batch}",
+    "/agents", "/agents/{agent}", "/agents/{agent_tab}",
     "/models", "/models/catalog", "/models/local/{local}", "/downloads", "/backends",
     "/backends/images", "/benchmarks", "/docs", "/docs/requests",
     "/docs/playground", "/docs/eval", "/knowledge", "/knowledge/{kb}",
@@ -201,7 +202,8 @@ def expand_routes(spec: str, base: str, token: str) -> list:
     """`{agent}` becomes every installed agent (chat, app and script agents
     lay out differently), `{agent_tab}` each agent's other tabs (`<id>/runs`,
     `<id>/definition`, and `<id>/ui` for one that serves an app); `{local}`
-    the first local chat model, `{kb}` the first knowledge base."""
+    the first local chat model, `{kb}` the first knowledge base, `{batch}`
+    the newest Decision lab set run."""
     routes = ROUTES if spec == "all" else [r.strip() for r in spec.split(",") if r.strip()]
     fill = {}
     if any("{agent}" in r or "{agent_tab}" in r for r in routes):
@@ -215,6 +217,9 @@ def expand_routes(spec: str, base: str, token: str) -> list:
     if any("{kb}" in r for r in routes):
         bases = api_get(base, token, "/api/knowledge/bases").get("bases", [])
         fill["kb"] = [str(bases[0]["id"])] if bases else []
+    if any("{batch}" in r for r in routes):
+        runs = api_get(base, token, "/decision-lab/api/batches").get("batches", [])
+        fill["batch"] = [str(runs[0]["id"])] if runs else []
     out = []
     for r in routes:
         key = next((k for k in fill if "{" + k + "}" in r), None)

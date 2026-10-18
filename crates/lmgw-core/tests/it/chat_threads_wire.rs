@@ -139,6 +139,7 @@ async fn a_thread_reads_into_its_type_whole() {
             query: "q".into(),
             ms: 1.5,
         }),
+        None,
     )
     .await
     .unwrap();

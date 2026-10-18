@@ -1,13 +1,12 @@
 //! The image class (image-generation design §8)
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use lmgw_api_types as dto;
 
 use crate::config::{HoldFallbackMode, ImageModel, Snapshot};
 use crate::hf;
-use crate::runtime::argv;
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
 use crate::store::{self};
@@ -15,7 +14,7 @@ use crate::store::{self};
 use super::*;
 
 /// A `files` or `args` map as a patch carries it, the image class's map
-/// counterpart of the list-valued `ArgList`.
+/// counterpart of the list-valued run arguments.
 ///
 /// Two spellings for one map, and both are load-bearing. `/api/op` and the
 /// dashboard send a real JSON object, because that is what the row stores.
@@ -153,8 +152,8 @@ pub struct ImageModelPatch {
     pub image: Option<String>,
     /// `podman run` args override; name it in `clear` to revert to the class
     /// setting. An empty list inherits too (it is never stored as one);
-    /// blank text leaves the current value.
-    pub extra_run_args: Option<ArgList>,
+    /// absent leaves the current value.
+    pub extra_run_args: Option<Vec<String>>,
     pub warm_start: Option<bool>,
     pub idle_seconds: Option<i64>,
     /// `inherit` (default — no fallback for this class) | `none` | `alias`.
@@ -443,7 +442,10 @@ fn merged_map(
 /// models dir as the path boundary, `reload_snapshot()` after every write, and
 /// container hygiene keyed on the *current* model id so a rename drops the
 /// container that exists.
-pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<Value, String> {
+pub async fn image_model_set(
+    state: &SharedState,
+    p: ImageModelPatch,
+) -> Result<dto::ImageModelSaved, String> {
     let snap = state.snapshot();
     let all = snap.image_models.clone();
     let find = || -> Result<ImageModel, String> {
@@ -510,7 +512,7 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
                 // empty list without the clear is no override either.
                 extra_run_args: match &p.extra_run_args {
                     _ if p.clears("extra_run_args") => None,
-                    Some(a) => run_args_override(Some(a.tokens()?)),
+                    Some(a) => run_args_override(Some(arg_list(a)?)),
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
@@ -528,19 +530,26 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
                 .await
                 .map_err(|e| e.to_string())?;
             let snap = reload().await?;
-            Ok(json!({
-                "ok": true, "id": id, "warnings": warnings,
-                "public_name": snap.image_public_name(&model_id),
-                "command_line": command_line_preview(state, Class::Image, &model_id),
-                "message": format!(
+            Ok(dto::ImageModelSaved {
+                ok: true,
+                id,
+                warnings: Some(warnings),
+                public_name: Some(snap.image_public_name(&model_id)),
+                command_line: Some(command_line_preview(state, Class::Image, &model_id)),
+                message: format!(
                     "image model '{model_id}' created — clients request it as '{}' on \
                      /v1/images/generations{}; run lmgw__local_model_test model_id={model_id} \
                      target=image to prove it loads and draws (its container starts on the \
                      first request)",
                     snap.image_public_name(&model_id),
-                    if new.edit { " and /v1/images/edits" } else { "" },
+                    if new.edit {
+                        " and /v1/images/edits"
+                    } else {
+                        ""
+                    },
                 ),
-            }))
+                ..Default::default()
+            })
         }
         "update" | "enable" | "disable" => {
             let cur = find()?;
@@ -561,13 +570,12 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
             let (caps, vocab_note) =
                 image_vocabulary(state, &effective_image_image(state, &image)).await;
             check_image_row(&caps, &models_dir, &files, &args)?;
-            // An empty list inherits the class; blank text is "not supplied".
+            // An empty list inherits the class; absent leaves the current value.
             let extra_run_args = if p.clears("extra_run_args") {
                 None
             } else {
                 match &p.extra_run_args {
-                    Some(a) if a.is_blank_text() => cur.extra_run_args.clone(),
-                    Some(a) => Some(a.tokens()?),
+                    Some(a) => Some(arg_list(a)?),
                     None => cur.extra_run_args.clone(),
                 }
             };
@@ -668,20 +676,29 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
             } else {
                 String::new()
             };
-            Ok(json!({
-                "ok": true, "id": cur.id, "warnings": warnings,
-                "peak_reset": peak_reset,
-                "command_line": command_line_preview(state, Class::Image, &new.model_id),
-                "message": match note {
-                    Some(note) => format!(
-                        "image model '{}' updated — {note}{peak_note}", new.model_id
-                    ),
+            Ok(dto::ImageModelSaved {
+                ok: true,
+                id: cur.id,
+                warnings: Some(warnings),
+                peak_reset: Some(peak_reset),
+                command_line: Some(command_line_preview(state, Class::Image, &new.model_id)),
+                message: match note {
+                    Some(note) => {
+                        format!(
+                            "image model '{}' {} — {note}{peak_note}",
+                            new.model_id,
+                            saved_verb(&p.action)
+                        )
+                    }
                     None => format!(
-                        "image model '{}' updated — it is not running, so the next request \
-                         starts it with the new configuration{peak_note}", new.model_id
+                        "image model '{}' {} — it is not running, so the next request \
+                         starts it with the new configuration{peak_note}",
+                        new.model_id,
+                        saved_verb(&p.action)
                     ),
                 },
-            }))
+                ..Default::default()
+            })
         }
         "delete" => {
             let cur = find()?;
@@ -691,13 +708,15 @@ pub async fn image_model_set(state: &SharedState, p: ImageModelPatch) -> Result<
             reload().await?;
             // §3.4: immediately, not at the next boot.
             lifecycle::drop_model(state, Class::Image, &cur.model_id).await;
-            Ok(json!({
-                "ok": true, "id": cur.id,
-                "message": format!(
+            Ok(dto::ImageModelSaved {
+                ok: true,
+                id: cur.id,
+                message: format!(
                     "image model '{}' deleted — its container was stopped and removed",
                     cur.model_id
                 ),
-            }))
+                ..Default::default()
+            })
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable)"
@@ -783,7 +802,7 @@ pub(super) fn image_model_get(
         },
         enabled: m.enabled,
         image: m.image.clone(),
-        extra_run_args: m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
         idle_seconds: m.idle_seconds,
         hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),

@@ -394,10 +394,7 @@ mod tests {
 
     #[test]
     fn live_of_reads_the_package_rows() {
-        let dv = |rows: Vec<DownloadRow>| DownloadsView {
-            downloads: rows,
-            active: 0,
-        };
+        let dv = |rows: Vec<DownloadRow>| DownloadsView { downloads: rows };
         // Downloaded, or never touched: nothing moves.
         let done = dv(vec![row(1, "done", None), row(2, "done", None)]);
         assert_eq!(live_of(&pkg(&[1, 2]), Some(&done), &[], &[]), Live::Idle);
@@ -481,7 +478,6 @@ mod tests {
                 row(3, "downloading", Some(30)),
                 row(4, "queued", None),
             ],
-            active: 0,
         };
         let p = &before_queue.families[0].packages[0];
         let q = &before_queue.families[0].packages[1];
@@ -558,7 +554,6 @@ mod tests {
         // "Complete install", not a package finishing forever.
         let dv = DownloadsView {
             downloads: vec![row(1, "done", None), row(2, "done", None)],
-            active: 0,
         };
         let short = named("p", &[1, 2], false);
         assert_eq!(live_of(&short, Some(&dv), &[], &[]), Live::Idle);
@@ -566,7 +561,6 @@ mod tests {
         // A failed file of a landed package is a failure, not finishing.
         let failed = DownloadsView {
             downloads: vec![row(1, "done", None), row(2, "failed", None)],
-            active: 0,
         };
         let landed = [Landed {
             package: "p".into(),
@@ -586,7 +580,6 @@ mod tests {
                 row(3, "done", None),
                 row(5, "queued", None),
             ],
-            active: 0,
         };
         // Known to the catalog and transferring; queued from here (5), and
         // queued from here a moment ago and not in the list yet (6). A row

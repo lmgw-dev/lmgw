@@ -451,6 +451,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::erased::Erased;
 
     #[test]
     fn cache_mount_paths_are_the_uid_rooted_dir_of_the_hashed_id() {
@@ -512,15 +513,20 @@ mod tests {
         calls: Mutex<Vec<Vec<String>>>,
     }
 
-    #[async_trait::async_trait]
     impl CommandRunner for RecordingRunner {
-        async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-            assert_eq!(program, "podman");
-            self.calls.lock().unwrap().push(args.to_vec());
-            Ok(CmdOutput {
-                status: 0,
-                stdout: String::new(),
-                stderr: String::new(),
+        fn run<'a>(
+            &'a self,
+            program: &'a str,
+            args: &'a [String],
+        ) -> Erased<'a, std::io::Result<CmdOutput>> {
+            Box::pin(async move {
+                assert_eq!(program, "podman");
+                self.calls.lock().unwrap().push(args.to_vec());
+                Ok(CmdOutput {
+                    status: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
             })
         }
     }
@@ -651,13 +657,17 @@ mod tests {
     #[tokio::test]
     async fn working_containers_are_filtered_by_state_and_name() {
         struct Ps;
-        #[async_trait::async_trait]
         impl CommandRunner for Ps {
-            async fn run(&self, _p: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-                assert_eq!(args, ["ps", "-a", "--external", "--format", "json"]);
-                Ok(CmdOutput {
-                    status: 0,
-                    stdout: r#"[
+            fn run<'a>(
+                &'a self,
+                _p: &'a str,
+                args: &'a [String],
+            ) -> Erased<'a, std::io::Result<CmdOutput>> {
+                Box::pin(async move {
+                    assert_eq!(args, ["ps", "-a", "--external", "--format", "json"]);
+                    Ok(CmdOutput {
+                        status: 0,
+                        stdout: r#"[
                         {"Id":"a1","Names":["cuda-working-container"],"State":"storage"},
                         {"Id":"b2","Names":["lmgw-chat-qwen-a1b2c3"],"State":"running"},
                         {"Id":"c3","Names":["node-working-container-1"],"State":"exited"},
@@ -665,8 +675,9 @@ mod tests {
                         {"Id":"e5","Names":null,"State":"storage"},
                         {"Id":"f6","Names":["ubuntu-working-container-2"],"Status":"Storage"}
                     ]"#
-                    .into(),
-                    stderr: String::new(),
+                        .into(),
+                        stderr: String::new(),
+                    })
                 })
             }
         }

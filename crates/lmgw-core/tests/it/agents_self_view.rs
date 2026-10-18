@@ -22,8 +22,8 @@ use crate::common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use lmgw_core::agents::container::{self, Exit, Spawned, Spawner};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::CmdOutput;
 use lmgw_core::state::AppState;
 use lmgw_core::store;
@@ -110,29 +110,40 @@ fn run_mount_doc(id: &str) -> String {
 /// what is under test here is the *document* two principals read afterwards.
 struct Fake;
 
-#[async_trait]
 impl Spawner for Fake {
-    async fn spawn(&self, _program: &str, _args: &[String]) -> std::io::Result<Spawned> {
-        let (out_tx, stdout) = mpsc::channel(8);
-        let (_err_tx, stderr) = mpsc::channel(8);
-        tokio::spawn(async move {
-            let _ = out_tx
-                .send(r#"{"type":"row","id":"m1","columns":{"subject":"Invoice"}}"#.to_string())
-                .await;
-        });
-        Ok(Spawned {
-            stdout,
-            stderr,
-            // The agent runner stops containers by name, never by signal.
-            kill: container::KillHandle::detached(),
-            status: Box::pin(async move { Ok(Exit::Code(0)) }),
+    fn spawn<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            let (out_tx, stdout) = mpsc::channel(8);
+            let (_err_tx, stderr) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = out_tx
+                    .send(r#"{"type":"row","id":"m1","columns":{"subject":"Invoice"}}"#.to_string())
+                    .await;
+            });
+            Ok(Spawned {
+                stdout,
+                stderr,
+                // The agent runner stops containers by name, never by signal.
+                kill: container::KillHandle::detached(),
+                status: Box::pin(async move { Ok(Exit::Code(0)) }),
+            })
         })
     }
-    async fn run(&self, _program: &str, _args: &[String]) -> std::io::Result<CmdOutput> {
-        Ok(CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            Ok(CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -648,6 +659,8 @@ async fn a_start_refused_by_a_mount_rule_reads_as_the_code_alone_to_the_agent() 
     for path in [
         format!("/api/agents/runs/{job}"),
         "/api/agents/notes-desk/runs".to_string(),
+        // The agent's own detail carries its last run, with the same error.
+        "/api/agents/notes-desk".to_string(),
     ] {
         let (status, owner) = as_owner(&gw, &path).await;
         assert_eq!(status, 200, "{owner}");
@@ -660,9 +673,10 @@ async fn a_start_refused_by_a_mount_rule_reads_as_the_code_alone_to_the_agent() 
 
         let (status, mine) = as_agent(&gw, &path, &token).await;
         assert_eq!(status, 200, "{mine}");
-        let error = match mine.get("job") {
-            Some(job) => job["error"].clone(),
-            None => mine[0]["error"].clone(),
+        let error = match (mine.get("job"), mine.get("last_run")) {
+            (Some(job), _) => job["error"].clone(),
+            (_, Some(last)) => last["error"].clone(),
+            _ => mine[0]["error"].clone(),
         };
         assert_eq!(
             error,

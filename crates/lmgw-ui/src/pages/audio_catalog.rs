@@ -17,7 +17,10 @@ use std::collections::HashMap;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{AudioCatalog, AudioCatalogInstall, AudioFamily, AudioPackage, DownloadsView};
+use lmgw_api_types::{
+    AudioCatalog, AudioCatalogInstall, AudioCatalogRefreshed, AudioFamily, AudioPackage,
+    DownloadsView,
+};
 use serde_json::json;
 use wasm_bindgen::JsCast;
 
@@ -238,19 +241,19 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
         refreshing.set(true);
         refresh_err.set(None);
         spawn_local(async move {
-            let res = crate::api::post::<serde_json::Value, _>(
+            let res = crate::api::post::<AudioCatalogRefreshed, _>(
                 "/api/op/audio_catalog",
                 &json!({ "action": "refresh" }),
             )
             .await;
             refreshing.set(false);
             match res {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("catalog refreshed")
-                        .to_string());
+                Ok(r) => {
+                    toasts.ok(if r.message.is_empty() {
+                        "catalog refreshed".to_string()
+                    } else {
+                        r.message
+                    });
                     reload.update(|n| *n += 1);
                 }
                 Err(e) => refresh_err.set(Some(e.to_string())),
@@ -304,16 +307,19 @@ pub fn AudioCatalogBrowser(open: RwSignal<bool>) -> impl IntoView {
         <div class="wiz cat">
             <div class="row" style="justify-content:space-between; align-items:baseline">
                 <span class="dim">
-                    {move || match catalog.get().and_then(|r| r.ok()) {
-                        Some(c) if !c.fetched_at.is_empty() => {
-                            format!(
-                                "{} families · fetched {} {}",
-                                c.families.len(),
-                                c.fetched_at.get(0..10).unwrap_or_default(),
-                                c.fetched_at.get(11..19).unwrap_or_default(),
-                            )
+                    {move || {
+                        let c = catalog.get().and_then(|r| r.ok());
+                        match c.as_ref().and_then(|c| c.fetched_at.as_deref().map(|at| (c, at))) {
+                            Some((c, at)) => {
+                                format!(
+                                    "{} families · fetched {} {}",
+                                    c.families.len(),
+                                    at.get(0..10).unwrap_or_default(),
+                                    at.get(11..19).unwrap_or_default(),
+                                )
+                            }
+                            None => "audio.cpp model_specs — nothing fetched yet".to_string(),
                         }
-                        _ => "audio.cpp model_specs — nothing fetched yet".to_string(),
                     }}
                 </span>
                 <button class="btn" disabled=move || refreshing.get() on:click=refresh>
@@ -441,7 +447,7 @@ fn FamilyBlock(
     };
     // Its own Memo, so a download landing (which changes the family) does
     // not rebuild the options block and close it.
-    let options = Memo::new(move |_| now(fam, |f| f.options.clone()));
+    let options = Memo::new(move |_| now(fam, |f| f.options.clone().unwrap_or_default()));
     let package_ids = move || {
         now(fam, |f| {
             f.packages.iter().map(|p| p.id.clone()).collect::<Vec<_>>()

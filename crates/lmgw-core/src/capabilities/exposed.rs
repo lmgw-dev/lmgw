@@ -156,61 +156,69 @@ pub async fn exposed_entries(state: &SharedState) -> Vec<ExposedEntry> {
 /// enabled `expose_all` upstream in the same order [`exposed_entries`]'s
 /// second pass would, but only *that* upstream's catalog is fetched, and only
 /// until one answers — not all of them upfront.
-pub async fn exposed_entry(state: &SharedState, name: &str) -> Option<ExposedEntry> {
-    let snap = state.snapshot();
-    let default_created = state.started_at_utc.timestamp();
+///
+/// Erased ([`crate::erased`]): what chat turns' capability lookup, the heard
+/// check and the knowledge bases' input limits await.
+pub fn exposed_entry<'a>(
+    state: &'a SharedState,
+    name: &'a str,
+) -> crate::erased::Erased<'a, Option<ExposedEntry>> {
+    futures::FutureExt::boxed(async move {
+        let snap = state.snapshot();
+        let default_created = state.started_at_utc.timestamp();
 
-    if let Some(e) = snap.exposed_models().into_iter().find(|e| e.name == name) {
-        return Some(entry_for(state, &snap, e, default_created).await);
-    }
-
-    // Not statically enumerated: maybe a bare passthrough id under one of the
-    // enabled expose-all upstreams (`exposed_entries`'s second pass).
-    let mut passthrough: Vec<Upstream> = snap
-        .upstreams
-        .values()
-        .filter(|u| u.enabled && u.expose_all)
-        .cloned()
-        .collect();
-    passthrough.sort_by(|a, b| a.name.cmp(&b.name));
-    for u in &passthrough {
-        let model_id = match u.prefix() {
-            "" => name.to_string(),
-            p => match name.strip_prefix(p).and_then(|s| s.strip_prefix('/')) {
-                Some(rest) => rest.to_string(),
-                None => continue,
-            },
-        };
-        if snap.hidden_passthrough.contains(&(u.id, model_id.clone())) {
-            continue;
+        if let Some(e) = snap.exposed_models().into_iter().find(|e| e.name == name) {
+            return Some(entry_for(state, &snap, e, default_created).await);
         }
-        match catalog::upstream_models(state, u).await {
-            Ok(models) => {
-                if let Some(m) = models.into_iter().find(|m| m.id == model_id) {
-                    let pricing = m.pricing.clone().or_else(|| {
-                        matches!(
-                            u.kind,
-                            UpstreamKind::LlamaServer
-                                | UpstreamKind::AudioCpp
-                                | UpstreamKind::SdCpp
-                        )
-                        .then(zero_pricing)
-                    });
-                    let derived = super::for_catalog(&m, u.protocol, &u.name);
-                    return Some(assemble(
-                        name.to_string(),
-                        u.name.clone(),
-                        m.context_length,
-                        pricing,
-                        derived,
-                        default_created,
-                    ));
-                }
+
+        // Not statically enumerated: maybe a bare passthrough id under one of the
+        // enabled expose-all upstreams (`exposed_entries`'s second pass).
+        let mut passthrough: Vec<Upstream> = snap
+            .upstreams
+            .values()
+            .filter(|u| u.enabled && u.expose_all)
+            .cloned()
+            .collect();
+        passthrough.sort_by(|a, b| a.name.cmp(&b.name));
+        for u in &passthrough {
+            let model_id = match u.prefix() {
+                "" => name.to_string(),
+                p => match name.strip_prefix(p).and_then(|s| s.strip_prefix('/')) {
+                    Some(rest) => rest.to_string(),
+                    None => continue,
+                },
+            };
+            if snap.hidden_passthrough.contains(&(u.id, model_id.clone())) {
+                continue;
             }
-            Err(e) => tracing::warn!("listing models of upstream {}: {e}", u.name),
+            match catalog::upstream_models(state, u).await {
+                Ok(models) => {
+                    if let Some(m) = models.into_iter().find(|m| m.id == model_id) {
+                        let pricing = m.pricing.clone().or_else(|| {
+                            matches!(
+                                u.kind,
+                                UpstreamKind::LlamaServer
+                                    | UpstreamKind::AudioCpp
+                                    | UpstreamKind::SdCpp
+                            )
+                            .then(zero_pricing)
+                        });
+                        let derived = super::for_catalog(&m, u.protocol, &u.name);
+                        return Some(assemble(
+                            name.to_string(),
+                            u.name.clone(),
+                            m.context_length,
+                            pricing,
+                            derived,
+                            default_created,
+                        ));
+                    }
+                }
+                Err(e) => tracing::warn!("listing models of upstream {}: {e}", u.name),
+            }
         }
-    }
-    None
+        None
+    })
 }
 
 /// The `Derived` half of an entry folded onto the four fields that come from
@@ -246,7 +254,7 @@ async fn entry_for(
         "aux" => {
             let row = snap
                 .enabled_aux_models()
-                .find(|m| snap.aux_public_name(&m.model_id) == e.name);
+                .find(|m| snap.aux_public_name(m) == e.name);
             let (ctx, derived) = match row {
                 Some(m) => (
                     state
@@ -730,12 +738,45 @@ pub(crate) async fn trained_context(
     summary.context_length.and_then(|v| i64::try_from(v).ok())
 }
 
-/// An aux row: the summary is read only so the notes can say the file is
-/// missing — nothing published for this class is derived from it (§3.5).
+/// An aux row: the weights' summary feeds the notes (the file is missing, a
+/// decision row's type and head budget), and the projector's summary the
+/// input modalities, as for a chat row (decision-models design §2.9).
 async fn aux_derived(state: &SharedState, snap: &Snapshot, model: &AuxModel) -> Derived {
-    let path = Path::new(aux_models_dir(snap)).join(&model.gguf_path);
-    let summary = state.gguf_cache.summarize_cached(&path).await.ok();
-    super::for_aux(model, summary.as_deref())
+    let dir = Path::new(aux_models_dir(snap));
+    let summary = state
+        .gguf_cache
+        .summarize_cached(&dir.join(&model.gguf_path))
+        .await
+        .ok();
+    let projector = super::aux_projector(model);
+    let read = match projector.as_ref().map(|p| p.rel.as_deref()) {
+        Some(Some(rel)) => Some(
+            state
+                .gguf_cache
+                .summarize_cached(&dir.join(rel))
+                .await
+                .map_err(|err| without_host_path(&err, dir)),
+        ),
+        Some(None) => Some(Err(
+            "it is not under /models, where the aux models dir is mounted".to_string(),
+        )),
+        None => None,
+    };
+    let status = match (&projector, &read) {
+        (Some(p), Some(Ok(_))) => ProjectorStatus::Configured { path: &p.shown },
+        (Some(p), Some(Err(err))) => ProjectorStatus::Unreadable {
+            path: &p.shown,
+            err,
+        },
+        _ => ProjectorStatus::None,
+    };
+    let projector_summary = read.as_ref().and_then(|r| r.as_ref().ok());
+    super::for_aux(
+        model,
+        summary.as_deref(),
+        status,
+        projector_summary.map(|s| &**s),
+    )
 }
 
 /// An image row: everything published comes from the row's own columns
@@ -831,6 +872,26 @@ fn probed_image_capabilities(state: &SharedState, model_id: &str) -> Option<Imag
         .and_then(|v| v.image_capabilities)
 }
 
+/// A GGUF cache error as `/v1/models` may print it. The cache's errors lead
+/// with the file's full host path (`<dir>/<rel>: <reason>`); a client-facing
+/// note names the file relative to the models dir (or as the container sees
+/// it) and keeps only the reason. Any other occurrence of the models dir is
+/// cut back to a relative path too.
+pub fn without_host_path(err: &str, models_dir: &Path) -> String {
+    let dir = models_dir.display().to_string();
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() {
+        return err.to_string();
+    }
+    let mut out = err.to_string();
+    if let Some(at) = out.find(": ") {
+        if out[..at].starts_with(dir) {
+            out = out[at + 2..].to_string();
+        }
+    }
+    out.replace(&format!("{dir}/"), "").replace(dir, ".")
+}
+
 /// The projector situation of a local row, owned so
 /// [`ProjectorStatus`] (which borrows) can be built from it.
 enum Projector {
@@ -897,7 +958,10 @@ async fn local_derived(
             let rel = rel.to_string();
             match state.gguf_cache.summarize_cached(&dir.join(&rel)).await {
                 Ok(s) => (Projector::Configured(rel), Some(s)),
-                Err(err) => (Projector::Unreadable(rel, err), None),
+                Err(err) => {
+                    let err = without_host_path(&err, dir);
+                    (Projector::Unreadable(rel, err), None)
+                }
             }
         }
         None => match sibling_mmproj(weights_path).await {

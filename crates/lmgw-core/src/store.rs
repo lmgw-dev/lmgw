@@ -224,6 +224,9 @@ pub use mcp_servers::*;
 mod device_servers;
 pub use device_servers::*;
 
+mod device_tokens;
+pub use device_tokens::*;
+
 mod mcp_known_tools;
 pub use mcp_known_tools::*;
 
@@ -235,6 +238,25 @@ pub use request_logs::*;
 
 mod agent_catalog;
 pub use agent_catalog::*;
+
+// The lab store (labs-store design §1.2): groups, runs and the rows that name
+// the artifact files (`crate::labs`).
+mod lab_groups;
+pub use lab_groups::*;
+
+mod lab_runs;
+pub use lab_runs::*;
+
+mod lab_artifacts;
+pub use lab_artifacts::*;
+
+// Slice 2 (labs-store design §3.1): presets, and set runs whose items are
+// groups.
+mod lab_presets;
+pub use lab_presets::*;
+
+mod lab_batches;
+pub use lab_batches::*;
 
 /// The SQL that says a thread's stored `voice` holds a seed: a `u32`,
 /// anything else is none — one predicate for the settings write that keeps

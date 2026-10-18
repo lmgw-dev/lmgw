@@ -5,12 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use lmgw_api_types as dto;
+use lmgw_api_types::self_admin::{AudioCatalogList, AudioCatalogToolAnswer};
+use lmgw_api_types::WithNextStep;
 
 use crate::config::AudioModel;
-use crate::runtime::argv;
 use crate::state::SharedState;
 use crate::web::audio;
 
@@ -19,20 +20,40 @@ use crate::web::audio;
 /// or `download` one package's files.
 ///
 /// `list` answers every family and package. A family's option schema is
-/// long, so it comes only for the families `family` names; the listing says
-/// so on each family it left out, rather than leaving the field empty.
+/// long, so `options` comes only for the families `family` names; the full
+/// listing carries `options_summary` on each family instead.
+/// A `download` says what to call once the files are there.
 pub async fn audio_catalog(
     state: &SharedState,
     action: &str,
     family: Option<&str>,
     package: Option<&str>,
     search: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<AudioCatalogToolAnswer, String> {
+    let family = family.map(str::trim).filter(|s| !s.is_empty());
     if action == "list" {
-        let family = family.map(str::trim).filter(|s| !s.is_empty());
-        return Ok(list(state, family, search).await);
+        return Ok(AudioCatalogToolAnswer::List(Box::new(
+            list(state, family, search).await,
+        )));
     }
-    super::backends::to_json(audio_catalog_act(state, action, family, package).await)
+    Ok(
+        match audio_catalog_act(state, action, family, package).await? {
+            dto::AudioCatalogAnswer::Refreshed(r) => AudioCatalogToolAnswer::Refreshed(r),
+            dto::AudioCatalogAnswer::Download(d) => {
+                AudioCatalogToolAnswer::Downloaded(Box::new(WithNextStep::new(
+                    d,
+                    format!(
+                        "follow the queued files with lmgw__hf_downloads until each says \
+                         'done', then lmgw__audio_model_set action=create with this package's \
+                         suggested_model_id, suggested_path, suggested_task and suggested_mode \
+                         — lmgw__audio_catalog action=list family={} shows them, and the \
+                         options the family takes",
+                        family.unwrap_or_default()
+                    ),
+                )))
+            }
+        },
+    )
 }
 
 /// The two actions the op takes: a refresh's summary or a queued download.
@@ -82,16 +103,18 @@ pub async fn audio_catalog_act(
     }
 }
 
-async fn list(state: &SharedState, family: Option<&str>, search: Option<&str>) -> Value {
+async fn list(state: &SharedState, family: Option<&str>, search: Option<&str>) -> AudioCatalogList {
     let catalog = audio::catalog(state).await;
-    if catalog.fetched_at.is_empty() {
-        return json!({
-            "fetched_at": null,
-            "families": [],
-            "message": "the audio.cpp catalog has not been fetched on this machine — call \
-                        lmgw__audio_catalog action=refresh first",
-        });
-    }
+    let Some(fetched_at) = catalog.fetched_at else {
+        return AudioCatalogList {
+            fetched_at: None,
+            families: Vec::new(),
+            warnings: Vec::new(),
+            message: "the audio.cpp catalog has not been fetched on this machine — call \
+                      lmgw__audio_catalog action=refresh first"
+                .into(),
+        };
+    };
     let needle = search
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty());
@@ -114,37 +137,39 @@ async fn list(state: &SharedState, family: Option<&str>, search: Option<&str>) -
                 hay.contains(n.as_str())
             })
     };
-    let families: Vec<Value> = catalog
+    let families: Vec<dto::AudioFamily> = catalog
         .families
         .iter()
         .filter(|f| matches(f))
         .map(|f| {
-            let mut v = serde_json::to_value(f).unwrap_or_default();
+            let mut listed = f.clone();
             if family.is_none() {
-                v["options"] = json!(format!(
+                listed.options = None;
+                listed.options_summary = Some(format!(
                     "left out of the full listing — lmgw__audio_catalog action=list \
                      family={} answers its load, session and request options",
                     f.family
                 ));
             }
-            v
+            listed
         })
         .collect();
-    json!({
-        "fetched_at": catalog.fetched_at,
-        "families": families,
-        "warnings": catalog.warnings,
-        "message": if families.is_empty() {
-            "no family matches".to_string()
-        } else {
-            format!(
-                "{} famil{} — a package that is 'installed' can be served now; its \
-                 suggested_* fields are what lmgw__audio_model_set action=create takes",
-                families.len(),
-                if families.len() == 1 { "y" } else { "ies" }
-            )
-        },
-    })
+    let message = if families.is_empty() {
+        "no family matches".to_string()
+    } else {
+        format!(
+            "{} famil{} — a package that is 'installed' can be served now; its \
+             suggested_* fields are what lmgw__audio_model_set action=create takes",
+            families.len(),
+            if families.len() == 1 { "y" } else { "ies" }
+        )
+    };
+    AudioCatalogList {
+        fetched_at: Some(fetched_at),
+        families,
+        warnings: catalog.warnings,
+        message,
+    }
 }
 
 /// One audio row, read back for `lmgw__local_model_get`: every stored field,
@@ -270,7 +295,7 @@ pub(super) async fn audio_model_get(
         // The row's override alone; what the container is started with is
         // `effective_image` and `effective_extra_run_args`.
         image: image.clone(),
-        extra_run_args: extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        extra_run_args: extra_run_args.clone(),
         warm_start,
         hold_fallback_mode: hold_fallback_mode.as_str().to_string(),
         hold_fallback,
@@ -280,7 +305,7 @@ pub(super) async fn audio_model_get(
             key: r.key,
         }),
         effective_image: image.unwrap_or_else(|| s.image.clone()),
-        effective_extra_run_args: argv::args_to_lines(&crate::runtime::audio::run_args(m, s)),
+        effective_extra_run_args: crate::runtime::audio::run_args(m, s),
         // Where it runs, and its thread count with where that comes from:
         // `row`, the audio `class`, or this machine's physical `cores`.
         runs_on: crate::runtime::audio::placement(m, s).as_str().to_string(),

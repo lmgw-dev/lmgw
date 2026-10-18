@@ -22,8 +22,6 @@ pub const REVEALS_SECRET: &str = "x-lmgw-reveals-secret";
 pub const CONFIRM_NOTE: &str = "x-lmgw-confirm-note";
 /// Op operation: the op name.
 pub const OP: &str = "x-lmgw-op";
-/// Op operation: the op this one is a deprecated alias of.
-pub const ALIAS_OF: &str = "x-lmgw-alias-of";
 /// Operation: the `lmgw__X` self-admin tool sharing this code path.
 pub const TOOL: &str = "x-lmgw-tool";
 /// Operation: `openai` | `anthropic` | `llamacpp` | `jsonrpc` | `dashboard`.
@@ -37,13 +35,18 @@ pub const ENDPOINTS: &str = "x-lmgw-endpoints";
 pub const UNTYPED: &str = "x-lmgw-untyped";
 /// Response: `{event name: schema ref}` for an SSE stream.
 pub const SSE_EVENTS: &str = "x-lmgw-sse-events";
+/// Response media: the schema of one line of the `manifest.jsonl` a zip
+/// answer carries, where the zip itself is binary.
+pub const ZIP_MANIFEST: &str = "x-lmgw-zip-manifest";
 /// Path param: `true` when a `{*rest}` capture, sent unescaped.
 pub const WILDCARD: &str = "x-lmgw-wildcard";
 /// Property or param: `true` where the value is a credential — every
 /// property or parameter named `token`, `api_key`, `hf_token` or
 /// `update_token`, plus the fields marked at their definition with
 /// [`secret`] (`extra_headers`, `forge_tokens`, an MCP server's `env` and
-/// `headers`, an agent's config `values`).
+/// `headers`, an agent's config `values`, and the credentials an answer
+/// hands out: a created, revealed or rotated key's `key`, a paired device's
+/// `key` and `link`).
 pub const SECRET: &str = "x-lmgw-secret";
 /// Header param: `true` when the tester should fill in the example value.
 pub const PREFILL: &str = "x-lmgw-prefill";
@@ -74,9 +77,16 @@ pub fn secret(schema: &mut schemars::Schema) {
 /// A field's schema transform that drops `null` from its types:
 /// `#[schemars(transform = lmgw_api_types::openapi_ext::non_null)]`.
 ///
-/// For an `Option` field that is skipped when `None` (`skip_serializing_if`)
-/// and so is absent or has a value, never `null`; the derive documents every
-/// `Option` as nullable.
+/// For an `Option` field that is never `null` on the wire: skipped when
+/// `None` (`skip_serializing_if`), so absent or a value, or always `Some` in
+/// every answer the gateway builds. The derive documents every `Option` as
+/// nullable. Stated per field, after checking every builder of the type and
+/// that the inner type has no `null` of its own (an `f64` is written as
+/// `null` when it is not finite).
+///
+/// It also removes a `"default": null`. A field-level or container
+/// `#[serde(default)]` makes the derive write one beside the type, and a
+/// non-null type with a `null` default contradicts itself.
 #[cfg(feature = "schema")]
 pub fn non_null(schema: &mut schemars::Schema) {
     if let Some(object) = schema.as_object_mut() {
@@ -84,12 +94,41 @@ pub fn non_null(schema: &mut schemars::Schema) {
     }
 }
 
-/// [`non_null`] on a schema that is already a plain JSON object (the document
-/// builder drops `null` from every field the gateway leaves out rather than
-/// sends as `null`).
+/// A field's schema transform that adds `null` to its type:
+/// `#[schemars(transform = lmgw_api_types::openapi_ext::nullable)]`.
+///
+/// For a number that is not an `Option` but is written as `null` when it is
+/// not finite (`serde_json` writes a NaN so), where the document would
+/// otherwise promise a number.
+#[cfg(feature = "schema")]
+pub fn nullable(schema: &mut schemars::Schema) {
+    use serde_json::Value;
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    match object.get_mut("type") {
+        Some(Value::String(t)) => {
+            let only = Value::String(std::mem::take(t));
+            object.insert("type".to_string(), Value::Array(vec![only, "null".into()]));
+        }
+        Some(Value::Array(types)) if !types.iter().any(|t| t == "null") => {
+            types.push("null".into());
+        }
+        _ => {}
+    }
+}
+
+/// The work of [`non_null`] on a schema held as a plain JSON object: `null`
+/// leaves its `type` list and its `anyOf`/`oneOf` arms, and a `"default":
+/// null` goes. Nothing applies it wholesale: the document builder drops no
+/// `null` of its own, since a field left out of some answers can still be
+/// sent as `null` in others (a flattened `Option`'s fields).
 #[cfg(feature = "schema")]
 pub fn drop_null(schema: &mut serde_json::Map<String, serde_json::Value>) {
     use serde_json::Value;
+    if schema.get("default") == Some(&Value::Null) {
+        schema.remove("default");
+    }
     if let Some(Value::Array(types)) = schema.get_mut("type") {
         types.retain(|t| t != "null");
         if types.len() == 1 {
@@ -154,6 +193,8 @@ pub mod model_task {
     pub const ASR: &str = "asr";
     pub const IMAGE_GENERATION: &str = "image_generation";
     pub const IMAGE_EDIT: &str = "image_edit";
+    /// A decision model on `/v1/systemone` (decision-models design §2.8).
+    pub const DECISION: &str = "decision";
 }
 
 /// [`AUDIENCE`] values.

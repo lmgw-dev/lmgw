@@ -1,7 +1,6 @@
 //! Image recipes — "add from recipe" for a class whose pipeline spans repos
 
 use lmgw_api_types as dto;
-use serde_json::Value;
 
 use crate::hf;
 use crate::image_recipes;
@@ -16,7 +15,7 @@ use crate::store::{self};
 /// hub. What it *does* touch is the filesystem (one `is_file` per component)
 /// and the tracked-download table, because "add from recipe" has to be able to
 /// say what is left to fetch.
-pub async fn image_recipes(state: &SharedState) -> Result<Value, String> {
+pub async fn image_recipes(state: &SharedState) -> Result<dto::ImageRecipes, String> {
     let snap = state.snapshot();
     let models_dir = snap.settings.image.models_dir.clone();
     let tracked = store::list_hf_models_by_target(&state.db, "image")
@@ -100,7 +99,7 @@ pub async fn image_recipes(state: &SharedState) -> Result<Value, String> {
         })
         .collect();
 
-    let view = dto::ImageRecipes {
+    Ok(dto::ImageRecipes {
         recipes,
         models_dir_missing: models_dir.trim().is_empty(),
         models_dir,
@@ -110,8 +109,7 @@ pub async fn image_recipes(state: &SharedState) -> Result<Value, String> {
                     says 'done', then post that row at image_model_set action=create and \
                     finish with local_model_test target=image."
             .into(),
-    };
-    serde_json::to_value(view).map_err(|e| e.to_string())
+    })
 }
 
 /// Is this component's file already under the image models dir?
@@ -139,7 +137,7 @@ pub async fn image_recipe_add(
     state: &SharedState,
     key: &str,
     diffusion_file: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::ImageRecipeAddResult, String> {
     let recipe = image_recipes::find(key).ok_or_else(|| {
         format!(
             "unknown recipe '{key}' — this build ships {}",
@@ -184,19 +182,9 @@ pub async fn image_recipe_add(
         }
         // One job per component through the path `hf_add` uses, so progress
         // shows up where every other download does.
-        crate::web::hf::queue_files(state, c.repo, &[(*file).to_string()], "image").await?;
-        let tracked = store::list_hf_models(&state.db).await.unwrap_or_default();
-        if let Some(row) = tracked
-            .iter()
-            .find(|t| t.repo == c.repo && t.file == *file && t.target == "image")
-        {
-            queued_rows.push(dto::QueuedDownload {
-                id: row.id,
-                file: row.file.clone(),
-                dest_path: row.dest_path.clone(),
-                status: row.status.clone(),
-            });
-        }
+        queued_rows.extend(
+            crate::web::hf::queue_files(state, c.repo, &[(*file).to_string()], "image").await?,
+        );
     }
 
     let files = recipe.files_json(diffusion_file)?;
@@ -213,7 +201,7 @@ pub async fn image_recipe_add(
     };
     let queued = queued_rows.len() as u32;
     let ids: Vec<String> = queued_rows.iter().map(|r| r.id.to_string()).collect();
-    let result = dto::ImageRecipeAddResult {
+    Ok(dto::ImageRecipeAddResult {
         ok: true,
         key: recipe.key.to_string(),
         display_name: recipe.display_name.to_string(),
@@ -254,6 +242,5 @@ pub async fn image_recipe_add(
                 ids.join(", ")
             )
         },
-    };
-    serde_json::to_value(result).map_err(|e| e.to_string())
+    })
 }

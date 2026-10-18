@@ -6,9 +6,10 @@
 //! the pure helpers and the components live here; `chat.rs` only calls them.
 
 use leptos::prelude::*;
+use lmgw_api_types::chat_threads::AttachmentMeta;
 use serde_json::json;
 
-use super::chat::{Attachment, ThreadDetail};
+use super::chat::ThreadDetail;
 use crate::scope::Scope;
 use crate::widgets::use_toasts;
 
@@ -29,7 +30,7 @@ pub(super) struct DraftChip {
     pub(super) error: RwSignal<Option<String>>,
     /// Everything the server said about the file: extraction meta, the PDF
     /// mode and `blockers` for the thread's current model.
-    pub(super) att: RwSignal<Attachment>,
+    pub(super) att: RwSignal<AttachmentMeta>,
 }
 
 pub(super) fn new_draft(key: u64, name: String, size: Option<i64>) -> DraftChip {
@@ -41,12 +42,12 @@ pub(super) fn new_draft(key: u64, name: String, size: Option<i64>) -> DraftChip 
         size: RwSignal::new(size),
         uploading: RwSignal::new(true),
         error: RwSignal::new(None),
-        att: RwSignal::new(Attachment::default()),
+        att: RwSignal::new(AttachmentMeta::default()),
     }
 }
 
 /// A stored draft attachment, reopened with its thread.
-pub(super) fn draft_from_attachment(key: u64, a: Attachment) -> DraftChip {
+pub(super) fn draft_from_attachment(key: u64, a: AttachmentMeta) -> DraftChip {
     DraftChip {
         key,
         id: RwSignal::new(Some(a.id)),
@@ -61,7 +62,7 @@ pub(super) fn draft_from_attachment(key: u64, a: Attachment) -> DraftChip {
 
 impl DraftChip {
     /// The upload answered: every signal the composer reads is filled.
-    pub(super) fn uploaded(&self, a: Attachment) {
+    pub(super) fn uploaded(&self, a: AttachmentMeta) {
         self.id.set(Some(a.id));
         self.kind.set(Some(a.kind.clone()));
         self.size.set(Some(a.size));
@@ -70,8 +71,8 @@ impl DraftChip {
     }
 
     /// The chip as the transcript's optimistic user bubble shows it.
-    pub(super) fn as_attachment(&self) -> Attachment {
-        Attachment {
+    pub(super) fn as_attachment(&self) -> AttachmentMeta {
+        AttachmentMeta {
             id: self.id.get_untracked().unwrap_or_default(),
             kind: self.kind.get_untracked().unwrap_or_default(),
             name: self.name.get_untracked(),
@@ -122,13 +123,13 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 }
 
 /// A text-class PDF (every page has text) is the only one with a choice.
-pub(super) fn is_text_pdf(a: &Attachment) -> bool {
+pub(super) fn is_text_pdf(a: &AttachmentMeta) -> bool {
     a.kind == "pdf" && a.meta["class"].as_str() == Some("text")
 }
 
 /// What extraction found, chip-sized: pages and scan state, format and
 /// sheets, the token estimate, the transcript's origin or its failure.
-pub(super) fn chip_facts(a: &Attachment) -> Vec<Fact> {
+pub(super) fn chip_facts(a: &AttachmentMeta) -> Vec<Fact> {
     let mut out = Vec::new();
     let m = &a.meta;
     match a.kind.as_str() {
@@ -182,7 +183,7 @@ pub(super) fn chip_facts(a: &Attachment) -> Vec<Fact> {
 }
 
 /// An audio draft whose transcription failed: the one chip with a retry.
-pub(super) fn can_retry_transcript(a: &Attachment) -> bool {
+pub(super) fn can_retry_transcript(a: &AttachmentMeta) -> bool {
     a.kind == "audio" && a.meta["transcript_error"].as_str().is_some()
 }
 
@@ -200,7 +201,11 @@ pub(super) fn mode_label(mode: Option<&str>) -> Option<&'static str> {
 /// only for a draft the server has not answered for yet — a fresh upload
 /// before its thread is re-read — the local vision check. Deduplicated, in
 /// chip order.
-pub(super) fn select_blockers(drafts: &[Attachment], vision_no: bool, model: &str) -> Vec<String> {
+pub(super) fn select_blockers(
+    drafts: &[AttachmentMeta],
+    vision_no: bool,
+    model: &str,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |s: String| {
         if !out.contains(&s) {
@@ -226,7 +231,7 @@ pub(super) fn vision_block_reason(model: &str) -> String {
 /// What the drafts become on the way, sent all the same: the server's
 /// `hints` (a GPU block's fallback that cannot see gets an image as a
 /// placeholder, a PDF's pages as its text). Deduplicated, in chip order.
-pub(super) fn select_hints(drafts: &[Attachment]) -> Vec<String> {
+pub(super) fn select_hints(drafts: &[AttachmentMeta]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for h in drafts.iter().flat_map(|a| a.hints.iter().flatten()) {
         if !out.contains(h) {
@@ -238,7 +243,7 @@ pub(super) fn select_hints(drafts: &[Attachment]) -> Vec<String> {
 
 /// The composer's hints, tracked: read inside a `Signal::derive`.
 pub(super) fn draft_hints(chips: &[DraftChip]) -> Vec<String> {
-    let drafts: Vec<Attachment> = chips
+    let drafts: Vec<AttachmentMeta> = chips
         .iter()
         .filter(|c| c.id.get().is_some() && c.error.get().is_none())
         .map(|c| c.att.get())
@@ -248,7 +253,7 @@ pub(super) fn draft_hints(chips: &[DraftChip]) -> Vec<String> {
 
 /// The composer's blockers, tracked: read inside a `Signal::derive`.
 pub(super) fn draft_blockers(chips: &[DraftChip], vision_no: bool, model: &str) -> Vec<String> {
-    let drafts: Vec<Attachment> = chips
+    let drafts: Vec<AttachmentMeta> = chips
         .iter()
         .filter(|c| c.id.get().is_some() && c.error.get().is_none())
         .map(|c| c.att.get())
@@ -281,7 +286,7 @@ pub(super) fn refresh_drafts(
 /// chips that are them, where they differ: their `blockers` and `hints`
 /// against the thread's model as stored, their mode. A chip still
 /// uploading, or one the server does not list, is left as it is.
-pub(super) fn fold_drafts(chips: RwSignal<Vec<DraftChip>>, fresh: &[Attachment]) {
+pub(super) fn fold_drafts(chips: RwSignal<Vec<DraftChip>>, fresh: &[AttachmentMeta]) {
     chips.with_untracked(|v| {
         for c in v {
             if let Some(a) = fresh.iter().find(|a| Some(a.id) == c.id.get_untracked()) {
@@ -329,9 +334,9 @@ fn Facts(#[prop(into)] facts: Signal<Vec<Fact>>) -> impl IntoView {
 /// current model will not take it (design §3).
 #[component]
 pub(super) fn SentChip(
-    a: Attachment,
+    a: AttachmentMeta,
     #[prop(into)] vision_no: Signal<bool>,
-    on_open: Callback<Attachment>,
+    on_open: Callback<AttachmentMeta>,
 ) -> impl IntoView {
     let is_image = a.kind == "image";
     let pages_mode = a.kind == "pdf" && a.mode.as_deref() == Some("images");
@@ -380,7 +385,7 @@ pub(super) fn DraftChips(
     chips: RwSignal<Vec<DraftChip>>,
     #[prop(into)] vision_no: Signal<bool>,
     on_remove: Callback<DraftChip>,
-    on_open: Callback<Attachment>,
+    on_open: Callback<AttachmentMeta>,
     /// Re-read the drafts' blockers (after a mode change).
     on_refresh: Callback<()>,
 ) -> impl IntoView {
@@ -406,7 +411,7 @@ fn DraftChipView(
     chip: DraftChip,
     #[prop(into)] vision_no: Signal<bool>,
     on_remove: Callback<DraftChip>,
-    on_open: Callback<Attachment>,
+    on_open: Callback<AttachmentMeta>,
     on_refresh: Callback<()>,
 ) -> impl IntoView {
     let toasts = use_toasts();
@@ -622,7 +627,7 @@ pub(super) fn BlockerNote(#[prop(into)] blockers: Signal<Vec<String>>) -> impl I
 /// Download original (WebKitGTK has no inline PDF viewer, so the original is
 /// only ever downloaded).
 #[component]
-pub(super) fn ViewerMeta(att: RwSignal<Option<Attachment>>) -> impl IntoView {
+pub(super) fn ViewerMeta(att: RwSignal<Option<AttachmentMeta>>) -> impl IntoView {
     view! {
         {move || {
             att.get()
@@ -655,8 +660,8 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    fn att(kind: &str, meta: Value) -> Attachment {
-        Attachment {
+    fn att(kind: &str, meta: Value) -> AttachmentMeta {
+        AttachmentMeta {
             id: 1,
             kind: kind.into(),
             name: "f".into(),
@@ -677,7 +682,7 @@ mod tests {
         assert_eq!(fmt_tokens(-4), "0");
     }
 
-    fn texts(a: &Attachment) -> Vec<String> {
+    fn texts(a: &AttachmentMeta) -> Vec<String> {
         chip_facts(a).into_iter().map(|f| f.text).collect()
     }
 

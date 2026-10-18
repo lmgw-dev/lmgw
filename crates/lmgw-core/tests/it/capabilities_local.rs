@@ -675,6 +675,23 @@ fn configured_projector_reads_the_field_then_the_args() {
         Some("c/mmproj.gguf")
     );
 
+    // The short spelling renders the same projector, and a later flag
+    // overwrites an earlier one in llama-server's parser.
+    let short = row("s", LlamaParams::default(), &["-mm", "s/mmproj.gguf"]);
+    assert_eq!(
+        capabilities::configured_projector(&short),
+        Some("s/mmproj.gguf")
+    );
+    let twice = row(
+        "t",
+        LlamaParams::default(),
+        &["--mmproj", "t/old.gguf", "-mm", "t/new.gguf"],
+    );
+    assert_eq!(
+        capabilities::configured_projector(&twice),
+        Some("t/new.gguf")
+    );
+
     let none = row("d", LlamaParams::default(), &["--no-mmproj"]);
     assert_eq!(capabilities::configured_projector(&none), None);
 

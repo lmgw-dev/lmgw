@@ -74,6 +74,7 @@ async fn replayed_reasoning_grows_the_prompt_through_the_gateway() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

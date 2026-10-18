@@ -54,6 +54,10 @@ pub(crate) struct DocRoute {
     /// `None` means the method rule (§4.2); `Some` is `DocRoute`'s own
     /// override for the inference-plane POSTs that only compute an answer.
     pub writes: Option<bool>,
+    /// Error statuses documented beside the dialect's `default` error: the
+    /// status and the schema of its body, for a failure whose answer is not
+    /// the dialect's envelope. Empty for nearly every route.
+    pub errors: &'static [(u16, SchemaFn)],
     pub example: Option<fn() -> Value>,
 }
 
@@ -77,16 +81,23 @@ pub(crate) enum Req {
     /// `POST /mcp`, `POST /mcp/admin`: JSON-RPC 2.0, documented by hand in
     /// `v1::mcp` rather than schema-generated.
     JsonRpc,
+    /// A raw body of the mime type `raw`, or the same in a
+    /// `multipart/form-data` body whose parts `multipart` describes:
+    /// `POST /v1/realtime/calls`, an SDP offer alone or with its `session`
+    /// part (realtime calls design §2.1).
+    RawOrMultipart {
+        raw: &'static str,
+        multipart: SchemaFn,
+    },
 }
 
 /// A response body's shape (§4.2).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Resp {
     Json(SchemaFn),
-    /// An op's `{ok, message?, id?}` shape (§4.7) — api-types `OpOutcome`
-    /// (`models.rs:396`), extra keys allowed. Not schema-generated so every
-    /// such op does not each need its own trivial `SchemaFn`.
-    OpOutcome,
+    /// `201 Created` with a JSON body: a route that makes something
+    /// (`POST /devices/enrol`'s certificate).
+    CreatedJson(SchemaFn),
     /// No DTO exists (§4.6 rule 4) — the reason shown on the page.
     Untyped(&'static str),
     /// A download or a media type with no useful schema; the content types it
@@ -124,6 +135,16 @@ pub(crate) enum Resp {
     /// `POST /api/session/login`'s 302.
     Redirect,
     NoContent,
+    /// `200` with an empty body: `POST /v1/realtime/calls/{call_id}/hangup`
+    /// (OpenAI's own answer there).
+    Empty,
+    /// `201 Created`: a body of the mime type `mime` (free text) and a
+    /// `Location` header that `location` describes — `POST
+    /// /v1/realtime/calls`, the SDP answer and the call's path.
+    Created {
+        mime: &'static str,
+        location: &'static str,
+    },
     /// This document itself (`/api/openapi.json`, `/v1/openapi.json`).
     Doc,
 }
@@ -205,7 +226,10 @@ pub(crate) fn all_routes() -> Vec<DocRoute> {
     routes.extend(super::planes::agents::routes());
     routes.extend(super::planes::audio_lab::routes());
     routes.extend(super::planes::image_lab::routes());
+    routes.extend(super::planes::decision_lab::routes());
+    routes.extend(super::planes::labs_store::routes());
     routes.extend(super::planes::session::routes());
     routes.extend(super::planes::chat::routes());
+    routes.extend(super::planes::devices::routes());
     routes
 }

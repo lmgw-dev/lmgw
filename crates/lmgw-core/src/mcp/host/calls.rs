@@ -15,7 +15,7 @@
 //! - **A `resources/read`** goes the same way ([`McpManager::device_request`]):
 //!   `_meta`, the timeout, the cancel, a closed link's reason.
 //! - **An offline device** answers at once, without the lazy-list budget's
-//!   wait: "device '<name>' is not connected (last seen …)".
+//!   wait: "device '<name>' is offline (last seen …)".
 //! - **A task-augmented call** (MCP Tasks design §1.1, §1.2) carries
 //!   `task: {}` and `_meta["lmgw/task"]`; `lmgw/timeout_ms` bounds the wait
 //!   for its `CreateTaskResult` only, and a timeout there is a normal
@@ -225,7 +225,9 @@ impl McpManager {
         }
     }
 
-    /// "device '<name>' is not connected (last seen …)".
+    /// "device '<name>' is offline (last seen …)": the words of a Chat
+    /// turn's `tool_offline` frame too (client-apps design §5.3,
+    /// 2026-10-15).
     pub(crate) async fn offline_words(&self, server: &McpServer) -> String {
         let device = device_name(server);
         let seen = match self.app() {
@@ -233,8 +235,8 @@ impl McpManager {
             None => None,
         };
         match seen {
-            Some(at) => format!("device '{device}' is not connected (last seen {at})"),
-            None => format!("device '{device}' is not connected (never seen)"),
+            Some(at) => format!("device '{device}' is offline (last seen {at})"),
+            None => format!("device '{device}' is offline (never seen)"),
         }
     }
 }

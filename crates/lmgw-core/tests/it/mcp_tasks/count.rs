@@ -13,6 +13,7 @@ use crate::support::realtime_fakes::Turn;
 /// The `open_tasks` of server row `id` in the list.
 async fn open_tasks(w: &World, id: i64) -> Value {
     let v = w.get("/api/mcp-servers").await;
+    crate::common::round_trips::<lmgw_api_types::McpServersResponse>("GET /api/mcp-servers", &v);
     v["mcp_servers"]
         .as_array()
         .and_then(|rows| rows.iter().find(|r| r["id"] == id))

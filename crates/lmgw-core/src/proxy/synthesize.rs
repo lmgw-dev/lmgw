@@ -668,7 +668,7 @@ fn log<'a>(
 /// entries are names or objects naming one (`id`, `voice_id`, `name`);
 /// `presets` is read the same way, as an array or as an object keyed by
 /// name. Anything else contributes nothing.
-fn parse_voice_names(body: &[u8]) -> Vec<String> {
+pub(crate) fn parse_voice_names(body: &[u8]) -> Vec<String> {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
     };

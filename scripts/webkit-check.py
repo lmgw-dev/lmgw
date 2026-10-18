@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Usage: scripts/webkit-check.py [--base URL] [--routes /a,/b,...] [--sizes WxH,...]
 #                                 [--shots DIR] [--token-file PATH] [--json OUT]
-#                                 [--backend auto|broadway|wayland] [--media]
+#                                 [--backend auto|broadway|wayland] [--media] [--zoom 1.25]
 """WebKitGTK compatibility check for lmgw's dashboard.
 
 Every other UI script here (ui-matrix.py, ui-drive.py, screenshot.py) drives
@@ -368,6 +368,7 @@ def orchestrate(args) -> int:
         "shots": str(shots),
         "settle_max_ms": args.wait * 1000,
         "media": args.media,
+        "zoom": args.zoom,
         # The realtime phase's session mock rides along (chat-voice WP9).
         "probe": ((Path(__file__).parent / "realtime-mock.js").read_text() + "\n"
                   + (Path(__file__).parent / "media-probe.js").read_text()) if args.media else None,
@@ -713,6 +714,10 @@ def worker_main(spec_path: str, result_path: str) -> int:
                 website_policies=WebKit.WebsitePolicies(autoplay=WebKit.AutoplayPolicy.ALLOW))
         else:
             webview = WebKit.WebView(network_session=session)
+        # The app window's interface scale is the webview's own zoom
+        # (lmgw-ui's ui_scale.rs): --zoom 1.25 shows a page as the app does
+        # at its default 125%, the window size unchanged.
+        webview.set_zoom_level(spec.get("zoom") or 1.0)
         media = None
         if spec.get("media"):
             media = {}
@@ -1064,6 +1069,8 @@ def main() -> int:
                      help="most seconds to wait for a route to settle")
     ap.add_argument("--media", action="store_true",
                      help="run the page-audio probe (chat-voice WP6) on /chat instead")
+    ap.add_argument("--zoom", type=float, default=1.0,
+                     help="the webview's zoom, as the app's interface scale (1.25: its default)")
     args = ap.parse_args()
 
     if args._worker:

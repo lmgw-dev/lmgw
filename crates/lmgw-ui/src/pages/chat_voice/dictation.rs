@@ -61,7 +61,7 @@ use super::audio::{pcm, player};
 use super::devices::VoiceDevices;
 use super::keys::{Phase, DICTATE_KEY_LABEL};
 use super::read_aloud::ReadAloud;
-use super::spoken::{insert_dictated, ms_text, DictationMark, Transcript};
+use super::spoken::{asr_name, insert_dictated, ms_text, DictationMark, Transcript};
 use super::state::{block_refusal, blocker, note_of, Note, NoteKind};
 use super::status::VoiceStatus;
 use crate::scope::Scope;
@@ -630,7 +630,7 @@ impl Dictation {
                 NoteKind::Warn,
                 format!(
                     "{} heard no words (the recording peaked at {}): nothing was inserted",
-                    t.alias.as_deref().unwrap_or("the speech-to-text model"),
+                    asr_name(&t),
                     pcm_peak_dbfs(peak)
                 ),
             ))),
@@ -810,10 +810,7 @@ fn pcm_peak_dbfs(peak: u32) -> String {
 
 /// The note after a dictation landed.
 fn inserted_text(t: &Transcript) -> String {
-    let mut s = format!(
-        "dictated with {}",
-        t.alias.as_deref().unwrap_or("the speech-to-text model")
-    );
+    let mut s = format!("dictated with {}", asr_name(t));
     if let Some(b) = &t.asr_answered_by {
         s.push_str(&format!(" — answered by {b}"));
     }
@@ -832,7 +829,7 @@ mod tests {
     fn the_inserted_note_names_the_model_and_its_fallback() {
         let t = Transcript {
             text: "Hallo".into(),
-            alias: Some("audio/parakeet".into()),
+            alias: "audio/parakeet".into(),
             asr_answered_by: Some("openai/whisper-1".into()),
             asr_ms: Some(702),
             ..Default::default()

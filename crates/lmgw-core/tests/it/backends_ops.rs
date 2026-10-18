@@ -1237,7 +1237,7 @@ async fn read_only_lists_the_build_reads_and_refuses_the_writes() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| p["preset"].as_str().unwrap())
+        .map(|p| p["id"].as_str().unwrap())
         .collect();
     assert_eq!(presets, ["official", "ik", "audio", "sdcpp"]);
     let one = tool_ok(&base, &sid, "lmgw__builds", json!({"id": id})).await;

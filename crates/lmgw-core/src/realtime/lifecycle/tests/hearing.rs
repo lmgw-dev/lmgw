@@ -69,6 +69,7 @@ pub(super) async fn bound() -> (
         .unwrap();
     let init = SessionInit {
         running: None,
+        call: None,
         state,
         ctx: Default::default(),
         requested_model: None,
@@ -83,7 +84,9 @@ pub(super) async fn bound() -> (
         },
         speech,
         slot: None,
-        limits: crate::realtime::Limits::from_settings(&Default::default()),
+        transport: crate::realtime::link::Transport::WebSocket(
+            crate::realtime::Limits::from_settings(&Default::default()),
+        ),
         bound: Some(binding),
     };
     let mut core = Core::new(init, ids, out, responder_tx, asr_tx, score_tx);

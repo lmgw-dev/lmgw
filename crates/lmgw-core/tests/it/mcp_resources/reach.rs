@@ -19,7 +19,7 @@ async fn key(w: &World, name: &str, mode: &str, patterns: &str) -> reqwest::Clie
     }
     let (s, v) = op(w, "key_create", body).await;
     assert_eq!(s, 200, "{v}");
-    bearer(v["plaintext"].as_str().unwrap())
+    bearer(v["key"].as_str().unwrap())
 }
 
 /// A key that reaches `wx` sees and reads its resources and not those of a
@@ -95,9 +95,11 @@ async fn resources_follow_the_key_s_tool_scope() {
     assert!(v["result"]["contents"].is_array(), "{v}");
 }
 
-/// A device's resources reach as its tools do (L16): the owner, the device
-/// itself and a key that names the label; never an `all` key or anonymous.
-/// A read goes over the link in the device's own spelling, with `_meta`.
+/// A device's resources reach as its tools do (L16 as changed 2026-10-15):
+/// the owner, the device itself and a key granted the label; never an
+/// `all` key without the grant, a key whose patterns name the label without
+/// it, or anonymous. A read goes over the link in the device's own
+/// spelling, with `_meta`.
 #[tokio::test]
 async fn a_device_s_resources_reach_as_its_tools_do() {
     let (w, d) = host_world().await;
@@ -107,13 +109,22 @@ async fn a_device_s_resources_reach_as_its_tools_do() {
 
     let all = key(&w, "k-all", "", "").await;
     let named = key(&w, "k-named", "allow", "desktop__*").await;
+    let (s, v) = op(
+        &w,
+        "key_create",
+        json!({"name": "k-granted", "device_tools": ["desktop"]}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let granted = bearer(v["key"].as_str().unwrap());
     let phone = pair(&w, "phone", json!({})).await;
     let anonymous = reqwest::Client::new();
     let owner = w.gw.client();
     let cases: Vec<(&str, &reqwest::Client, bool)> = vec![
         ("the owner", &owner, true),
         ("the hosting device", &d.client, true),
-        ("a key naming the label", &named, true),
+        ("a key granted the label", &granted, true),
+        ("a key naming the label without the grant", &named, false),
         ("an all key", &all, false),
         ("another device", &phone.client, false),
         ("anonymous", &anonymous, false),

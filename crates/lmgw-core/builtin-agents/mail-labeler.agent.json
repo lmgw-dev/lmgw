@@ -3,7 +3,7 @@
   "id": "mail-labeler",
   "name": "Mail labeler",
   "description": "Classifies unread Gmail into labels. Nothing is written until you apply.",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "model": {
     "alias": "{{config.model}}",
     "temperature": 0.0
@@ -16,7 +16,13 @@
           "type": "string",
           "format": "model_alias",
           "title": "Model",
-          "description": "The alias each classify call runs on. One call per message, so a small local model is the usual choice."
+          "description": "The alias each classify call runs on when no question set is chosen. One call per message, so a small local model is the usual choice."
+        },
+        "decision_set": {
+          "type": "integer",
+          "format": "lmgw-question-set",
+          "title": "Question set",
+          "description": "Classify through a Decision lab question set instead: its choice question 'category' picks the label from its options, which replace Categories, and its default model answers. Other stays the review's catch-all and what a failed call falls back to. A row needs attention when the answer is Other, its confidence is below the set's measured threshold, or the call failed. Empty classifies with the model above."
         },
         "categories": {
           "type": "array",
@@ -58,10 +64,7 @@
           "minimum": 1,
           "description": "Parallel classify calls; match the local server's -np"
         }
-      },
-      "required": [
-        "model"
-      ]
+      }
     }
   },
   "tools": [
@@ -110,7 +113,8 @@
       "output": {
         "field": "category",
         "enum_from": "config.categories",
-        "fallback": "Other"
+        "fallback": "Other",
+        "decide": "config.decision_set"
       },
       "concurrency": "{{config.concurrency}}"
     },

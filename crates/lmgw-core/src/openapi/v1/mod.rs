@@ -1,7 +1,8 @@
 //! Hand-written `/v1` schemas and examples: what lmgw's own parsers read
 //! and its serializers emit, not provider docs. Split into `chat`,
-//! `responses`, `anthropic`, `aux`, `media`, `models`, `errors` and `mcp`,
-//! each `pub(crate)` so
+//! `responses`, `anthropic`, `aux`, `media`, `models`, `errors` and `mcp`
+//! (and `systemone`'s example, whose schemas are generated from
+//! `lmgw_api_types::systemone`), each `pub(crate)` so
 //! `planes::inference` (a sibling under `openapi`, not a descendant of this
 //! module) and `build`/`schemas` (the same) can reach the `SchemaFn`s and
 //! example functions directly.
@@ -14,3 +15,4 @@ pub(crate) mod mcp;
 pub(crate) mod media;
 pub(crate) mod models;
 pub(crate) mod responses;
+pub(crate) mod systemone;

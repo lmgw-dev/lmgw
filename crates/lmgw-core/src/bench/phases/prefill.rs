@@ -34,8 +34,9 @@ pub async fn run(cx: &PhaseCx<'_>, out: &mut Vec<PrefillPoint>) -> Result<(), Be
             let first = rec
                 .first_token()
                 .ok_or_else(|| BenchError::Failed(format!("prefill {p}: no token arrived")))?;
-            tok_s.push(t.prompt_per_second);
-            prompt_ms.push(t.prompt_ms);
+            // A figure llama.cpp did not give is left out, not counted as 0.
+            tok_s.extend(t.prompt_per_second);
+            prompt_ms.extend(t.prompt_ms);
             evaluated.push(t.prompt_n as f64);
             ttft.push(rec.ttft().map(ms).unwrap_or_default());
             windows.push(EnergyWindow {
@@ -44,6 +45,11 @@ pub async fn run(cx: &PhaseCx<'_>, out: &mut Vec<PrefillPoint>) -> Result<(), Be
                 tokens: t.prompt_n,
             });
             cx.steps.advance();
+        }
+        if tok_s.is_empty() {
+            return Err(BenchError::Failed(format!(
+                "prefill {p}: the server reported no prefill rate"
+            )));
         }
         // TTFT windows at the short lengths are tens of milliseconds:
         // shorter than the sampler resolves, so they get a reason, not a

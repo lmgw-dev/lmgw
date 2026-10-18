@@ -126,6 +126,7 @@ pub(crate) async fn setup(chat: &MockServer, stt: &MockServer) -> (SharedState, 
         expose_all: false,
         expose_prefix: String::new(),
         supports_responses: false,
+        catalog_all_modalities: true,
     };
     let chat_up =
         store::insert_upstream(&state.db, &up("chat-up", UpstreamKind::Generic, chat.uri()))
@@ -642,6 +643,20 @@ async fn an_unsupported_upload_is_415_and_lists_what_is_accepted() {
     }
 }
 
+#[tokio::test]
+async fn a_standard_midi_file_is_an_unsupported_upload() {
+    // The labs keep MIDI as an artifact; chat never sniffed it and refuses it.
+    let (chat, stt) = (chat_mock().await, stt_mock("never used").await);
+    let (_s, gw) = setup(&chat, &stt).await;
+    let tid = new_thread(&gw, "plain", false).await;
+    let smf = b"MThd\0\0\0\x06\0\x01\0\x02\x01\xE0MTrk\0\0\0\x04\0\xFF\x2F\0".to_vec();
+    let r = upload(&gw, tid, "tune.mid", smf).await;
+    assert_eq!(r.status(), 415);
+    let e: Value = r.json().await.unwrap();
+    assert_eq!(e["code"], "unsupported_attachment");
+    assert_eq!(transcriptions(&stt).await, 0);
+}
+
 // -- audio ------------------------------------------------------------------
 
 #[tokio::test]
@@ -693,6 +708,7 @@ async fn audio_for_an_anthropic_model_is_transcribed_whatever_its_override_says(
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

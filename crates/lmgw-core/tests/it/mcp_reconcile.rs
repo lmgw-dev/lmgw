@@ -161,7 +161,7 @@ async fn the_hold_and_a_settings_save_go_through_while_a_save_s_reconcile_hangs(
         .await
         .expect("the hold does not wait for the save's reconcile")
         .unwrap();
-    assert_eq!(hold["active"], true, "{hold}");
+    assert!(hold.active, "{hold:?}");
     let second = tokio::time::timeout(
         Duration::from_secs(5),
         ops::settings_set(
@@ -175,7 +175,7 @@ async fn the_hold_and_a_settings_save_go_through_while_a_save_s_reconcile_hangs(
     .await
     .expect("the second save does not wait for the first one's reconcile")
     .unwrap();
-    assert_eq!(second["ok"], true, "{second}");
+    assert!(second.ok, "{second:?}");
     let settings = state.snapshot().settings.clone();
     assert_eq!(settings.retention_days, 9);
     assert!(settings.hold.active, "the second save kept the hold");

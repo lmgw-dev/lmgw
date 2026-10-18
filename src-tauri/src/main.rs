@@ -9,11 +9,15 @@ mod audio_out;
 mod context_menu;
 mod desktop_palette;
 mod dev_guard;
+/// Every download of the window asks where to save it (Save As).
+mod downloads;
 mod gateway;
 #[cfg(target_os = "linux")]
 mod media;
 /// A device's `lmgw-pair:` link, handed to the desktop (client-apps §1.4).
 mod pairing;
+/// The desktop's own file dialogs through GTK's file-chooser portal.
+mod portal;
 #[cfg(target_os = "linux")]
 mod reveal;
 mod updater;
@@ -149,10 +153,6 @@ fn show_main_window(app: &tauri::AppHandle) {
             lmgw_core::agents::service::origin_label(&settings, h).is_some()
         })
     })
-    // Exports (and any other `Content-Disposition: attachment`): WebKitGTK
-    // only saves a file when a download handler decides its destination —
-    // without one the download is cancelled and the click does nothing.
-    .on_download(handle_download)
     // Before the first paint, and again after every load: a reload keeps
     // the reading and focus of the moment, not the window's first ones.
     .initialization_script(desktop.init_script())
@@ -176,6 +176,14 @@ fn show_main_window(app: &tauri::AppHandle) {
     {
         builder = builder.visible(false);
     }
+    // Exports (and any other `Content-Disposition: attachment`): on Linux the
+    // shell answers WebKitGTK's downloads itself with a Save As dialog
+    // (`downloads::save_dialog`, installed below); elsewhere wry's handler
+    // saves into the Downloads folder.
+    #[cfg(not(target_os = "linux"))]
+    {
+        builder = builder.on_download(downloads::to_downloads_folder);
+    }
     if let Some(dir) = webview_dir {
         builder = builder.data_directory(dir);
     }
@@ -196,6 +204,7 @@ fn show_main_window(app: &tauri::AppHandle) {
             desktop_palette::follow(&window, desktop);
             context_menu::install(&window);
             reveal::when_mounted(&window);
+            downloads::save_dialog::install(&window);
             media::install(&window, media_serving)
         }
         #[cfg(not(target_os = "linux"))]
@@ -213,6 +222,7 @@ fn xdg_open(url: &str) -> std::io::Result<std::process::Child> {
     let mut cmd = std::process::Command::new("xdg-open");
     cmd.arg(url);
     audio_out::scrub_identity_env(&mut cmd);
+    portal::scrub(&mut cmd);
     cmd.spawn()
 }
 
@@ -273,164 +283,6 @@ fn navigation_allowed(
 /// `target=_blank` links: web and mail only.
 fn new_window_may_open(url: &tauri::Url) -> bool {
     matches!(url.scheme(), "http" | "https" | "mailto")
-}
-
-/// The window's download handler: save into the XDG Downloads folder, never
-/// over an existing file, and tell the page where it went (or that it did
-/// not) so the UI can toast it — a saved file otherwise leaves no trace in an
-/// undecorated window.
-///
-/// The folder is decided by [`download_destination`], not taken from wry's
-/// proposal (which is the working directory on a host with no
-/// `XDG_DOWNLOAD_DIR`), and a taken name steps to `<name> (1).<ext>`.
-fn handle_download(webview: tauri::Webview, event: tauri::webview::DownloadEvent<'_>) -> bool {
-    use tauri::webview::DownloadEvent;
-    match event {
-        DownloadEvent::Requested { destination, .. } => match download_destination(destination) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!("download refused: {e}");
-                notify_page(
-                    &webview,
-                    "lmgw-download-failed",
-                    "error",
-                    &format!("no folder to save into: {e}"),
-                );
-                false
-            }
-        },
-        DownloadEvent::Finished { path, success, url } => {
-            match (success, path) {
-                (true, Some(p)) => {
-                    tracing::info!("download saved: {}", p.display());
-                    notify_page(&webview, "lmgw-downloaded", "path", &p.to_string_lossy());
-                }
-                _ => notify_page(
-                    &webview,
-                    "lmgw-download-failed",
-                    "error",
-                    &format!("{url} did not finish"),
-                ),
-            }
-            true
-        }
-        _ => true,
-    }
-}
-
-/// Make `dest` (the file wry proposes) a path that can be written and does
-/// not exist, in the Downloads folder ([`download_target`]), whose folder is
-/// created when missing.
-fn download_destination(dest: &mut std::path::PathBuf) -> std::io::Result<()> {
-    let env = DownloadEnv::from_process();
-    *dest = download_target(dest, &env)?;
-    if let Some(dir) = dest.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    unique_path(dest);
-    Ok(())
-}
-
-/// What [`download_target`] reads from the process: `$HOME`,
-/// `$XDG_CONFIG_HOME` and the contents of `user-dirs.dirs` under it.
-struct DownloadEnv {
-    home: Option<std::path::PathBuf>,
-    user_dirs: String,
-}
-
-impl DownloadEnv {
-    fn from_process() -> Self {
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            // The XDG spec: a relative value is invalid and ignored.
-            .filter(|p| p.is_absolute())
-            .or_else(|| home.as_ref().map(|h| h.join(".config")));
-        let user_dirs = config
-            .and_then(|c| std::fs::read_to_string(c.join("user-dirs.dirs")).ok())
-            .unwrap_or_default();
-        Self { home, user_dirs }
-    }
-}
-
-/// Where a download proposed as `proposed` is saved: its **file name only**
-/// (a name carrying path components — `../x`, an absolute path — keeps just
-/// its last part) in the Downloads folder: `XDG_DOWNLOAD_DIR` from
-/// `user-dirs.dirs`, else `~/Downloads` (created when missing).
-///
-/// wry proposes `dirs::download_dir()/<name>`, and `dirs` reads only
-/// `user-dirs.dirs`: without an `XDG_DOWNLOAD_DIR` there it proposes the
-/// working directory, even when `~/Downloads` exists (review R1 finding 7 —
-/// the old check redirected only when neither existed, so the file landed in
-/// the CWD). The folder is therefore always decided here, never taken from
-/// the proposal.
-fn download_target(
-    proposed: &std::path::Path,
-    env: &DownloadEnv,
-) -> std::io::Result<std::path::PathBuf> {
-    let name = match proposed.components().next_back() {
-        Some(std::path::Component::Normal(n)) => n.to_os_string(),
-        _ => std::ffi::OsString::from("download"),
-    };
-    let home = env.home.as_deref().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no HOME and no Downloads folder",
-        )
-    })?;
-    let dir = xdg_download_dir(&env.user_dirs, home).unwrap_or_else(|| home.join("Downloads"));
-    Ok(dir.join(name))
-}
-
-/// `XDG_DOWNLOAD_DIR` as `xdg-user-dirs` writes it into `user-dirs.dirs`
-/// (`"$HOME/…"` or an absolute path); `None` when it is not set there, or
-/// set to something that is neither.
-fn xdg_download_dir(user_dirs: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
-    user_dirs.lines().find_map(|l| {
-        let v = l
-            .trim()
-            .strip_prefix("XDG_DOWNLOAD_DIR=")?
-            .trim()
-            .trim_matches('"');
-        let p = match v.strip_prefix("$HOME") {
-            Some(rest) => home.join(rest.trim_start_matches('/')),
-            None => std::path::PathBuf::from(v),
-        };
-        p.is_absolute().then_some(p)
-    })
-}
-
-/// `name.ext` → `name (1).ext`, `name (2).ext`, … until nothing is there.
-fn unique_path(p: &mut std::path::PathBuf) {
-    if !p.exists() {
-        return;
-    }
-    let file = p
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (stem, ext) = match file.split_once('.') {
-        Some((s, e)) => (s.to_string(), format!(".{e}")),
-        None => (file.clone(), String::new()),
-    };
-    let mut n = 1;
-    while p.exists() {
-        p.set_file_name(format!("{stem} ({n}){ext}"));
-        n += 1;
-    }
-}
-
-/// Fire `event` on the page's `window` with `{key: value}` as its detail.
-fn notify_page(webview: &tauri::Webview, event: &str, key: &str, value: &str) {
-    let detail = serde_json::json!({ key: value });
-    let js = format!(
-        "window.dispatchEvent(new CustomEvent({}, {{detail: {}}}));",
-        serde_json::json!(event),
-        detail
-    );
-    if let Err(e) = webview.eval(js) {
-        tracing::warn!("telling the page about a download: {e}");
-    }
 }
 
 /// The tray's Quit item, said "Quitting…" while the quit runs.
@@ -512,7 +364,7 @@ const RENDER_VARS: [&str; 3] = [
 /// unless the process opts out of the driver's explicit sync, so the app sets
 /// `__NV_DISABLE_EXPLICIT_SYNC=1` before GTK initializes. That keeps the
 /// zero-copy hardware renderer. The alternatives cost real frames (measured
-/// 2026-09-27, RTX 4090, driver 615.71, WebKitGTK 2.52.5, Plasma Wayland):
+/// 2026-09-27, a 24 GB NVIDIA GPU, WebKitGTK 2.52.5, Plasma Wayland):
 /// `WEBKIT_DISABLE_DMABUF_RENDERER=1` drops to software compositing (21 fps at
 /// 1600×1000, 4 fps at 5000×1400, against 60 at both), and
 /// `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` reads the GPU back every frame (26 fps
@@ -542,6 +394,10 @@ fn main() {
     if let Some(var) = workaround {
         std::env::set_var(var, "1");
     }
+    // The Save As and Open dialogs as the desktop draws them: GTK 3 reads
+    // GTK_USE_PORTAL once, at its first file dialog or its display's
+    // settings, so before GTK starts too (`portal`).
+    let portal = portal::apply();
     // Before WebKit spawns its processes too, which inherit it: the name
     // WirePlumber remembers lmgw's audio routing under (chat-voice §12.3).
     let identity = audio_out::apply_identity_env();
@@ -561,6 +417,7 @@ fn main() {
              render path alone; set WEBKIT_DISABLE_DMABUF_RENDERER=1 if the window fails to open"
         );
     }
+    tracing::info!("file dialogs: {portal}");
     let set: Vec<&str> = identity.iter().map(|(k, _)| *k).collect();
     tracing::debug!("audio stream identity: set {set:?} (an explicit value is left alone)");
 
@@ -797,7 +654,9 @@ fn main() {
                             let app = app.clone();
                             let hold_item = hold_item_for_menu.clone();
                             tauri::async_runtime::spawn(async move {
-                                match lmgw_core::ops::hold_set(&st, next).await {
+                                match lmgw_core::ops::backends::to_json(
+                                    lmgw_core::ops::hold_set(&st, next).await,
+                                ) {
                                     Ok(v) => {
                                         tracing::info!("hold_set: {v}");
                                         sync_hold(&app, &hold_item, next);
@@ -995,86 +854,5 @@ mod tests {
         ] {
             assert!(!new_window_may_open(&u(bad)), "{bad}");
         }
-    }
-
-    #[test]
-    fn a_taken_download_name_gets_a_counter_before_the_extension() {
-        let dir = std::env::temp_dir().join(format!("lmgw-dl-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut p = dir.join("lmgw-chat-1-x.md");
-        unique_path(&mut p);
-        assert_eq!(p, dir.join("lmgw-chat-1-x.md"), "a free name stays");
-        std::fs::write(&p, "a").unwrap();
-        std::fs::write(dir.join("lmgw-chat-1-x (1).md"), "b").unwrap();
-        let mut again = p.clone();
-        unique_path(&mut again);
-        assert_eq!(again, dir.join("lmgw-chat-1-x (2).md"));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn env(home: &str, user_dirs: &str) -> DownloadEnv {
-        DownloadEnv {
-            home: Some(std::path::PathBuf::from(home)),
-            user_dirs: user_dirs.to_string(),
-        }
-    }
-
-    #[test]
-    fn a_download_goes_to_the_downloads_folder_whatever_wry_proposed() {
-        use std::path::{Path, PathBuf};
-        // No XDG_DOWNLOAD_DIR: wry proposes the working directory, and the
-        // file still lands in ~/Downloads.
-        let none = env("/home/u", "");
-        assert_eq!(
-            download_target(Path::new("/some/cwd/lmgw-chat-1-x.md"), &none).unwrap(),
-            PathBuf::from("/home/u/Downloads/lmgw-chat-1-x.md")
-        );
-        // Configured, as xdg-user-dirs writes it.
-        let conf = env(
-            "/home/u",
-            "# comment\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Herunterladen\"\n",
-        );
-        assert_eq!(
-            download_target(Path::new("/home/u/Herunterladen/a.zip"), &conf).unwrap(),
-            PathBuf::from("/home/u/Herunterladen/a.zip")
-        );
-        let abs = env("/home/u", "XDG_DOWNLOAD_DIR=\"/data/dl\"\n");
-        assert_eq!(
-            download_target(Path::new("x.json"), &abs).unwrap(),
-            PathBuf::from("/data/dl/x.json")
-        );
-        // A relative value is not a folder to trust.
-        let rel = env("/home/u", "XDG_DOWNLOAD_DIR=\"dl\"\n");
-        assert_eq!(
-            download_target(Path::new("x.json"), &rel).unwrap(),
-            PathBuf::from("/home/u/Downloads/x.json")
-        );
-    }
-
-    #[test]
-    fn a_download_keeps_only_its_file_name() {
-        use std::path::{Path, PathBuf};
-        let e = env("/home/u", "");
-        for proposed in [
-            "/home/u/Downloads/../../etc/evil.md",
-            "/etc/evil.md",
-            "../../evil.md",
-            "evil.md",
-        ] {
-            assert_eq!(
-                download_target(Path::new(proposed), &e).unwrap(),
-                PathBuf::from("/home/u/Downloads/evil.md"),
-                "{proposed}"
-            );
-        }
-        assert_eq!(
-            download_target(Path::new("/home/u/Downloads/.."), &e).unwrap(),
-            PathBuf::from("/home/u/Downloads/download")
-        );
-        let no_home = DownloadEnv {
-            home: None,
-            user_dirs: String::new(),
-        };
-        assert!(download_target(Path::new("a.md"), &no_home).is_err());
     }
 }

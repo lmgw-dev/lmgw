@@ -1,6 +1,8 @@
 //! `ops-runtime`: the per-model container runtime, the GPU hold, and
 //! background jobs (api-docs design §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 use crate::openapi::ops::args;
 
@@ -25,10 +27,16 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "hold_set",
         tag: TAG,
         summary: "Engage or release the GPU hold",
-        description: None,
+        description: Some(
+            "Engaging stops every idle local container (`stopped`), leaves the ones still \
+             working to the next reaper tick (`draining`), names the stops that failed \
+             (`failed`) and aborts a benchmark run in flight (`benchmark_aborted`, absent when \
+             none was). Asking for the state the hold is already in is not an error: nothing \
+             changes, and the answer reports the current state.",
+        ),
         tool: Some("lmgw__hold_set"),
         args: OpArgs::Tool,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::HoldSet>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -45,7 +53,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::job_cancel),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

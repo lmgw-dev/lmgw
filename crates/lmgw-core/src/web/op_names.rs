@@ -15,7 +15,7 @@
 //! adding it here, which is what forces it into the docs.
 
 /// The 57 arms of [`super::api::op`]'s own `match` — everything dispatched
-/// there directly, including the legacy `embed_model_set` spelling.
+/// there directly.
 pub const MAIN_OPS: &[&str] = &[
     "upstream_set",
     "model_set",
@@ -24,7 +24,6 @@ pub const MAIN_OPS: &[&str] = &[
     "mcp_server_set",
     "settings_set",
     "aux_model_set",
-    "embed_model_set",
     "audio_model_set",
     "image_model_set",
     "model_visibility",
@@ -101,7 +100,8 @@ pub const AGENT_OPS: &[&str] = &[
     "agents_restore",
 ];
 
-/// The credential ops (principals design §3.12), dispatched to
+/// The credential ops (principals design §3.12) and the device link's
+/// pairing ops (device link design §9.4), dispatched to
 /// `super::api_settings::key_op`.
 pub const KEY_OPS: &[&str] = &[
     "key_create",
@@ -109,6 +109,10 @@ pub const KEY_OPS: &[&str] = &[
     "key_delete",
     "key_reveal",
     "key_rotate",
+    "device_token",
+    "device_token_end",
+    "device_confirm",
+    "device_ca_rotate",
 ];
 
 /// The dashboard's settings save — special-cased in `op()` for the same
@@ -117,9 +121,9 @@ pub const KEY_OPS: &[&str] = &[
 pub const SETTINGS_OPS: &[&str] = &["settings_set_full"];
 
 /// Every op name, in list order — `MAIN_OPS`, then `AGENT_OPS`, `KEY_OPS`,
-/// `SETTINGS_OPS`. 83 in total (§4.7, plus the benchmark design's seven,
-/// §8.1, `voice_transcribe`, audio-class gap 5, and the realtime design's
-/// `realtime_budget`, §12).
+/// `SETTINGS_OPS`. 86 in total (§4.7, plus the benchmark design's seven,
+/// §8.1, `voice_transcribe`, audio-class gap 5, the realtime design's
+/// `realtime_budget`, §12, and the device link's four, §9.4).
 pub fn all() -> impl Iterator<Item = &'static str> {
     MAIN_OPS
         .iter()
@@ -129,7 +133,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
         .copied()
 }
 
-/// Is `name` one of the 83? What `op()` checks before it looks at its own
+/// Is `name` one of the 82? What `op()` checks before it looks at its own
 /// arms (§4.7): unlisted means unreachable, whatever a `match` arm below it
 /// might otherwise have answered.
 pub fn is_op(name: &str) -> bool {
@@ -153,9 +157,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn the_four_lists_are_82_names_with_no_duplicate() {
+    fn the_four_lists_are_86_names_with_no_duplicate() {
         let all: Vec<&str> = all().collect();
-        assert_eq!(all.len(), 83, "{all:#?}");
+        assert_eq!(all.len(), 86, "{all:#?}");
         let set: HashSet<&str> = all.iter().copied().collect();
         assert_eq!(set.len(), all.len(), "a name appears in more than one list");
     }

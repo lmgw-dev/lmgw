@@ -35,7 +35,6 @@ use std::convert::Infallible;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
@@ -46,6 +45,7 @@ use futures::stream::{self, StreamExt};
 use serde_json::{json, Map, Value};
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::erased::Erased;
 use crate::mcp::scope::ToolScope;
 use crate::mcp::{selfadmin, CallError};
 use crate::proxy::RequestCtx;
@@ -157,31 +157,30 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
 /// The aggregate behind `tools/list` / `tools/call`, abstracted so the
 /// northbound dispatch can be golden-tested with a fake (no live MCP server).
 /// `McpManager` is wired in via [`ManagerPlane`]; tests inject their own.
-#[async_trait]
 pub trait ToolPlane: Send + Sync {
     /// Exposed tools as JSON-RPC `tools/list` `tools` array entries (already
     /// serialized rmcp `Tool`s with exposed names). Triggers the lazy-list
     /// contract (§9): bounded connects, partial results.
-    async fn list_tools(&self) -> Vec<Value>;
+    fn list_tools<'a>(&'a self) -> Erased<'a, Vec<Value>>;
 
     /// Route + invoke a tool by exposed name. `Ok` carries the serialized
     /// `CallToolResult` (`content` + `isError`, verbatim, §7); `Err` carries the
     /// typed failure the dispatcher maps to JSON-RPC + a non-ok log row (§10).
-    async fn call_tool(
-        &self,
-        name: &str,
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
         args: Option<Map<String, Value>>,
-    ) -> Result<Value, CallError>;
+    ) -> Erased<'a, Result<Value, CallError>>;
 
     /// `resources/*` (client-apps design §7.2): `None` for a plane that
     /// serves no resources, whose dispatch answers `-32601` as for any
     /// method it does not know; else the result or the JSON-RPC error.
-    async fn resources(
-        &self,
-        _method: &str,
-        _params: &Value,
-    ) -> Option<Result<Value, (i64, String)>> {
-        None
+    fn resources<'a>(
+        &'a self,
+        _method: &'a str,
+        _params: &'a Value,
+    ) -> Erased<'a, Option<Result<Value, (i64, String)>>> {
+        Box::pin(async move { None })
     }
 }
 
@@ -210,61 +209,64 @@ struct AdminPlane {
     ctx: RequestCtx,
 }
 
-#[async_trait]
 impl ToolPlane for AdminPlane {
-    async fn list_tools(&self) -> Vec<Value> {
-        let snap = self.state.snapshot();
-        let mut tools = selfadmin::list(snap.settings.self_admin);
-        retain_enabled(&snap, &mut tools);
-        tools
+    fn list_tools<'a>(&'a self) -> Erased<'a, Vec<Value>> {
+        Box::pin(async move {
+            let snap = self.state.snapshot();
+            let mut tools = selfadmin::list(snap.settings.self_admin);
+            retain_enabled(&snap, &mut tools);
+            tools
+        })
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
         args: Option<Map<String, Value>>,
-    ) -> Result<Value, CallError> {
-        let started = Instant::now();
-        // Not a self-admin name: on this plane that is a lookup miss, not a
-        // routing hint. Sending it to the aggregate would quietly re-merge the
-        // two planes the split exists to keep apart.
-        if !selfadmin::owns(name) {
-            let e = CallError::ToolNotFound(name.to_string());
-            record_mcp_call(
-                &self.state,
-                &self.ctx,
-                name,
-                None,
-                started,
-                CallOutcome::Failed(&e),
-            )
-            .await;
-            return Err(e);
-        }
-        if let Some(e) = disabled(&self.state, name) {
-            record_mcp_call(
-                &self.state,
-                &self.ctx,
-                name,
-                None,
-                started,
-                CallOutcome::Failed(&e),
-            )
-            .await;
-            return Err(e);
-        }
-        let result = selfadmin::call(&self.state, name, args).await;
-        let (server, outcome) = match &result {
-            Ok(v) => (
-                Some(SELF_SERVER_NAME.to_string()),
-                CallOutcome::Completed {
-                    tool_error: builtin_tool_error(v),
-                },
-            ),
-            Err(e) => (None, CallOutcome::Failed(e)),
-        };
-        record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
-        result
+    ) -> Erased<'a, Result<Value, CallError>> {
+        Box::pin(async move {
+            let started = Instant::now();
+            // Not a self-admin name: on this plane that is a lookup miss, not a
+            // routing hint. Sending it to the aggregate would quietly re-merge the
+            // two planes the split exists to keep apart.
+            if !selfadmin::owns(name) {
+                let e = CallError::ToolNotFound(name.to_string());
+                record_mcp_call(
+                    &self.state,
+                    &self.ctx,
+                    name,
+                    None,
+                    started,
+                    CallOutcome::Failed(&e),
+                )
+                .await;
+                return Err(e);
+            }
+            if let Some(e) = disabled(&self.state, name) {
+                record_mcp_call(
+                    &self.state,
+                    &self.ctx,
+                    name,
+                    None,
+                    started,
+                    CallOutcome::Failed(&e),
+                )
+                .await;
+                return Err(e);
+            }
+            let result = selfadmin::call(&self.state, name, args).await;
+            let (server, outcome) = match &result {
+                Ok(v) => (
+                    Some(SELF_SERVER_NAME.to_string()),
+                    CallOutcome::Completed {
+                        tool_error: builtin_tool_error(v),
+                    },
+                ),
+                Err(e) => (None, CallOutcome::Failed(e)),
+            };
+            record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
+            result
+        })
     }
 }
 
@@ -288,69 +290,86 @@ struct AggregatePlane {
     session: Session,
 }
 
-#[async_trait]
 impl ToolPlane for AggregatePlane {
-    async fn list_tools(&self) -> Vec<Value> {
-        let snap = self.state.snapshot();
-        let agg = self.state.mcp.list_tools(&snap).await;
-        // rmcp `Tool` serializes camelCase (`inputSchema` etc.) — pass through.
-        let mut tools: Vec<Value> = super::docs::list();
-        tools.extend(super::kb::list());
-        // An app-only tool is for an MCP Apps host's views; a client that
-        // declared no such host is offered only what a model may see.
-        tools.extend(
-            agg.tools
-                .iter()
-                .filter(|t| self.session.apps_host || super::resources::model_visible(t))
-                // A switch set under the name a collision moved it from.
-                .filter(|t| !agg.tool_disabled(&snap, t.name.as_ref()))
-                .filter_map(super::tasks::meta::listed)
-                // Whose it is, so a host can route a view's call of it.
-                .map(|mut t| {
-                    server_meta::stamp(&mut t, &agg, &snap);
-                    t
-                }),
-        );
-        retain_enabled(&snap, &mut tools);
-        // The caller's own reach — an agent's manifest, a client key's tool
-        // scope — on top of the owner's switch, so a tool the owner switched
-        // off stays off for a caller whose list names it.
-        let scope = ToolScope::of_request(&self.state, &self.ctx).await;
-        tools.retain(|t| {
-            t.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|n| scope.admits(n))
-        });
-        tools
+    fn list_tools<'a>(&'a self) -> Erased<'a, Vec<Value>> {
+        Box::pin(async move {
+            let snap = self.state.snapshot();
+            let agg = self.state.mcp.list_tools(&snap).await;
+            // rmcp `Tool` serializes camelCase (`inputSchema` etc.) — pass through.
+            let mut tools: Vec<Value> = super::docs::list();
+            tools.extend(super::kb::list());
+            // An app-only tool is for an MCP Apps host's views; a client that
+            // declared no such host is offered only what a model may see.
+            tools.extend(
+                agg.tools
+                    .iter()
+                    .filter(|t| self.session.apps_host || super::resources::model_visible(t))
+                    // A switch set under the name a collision moved it from.
+                    .filter(|t| !agg.tool_disabled(&snap, t.name.as_ref()))
+                    .filter_map(super::tasks::meta::listed)
+                    // Whose it is, so a host can route a view's call of it.
+                    .map(|mut t| {
+                        server_meta::stamp(&mut t, &agg, &snap);
+                        t
+                    }),
+            );
+            retain_enabled(&snap, &mut tools);
+            // The caller's own reach — an agent's manifest, a client key's tool
+            // scope — on top of the owner's switch, so a tool the owner switched
+            // off stays off for a caller whose list names it.
+            let scope = ToolScope::of_request(&self.state, &self.ctx).await;
+            tools.retain(|t| {
+                t.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| scope.admits(n))
+            });
+            tools
+        })
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
         args: Option<Map<String, Value>>,
-    ) -> Result<Value, CallError> {
-        let started = Instant::now();
-        // The caller's own reach first, re-checked rather than trusted from
-        // the list, because a list is a snapshot and a call is not (§3.1).
-        // First, too, so that a name outside it answers the same whatever the
-        // owner's switch says about it — "disabled" would confirm the tool
-        // exists to a caller that is not meant to know.
-        //
-        // `lmgw__*` is skipped here so the "they moved to /mcp/admin" hint
-        // below still reaches every caller. Nothing is widened by that: the
-        // reserved namespace is off this plane for every caller, and no list
-        // can put it back — a scoped caller gets the same refusal everyone
-        // else does, with the one sentence that explains it.
-        //
-        // The server the name routed to as the scope admitted it is the one
-        // it runs on (`ToolScope::routed`): a name that changed hands since
-        // — to a device this caller does not reach — is refused, not run.
-        let mut routed = None;
-        if !selfadmin::owns(name) {
-            let scope = ToolScope::of_request(&self.state, &self.ctx).await;
-            routed = scope.routed(name);
-            if !scope.admits(name) {
-                let e = CallError::ToolNotFound(scope.refusal(name));
+    ) -> Erased<'a, Result<Value, CallError>> {
+        Box::pin(async move {
+            let started = Instant::now();
+            // The caller's own reach first, re-checked rather than trusted from
+            // the list, because a list is a snapshot and a call is not (§3.1).
+            // First, too, so that a name outside it answers the same whatever the
+            // owner's switch says about it — "disabled" would confirm the tool
+            // exists to a caller that is not meant to know.
+            //
+            // `lmgw__*` is skipped here so the "they moved to /mcp/admin" hint
+            // below still reaches every caller. Nothing is widened by that: the
+            // reserved namespace is off this plane for every caller, and no list
+            // can put it back — a scoped caller gets the same refusal everyone
+            // else does, with the one sentence that explains it.
+            //
+            // The server the name routed to as the scope admitted it is the one
+            // it runs on (`ToolScope::routed`): a name that changed hands since
+            // — to a device this caller does not reach — is refused, not run.
+            let mut routed = None;
+            if !selfadmin::owns(name) {
+                let scope = ToolScope::of_request(&self.state, &self.ctx).await;
+                routed = scope.routed(name);
+                if !scope.admits(name) {
+                    let e = CallError::ToolNotFound(scope.refusal(name));
+                    record_mcp_call(
+                        &self.state,
+                        &self.ctx,
+                        name,
+                        None,
+                        started,
+                        CallOutcome::Failed(&e),
+                    )
+                    .await;
+                    return Err(e);
+                }
+            }
+            // The owner's per-tool switch, ahead of every route below: a name that
+            // is off is off whether it belongs to a built-in or to a server.
+            if let Some(e) = disabled(&self.state, name) {
                 record_mcp_call(
                     &self.state,
                     &self.ctx,
@@ -362,127 +381,113 @@ impl ToolPlane for AggregatePlane {
                 .await;
                 return Err(e);
             }
-        }
-        // The owner's per-tool switch, ahead of every route below: a name that
-        // is off is off whether it belongs to a built-in or to a server.
-        if let Some(e) = disabled(&self.state, name) {
-            record_mcp_call(
-                &self.state,
-                &self.ctx,
-                name,
-                None,
-                started,
-                CallOutcome::Failed(&e),
-            )
-            .await;
-            return Err(e);
-        }
-        // The knowledge bases shared on `/mcp` (chat-complete §9.4): only
-        // the `mcp_visible` ones exist here.
-        // A device's retrieval is charged to it (review W3-3); any other
-        // key's stays the gateway's own.
-        let charged = crate::devices::charged(&self.ctx);
-        if super::kb::owns(name) {
-            let result = super::kb::call(
-                &self.state,
-                name,
-                args,
-                &super::kb::KbAccess::McpVisible,
-                (None, charged.as_ref()),
-            )
-            .await;
-            let (server, outcome) = match &result {
-                Ok(v) => (
-                    Some(super::exec::KB_SERVER.to_string()),
-                    CallOutcome::Completed {
-                        tool_error: builtin_tool_error(v),
-                    },
-                ),
-                Err(e) => (None, CallOutcome::Failed(e)),
-            };
-            record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
-            return result;
-        }
-        if super::docs::owns(name) {
-            let result = super::docs::call(
-                &self.state,
-                name,
-                args,
-                self.session.client_name.as_deref(),
-                charged.as_ref(),
-            )
-            .await;
-            let (server, outcome) = match &result {
-                Ok(v) => (
-                    Some(DOCS_SERVER_NAME.to_string()),
-                    CallOutcome::Completed {
-                        tool_error: builtin_tool_error(v),
-                    },
-                ),
-                Err(e) => (None, CallOutcome::Failed(e)),
-            };
-            record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
-            return result;
-        }
-        // A self-admin name reaching this plane is a client that has not been
-        // told the tools moved. Answer with where they went rather than a bare
-        // "unknown tool", which would read as "lmgw broke".
-        if selfadmin::owns(name) {
-            let e = CallError::ToolNotFound(format!(
-                "{name} — the lmgw__* self-admin tools are no longer served on /mcp; \
+            // The knowledge bases shared on `/mcp` (chat-complete §9.4): only
+            // the `mcp_visible` ones exist here.
+            // A device's retrieval is charged to it (review W3-3); any other
+            // key's stays the gateway's own.
+            let charged = crate::devices::charged(&self.ctx);
+            if super::kb::owns(name) {
+                let result = super::kb::call(
+                    &self.state,
+                    name,
+                    args,
+                    &super::kb::KbAccess::McpVisible,
+                    (None, charged.as_ref()),
+                )
+                .await;
+                let (server, outcome) = match &result {
+                    Ok(v) => (
+                        Some(super::exec::KB_SERVER.to_string()),
+                        CallOutcome::Completed {
+                            tool_error: builtin_tool_error(v),
+                        },
+                    ),
+                    Err(e) => (None, CallOutcome::Failed(e)),
+                };
+                record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
+                return result;
+            }
+            if super::docs::owns(name) {
+                let result = super::docs::call(
+                    &self.state,
+                    name,
+                    args,
+                    self.session.client_name.as_deref(),
+                    charged.as_ref(),
+                )
+                .await;
+                let (server, outcome) = match &result {
+                    Ok(v) => (
+                        Some(DOCS_SERVER_NAME.to_string()),
+                        CallOutcome::Completed {
+                            tool_error: builtin_tool_error(v),
+                        },
+                    ),
+                    Err(e) => (None, CallOutcome::Failed(e)),
+                };
+                record_mcp_call(&self.state, &self.ctx, name, server, started, outcome).await;
+                return result;
+            }
+            // A self-admin name reaching this plane is a client that has not been
+            // told the tools moved. Answer with where they went rather than a bare
+            // "unknown tool", which would read as "lmgw broke".
+            if selfadmin::owns(name) {
+                let e = CallError::ToolNotFound(format!(
+                    "{name} — the lmgw__* self-admin tools are no longer served on /mcp; \
                  they moved to /mcp/admin, which needs the owner:self-admin key \
                  from Usage → Keys"
-            ));
-            record_mcp_call(
-                &self.state,
-                &self.ctx,
-                name,
-                None,
-                started,
-                CallOutcome::Failed(&e),
-            )
-            .await;
-            return Err(e);
-        }
-
-        let snap = self.state.snapshot();
-        // `call` resolves the owning server while routing and hands its name back
-        // (errors carry it too) — so the log path labels the row without a second
-        // O(tools) aggregate rebuild (§10).
-        let from = super::host::CallFrom::of(&self.ctx);
-        let routed = match routed {
-            Some(server) => {
-                self.state
-                    .mcp
-                    .call_listed(&snap, name, server, args, &from)
-                    .await
+                ));
+                record_mcp_call(
+                    &self.state,
+                    &self.ctx,
+                    name,
+                    None,
+                    started,
+                    CallOutcome::Failed(&e),
+                )
+                .await;
+                return Err(e);
             }
-            None => self.state.mcp.call(&snap, name, args, &from).await,
-        };
-        let (server_name, result): (
-            Option<String>,
-            Result<rmcp::model::CallToolResult, CallError>,
-        ) = match routed {
-            Ok((r, sname)) => (Some(sname), Ok(r)),
-            Err(e) => (e.server().map(str::to_string), Err(e)),
-        };
-        let outcome = match &result {
-            Err(e) => CallOutcome::Failed(e),
-            Ok(r) if r.is_error == Some(true) => CallOutcome::Completed {
-                tool_error: Some(content_preview(r)),
-            },
-            Ok(_) => CallOutcome::Completed { tool_error: None },
-        };
-        record_mcp_call(&self.state, &self.ctx, name, server_name, started, outcome).await;
-        result.map(|r| serde_json::to_value(r).unwrap_or_else(|_| json!({})))
+
+            let snap = self.state.snapshot();
+            // `call` resolves the owning server while routing and hands its name back
+            // (errors carry it too) — so the log path labels the row without a second
+            // O(tools) aggregate rebuild (§10).
+            let from = super::host::CallFrom::of(&self.ctx);
+            let routed = match routed {
+                Some(server) => {
+                    self.state
+                        .mcp
+                        .call_listed(&snap, name, server, args, &from)
+                        .await
+                }
+                None => self.state.mcp.call(&snap, name, args, &from).await,
+            };
+            let (server_name, result): (
+                Option<String>,
+                Result<rmcp::model::CallToolResult, CallError>,
+            ) = match routed {
+                Ok((r, sname)) => (Some(sname), Ok(r)),
+                Err(e) => (e.server().map(str::to_string), Err(e)),
+            };
+            let outcome = match &result {
+                Err(e) => CallOutcome::Failed(e),
+                Ok(r) if r.is_error == Some(true) => CallOutcome::Completed {
+                    tool_error: Some(content_preview(r)),
+                },
+                Ok(_) => CallOutcome::Completed { tool_error: None },
+            };
+            record_mcp_call(&self.state, &self.ctx, name, server_name, started, outcome).await;
+            result.map(|r| serde_json::to_value(r).unwrap_or_else(|_| json!({})))
+        })
     }
 
-    async fn resources(
-        &self,
-        method: &str,
-        params: &Value,
-    ) -> Option<Result<Value, (i64, String)>> {
-        resources::serve(&self.state, &self.ctx, method, params).await
+    fn resources<'a>(
+        &'a self,
+        method: &'a str,
+        params: &'a Value,
+    ) -> Erased<'a, Option<Result<Value, (i64, String)>>> {
+        Box::pin(async move { resources::serve(&self.state, &self.ctx, method, params).await })
     }
 }
 
@@ -765,14 +770,27 @@ async fn dispatch(
                      head), live in their own models directory, and are exposed under the \
                      aux prefix (usually `embed/<id>`). Same path, different target: \
                      `lmgw__hf_add … target=aux`, `lmgw__local_model_plan … target=aux` \
-                     (returns kind, pooling and ctx_size read from the header), \
+                     (returns kind, pooling and ctx_size read from the header, and the \
+                     ubatch_size, batch_size, mmproj_path and backend that an encoder \
+                     reading each input in one ubatch, a decision or a multimodal model \
+                     needs), \
                      `lmgw__aux_model_set action=create`, then `lmgw__local_model_test … \
-                     target=aux` (it embeds or reranks a probe input — an encoder cannot \
-                     generate). Never create a chat-class row for an embedding model, and \
+                     target=aux` (it embeds, reranks or asks one decision question — an \
+                     encoder cannot generate). Never create a chat-class row for an embedding model, and \
                      never copy or hard-link a GGUF between the class directories: \
                      `lmgw__gguf_files target=aux` lists the aux dir, and a file only stays \
                      updatable where the downloader put it. CPU-only placement is \
-                     `--n-gpu-layers 0` in `extra_args`.\n\n\
+                     `backend: \"cpu\"` on the aux row: no VRAM, and it keeps serving under \
+                     the GPU hold. Decision models are the aux class's third kind: a GGUF \
+                     whose header declares `decision.type` plans as kind `decision` and \
+                     answers System One questions, which lmgw serves on `/v1/systemone` \
+                     only. It cannot embed or rerank, and the types that read embeddings \
+                     run llama-server in embedding mode, where it cannot generate either (a \
+                     label-logit type's context still can); never give it a chat row. It \
+                     has a \
+                     prefix of its own, the aux class's `decision_prefix` (usually \
+                     `decide/<id>`), and `embed/<id>` does not reach it; its plan sets \
+                     the ubatch, the batch and, for a small non-causal model, the CPU.\n\n\
                      IMAGE models (stable-diffusion.cpp) are the fourth class and the one \
                      place the hf_add chain does not fit: a pipeline is a diffusion model \
                      (or an all-in-one checkpoint) plus a VAE plus one to three text \
@@ -813,7 +831,8 @@ async fn dispatch(
                      renders.\n\n\
                      If `lmgw__status` reports `vram.hold_active: true`, the GPU is held: \
                      requests to a local model with no configured fallback come back as a 503 \
-                     `gpu_hold`; audio models that run on the CPU keep serving. \
+                     `gpu_hold`; models that run on the CPU (an audio or aux row with backend \
+                     `cpu`) keep serving. \
                      `lmgw__hold_set active=false` releases the hold; \
                      `active=true` engages it and stops idle local containers. The global \
                      fallback (chat-class local models only) is `hold_fallback_alias` on \
@@ -1002,9 +1021,7 @@ async fn mcp_get(
     // so: MCP has no notification for it, and the client's next POST meets
     // the gate's refusal.
     let served_at = ctx.as_ref().and_then(|axum::Extension(ctx)| ctx.served_at);
-    let watch = ctx.and_then(|axum::Extension(ctx)| {
-        crate::devices::watch(&state, &ctx.principal, ctx.revocation_mark)
-    });
+    let watch = ctx.and_then(|axum::Extension(ctx)| crate::devices::watch(&state, &ctx));
     let stream = crate::devices::until_revoked(stream, watch, |_| None);
     // And it ends when the server it came in on stops, likewise without a
     // frame.
@@ -1185,29 +1202,32 @@ mod tests {
     /// live MCP server, no `McpManager`.
     struct FakePlane;
 
-    #[async_trait]
     impl ToolPlane for FakePlane {
-        async fn list_tools(&self) -> Vec<Value> {
-            vec![json!({
-                "name": "time__now",
-                "description": "current time",
-                "inputSchema": { "type": "object", "properties": {} }
-            })]
+        fn list_tools<'a>(&'a self) -> Erased<'a, Vec<Value>> {
+            Box::pin(async move {
+                vec![json!({
+                    "name": "time__now",
+                    "description": "current time",
+                    "inputSchema": { "type": "object", "properties": {} }
+                })]
+            })
         }
 
-        async fn call_tool(
-            &self,
-            name: &str,
+        fn call_tool<'a>(
+            &'a self,
+            name: &'a str,
             _args: Option<Map<String, Value>>,
-        ) -> Result<Value, CallError> {
-            if name == "time__now" {
-                Ok(json!({
-                    "content": [ { "type": "text", "text": "2026-06-30T00:00:00Z" } ],
-                    "isError": false
-                }))
-            } else {
-                Err(CallError::ToolNotFound(name.to_string()))
-            }
+        ) -> Erased<'a, Result<Value, CallError>> {
+            Box::pin(async move {
+                if name == "time__now" {
+                    Ok(json!({
+                        "content": [ { "type": "text", "text": "2026-06-30T00:00:00Z" } ],
+                        "isError": false
+                    }))
+                } else {
+                    Err(CallError::ToolNotFound(name.to_string()))
+                }
+            })
         }
     }
 

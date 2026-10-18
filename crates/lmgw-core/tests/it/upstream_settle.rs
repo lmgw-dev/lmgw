@@ -65,7 +65,7 @@ fn cases() -> Vec<Case> {
             None,
             Some("openai"),
             Some("llama_server"),
-            Ok(((LlamaCpp, LlamaServer, false), "old spelling")),
+            Err("use protocol llama_cpp"),
         ),
         case(
             "create anthropic + llama_server",
@@ -135,7 +135,7 @@ fn cases() -> Vec<Case> {
             Some((Openai, Generic, false)),
             None,
             Some("llama_server"),
-            Ok(((LlamaCpp, LlamaServer, false), "old spelling")),
+            Err("use protocol llama_cpp"),
         ),
         case(
             "gemini row, kind llama_server alone",
@@ -202,6 +202,7 @@ async fn insert(state: &SharedState, name: &str, (protocol, kind, responses): Sh
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: responses,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -239,7 +240,7 @@ async fn via_tool_plane(
     };
     upstream_set(state, patch, RowWriter::Tool)
         .await
-        .map(|v| v["message"].as_str().unwrap().to_string())
+        .map(|v| v.message)
 }
 
 /// The request as the dashboard posts it.
@@ -300,10 +301,9 @@ async fn both_write_paths_settle_protocol_and_kind_row_by_row() {
                 None => stored_by_name(&state, &name).await,
             };
             // What each path answers when there is nothing to add.
-            let plain = match (id, dashboard) {
-                (None, _) => format!("upstream '{name}' created"),
-                (Some(id), false) => format!("upstream {id} updated"),
-                (Some(_), true) => "upstream updated".to_string(),
+            let plain = match id {
+                None => format!("upstream '{name}' created"),
+                Some(_) => format!("upstream '{name}' updated"),
             };
             match c.want {
                 Ok((shape, said)) => {

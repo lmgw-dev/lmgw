@@ -1,6 +1,8 @@
 //! `ops-tools`: southbound MCP servers and the per-tool switch (api-docs
 //! design §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 use crate::openapi::ops::args;
 
@@ -11,10 +13,14 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "mcp_server_set",
         tag: TAG,
         summary: "Create, update, delete, enable, disable or test a southbound MCP server",
-        description: None,
+        description: Some(
+            "Every action answers the server's id and a sentence. `test` connects to the \
+             server and also answers how many tools it lists (`tool_count`); a server that \
+             cannot be reached is an error answer instead.",
+        ),
         tool: Some("lmgw__mcp_server_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::McpServerPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::McpServerSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -32,7 +38,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::tool_set),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

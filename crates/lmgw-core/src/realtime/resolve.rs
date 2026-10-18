@@ -19,9 +19,10 @@
 //!
 //! "A chat alias" is exactly what `POST /v1/chat/completions` accepts at the
 //! gate (`gate::RouteCheck::Text`): a name the snapshot resolves, or a
-//! candidate alias, that is not an image or audio model. Resolving does not
-//! start anything and ignores the GPU hold — a held local model is still a
-//! valid choice, and each model call routes around the hold itself (§9.2).
+//! candidate alias, that is not an image or audio model and not a decision
+//! model, which cannot generate (decision-models design §2.2). Resolving does
+//! not start anything and ignores the GPU hold — a held local model is still
+//! a valid choice, and each model call routes around the hold itself (§9.2).
 
 use crate::config::Snapshot;
 use crate::error::GatewayError;
@@ -107,13 +108,18 @@ pub fn is_openai_realtime_name(name: &str) -> bool {
     n.starts_with("gpt-realtime") || (n.starts_with("gpt-4o") && n.contains("-realtime"))
 }
 
-/// Whether `name` is a chat alias in the sense `/v1/chat/completions` uses.
+/// Whether `name` is a chat alias in the sense `/v1/chat/completions` uses:
+/// both of its guards pass, the media one and the decision one. So a decision
+/// row is never a session's model nor a setting's, and the background warm
+/// never starts its container for a session that would refuse it.
 pub fn is_chat_alias(snap: &Snapshot, name: &str) -> bool {
     if snap.candidate_alias(name).is_some() {
         return true;
     }
-    snap.resolve(name)
-        .is_ok_and(|route| crate::proxy::refuse_media_route(&route, name, super::PATH).is_ok())
+    snap.resolve(name).is_ok_and(|route| {
+        crate::proxy::refuse_media_route(&route, name, super::PATH).is_ok()
+            && crate::proxy::refuse_decision_row(snap, &route, name, Some(super::PATH)).is_ok()
+    })
 }
 
 /// A setting that names an alias must name a chat alias — and when it does

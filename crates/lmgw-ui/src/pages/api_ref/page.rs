@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use serde_json::Value;
 
-use lmgw_api_types::ConnectInfo;
+use lmgw_api_types::{ConnectInfo, SessionView};
 
 use crate::scope::{Latest, Scope};
 use crate::url_state::use_query_signal;
@@ -43,22 +43,11 @@ async fn probe_key(key: &str) -> Option<KeyProbe> {
             ..KeyProbe::default()
         });
     }
-    let v: Value = resp.json().await.ok()?;
+    let v: SessionView = resp.json().await.ok()?;
     Some(KeyProbe {
-        authenticated: v
-            .get("authenticated")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        kind: v
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        name: v
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        authenticated: v.authenticated,
+        kind: v.kind,
+        name: v.name,
         refused: false,
     })
 }

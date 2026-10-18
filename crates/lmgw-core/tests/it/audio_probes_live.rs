@@ -77,7 +77,7 @@ const SUPERTONIC: (&str, &str) = ("supertonic", "audio-cpp/audio.cpp-gguf/Supert
 /// same package; the test's own row has learned nothing).
 const ASR_MEASURED: Measured = Measured {
     bytes: 3_343_000_000,
-    source: "realtime design §9.4: qwen3-asr-1.7b learned 3.343 GB on an RTX 4090, 2026-10-01",
+    source: "realtime design §9.4: qwen3-asr-1.7b learned 3.343 GB on a 24 GB GPU, 2026-10-01",
 };
 
 fn models_dir() -> Option<PathBuf> {

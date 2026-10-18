@@ -1,40 +1,51 @@
 //! Image lab: the "test the image routes" playground, the Audio lab's sibling
 //! for stable-diffusion.cpp (image-generation design §8). The model picker,
-//! the two panels and the result gallery are the SPA's Image lab page; this
+//! the two panels and the kept history are the SPA's Image lab page; this
 //! module is its server (`/image-lab/api/*`).
 //!
 //! Generation and editing are dispatched **in-process** through the very
 //! handlers that serve `POST /v1/images/generations` and `/v1/images/edits`
-//! ([`proxy::handle_image_generation`] / [`proxy::handle_image_edit`]), so what
+//! ([`crate::proxy::handle_image_generation`] and `handle_image_edit`), so what
 //! the page exercises is the real passthrough — the `resolve_image` guards, the
 //! GPU hold, admission, the model rewrite, sd-server's two error bodies
 //! normalized into the gateway's one envelope, and the `class = image` log row.
 //! Only the auth middleware and the HTTP hop are skipped, the same trade the
 //! Audio lab and `local_model_test` make.
 //!
-//! The request itself is **not** built here: [`ImageGenForm::generation_body`]
+//! Every dispatch is kept in the lab store (labs-store design §5): the page
+//! makes a group of one cell from its form first (`/image-lab/api/groups`,
+//! `/groups/edit`), then runs it (`/groups/{id}/run`), and the run is the
+//! route's answer with each picture an output artifact. An edit's picture
+//! and mask are the group's input artifacts.
+//!
+//! The request itself is **not** built here: `ImageGenForm::generation_body`
 //! lives in `lmgw-api-types` because the page's "Request" panel has to show the
 //! document this module dispatches, byte for byte. What is built here is the
 //! multipart — a browser upload arrives as two files plus a JSON form, and the
 //! edits route wants one `multipart/form-data` body with `model` in it.
 
-use axum::body::Body;
-use axum::extract::{Multipart, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lmgw_api_types::image_lab::{
-    ImageEditField, ImageEditFile, ImageEditResult, ImageEditSummary, ImageGenForm,
-    ImageGenerateResult, ImageLabModel, ImageLabModels, EDITS_ENDPOINT, GENERATIONS_ENDPOINT,
+    ImageLabModel, ImageLabModels, EDITS_ENDPOINT, GENERATIONS_ENDPOINT,
 };
-use serde_json::Value;
-use std::collections::BTreeMap;
 
 use crate::capabilities::exposed::exposed_entries;
-use crate::error::GatewayError;
-use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
-use lmgw_api_types::OpenAiError;
+
+/// `POST /image-lab/api/groups`, `/groups/edit` and `/groups/{id}/run`: the
+/// form kept as a group, then turned into the request, dispatched and kept
+/// as its run.
+mod dispatch;
+/// Recording a dispatch's answer as the group's run, and the answer.
+mod kept;
+/// The multipart body an edit is relayed as.
+mod multipart;
+/// A generation's pictures found in the route's answer.
+mod outputs;
+
+pub use dispatch::{create_edit, create_generate, run};
 
 // ---------------------------------------------------------------------------
 // Model list
@@ -105,314 +116,4 @@ pub async fn list_models(State(state): State<SharedState>) -> Response {
         hold: snap.settings.hold.active,
     })
     .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// The routes under test
-// ---------------------------------------------------------------------------
-
-/// The `x-lmgw-*` headers the gateway stamped on its own answer — which model
-/// really served the request (a hold fallback names itself here), which
-/// upstream, how long it took. Relayed beside the body because the lab wraps
-/// the success case and would otherwise drop them.
-fn gateway_headers(h: &HeaderMap) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for (name, value) in h {
-        let name = name.as_str();
-        if let (true, Ok(v)) = (name.starts_with("x-lmgw-"), value.to_str()) {
-            out.insert(name.to_string(), v.to_string());
-        }
-    }
-    out
-}
-
-/// What a dispatch answered, for the page: the gateway's headers and the
-/// parsed body of a success.
-struct Dispatched {
-    headers: BTreeMap<String, String>,
-    response: Value,
-    latency_ms: u64,
-}
-
-/// Run one in-process dispatch and read its answer for the page.
-///
-/// A success is wrapped by the caller — `{endpoint, request, latency_ms,
-/// headers, response}` — because the page shows what was sent next to what
-/// came back. A failure is **not**: the status, the headers and the body go
-/// back exactly as the handler produced them, so what the lab displays is the
-/// envelope a client would have received, down to the `code`. A lab that
-/// re-wrapped errors would be showing its own error handling rather than the
-/// gateway's.
-async fn dispatched(resp: Response, latency_ms: u64) -> Result<Dispatched, Response> {
-    let status = resp.status();
-    let (parts, body) = resp.into_parts();
-    // Unbounded, like the route: a 4096² PNG is the size it is.
-    let raw = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(b) => b,
-        Err(e) => {
-            let err = GatewayError::Internal(format!("reading the image response: {e}"));
-            return Err((err.http_status(), Json(err.to_openai_json())).into_response());
-        }
-    };
-    if !status.is_success() {
-        return Err((parts, raw).into_response());
-    }
-    Ok(Dispatched {
-        headers: gateway_headers(&parts.headers),
-        response: serde_json::from_slice(&raw).unwrap_or(Value::Null),
-        latency_ms,
-    })
-}
-
-/// A form that does not describe a request at all — a missing prompt, a
-/// step count that is not a number. Shaped like the gateway's envelope so the
-/// page has one error renderer, and 400 because it never left the browser.
-fn bad_form(message: String) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(OpenAiError::new(
-            message,
-            "invalid_request_error",
-            "image_lab_form",
-        )),
-    )
-        .into_response()
-}
-
-/// `POST /image-lab/api/generate` — the page's structured form, turned into the
-/// exact `/v1/images/generations` body and handed to that route's handler.
-pub async fn generate(
-    State(state): State<SharedState>,
-    Json(form): Json<ImageGenForm>,
-) -> Response {
-    let body = match form.generation_body() {
-        Ok(b) => b,
-        Err(e) => return bad_form(e),
-    };
-    let started = std::time::Instant::now();
-    let resp = proxy::handle_image_generation(state, RequestCtx::default(), body.clone()).await;
-    let ms = started.elapsed().as_millis() as u64;
-    match dispatched(resp, ms).await {
-        Ok(d) => Json(ImageGenerateResult {
-            endpoint: GENERATIONS_ENDPOINT.into(),
-            request: body,
-            latency_ms: d.latency_ms,
-            headers: d.headers,
-            response: d.response,
-        })
-        .into_response(),
-        Err(failed) => failed,
-    }
-}
-
-/// `POST /image-lab/api/edit` — the browser's upload (`form` as JSON, `image`,
-/// and optionally `mask`) re-assembled into the one multipart body
-/// `/v1/images/edits` accepts, and handed to that route's handler.
-///
-/// The re-assembly is the point: the edits route is multipart-only (§14, WP2)
-/// and reads `model` out of the form to resolve the alias, so the page cannot
-/// simply post its JSON and attach files. It uploads the parts; this builds the
-/// request a Python client would have built.
-pub async fn edit(State(state): State<SharedState>, mut mp: Multipart) -> Response {
-    let mut form: Option<ImageGenForm> = None;
-    let mut files: Vec<(String, String, Option<String>, Vec<u8>)> = Vec::new();
-    loop {
-        let field = match mp.next_field().await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => return bad_form(format!("invalid multipart body: {e}")),
-        };
-        let name = field.name().unwrap_or_default().to_string();
-        // Dispatched on the **field name**, never on whether a filename could
-        // be parsed out of the header: `image` and `mask` are the upload, and
-        // a part whose `filename="…\"` the parser hands back as `None` (a
-        // trailing backslash is an unterminated escape) is still the picture
-        // the owner chose. Read the other way round it was dropped, and the
-        // page answered "an edit needs an image to edit".
-        match name.as_str() {
-            "image" | "mask" => {
-                let file_name = field
-                    .file_name()
-                    .map(String::from)
-                    // Something has to go in the relayed part's `filename`.
-                    // The field name is the honest stand-in: sd-server reads
-                    // the bytes, not the name.
-                    .unwrap_or_else(|| name.clone());
-                let ct = field.content_type().map(String::from);
-                match field.bytes().await {
-                    Ok(b) => files.push((name, file_name, ct, b.to_vec())),
-                    Err(e) => return bad_form(format!("reading upload: {e}")),
-                }
-            }
-            "form" => {
-                let text = match field.text().await {
-                    Ok(t) => t,
-                    Err(e) => return bad_form(format!("reading the form field: {e}")),
-                };
-                match serde_json::from_str(&text) {
-                    Ok(f) => form = Some(f),
-                    Err(e) => return bad_form(format!("the form field is not valid JSON: {e}")),
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(form) = form else {
-        return bad_form("no `form` field in the upload".into());
-    };
-    let fields = match form.edit_fields() {
-        Ok(f) => f,
-        Err(e) => return bad_form(e),
-    };
-    if !files.iter().any(|(n, ..)| n == "image") {
-        return bad_form("an edit needs an image to edit — pick one".into());
-    }
-
-    // The summary the page shows beside the result: the text fields as sent,
-    // plus each file part by name and size. Built from the same `fields` the
-    // body is, so it cannot describe a request that was not made.
-    let request = ImageEditSummary {
-        fields: fields
-            .iter()
-            .map(|(k, v)| ImageEditField {
-                name: k.clone(),
-                value: v.clone(),
-            })
-            .collect(),
-        files: files
-            .iter()
-            .map(|(n, f, ct, b)| ImageEditFile {
-                name: n.clone(),
-                filename: f.clone(),
-                content_type: ct.clone(),
-                bytes: b.len(),
-            })
-            .collect(),
-    };
-
-    let boundary = format!("lmgwimagelab{}", super::rand_hex32());
-    let body = multipart_body(&boundary, &fields, &files);
-    let req = match axum::http::Request::builder()
-        .method("POST")
-        .uri(EDITS_ENDPOINT)
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={boundary}"),
-        )
-        .body(Body::from(body))
-    {
-        Ok(r) => r,
-        Err(e) => return bad_form(format!("building the multipart request: {e}")),
-    };
-    let started = std::time::Instant::now();
-    let resp = proxy::handle_image_edit(state, RequestCtx::default(), req).await;
-    let ms = started.elapsed().as_millis() as u64;
-    match dispatched(resp, ms).await {
-        Ok(d) => Json(ImageEditResult {
-            endpoint: EDITS_ENDPOINT.into(),
-            request,
-            latency_ms: d.latency_ms,
-            headers: d.headers,
-            response: d.response,
-        })
-        .into_response(),
-        Err(failed) => failed,
-    }
-}
-
-/// Serialize one `multipart/form-data` body: the text fields in the order the
-/// form lists them, then the file parts.
-///
-/// Hand-written because the destination is an in-process [`axum::extract::Request`]
-/// rather than an outgoing reqwest call — `reqwest::multipart::Form` can only
-/// be handed to a `RequestBuilder`, and `proxy::handle_image_edit` takes the
-/// request a client would have sent.
-fn multipart_body(
-    boundary: &str,
-    fields: &[(String, String)],
-    files: &[(String, String, Option<String>, Vec<u8>)],
-) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::new();
-    for (name, value) in fields {
-        out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        out.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
-        );
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
-    for (name, file_name, ct, bytes) in files {
-        out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        out.extend_from_slice(
-            format!(
-                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{}\"\r\n",
-                // Both characters that can end a quoted string early: a `"`
-                // closes it, and a trailing `\` escapes the quote that would
-                // have. Dropped rather than escaped, because the name is a
-                // label here — the bytes are the upload.
-                file_name.replace(['"', '\\'], "")
-            )
-            .as_bytes(),
-        );
-        let ct = ct.as_deref().unwrap_or("application/octet-stream");
-        out.extend_from_slice(format!("Content-Type: {ct}\r\n\r\n").as_bytes());
-        out.extend_from_slice(bytes);
-        out.extend_from_slice(b"\r\n");
-    }
-    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_multipart_carries_every_field_and_file() {
-        let fields = vec![
-            ("model".to_string(), "image/z".to_string()),
-            ("prompt".to_string(), "make it night".to_string()),
-        ];
-        let files = vec![(
-            "image".to_string(),
-            "in.png".to_string(),
-            Some("image/png".to_string()),
-            b"\x89PNGfake".to_vec(),
-        )];
-        let body = multipart_body("BOUND", &fields, &files);
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.starts_with("--BOUND\r\n"));
-        assert!(text.contains("name=\"model\"\r\n\r\nimage/z\r\n"));
-        assert!(text.contains("name=\"prompt\"\r\n\r\nmake it night\r\n"));
-        assert!(text.contains("name=\"image\"; filename=\"in.png\""));
-        assert!(text.contains("Content-Type: image/png"));
-        assert!(text.ends_with("--BOUND--\r\n"));
-    }
-
-    /// Neither a quote nor a backslash in a file name can close the header
-    /// and inject a part of its own — a trailing `\` would escape the quote
-    /// that ends `filename="…"`, which is the same break-out by another route.
-    #[test]
-    fn a_quoted_or_escaped_file_name_cannot_break_out_of_its_header() {
-        let files = vec![(
-            "image".to_string(),
-            "a\"; name=\"model".to_string(),
-            None,
-            vec![1, 2, 3],
-        )];
-        let body = multipart_body("BOUND", &[], &files);
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("filename=\"a; name=model\""));
-        assert_eq!(text.matches("name=\"image\"").count(), 1);
-
-        let files = vec![(
-            "image".to_string(),
-            "shot\\".to_string(),
-            None,
-            vec![1, 2, 3],
-        )];
-        let text = String::from_utf8_lossy(&multipart_body("BOUND", &[], &files)).to_string();
-        assert!(text.contains("filename=\"shot\"\r\n"), "{text}");
-        assert!(!text.contains('\\'), "{text}");
-    }
 }

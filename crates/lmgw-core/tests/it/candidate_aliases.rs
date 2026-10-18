@@ -134,7 +134,7 @@ fn full_row(id: &str) -> NewLocalModel {
 }
 
 async fn create(state: &SharedState, p: CandidateAliasPatch) -> Result<serde_json::Value, String> {
-    ops::candidate_alias_set(state, p).await
+    ops::backends::to_json(ops::candidate_alias_set(state, p).await)
 }
 
 fn patch(action: &str, alias: &str, candidates: &str) -> CandidateAliasPatch {
@@ -173,7 +173,7 @@ async fn a_new_alias_enables_every_common_facet() {
     for f in Facet::ALL {
         assert!(enabled.contains(&f.as_str().to_string()), "{enabled:?}");
     }
-    assert_eq!(out["routable"], json!(["m1", "m2"]));
+    assert_eq!(out["routable_candidates"], json!(["m1", "m2"]));
 }
 
 #[tokio::test]
@@ -447,6 +447,7 @@ async fn a_candidate_alias_cannot_take_an_existing_plain_aliass_name_case_insens
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -498,6 +499,7 @@ async fn a_shadowed_plain_alias_stays_editable() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -550,7 +552,7 @@ async fn a_shadowed_plain_alias_stays_editable() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
 
     // ...and neither must an unrelated update (no rename) once it is back
     // on.
@@ -564,7 +566,7 @@ async fn a_shadowed_plain_alias_stays_editable() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
 }
 
 #[tokio::test]
@@ -585,6 +587,7 @@ async fn a_candidate_alias_cannot_take_an_existing_plain_aliass_name() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -708,6 +711,7 @@ async fn request_fallback_reads_the_alias_fallback_for_a_candidate_alias_name() 
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -884,7 +888,7 @@ async fn ops_models_kind_alias_lists_candidate_aliases_alongside_plain_ones() {
         .await
         .unwrap();
 
-    let out = ops::models(&state, Some("alias"), None).await.unwrap();
+    let out = ops::backends::to_json(ops::models(&state, Some("alias"), None).await).unwrap();
     let entries = out["models"].as_array().unwrap();
     let found = entries
         .iter()

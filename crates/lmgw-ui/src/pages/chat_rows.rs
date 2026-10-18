@@ -144,9 +144,10 @@ pub(super) fn appended(
 
 #[cfg(test)]
 mod tests {
-    use super::super::chat::{new_msg, Attachment, ToolCard};
+    use super::super::chat::{new_msg, ToolCard};
     use super::super::chat_retrieval::KbContext;
     use super::*;
+    use lmgw_api_types::chat_threads::AttachmentMeta;
 
     /// A reply as the page shows it after its own turn: thinking, counts,
     /// the alias that answered, a note, a tool card and a retrieval.
@@ -157,7 +158,7 @@ mod tests {
         m.model.set(Some("a".into()));
         m.answered_by.set(Some("b".into()));
         m.images_note.set(Some("the images were described".into()));
-        m.attachments.set(vec![Attachment::default()]);
+        m.attachments.set(vec![AttachmentMeta::default()]);
         m.context.set(Some(KbContext {
             query: "q".into(),
             ..Default::default()

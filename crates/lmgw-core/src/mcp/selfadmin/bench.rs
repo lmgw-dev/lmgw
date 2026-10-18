@@ -5,6 +5,7 @@
 //! `lmgw__bench_run` leaves the timeline out unless asked.
 
 use lmgw_api_types::bench::Phase;
+use lmgw_api_types::WithNextStep;
 use serde_json::{Map, Value};
 
 use crate::ops::{self, bench};
@@ -24,9 +25,8 @@ pub(super) async fn run(
         "lmgw__bench_start" => {
             phases_to_array(&mut a)?;
             let started = bench::bench_start(state, ops::patch_from_args(Some(a))?).await?;
-            let mut v = ops::backends::to_json(Ok(started.clone()))?;
-            v["next_step"] = bench::start_next_step(&started);
-            Ok(v)
+            let next_step = bench::start_next_step(&started);
+            ops::backends::to_json(Ok(WithNextStep::new(started, next_step)))
         }
         "lmgw__bench_runs" => {
             ops::backends::to_json(bench::bench_runs(state, ops::patch_from_args(Some(a))?).await)

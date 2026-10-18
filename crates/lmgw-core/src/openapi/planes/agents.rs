@@ -40,6 +40,7 @@ fn base(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
@@ -190,6 +191,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             description: "Opens a run from outside lmgw, exactly as the manifest's own \
                 trigger would. An agent has at most one live run: a second open while one is live \
                 is refused with the running job's id.",
+            errors: &[(409, |g| g.root_schema_for::<dto::AgentRunConflict>())],
             request: Req::Json(|g| g.root_schema_for::<OpenBody>()),
             response: Resp::Json(|g| g.root_schema_for::<dto::AgentRunOpened>()),
             ..base(

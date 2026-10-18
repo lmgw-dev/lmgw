@@ -45,7 +45,7 @@ async fn without_gpu_telemetry_admission_is_inactive_and_still_starts_the_contai
     );
 
     // The same figures reach the tool plane, which is where an agent looks.
-    let status = lmgw_core::ops::status(&f.state).await.unwrap();
+    let status = lmgw_core::ops::backends::to_json(lmgw_core::ops::status(&f.state).await).unwrap();
     assert_eq!(status["vram"]["active"], false);
     assert!(status["vram"]["inactive_reason"].is_string());
 }

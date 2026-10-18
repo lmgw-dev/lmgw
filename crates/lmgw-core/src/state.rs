@@ -81,6 +81,10 @@ pub struct AppState {
     /// gateway answers it, and two gateways in one test process must not
     /// exchange each other's.
     pub login_nonces: crate::web::session::LoginNonces,
+    /// The lab cells being answered now (labs-store design §2.6): a second
+    /// post of one is the lab's 409, not a second dispatch. Here rather than
+    /// in a `static` for [`Self::agent_ledger`]'s reason.
+    pub lab_cells: crate::labs::claims::CellClaims,
     /// What each open run has spent on traffic that stamped itself with
     /// `X-Lmgw-Run` (§3.1). An in-process run meters itself; a container's own
     /// `/v1` and `/mcp` calls arrive as ordinary requests and are folded in
@@ -240,6 +244,10 @@ pub struct AppState {
     /// when the server it was opened on stops, so a graceful shutdown does
     /// not wait on a client that stays.
     pub stops: crate::server::Stops,
+    /// WebRTC calls (calls design §3): the UDP socket groups, the driver
+    /// that owns every call, the registry of live calls. In-process, like
+    /// the stops: a call is live state.
+    pub calls: crate::realtime::calls::Calls,
     /// This state's own `Weak`, set once the `Arc` exists: what a registry's
     /// hooks reach the state through ([`Self::wire_runtime`]) without a cycle.
     me: std::sync::OnceLock<std::sync::Weak<AppState>>,
@@ -313,6 +321,15 @@ pub(crate) enum KeyWritten {
     },
     /// A device's admin-tools level (`ApiKey::self_admin`).
     SelfAdmin(crate::config::DeviceAdmin),
+    /// A device's key ended (a new token that ends it, the CA's rotation):
+    /// it waits for its next enrolment (device link design §5.2).
+    Pending,
+    /// A device's waiting key was confirmed in place of the one it kept
+    /// (device link design §3.5, §5.2): `key_hash` is the row's key now,
+    /// confirmed, and the kept one opens nothing.
+    Confirmed {
+        key_hash: String,
+    },
 }
 
 /// Whether `LMGW_DEV` marks this process as a dev instance. Unset, empty,
@@ -329,6 +346,24 @@ fn dev_flag(v: Option<&str>) -> bool {
         None => false,
         Some(v) => !matches!(v.as_str(), "" | "0" | "false" | "no" | "off"),
     }
+}
+
+/// Where a start keeps the device CA's wrapping key (device link design
+/// D2): production's start, the session's Secret Service; a dev instance
+/// (`dev`: the headless runner, a debug build, `LMGW_DEV`), none, so its
+/// key stays plain in its own data dir as a headless start's does.
+///
+/// A dev instance runs in the user's desktop session, and the session bus
+/// there is the owner's real wallet's whatever its environment says: zbus takes an
+/// unset `DBUS_SESSION_BUS_ADDRESS` to mean `$XDG_RUNTIME_DIR/bus`, and a
+/// private bus activates a Secret Service of its own on the user's keyring files.
+/// So the rule is the start's, not the environment's; the bus itself stays
+/// as it is, rootless podman's systemd cgroup manager needing it.
+fn wrap_key_store(dev: bool) -> Option<Arc<dyn crate::devices::tls::WrapKeyStore>> {
+    (!dev).then(|| {
+        Arc::new(crate::devices::tls::SecretServiceStore)
+            as Arc<dyn crate::devices::tls::WrapKeyStore>
+    })
 }
 
 /// XDG data dir for lmgw (`~/.local/share/lmgw`).
@@ -416,13 +451,22 @@ impl AppState {
     /// asked podman would be asking about the installed app's containers
     /// (chat-voice WP5 review B1).
     pub async fn init_with(data_dir: PathBuf, dev: bool) -> anyhow::Result<SharedState> {
-        Self::init_with_host(
+        let state = Self::init_with_host(
             data_dir,
             dev,
             Arc::new(runtime::registry::TokioRunner),
             crate::vram::detect_probe(),
         )
-        .await
+        .await?;
+        match wrap_key_store(dev) {
+            Some(store) => state.devices.trust.set_store(store),
+            None => tracing::info!(
+                "a dev instance never asks the desktop's Secret Service: the device CA's key, \
+                 once the device listener makes one, is kept plain (0600) in {}",
+                state.data_dir.join(crate::devices::tls::TLS_DIR).display()
+            ),
+        }
+        Ok(state)
     }
 
     /// [`Self::init_with`], reaching podman through `runner` and the GPU
@@ -464,6 +508,13 @@ impl AppState {
             Ok(n) => tracing::info!("closed {n} job(s) interrupted by the last shutdown"),
             Err(e) => tracing::warn!("closing interrupted jobs: {e}"),
         }
+        // A set run a crash left half written (labs-store design §3.5): its
+        // row is not ready, so nothing lists or runs it; its items go too.
+        match store::delete_unready_lab_batches(&db).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("deleted {n} set run(s) the last shutdown left half written"),
+            Err(e) => tracing::warn!("deleting half-written set runs: {e}"),
+        }
         // The build runs those jobs were executing (container-builds §5):
         // same residue, same reason, and the run row is what the Backends
         // page shows, so it must not claim to be building forever.
@@ -493,6 +544,7 @@ impl AppState {
         let snapshot = store::load_snapshot(&db)
             .await
             .map_err(|e| anyhow::anyhow!("loading config snapshot: {e}"))?;
+        crate::devices::grant_audit::warn_at_boot(&snapshot.api_keys);
         // A database restored from an older copy is found by the cursors
         // themselves: each names its record's check (review W5-4).
         let chat_feed = crate::web::chat_feed::Feed::new(&snapshot);
@@ -521,6 +573,7 @@ impl AppState {
             agent_runs: Default::default(),
             agent_ledger: Default::default(),
             login_nonces: Default::default(),
+            lab_cells: Default::default(),
             agent_meters: Default::default(),
             agent_services: Default::default(),
             mcp: McpManager::new(),
@@ -539,6 +592,7 @@ impl AppState {
             started_at_utc: chrono::Utc::now(),
             background: Default::default(),
             stops: Default::default(),
+            calls: Default::default(),
             data_dir,
             _test_dir: None,
             settings_write: tokio::sync::Mutex::new(()),
@@ -552,6 +606,12 @@ impl AppState {
             me: Default::default(),
         });
         app.builds.set_instance_id(instance);
+        // The device link's pairing as the store left it (device link design
+        // §2.2, §3.3): the URL hosts every server certificate carries, and the
+        // tokens alive, while which a handshake may come without a
+        // certificate.
+        crate::devices::published(&app, &app.snapshot());
+        crate::devices::tokens::sync(&app).await;
         let _ = app.me.set(Arc::downgrade(&app));
         app.wire_runtime(&app.runtime());
         // Break the handler↔AppState cycle now that the `Arc` exists: the
@@ -711,6 +771,7 @@ impl AppState {
             agent_runs: Default::default(),
             agent_ledger: Default::default(),
             login_nonces: Default::default(),
+            lab_cells: Default::default(),
             agent_meters: Default::default(),
             agent_services: Default::default(),
             mcp: McpManager::new(),
@@ -761,6 +822,7 @@ impl AppState {
             started_at_utc: chrono::Utc::now(),
             background: Default::default(),
             stops: Default::default(),
+            calls: Default::default(),
             _test_dir: Some(TestDir(dir.clone())),
             data_dir: dir,
             settings_write: tokio::sync::Mutex::new(()),
@@ -777,6 +839,12 @@ impl AppState {
             me: Default::default(),
         });
         app.builds.set_instance_id(instance);
+        // The device link's pairing as the store left it (device link design
+        // §2.2, §3.3): the URL hosts every server certificate carries, and the
+        // tokens alive, while which a handshake may come without a
+        // certificate.
+        crate::devices::published(&app, &app.snapshot());
+        crate::devices::tokens::sync(&app).await;
         let _ = app.me.set(Arc::downgrade(&app));
         app.wire_runtime(&app.runtime());
         app.mcp.set_state(&app);
@@ -985,6 +1053,20 @@ impl AppState {
                         }
                     }
                 }
+                KeyWritten::Pending => {
+                    if let Some(k) = next.api_keys.iter_mut().find(|k| k.id == id) {
+                        k.key_hash = crate::config::DeviceLink::pending_hash();
+                        k.link.confirmed_at = None;
+                        k.link.waiting = None;
+                    }
+                }
+                KeyWritten::Confirmed { key_hash } => {
+                    if let Some(k) = next.api_keys.iter_mut().find(|k| k.id == id) {
+                        k.key_hash = key_hash.clone();
+                        k.link.waiting = None;
+                        k.link.confirmed_at = Some(crate::store::stamp(chrono::Utc::now()));
+                    }
+                }
             }
             next
         });
@@ -1155,6 +1237,9 @@ impl AppState {
     pub(crate) async fn publish_snapshot(&self) -> Result<Arc<Snapshot>, GatewayError> {
         let load = self.snapshot_loads.start();
         let snap = self.publish_loaded(load, store::load_snapshot(&self.db).await?);
+        // The server certificates carry every device's URL hosts (device
+        // link design §2.2).
+        crate::devices::published(self, &snap);
         // Every revocation watch re-reads its key in what was just published
         // (client-apps design §1.6): a key disabled, rotated or deleted by any
         // path — the Keys page, an agent's page, a restore — ends the
@@ -1170,7 +1255,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_dir, dev_flag, is_installed_data_dir, AppState};
+    use super::{absolute_dir, dev_flag, is_installed_data_dir, wrap_key_store, AppState};
     use crate::config::SelfAdmin;
     use std::path::{Path, PathBuf};
 
@@ -1258,5 +1343,13 @@ mod tests {
         for on in [Some("1"), Some("true"), Some("yes"), Some("typo")] {
             assert!(dev_flag(on), "{on:?}");
         }
+    }
+
+    /// A dev instance never reaches the desktop's Secret Service (device
+    /// link design D2): it gets no store, so its device CA's key is plain.
+    #[test]
+    fn only_a_production_start_reaches_the_secret_service() {
+        assert!(wrap_key_store(true).is_none());
+        assert!(wrap_key_store(false).is_some());
     }
 }

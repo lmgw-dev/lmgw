@@ -87,23 +87,25 @@ pub struct LocalModelDetail {
     pub model_id: String,
     pub gguf_path: String,
     pub gguf_present: bool,
+    /// The licence the GGUF header states; null when it states none.
+    pub licence: Option<crate::ModelLicence>,
     /// `hf | manual`.
     pub source: String,
     pub mmproj_present: Option<bool>,
     pub draft_present: Option<bool>,
     pub params: LlamaParams,
-    /// One llama-server option per line (round-trips with the patch field).
-    pub extra_args: String,
+    /// One entry per llama-server argument (round-trips with the patch field).
+    pub extra_args: Vec<String>,
     pub idle_seconds: i64,
     pub enabled: bool,
     pub public: bool,
     /// Per-model container image override;
     /// `None` inherits the chat class settings' image.
     pub image: Option<String>,
-    /// Per-model `podman run` args override, one per line — same
-    /// round-trip convention as `extra_args`; `None` inherits the chat class
-    /// settings' `extra_run_args`.
-    pub extra_run_args: Option<String>,
+    /// Per-model `podman run` args override, one entry per argument (round-trips
+    /// with the patch field); `None` inherits the chat class settings'
+    /// `extra_run_args`.
+    pub extra_run_args: Option<Vec<String>>,
     /// Start this model's own container at app launch.
     pub warm_start: bool,
     /// GPU-hold fallback mode (`inherit` | `none` | `alias`) and alias.
@@ -203,8 +205,59 @@ pub struct PlanResult {
     pub params: serde_json::Map<String, serde_json::Value>,
     pub rationale: serde_json::Map<String, serde_json::Value>,
     pub warnings: Vec<String>,
-    pub configured_as: Vec<serde_json::Value>,
+    /// The rows of the planned class already serving this GGUF, each with how
+    /// it differs from the plan. A row's comparison is the plan's own: it
+    /// knows what the plan's raw `params` do not (a tuning the row may take
+    /// further, a projector its args already name, placement left to the
+    /// owner), so an editor refills a saved row from `change`, not `params`.
+    pub configured_as: Vec<ConfiguredAs>,
     pub next_step: String,
+}
+
+/// A configured row already serving the planned GGUF, and how it differs
+/// from the plan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ConfiguredAs {
+    pub model_id: String,
+    /// The row's id in its class's table.
+    pub id: i64,
+    pub enabled: bool,
+    /// Nothing the plan proposes differs from the row.
+    pub in_sync: bool,
+    /// Each field the plan would change on the row.
+    pub change: Vec<PlanChange>,
+    /// Chat rows: settings the row's files cannot support, which `apply`
+    /// clears. Absent on aux rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub unset: Option<Vec<PlanUnset>>,
+    /// The patch for the class's set op that brings the row in line with the
+    /// plan; absent when it is in sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub apply: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// One field a plan would change on a configured row.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PlanChange {
+    pub field: String,
+    /// The row's value now; null when unset.
+    pub current: serde_json::Value,
+    pub planned: serde_json::Value,
+    /// The plan's reason for the planned value; null when it gives none.
+    pub why: Option<String>,
+}
+
+/// One setting a plan would clear on a configured chat row.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PlanUnset {
+    pub field: String,
+    pub current: serde_json::Value,
+    pub why: String,
 }
 
 /// `GET /api/ladder-rung-plan` — one ladder rung's footprint, MTP flag and
@@ -212,7 +265,8 @@ pub struct PlanResult {
 /// cannot compute itself. Per-slot context and switchover are plain
 /// arithmetic the UI does over fields it already holds, capped at
 /// `trained_context` the way llama-server caps every slot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RungPlan {
     pub footprint: RungFootprint,
@@ -221,19 +275,26 @@ pub struct RungPlan {
     /// The weights' trained context (`<arch>.context_length`): llama-server
     /// caps every slot there, and a rung whose per-slot context
     /// is above it is refused. `None` when the header does not say.
-    #[serde(default)]
     pub trained_context: Option<u64>,
 }
 
-/// A model's estimated GPU cost, a documented lower bound (compute/graph buffers and
-/// allocator slack are not in it).
+/// A model's estimated GPU cost. The CUDA context, allocator slack and a
+/// projector's compute buffer are not in it; those are the headroom's.
 // Mirror of `vram::plan::Footprint`; see that module's docs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RungFootprint {
     pub weights_bytes: u64,
+    /// The KV cache, a speculative row's MTP or draft cache and recurrent
+    /// state included.
     pub kv_cache_bytes: u64,
-    /// `weights_bytes + kv_cache_bytes`.
+    /// The compute buffers llama.cpp reserves on the card, derived from the
+    /// header and the row's slots, batch sizes and context: for a chat row
+    /// (a ladder rung) its own context's and its MTP or draft context's,
+    /// summed.
+    pub compute_bytes: u64,
+    /// `weights_bytes + kv_cache_bytes + compute_bytes`.
     pub total_bytes: u64,
     /// Context the KV figure was computed for; `None` when it could not be
     /// derived (also why `kv_cache_bytes` would be 0).

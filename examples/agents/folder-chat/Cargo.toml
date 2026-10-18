@@ -22,7 +22,6 @@ path = "src/main.rs"
 quickdoc-core = { path = "../../../crates/quickdoc-core" }
 # Every shared dependency below is pinned to the line lmgw-core uses, so the
 # workspace keeps one copy of each in the lock.
-async-trait = "0.1.89"
 # The page image a vision model reads goes in a `data:image/png;base64,…` URL
 # (gateway.rs, `read_page`).
 base64 = "0.22.1"

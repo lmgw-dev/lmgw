@@ -353,13 +353,14 @@ fn ladder_note(model: &LocalModel) -> Option<String> {
 // Aux rows
 // ---------------------------------------------------------------------------
 
-/// Notes for an aux (embedding/rerank) row. `projector` is the `--mmproj`
-/// value found in the row's freeform args, `weights_unreadable` says the
-/// caller could not read the GGUF.
+/// Notes for an aux (embedding/rerank/decision) row. `projector` is the
+/// row's projector as the caller found it (`super::aux_projector`, its path as
+/// the container sees it), `summary` the row's GGUF header, `None` when the
+/// caller could not read it.
 pub fn notes_for_aux(
     model: &AuxModel,
-    projector: Option<&str>,
-    weights_unreadable: bool,
+    projector: ProjectorStatus<'_>,
+    summary: Option<&ModelSummary>,
 ) -> Vec<String> {
     let mut out = Vec::new();
     match model.kind {
@@ -374,14 +375,44 @@ pub fn notes_for_aux(
              vector, so lmgw refuses that combination outright."
                 .to_string(),
         ),
+        // The route (decision-models design §2.1, §2.2), and what the header
+        // knows and the engine enforces (§2.9).
+        AuxKind::Decision => {
+            out.push(
+                "Decision model: POST /v1/systemone with a state and typed questions (choice, \
+                 score, noul), answered with calibrated probabilities. It cannot generate, \
+                 embed or rerank, and lmgw refuses those routes for it before its container \
+                 starts; /tokenize and the token counters still answer."
+                    .to_string(),
+            );
+            out.extend(summary.and_then(decision_header_note));
+        }
     }
-    if let Some(path) = projector {
-        out.push(format!(
-            "This is a multimodal embedder: it loads the projector {path}, so its input \
-             modalities beyond text are not published here. Send text, and image_url parts on \
-             /v1/embeddings if your client supports them."
-        ));
+    match (model.kind, projector) {
+        (_, ProjectorStatus::None | ProjectorStatus::SiblingPresentNotConfigured { .. }) => {}
+        (AuxKind::Embed, ProjectorStatus::Configured { path }) => out.push(format!(
+            "This is a multimodal embedder: it loads the projector {path}. Send text, and \
+             image_url parts on /v1/embeddings if your client supports them."
+        )),
+        (AuxKind::Embed, ProjectorStatus::Unreadable { path, err }) => out.push(format!(
+            "This is a multimodal embedder: it loads the projector {path}, which lmgw could not \
+             read ({err}), so its input modalities beyond text are not published here. Send \
+             text, and image_url parts on /v1/embeddings if your client supports them."
+        )),
+        (AuxKind::Decision, ProjectorStatus::Configured { path }) => out.push(format!(
+            "It loads the projector {path}: images go in the request's images array as data \
+             URLs, llama.cpp's extension of System One, and llama.cpp answers 501 for a \
+             decision type that reads none."
+        )),
+        (_, ProjectorStatus::Configured { path }) => {
+            out.push(format!("It loads the projector {path}."))
+        }
+        (_, ProjectorStatus::Unreadable { path, err }) => out.push(format!(
+            "It loads the projector {path}, which lmgw could not read ({err}), so its input \
+             modalities are not published here."
+        )),
     }
+    let weights_unreadable = summary.is_none();
     if weights_unreadable {
         out.push(format!(
             "The model file {} could not be read; everything above comes from this row's \
@@ -390,6 +421,23 @@ pub fn notes_for_aux(
         ));
     }
     out
+}
+
+/// What a decision row's header says and the engine enforces
+/// (decision-models design §2.9): its decision type and, where the header
+/// sets one, the head budget past which llama.cpp truncates a question and
+/// its options. The per-type option limits live in llama.cpp's code, not the
+/// header, so they are not published; llama.cpp's 400 names them.
+fn decision_header_note(s: &ModelSummary) -> Option<String> {
+    let kind = s.decision_type.as_deref()?;
+    Some(match s.decision_max_head_tokens {
+        Some(n) => format!(
+            "Its header declares decision type '{kind}' and decision.max_head_tokens {n}: \
+             llama.cpp truncates a question and its options past {n} tokens. That is the \
+             engine's rule, and lmgw cannot change it."
+        ),
+        None => format!("Its header declares decision type '{kind}'."),
+    })
 }
 
 // ---------------------------------------------------------------------------

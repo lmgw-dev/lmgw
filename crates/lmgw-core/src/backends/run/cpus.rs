@@ -153,6 +153,7 @@ async fn check_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::erased::Erased;
     use crate::runtime::registry::{CmdOutput, CommandRunner};
     use std::sync::Arc;
 
@@ -189,19 +190,24 @@ mod tests {
     /// `podman info` answering with `stdout`, or failing to run.
     struct Info(Option<&'static str>);
 
-    #[async_trait::async_trait]
     impl CommandRunner for Info {
-        async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-            assert_eq!(program, "podman");
-            assert_eq!(args[0], "info", "only the probe runs");
-            match self.0 {
-                Some(out) => Ok(CmdOutput {
-                    status: 0,
-                    stdout: out.into(),
-                    stderr: String::new(),
-                }),
-                None => Err(std::io::Error::other("no podman")),
-            }
+        fn run<'a>(
+            &'a self,
+            program: &'a str,
+            args: &'a [String],
+        ) -> Erased<'a, std::io::Result<CmdOutput>> {
+            Box::pin(async move {
+                assert_eq!(program, "podman");
+                assert_eq!(args[0], "info", "only the probe runs");
+                match self.0 {
+                    Some(out) => Ok(CmdOutput {
+                        status: 0,
+                        stdout: out.into(),
+                        stderr: String::new(),
+                    }),
+                    None => Err(std::io::Error::other("no podman")),
+                }
+            })
         }
     }
 

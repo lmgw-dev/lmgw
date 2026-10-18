@@ -13,6 +13,7 @@ use crate::common;
 
 use std::time::Duration;
 
+use lmgw_api_types::SessionView;
 use lmgw_core::agents::token::{set_owner_key, OWNER_DASHBOARD};
 use lmgw_core::state::AppState;
 use lmgw_core::web::session::{mint_login_nonce, SESSION_MAX_AGE_SECS};
@@ -217,6 +218,12 @@ async fn the_session_route_reports_the_current_principal() {
     assert_eq!(body["authenticated"], json!(true), "{body}");
     assert_eq!(body["kind"], json!("owner"), "{body}");
     assert_eq!(body["name"], json!("owner:dashboard"), "{body}");
+    // The documented type is the answer, key by key.
+    let view = common::round_trips::<SessionView>("owner session", &body);
+    assert_eq!(
+        (view.authenticated, view.kind.as_str(), view.name.as_str()),
+        (true, "owner", "owner:dashboard")
+    );
 
     let resp = browser()
         .get(format!("{gw}/api/session"))
@@ -231,6 +238,9 @@ async fn the_session_route_reports_the_current_principal() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["authenticated"], json!(false), "{body}");
     assert_eq!(body["kind"], json!(""), "{body}");
+    // Nobody signed in is the default view: all three keys, empty.
+    let view = common::round_trips::<SessionView>("anonymous session", &body);
+    assert_eq!(view, SessionView::default());
 }
 
 /// `DELETE` clears it: the same cookie with `Max-Age=0` — the attributes have

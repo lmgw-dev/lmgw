@@ -2,8 +2,9 @@
 //! attribution for the outside-VRAM fallback (candidate-aliases design §4.7).
 //!
 //! The verdict §4.7 wants is "is the memory that is short memory lmgw could
-//! free itself?". The ledger's estimates cannot answer that: they are lower
-//! bounds (weights + KV, no compute buffers), and an underestimated lmgw
+//! free itself?". The ledger's estimates cannot answer that: they leave out
+//! the CUDA context (weights + KV + compute buffers, ~450 MiB short per
+//! container in measurement), and an underestimated lmgw
 //! share reads as outside pressure — which would send to the cloud a request
 //! lmgw could have served. So the share is *measured*: the driver's
 //! per-process figures ([`GpuProbe::processes`](super::GpuProbe::processes))

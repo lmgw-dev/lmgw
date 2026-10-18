@@ -76,7 +76,8 @@ async fn the_setting_defaults_to_off_and_saves_on_both_paths() {
         "off"
     );
     assert_eq!(
-        lmgw_core::ops::settings(&state).await.unwrap()["chat_voice_audio_input"],
+        lmgw_core::ops::backends::to_json(lmgw_core::ops::settings(&state).await).unwrap()
+            ["chat_voice_audio_input"],
         "off"
     );
 
@@ -85,11 +86,8 @@ async fn the_setting_defaults_to_off_and_saves_on_both_paths() {
         .await
         .unwrap();
     assert!(
-        res["changed"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("chat_voice_audio_input")),
-        "{res}"
+        res.changed.iter().any(|c| c == "chat_voice_audio_input"),
+        "{res:?}"
     );
     assert_eq!(state.snapshot().settings.chat_voice_audio_input, "on");
     assert_eq!(
@@ -385,6 +383,7 @@ async fn the_verdict_never_waits_on_a_catalog_it_has_not_read() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

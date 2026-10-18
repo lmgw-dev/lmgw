@@ -1,27 +1,17 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
+use lmgw_api_types::chat::{ThreadList, ThreadRow};
 use lmgw_api_types::AgentDetail;
 
 use super::*;
 use crate::pages::agents::short_ts;
-use crate::pages::chat::ChatThread;
 use crate::pages::usage::money;
 use crate::widgets::ConfirmButton;
 
 // ---------------------------------------------------------------------------
 // Runs / Threads
 // ---------------------------------------------------------------------------
-
-/// `GET /chat/api/threads?archived=all`: the envelope the chat-archive-pin-
-/// attachments backend wraps every thread list in (chat.rs's own
-/// `ThreadsResponse`, but that type is private to this page — the Runs tab
-/// only ever needs the list, never the archived count).
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default)]
-struct ThreadsEnvelope {
-    threads: Vec<ChatThread>,
-}
 
 #[component]
 pub(super) fn RunsTab(
@@ -36,7 +26,7 @@ pub(super) fn RunsTab(
     // The gateway's display currency, so a run's cost reads like every other
     // cost on the dashboard rather than as a bare number.
     let currency = StoredValue::new(d.currency.clone());
-    let threads = RwSignal::new(None::<Result<Vec<ChatThread>, String>>);
+    let threads = RwSignal::new(None::<Result<Vec<ThreadRow>, String>>);
     let load_threads = move || {
         let want = id.get_value();
         spawn_local(async move {
@@ -46,10 +36,10 @@ pub(super) fn RunsTab(
             // idle thread the auto-archive sweep filed away still shows here
             // (it just carries the "archived" mark below) instead of quietly
             // vanishing from its agent's Runs tab.
-            let res = crate::api::get::<ThreadsEnvelope>("/chat/api/threads?archived=all")
+            let res = crate::api::get::<ThreadList>("/chat/api/threads?archived=all")
                 .await
-                .map(|env| {
-                    env.threads
+                .map(|list| {
+                    list.threads
                         .into_iter()
                         .filter(|t| t.agent_id.as_deref() == Some(want.as_str()))
                         .collect::<Vec<_>>()

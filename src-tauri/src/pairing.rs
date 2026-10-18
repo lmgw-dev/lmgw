@@ -9,13 +9,14 @@
 //! **Only the link this process just minted, once** (review W2-1). The
 //! window also hosts the Chat's HTML preview, whose scripts may navigate
 //! their own frame, and the navigation handler cannot tell a frame from the
-//! page. A paired device holds `Chat` and its own key, so "a link carrying
-//! some device's key" would let any device put a link with an address of
-//! its choosing in front of the owner. So a link is handed on only when it
-//! is exactly one `key_create` or `key_rotate` minted in this process and
-//! has not handed off yet (`devices::MintedLinks`): a link replayed from a
-//! preview can then only be the owner's own fresh one, to the address the
-//! owner chose. Every other `lmgw-pair:` navigation is cancelled and dropped.
+//! page. A paired device holds `Chat`, so "a link that looks like a pairing
+//! link" would let any device put a link with an address of its choosing in
+//! front of the owner. So a link is handed on only when it is exactly one
+//! `key_create` or `device_token` minted in this process, has not handed
+//! off yet and its token lives (`devices::MintedLinks`): a link replayed
+//! from a preview can then only be the owner's own fresh one, to the
+//! addresses the owner chose. Every other `lmgw-pair:` navigation is
+//! cancelled and dropped.
 //!
 //! And only to a registered handler: with no client registered for the
 //! scheme, a generic `xdg-open` may fall back to a browser, and the link
@@ -61,34 +62,42 @@ mod tests {
     #[tokio::test]
     async fn only_the_link_just_minted_is_handed_on_and_only_once() {
         let state = lmgw_core::state::AppState::init_for_tests().await.unwrap();
-        let link = |url: &str, key: &str| -> tauri::Url {
-            format!("lmgw-pair:?v=1&url={url}&name=desk&key={key}")
-                .parse()
-                .unwrap()
+        let fp = format!("sha256:{}", "9f".repeat(32));
+        let real = format!("lmgw-enrol-{}", "4b1d".repeat(8));
+        let forged = format!("lmgw-enrol-{}", "0bad".repeat(8));
+        let link = |url: &str, token: &str| -> tauri::Url {
+            format!(
+                "lmgw-pair:?v=2&name=desk&url={url}&fp=sha256%3A{}&token={token}",
+                "9f".repeat(32)
+            )
+            .parse()
+            .unwrap()
         };
         // Registered as `key_create` registers it — `pairing_link`'s own
         // string — and navigated in the form WebKit hands the handler, the
         // parsed one (review W3-15): a normalisation between the two would
         // drop the owner's own link, and this would say so.
-        let raw =
-            lmgw_core::devices::pairing_link("http://127.0.0.1:8001", "desk", "lmgw-device-real");
-        state.devices.minted.register(7, &raw);
-        let minted: tauri::Url = raw.parse().unwrap();
-        assert_eq!(
-            minted,
-            link("http%3A%2F%2F127.0.0.1%3A8001", "lmgw-device-real")
+        let raw = lmgw_core::devices::pairing_link(
+            "desk",
+            &["https://127.0.0.1:8788".to_string()],
+            &fp,
+            &real,
         );
+        let lapses = chrono::Utc::now() + chrono::Duration::minutes(10);
+        state.devices.minted.register(7, &raw, lapses);
+        let minted: tauri::Url = raw.parse().unwrap();
+        assert_eq!(minted, link("https%3A%2F%2F127.0.0.1%3A8788", &real));
 
         let opened = RefCell::new(Vec::<String>::new());
         let open = |u: &str| opened.borrow_mut().push(u.to_string());
         assert!(is_pairing_link(&minted));
 
-        // The same key at another address — what a device's own key in a
-        // preview would carry — and a key nobody minted: dropped.
+        // The same token to another address — what a preview replaying the
+        // owner's link would carry — and a token nobody minted: dropped.
         for url in [
-            link("https%3A%2F%2Fevil.example", "lmgw-device-real"),
-            link("http%3A%2F%2F127.0.0.1%3A8001", "lmgw-device-forged"),
-            "lmgw-pair:?v=1&url=http%3A%2F%2Fevil".parse().unwrap(),
+            link("https%3A%2F%2Fevil.example", &real),
+            link("https%3A%2F%2F127.0.0.1%3A8788", &forged),
+            "lmgw-pair:?v=2&url=https%3A%2F%2Fevil".parse().unwrap(),
         ] {
             hand_off(&url, &state, open);
         }

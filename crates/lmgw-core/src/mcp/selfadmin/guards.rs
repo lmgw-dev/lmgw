@@ -25,17 +25,21 @@ use serde_json::{Map, Value};
 ///   caller's admin tools;
 /// - `bind_addr`: the address lmgw listens on, loopback or the network;
 /// - `agent_origin_suffix`: the names a service agent's UI answers under,
-///   the setting to change for a gateway opened from another box.
+///   the setting to change for a gateway opened from another box;
+/// - `devices`: the device listener, where it listens, and how long a
+///   pairing token and a device's certificate live (device link design
+///   §9.1).
 ///
 /// None is among `lmgw__settings_set`'s fields; they are named here so a
 /// call that asks for one hears why, not that the tool does not know it.
 /// lmgw's CORS policy is fixed (`server.rs`), and the API keys are no
 /// setting: no self-admin tool writes them.
-pub const ACCESS_SETTINGS: [&str; 4] = [
+pub const ACCESS_SETTINGS: [&str; 5] = [
     "auth_enabled",
     "self_admin",
     "bind_addr",
     "agent_origin_suffix",
+    "devices",
 ];
 
 /// Why the call `name(args)` may not run, from any caller: it names an

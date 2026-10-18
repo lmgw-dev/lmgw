@@ -33,6 +33,10 @@ pub enum RevokeReason {
     Rotated,
     Deleted,
     Expired,
+    /// The client certificate the connection was opened with passed its
+    /// `notAfter` (device link design D5, §5.1). Never raised as a signal:
+    /// each watch wakes at its own certificate's date.
+    CertificateExpired,
 }
 
 impl RevokeReason {
@@ -43,6 +47,7 @@ impl RevokeReason {
             Self::Rotated => "rotated",
             Self::Deleted => "deleted",
             Self::Expired => "expired",
+            Self::CertificateExpired => "certificate_expired",
         }
     }
 
@@ -60,6 +65,7 @@ impl RevokeReason {
             Self::Disabled => RevokeKind::DeviceDisabled,
             Self::Expired => RevokeKind::KeyExpired,
             Self::Rotated | Self::Deleted => RevokeKind::KeyUnknown,
+            Self::CertificateExpired => RevokeKind::CertificateExpired,
         }
     }
 
@@ -73,10 +79,14 @@ impl RevokeReason {
         let device = who.starts_with("device '");
         match self {
             Self::Disabled => format!("{who} was disabled"),
-            Self::Rotated if device => format!("{who} was rotated — pair it again"),
+            // A device's key ends by a new token that ends it, an enrolment
+            // that replaced it, or the CA's rotation (device link design
+            // §5.2, §5.5).
+            Self::Rotated if device => format!("the key of {who} was replaced — pair it again"),
             Self::Rotated => format!("{who} was rotated"),
             Self::Deleted => format!("{who} was deleted"),
             Self::Expired => format!("{who} expired"),
+            Self::CertificateExpired => format!("the certificate of {who} expired — pair it again"),
         }
     }
 }
@@ -125,12 +135,21 @@ impl Revocations {
     /// A watch on `key_id` that counts revocations raised after generation
     /// `mark`, the one its principal was resolved at, for the credential
     /// `fingerprint` it presented (`ApiKey::fingerprint`): a row that holds
-    /// another one now was rotated, whatever the signal saw.
-    pub fn watch_from(&self, key_id: i64, mark: u64, fingerprint: String) -> RevocationWatch {
+    /// another one now was rotated, whatever the signal saw. `lapses` is the
+    /// client certificate's `notAfter` on the device listener: the watch
+    /// resolves with [`RevokeReason::CertificateExpired`] then.
+    pub fn watch_from(
+        &self,
+        key_id: i64,
+        mark: u64,
+        fingerprint: String,
+        lapses: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> RevocationWatch {
         RevocationWatch {
             key_id,
             mark,
             fingerprint,
+            lapses,
             rx: self.generation.subscribe(),
         }
     }
@@ -150,6 +169,9 @@ pub struct RevocationWatch {
     mark: u64,
     /// The credential the principal was resolved with.
     fingerprint: String,
+    /// The client certificate's `notAfter`, for a connection of the device
+    /// listener.
+    lapses: Option<chrono::DateTime<chrono::Utc>>,
     rx: watch::Receiver<u64>,
 }
 
@@ -159,8 +181,9 @@ pub struct RevocationWatch {
 /// watch that slept toward a far expiry in one go could close late by as
 /// much as it slept (review W2-7). Short enough that an expiry is honoured
 /// within this much of it whatever the clock did; a watch awaited as one
-/// long-lived future (the feed, the host link) needs nothing more.
-const RECHECK: Duration = Duration::from_secs(30);
+/// long-lived future (the feed, the host link) needs nothing more. The bound
+/// a suite waits a certificate's lapse with.
+pub const RECHECK: Duration = Duration::from_secs(30);
 
 impl RevocationWatch {
     pub fn key_id(&self) -> i64 {
@@ -196,7 +219,7 @@ impl RevocationWatch {
                 return RevokeReason::Rotated;
             }
             let now = chrono::Utc::now();
-            let until = match key
+            let mut until = match key
                 .policy
                 .expires_at
                 .as_deref()
@@ -206,6 +229,12 @@ impl RevocationWatch {
                 Some(at) => (at - now).to_std().unwrap_or(Duration::ZERO).min(RECHECK),
                 None => RECHECK,
             };
+            // The certificate's date by the same clock (D5, §5.1).
+            match self.lapses {
+                Some(at) if at <= now => return RevokeReason::CertificateExpired,
+                Some(at) => until = until.min((at - now).to_std().unwrap_or(Duration::ZERO)),
+                None => {}
+            }
             tokio::select! {
                 changed = self.rx.changed() => {
                     if changed.is_err() {
@@ -262,7 +291,7 @@ mod tests {
         let r = &state.devices.revocations;
         r.revoke(id, RevokeReason::Disabled);
         // Resolved after that one (re-enabled since): it does not count.
-        let mut w = r.watch_from(id, r.mark(), fp);
+        let mut w = r.watch_from(id, r.mark(), fp, None);
         assert_eq!(within(&state, &mut w, 50).await, None);
         r.revoke(id, RevokeReason::Rotated);
         assert_eq!(
@@ -272,7 +301,7 @@ mod tests {
         // Another key's revocation is not this one's.
         let (state2, id2, fp2) = with_key().await;
         let r2 = &state2.devices.revocations;
-        let mut w2 = r2.watch_from(id2, r2.mark(), fp2);
+        let mut w2 = r2.watch_from(id2, r2.mark(), fp2, None);
         r2.revoke(id2 + 1, RevokeReason::Deleted);
         assert_eq!(within(&state2, &mut w2, 50).await, None);
     }
@@ -282,7 +311,7 @@ mod tests {
         // Disabled by hand: the reload re-arms the watch, which reads it.
         let (state, id, fp) = with_key().await;
         let r = &state.devices.revocations;
-        let mut w = r.watch_from(id, r.mark(), fp.clone());
+        let mut w = r.watch_from(id, r.mark(), fp.clone(), None);
         sqlx::query("UPDATE api_keys SET enabled = 0 WHERE id = ?1")
             .bind(id)
             .execute(&state.db)
@@ -304,7 +333,7 @@ mod tests {
             .unwrap();
         state.reload_snapshot().await.unwrap();
         let r = &state.devices.revocations;
-        let mut w = r.watch_from(id, r.mark(), fp);
+        let mut w = r.watch_from(id, r.mark(), fp, None);
         assert_eq!(
             within(&state, &mut w, 500).await,
             Some(RevokeReason::Rotated)
@@ -313,7 +342,7 @@ mod tests {
         // Deleted.
         let (state, id, fp) = with_key().await;
         let r = &state.devices.revocations;
-        let mut w = r.watch_from(id, r.mark(), fp);
+        let mut w = r.watch_from(id, r.mark(), fp, None);
         sqlx::query("DELETE FROM api_keys WHERE id = ?1")
             .bind(id)
             .execute(&state.db)
@@ -338,17 +367,45 @@ mod tests {
             .unwrap();
         state.reload_snapshot().await.unwrap();
         let r = &state.devices.revocations;
-        let mut w = r.watch_from(id, r.mark(), fp.clone());
+        let mut w = r.watch_from(id, r.mark(), fp.clone(), None);
         assert_eq!(within(&state, &mut w, 200).await, None, "not yet");
         assert_eq!(
             within(&state, &mut w, 2_000).await,
             Some(RevokeReason::Expired)
         );
         // One already past resolves at once.
-        let mut late = r.watch_from(id, r.mark(), fp);
+        let mut late = r.watch_from(id, r.mark(), fp, None);
         assert_eq!(
             within(&state, &mut late, 100).await,
             Some(RevokeReason::Expired)
+        );
+    }
+
+    /// Device link D5, §5.1: a connection opened with a client certificate
+    /// ends at its `notAfter`, as `certificate_expired`, whatever the row
+    /// says.
+    #[tokio::test]
+    async fn a_certificate_s_date_ends_the_watch_by_the_clock() {
+        let (state, id, fp) = with_key().await;
+        let r = &state.devices.revocations;
+        let far = chrono::Utc::now() + chrono::Duration::hours(1);
+        let mut w = r.watch_from(id, r.mark(), fp.clone(), Some(far));
+        assert_eq!(within(&state, &mut w, 50).await, None, "an hour away");
+        // Waited for without a bound of its own: the harness ends a broken
+        // test, and a working one wakes at the date.
+        let soon = chrono::Utc::now() + chrono::Duration::milliseconds(300);
+        let mut w = r.watch_from(id, r.mark(), fp.clone(), Some(soon));
+        assert_eq!(w.revoked(&state).await, RevokeReason::CertificateExpired);
+        assert!(chrono::Utc::now() >= soon, "not before the date");
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let mut late = r.watch_from(id, r.mark(), fp, Some(past));
+        assert_eq!(
+            within(&state, &mut late, 100).await,
+            Some(RevokeReason::CertificateExpired)
+        );
+        assert_eq!(
+            RevokeReason::CertificateExpired.message("device 'phone'"),
+            "the certificate of device 'phone' expired — pair it again"
         );
     }
 }

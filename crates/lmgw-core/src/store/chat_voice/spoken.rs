@@ -11,10 +11,12 @@
 //!
 //! A delete is the ordinary one (`delete_chat_message`), under the same
 //! conditional write. None of them is activity: the thread's `updated_at`
-//! stays.
+//! stays. Each records `message.updated` in its own transaction, `by` the
+//! session's binder (client-apps design §2.2).
 
 use sqlx::SqlitePool;
 
+use super::super::feed;
 use super::super::DbResult;
 use super::MessageVoice;
 
@@ -24,14 +26,20 @@ pub async fn set_chat_message_voice(
     thread_id: i64,
     id: i64,
     voice: &MessageVoice,
+    by: feed::By<'_>,
 ) -> DbResult<bool> {
+    let mut tx = super::super::begin_write(pool).await?;
     let n = sqlx::query("UPDATE chat_messages SET voice = ?3 WHERE id = ?1 AND thread_id = ?2")
         .bind(id)
         .bind(thread_id)
         .bind(voice.to_stored())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+    if n > 0 {
+        feed::record_updated(&mut tx, thread_id, id, by).await?;
+    }
+    tx.commit().await?;
     Ok(n > 0)
 }
 
@@ -43,7 +51,9 @@ pub async fn cut_chat_reply(
     id: i64,
     content: &str,
     voice: &MessageVoice,
+    by: feed::By<'_>,
 ) -> DbResult<bool> {
+    let mut tx = super::super::begin_write(pool).await?;
     let n = sqlx::query(
         "UPDATE chat_messages SET content = ?3, voice = ?4
          WHERE id = ?1 AND thread_id = ?2 AND role = 'assistant'",
@@ -52,8 +62,12 @@ pub async fn cut_chat_reply(
     .bind(thread_id)
     .bind(content)
     .bind(voice.to_stored())
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    if n > 0 {
+        feed::record_updated(&mut tx, thread_id, id, by).await?;
+    }
+    tx.commit().await?;
     Ok(n > 0)
 }

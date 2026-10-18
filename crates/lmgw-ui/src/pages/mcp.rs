@@ -9,7 +9,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    McpServerView, McpServersResponse, ToolEntryView, ToolInventory, ToolSourceView,
+    McpServerSaved, McpServerView, McpServersResponse, MessageAck, ToolEntryView, ToolInventory,
+    ToolSourceView,
 };
 use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
@@ -178,7 +179,7 @@ fn switch_all(
     spawn_local(async move {
         let mut failed: Vec<String> = Vec::new();
         for (i, name) in names.into_iter().enumerate() {
-            if let Err(e) = crate::api::post::<Value, _>(
+            if let Err(e) = crate::api::post::<MessageAck, _>(
                 "/api/op/tool_set",
                 &json!({ "name": name, "enabled": enable }),
             )
@@ -239,7 +240,7 @@ pub fn McpServers() -> impl IntoView {
     let statuses = Memo::new(move |_| {
         live.mcp.with(|m| {
             m.as_ref().map(|v| {
-                let mut s: Vec<(i64, String, Option<i64>)> = v
+                let mut s: Vec<(i64, String, i64)> = v
                     .iter()
                     .map(|x| (x.id, x.status.clone(), x.tool_count))
                     .collect();
@@ -438,7 +439,7 @@ fn StatusChip(id: i64, initial: String, initial_count: i64, inv: InvData) -> imp
                 views
                     .into_iter()
                     .find(|v| v.id == id)
-                    .map(|v| (v.status, v.tool_count.unwrap_or(0), v.detail))
+                    .map(|v| (v.status, v.tool_count, v.detail))
             })
             .unwrap_or_else(|| (initial.clone(), initial_count, None))
     });
@@ -495,18 +496,14 @@ fn McpRow(
         }
         testing.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<McpServerSaved, _>(
                 "/api/op/mcp_server_set",
                 &json!({ "action": "test", "id": id }),
             )
             .await;
             testing.set(false);
             match res {
-                Ok(v) => toasts.ok(v
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("connected")
-                    .to_string()),
+                Ok(v) => toasts.ok(v.message),
                 Err(e) => toasts.err(e.to_string()),
             }
         });
@@ -539,7 +536,7 @@ fn McpRow(
             MenuItem::new("Edit", move || editing.set(Some(edit_s.get_value()))),
             MenuItem::new(if enabled { "Disable" } else { "Enable" }, move || {
                 spawn_local(async move {
-                    match crate::api::post::<Value, _>(
+                    match crate::api::post::<McpServerSaved, _>(
                         "/api/op/mcp_server_set",
                         &json!({ "action": toggle, "id": id }),
                     )
@@ -1006,7 +1003,7 @@ fn ToolRow(t: ToolEntryView, source_reason: Option<String>, inv: InvData) -> imp
             .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok());
         busy.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<MessageAck, _>(
                 "/api/op/tool_set",
                 &json!({ "name": name.get_value(), "enabled": want }),
             )
@@ -1093,7 +1090,7 @@ fn McpForm(
     let env = RwSignal::new(s.env.clone());
     let cwd = RwSignal::new(s.cwd.clone().unwrap_or_default());
     let image = RwSignal::new(s.container_image.clone().unwrap_or_default());
-    let run_args = RwSignal::new(s.extra_run_args.clone());
+    let run_args = RwSignal::new(s.extra_run_args.join("\n"));
     let url = RwSignal::new(s.url.clone().unwrap_or_default());
     let headers = RwSignal::new(s.headers.clone());
     let prefix = RwSignal::new(s.tool_prefix.clone());
@@ -1114,7 +1111,7 @@ fn McpForm(
         // Read now: the dialog can be gone by the time the answer lands.
         let name = saved_name.get_value();
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<McpServerSaved, _>(
                 "/api/op/mcp_server_set",
                 &json!({ "action": "delete", "id": id }),
             )
@@ -1172,7 +1169,12 @@ fn McpForm(
             "env": env.get_untracked(),
             "cwd": cwd.get_untracked().trim(),
             "container_image": image.get_untracked().trim(),
-            "extra_run_args": run_args.get_untracked(),
+            "extra_run_args": run_args
+                .get_untracked()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>(),
             "url": url.get_untracked().trim(),
             "headers": headers.get_untracked(),
             "tool_prefix": prefix.get_untracked().trim(),
@@ -1185,15 +1187,11 @@ fn McpForm(
         });
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/mcp_server_set", &body).await;
+            let res = crate::api::post::<McpServerSaved, _>("/api/op/mcp_server_set", &body).await;
             saving.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     open.set(false);
                     on_saved();
                 }
@@ -1254,7 +1252,7 @@ fn McpForm(
                 <h3>{move || if stdio() { "Process" } else { "Request" }}</h3>
                 <Show when=stdio>
                     <div class="field">
-                        <label>"Arguments" <span class="field-unit">"one per line"</span></label>
+                        <label>"Command arguments" <span class="field-unit">"one per line, shell-quoted"</span></label>
                         <textarea class="input mono ta set-ta" rows=rows(args) prop:value=move || args.get()
                             on:input=move |ev| args.set(event_target_value(&ev))></textarea>
                     </div>
@@ -1264,7 +1262,7 @@ fn McpForm(
                             on:input=move |ev| env.set(event_target_value(&ev))></textarea>
                     </div>
                     <div class="field">
-                        <label>"Extra podman run args" <span class="field-unit">"one per line"</span></label>
+                        <label>"Extra podman run args" <span class="field-unit">"one argument per line"</span></label>
                         <textarea class="input mono ta set-ta" rows=rows(run_args) prop:value=move || run_args.get()
                             on:input=move |ev| run_args.set(event_target_value(&ev))></textarea>
                     </div>

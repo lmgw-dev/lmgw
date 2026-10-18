@@ -185,7 +185,7 @@ pub async fn delete_message(
     {
         return refused;
     }
-    match repo.delete_message(&state, id, mid).await {
+    match repo.delete_message(&state, id, mid, &caller).await {
         Ok(true) => Json(Ack::ok()).into_response(),
         Ok(false) => message_not_found(),
         Err(e) => internal(e),
@@ -237,7 +237,7 @@ pub async fn edit_message(
                 voice: msg.voice.clone().map(MessageVoice::edited),
                 ..Default::default()
             };
-            match repo.update_message(&state, id, mid, &update).await {
+            match repo.update_message(&state, id, mid, &update, &caller).await {
                 Ok(true) => {}
                 Ok(false) => return message_not_found(),
                 Err(e) => return internal(e),
@@ -356,14 +356,14 @@ pub async fn regenerate_message(
                 );
             }
             let caps = super::chat_attach_gate::thread_caps(&state, repo, &thread).await;
-            if let Err(e) = repo.truncate(&state, id, mid, true).await {
+            if let Err(e) = repo.truncate(&state, id, mid, true, &caller).await {
                 return internal(e);
             }
             answer(&state, &caller, repo, &thread, None, caps, req.speak).await
         }
         "user" => {
             let caps = super::chat_attach_gate::thread_caps(&state, repo, &thread).await;
-            if let Err(e) = repo.truncate(&state, id, mid, false).await {
+            if let Err(e) = repo.truncate(&state, id, mid, false, &caller).await {
                 return internal(e);
             }
             answer(&state, &caller, repo, &thread, Some(mid), caps, req.speak).await

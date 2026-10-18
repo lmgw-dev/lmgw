@@ -2,10 +2,14 @@
 //! this parses the raw SSE text off a fetch ReadableStream, exactly like the
 //! old chat-app.js did, but typed.
 
+mod read;
+
 use futures::StreamExt;
 use lmgw_api_types::chat_frames as frames;
 use serde_json::Value;
 use wasm_bindgen::JsCast;
+
+pub use read::{ToolEvent, VoiceEvent};
 
 /// One parsed frame from `/chat/api/threads/{id}/send`.
 #[derive(Debug, Clone)]
@@ -15,14 +19,14 @@ pub enum ChatEvent {
     Turn(i64),
     Delta(String),
     Reasoning(String),
-    /// `event` is `start | args | ready | result`; fields vary (see payload).
-    Tool(Value),
+    /// A tool call's step: `start`, `args`, `ready`, `approval` or `result`.
+    Tool(ToolEvent),
     Usage {
         prompt_tokens: Option<i64>,
         completion_tokens: Option<i64>,
     },
-    /// llama.cpp per-token timings (raw block, `timings` keys).
-    Stats(Value),
+    /// llama.cpp per-token timings, live while the reply streams.
+    Stats(frames::Timings),
     /// What the turn retrieved from the thread's knowledge bases, before the
     /// first delta (chat-complete §9.3).
     Retrieval(super::chat_retrieval::KbContext),
@@ -39,11 +43,13 @@ pub enum ChatEvent {
     Superseded,
     /// The reply's save was refused; `done` follows with `saved: false`.
     NotSaved(String),
-    Done(Value),
-    /// A voice frame (chat-voice §4.3, §6.3): a model's `state`, the
-    /// read-aloud's `voice`, `speech`, `speech_done` or `speech_error` —
-    /// the name and its data, for `chat_voice` to read.
-    Voice(&'static str, Value),
+    /// The turn's last frame. The voice warm-up's empty `done` reads as one
+    /// that saved nothing and did not abort.
+    Done(frames::DoneFrame),
+    /// A voice frame (chat-voice §4.3, §6.3): a model's `state`, or the
+    /// read-aloud's `voice`, `speech`, `speech_done` or `speech_error`, for
+    /// `chat_voice` to read.
+    Voice(VoiceEvent),
 }
 
 fn parse_record(record: &str) -> Option<ChatEvent> {
@@ -82,7 +88,7 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
         },
         "delta" => ChatEvent::Delta(text_of(v)),
         "reasoning" => ChatEvent::Reasoning(text_of(v)),
-        "tool" => ChatEvent::Tool(v),
+        "tool" => ChatEvent::Tool(read::tool(v)),
         "usage" => {
             let u: frames::UsageFrame = serde_json::from_value(v).unwrap_or_default();
             ChatEvent::Usage {
@@ -90,9 +96,12 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
                 completion_tokens: u.completion_tokens.map(|n| n as i64),
             }
         }
-        "stats" => ChatEvent::Stats(v),
-        "retrieval" => match serde_json::from_value(v) {
-            Ok(c) => ChatEvent::Retrieval(c),
+        "stats" => match serde_json::from_value(v) {
+            Ok(t) => ChatEvent::Stats(t),
+            Err(_) => return None,
+        },
+        "retrieval" => match serde_json::from_value::<frames::RetrievalFrame>(v) {
+            Ok(f) => ChatEvent::Retrieval(f.into()),
             Err(_) => return None,
         },
         "stop" => ChatEvent::Stop,
@@ -103,6 +112,7 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
                 serde_json::from_value(v.clone()).unwrap_or_else(|_| frames::ErrorFrame {
                     message: "stream failed".into(),
                     code: v.get("code").and_then(|c| c.as_str()).map(str::to_string),
+                    ..Default::default()
                 });
             match e.code.as_deref() {
                 Some("superseded") => ChatEvent::Superseded,
@@ -113,12 +123,10 @@ pub fn frame(event: &str, v: Value) -> Option<ChatEvent> {
                 },
             }
         }
-        "done" => ChatEvent::Done(v),
-        "state" => ChatEvent::Voice("state", v),
-        "voice" => ChatEvent::Voice("voice", v),
-        "speech" => ChatEvent::Voice("speech", v),
-        "speech_done" => ChatEvent::Voice("speech_done", v),
-        "speech_error" => ChatEvent::Voice("speech_error", v),
+        "done" => ChatEvent::Done(read::done(v)?),
+        "state" | "voice" | "speech" | "speech_done" | "speech_error" => {
+            ChatEvent::Voice(read::voice(event, v)?)
+        }
         _ => return None,
     })
 }

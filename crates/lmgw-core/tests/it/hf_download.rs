@@ -52,6 +52,12 @@ fn accepted_file_kinds_are_per_target() {
     // The fourth target is a real one now, and it resolves to its own dir.
     assert_eq!(hf::TARGETS.len(), 4);
     assert_eq!(hf::normalize_target("image").unwrap(), "image");
+    // `embed`, the pre-rename name of `aux`, is refused with the valid ones.
+    let e = hf::normalize_target("embed").unwrap_err();
+    assert!(
+        e.contains("'embed'") && e.contains("chat, aux, audio, image"),
+        "{e}"
+    );
     assert_eq!(hf::models_dir_setting("image"), "image.models_dir");
     let mut settings = lmgw_core::config::Settings::default();
     settings.image.models_dir = "/srv/sdcpp".into();
@@ -230,11 +236,10 @@ async fn download_flow_and_update_check() {
     assert_eq!(jobs_seen[0].percent, Some(100));
     assert!(state.jobs.live().is_empty());
     let view = lmgw_core::ops::hf_downloads(&state).await.unwrap();
-    let entry = &view["downloads"][0];
-    assert_eq!(entry["status"], "done");
-    assert!(entry["received_bytes"].is_null());
-    assert!(entry["job_id"].is_null());
-    assert_eq!(view["active"], 0);
+    let entry = &view.downloads[0];
+    assert_eq!(entry.status, "done");
+    assert!(entry.received_bytes.is_none());
+    assert!(entry.job_id.is_none());
 
     // Cancelling something that is not transferring is an error, not a quiet
     // no-op — the same path `lmgw__hf_set action=cancel` takes.
@@ -295,12 +300,11 @@ async fn download_flow_and_update_check() {
     let listed = lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "image")
         .await
         .unwrap();
-    assert_eq!(listed["target"], "image");
-    let roles: Vec<(&str, &str)> = listed["files"]
-        .as_array()
-        .unwrap()
+    assert_eq!(listed.target, "image");
+    let roles: Vec<(&str, &str)> = listed
+        .files
         .iter()
-        .map(|f| (f["file"].as_str().unwrap(), f["role"].as_str().unwrap()))
+        .map(|f| (f.file.as_str(), f.role.as_str()))
         .collect();
     assert_eq!(
         roles,
@@ -317,26 +321,27 @@ async fn download_flow_and_update_check() {
         ],
         "the README is not a weights file and the roles are the pipeline's"
     );
-    let chat_err = lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "chat")
+    let chat = lmgw_core::ops::hf_repo(&state, VAE_REPO, None, "chat")
         .await
-        .unwrap_err();
+        .unwrap();
+    assert!(chat.files.is_empty(), "the chat target is still GGUF-only");
     assert!(
-        chat_err.contains("no .gguf files"),
-        "the chat target is still GGUF-only: {chat_err}"
+        chat.note.contains("no .gguf files"),
+        "an empty list says plainly nothing matched: {}",
+        chat.note
     );
 
     // …and `hf_add target=image` actually downloads one.
     let added = lmgw_core::ops::hf_add(&state, VAE_REPO, Some(VAE_FILE), None, "image", true)
         .await
         .unwrap();
-    assert_eq!(added["target"], "image");
-    assert_eq!(added["files_queued"], 1);
-    assert_eq!(
-        added["companions"],
-        json!([]),
+    assert_eq!(added.target, "image");
+    assert_eq!(added.files_queued, 1);
+    assert!(
+        added.companions.is_empty(),
         "an image pipeline's components are in other repos"
     );
-    let vae_id = added["downloads"][0]["id"].as_i64().unwrap();
+    let vae_id = added.downloads[0].id;
     for _ in 0..200 {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let r = store::get_hf_model(&state.db, vae_id)

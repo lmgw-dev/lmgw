@@ -9,56 +9,16 @@
 //! which is also what shaping then goes by
 //! ([`crate::audio::shape::Expressive::from_override`]).
 
-use serde::{Deserialize, Serialize};
-
 use crate::audio::profile::{InstructionsMode, SpeechProfile};
 use crate::audio::tags::TagMode;
 use crate::config::AudioModel;
+
+pub use lmgw_api_types::capabilities::SpeechCaps;
 
 /// The `instructions` words, as published and as an override may write them.
 pub const INSTRUCTIONS_KINDS: [&str; 4] = ["none", "style", "voice_design", "passthrough"];
 /// The `inline_tags` words.
 pub const INLINE_TAG_KINDS: [&str; 3] = ["none", "fixed", "free"];
-
-/// The `speech` object of a text-to-speech model's capabilities. Absent
-/// fields are unknown, as everywhere in the schema.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SpeechCaps {
-    /// What `instructions` do: `none` (dropped — said in `x-lmgw-speech`),
-    /// `style` (a speaking style for the voice), `voice_design` (the voice
-    /// is designed from them), `passthrough` (sent; the model reads them —
-    /// it declares an instruction option, or lmgw knows its engine reads
-    /// one anyway — and decides what they do).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    /// A request without instructions is refused (`instructions_required`)
-    /// unless the row has a default description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions_required: Option<bool>,
-    /// What inline tags in `input` do: `none` (stripped, never read out),
-    /// `fixed` (the ones in `tags` are rendered, stage directions mapped
-    /// onto them, the rest stripped), `free` (every `[tag]` is rendered).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_tags: Option<String>,
-    /// The tags a `fixed` model renders, written `[tag]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-    /// ISO 639-1 codes the model speaks; `language` takes them (lmgw sends
-    /// each in the model's own spelling).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub languages: Vec<String>,
-    /// `stream_format` (`sse` or `audio`, `response_format: pcm`) works on
-    /// this row: it runs in streaming mode.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub streaming: Option<bool>,
-    /// The sample rate of its audio, in Hz, as its last answer through lmgw
-    /// said (a streamed answer's PCM has no header of its own; the same
-    /// figure is the `x-lmgw-sample-rate` header on it). Absent until the
-    /// model has answered once since lmgw started.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sample_rate: Option<u32>,
-}
 
 /// Whether a model of capability `task` answers `POST /v1/audio/speech`
 /// ([`lmgw_api_types::realtime::SPEECH_TASKS`]): a row of it publishes

@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use quickdoc_core::embed::Embedder;
 use quickdoc_core::ingest::{
     self, extract, prompt, AcceptedSection, Extraction, Fence, LineIndex, SourceKind,
@@ -41,6 +40,7 @@ use crate::agent::{
     ToolOutcome, TurnRunner,
 };
 use crate::config::{Route, ROUTER_UPSTREAM_ID};
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ir::{ChatRequest, Completion, Message, Params, Role, ToolDef, ToolResultBlock};
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
@@ -101,26 +101,27 @@ pub async fn start(state: &SharedState, corpus: &Corpus) -> Result<Spawn, String
 
 pub struct IngestExecutor;
 
-#[async_trait]
 impl JobExecutor for IngestExecutor {
     fn kind(&self) -> JobKind {
         JobKind::Ingest
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("ingest input: {e}"))?;
-        let corpus = qstore::get_corpus(&ctx.state.corpus, input.corpus_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("corpus {} no longer exists", input.corpus_id))?;
-        match run_ingest(&ctx, &corpus).await {
-            Ok(outcome) => Ok(outcome),
-            Err(e) => {
-                let _ = qstore::set_corpus_status(&ctx.state.corpus, corpus.id, "failed").await;
-                Err(e)
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("ingest input: {e}"))?;
+            let corpus = qstore::get_corpus(&ctx.state.corpus, input.corpus_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("corpus {} no longer exists", input.corpus_id))?;
+            match run_ingest(&ctx, &corpus).await {
+                Ok(outcome) => Ok(outcome),
+                Err(e) => {
+                    let _ = qstore::set_corpus_status(&ctx.state.corpus, corpus.id, "failed").await;
+                    Err(e)
+                }
             }
-        }
+        })
     }
 }
 
@@ -753,27 +754,28 @@ struct IngestRunner {
     _admission: Option<crate::vram::LocalHold>,
 }
 
-#[async_trait]
 impl TurnRunner for IngestRunner {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        _sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        proxy::sample_once(
-            &self.state,
-            self._admission.as_ref(),
-            &self.route,
-            // A batch runner is admitted by plain `vram::admit`: never a
-            // fallback (gpu-hold design §2).
-            None,
-            ir,
-            INGEST_PROTO,
-            None,
-            deadline,
-        )
-        .await
+        _sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            proxy::sample_once(
+                &self.state,
+                self._admission.as_ref(),
+                &self.route,
+                // A batch runner is admitted by plain `vram::admit`: never a
+                // fallback (gpu-hold design §2).
+                None,
+                ir,
+                INGEST_PROTO,
+                None,
+                deadline,
+            )
+            .await
+        })
     }
 }
 
@@ -787,39 +789,40 @@ struct EmitExecutor<'a> {
     rejected: AtomicU64,
 }
 
-#[async_trait]
 impl ToolExecutor for EmitExecutor<'_> {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        if name != extract::EMIT_TOOL {
-            return ToolOutcome::error(format!(
-                "there is no tool named '{name}' here — only {}",
-                extract::EMIT_TOOL
-            ));
-        }
-        let proposal: Extraction = match serde_json::from_value(args.clone()) {
-            Ok(p) => p,
-            Err(e) => {
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            if name != extract::EMIT_TOOL {
                 return ToolOutcome::error(format!(
-                    "those arguments do not match the schema: {e}. Every section needs \
-                     start_line, end_line, first_line and last_line."
-                ))
+                    "there is no tool named '{name}' here — only {}",
+                    extract::EMIT_TOOL
+                ));
             }
-        };
-        let verdict = extract::validate(self.document, self.idx, &proposal);
-        let report = extract::verdict_report(&verdict);
-        self.rejected
-            .fetch_add(verdict.rejected.len() as u64, Ordering::Relaxed);
-        if let Ok(mut acc) = self.accepted.lock() {
-            acc.extend(verdict.accepted);
-        }
-        // A rejection is the model's problem to fix, not the gateway's to hide:
-        // it comes back as a failed tool result so the loop keeps going and the
-        // next turn can correct it.
-        if verdict.rejected.is_empty() {
-            ToolOutcome::ok(ToolResultBlock::one(report))
-        } else {
-            ToolOutcome::error(report)
-        }
+            let proposal: Extraction = match serde_json::from_value(args.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return ToolOutcome::error(format!(
+                        "those arguments do not match the schema: {e}. Every section needs \
+                     start_line, end_line, first_line and last_line."
+                    ))
+                }
+            };
+            let verdict = extract::validate(self.document, self.idx, &proposal);
+            let report = extract::verdict_report(&verdict);
+            self.rejected
+                .fetch_add(verdict.rejected.len() as u64, Ordering::Relaxed);
+            if let Ok(mut acc) = self.accepted.lock() {
+                acc.extend(verdict.accepted);
+            }
+            // A rejection is the model's problem to fix, not the gateway's to hide:
+            // it comes back as a failed tool result so the loop keeps going and the
+            // next turn can correct it.
+            if verdict.rejected.is_empty() {
+                ToolOutcome::ok(ToolResultBlock::one(report))
+            } else {
+                ToolOutcome::error(report)
+            }
+        })
     }
 }
 
@@ -830,16 +833,17 @@ struct GatewayTokens {
     alias: String,
 }
 
-#[async_trait]
 impl ingest::AsyncTokenCounter for GatewayTokens {
-    async fn count(&self, text: &str) -> quickdoc_core::Result<usize> {
-        // Pinned: windows are sized with this model's own tokenizer, so a
-        // count from a fallback would be a silently wrong window (§4.7).
-        proxy::count_tokens_inner(&self.state, &self.alias, text, true)
-            .await
-            .map(|(n, _)| n as usize)
-            .map_err(|(_, e)| {
-                quickdoc_core::QuickdocError::Invalid(format!("counting tokens: {e}"))
-            })
+    fn count<'a>(&'a self, text: &'a str) -> Erased<'a, quickdoc_core::Result<usize>> {
+        Box::pin(async move {
+            // Pinned: windows are sized with this model's own tokenizer, so a
+            // count from a fallback would be a silently wrong window (§4.7).
+            proxy::count_tokens_inner(&self.state, &self.alias, text, true)
+                .await
+                .map(|(n, _)| n as usize)
+                .map_err(|(_, e)| {
+                    quickdoc_core::QuickdocError::Invalid(format!("counting tokens: {e}"))
+                })
+        })
     }
 }

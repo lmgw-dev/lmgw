@@ -33,9 +33,10 @@ use super::super::chat::err_json;
 use super::super::chat_caller::Caller;
 use super::super::chat_extract::{ChatOptJson, ChatPath};
 use super::super::{chat_turn, chat_wire};
+use super::pick::{self, Pick};
 use super::{folder_as, internal};
 use crate::state::{AppState, SharedState};
-use crate::store::{self, ChatFolder, ChatThread, FolderOngoing};
+use crate::store::{self, ChatFolder, ChatThread};
 
 /// One async lock per folder id, made on first use and dropped with its last
 /// holder or waiter.
@@ -59,14 +60,6 @@ impl FolderLocks {
         };
         lock.lock_owned().await
     }
-}
-
-/// What a `current` call does with the folder as it is now.
-enum Decision {
-    /// Answer this thread.
-    Keep(Box<ChatThread>),
-    /// Start a new one, for this reason.
-    New(CurrentReason),
 }
 
 /// The thread a new conversation in `folder` starts as: the default system
@@ -130,52 +123,6 @@ pub(super) fn new_thread(
     t
 }
 
-/// §3.3's rules, on `folder`'s current thread as `caller` sees it.
-async fn decide(
-    state: &AppState,
-    caller: &Caller,
-    folder: &ChatFolder,
-    ongoing: &FolderOngoing,
-    new: bool,
-) -> Result<Decision, Response> {
-    let Some(id) = ongoing.current_thread_id else {
-        return Ok(Decision::New(CurrentReason::First));
-    };
-    let current = match store::get_chat_thread(&state.db, id).await {
-        Ok(t) => t,
-        Err(e) => return Err(internal(e)),
-    };
-    // A current thread is always a chat thread in its folder, not archived
-    // (the writes that change that clear it); the check is the backstop.
-    // One out of the caller's reach is gone for it.
-    let Some(t) = current.filter(|t| {
-        t.kind == "chat"
-            && t.folder_id == Some(folder.id)
-            && t.archived_at.is_none()
-            && caller.sees(&state.snapshot(), t)
-    }) else {
-        return Ok(Decision::New(CurrentReason::Gone));
-    };
-    // A thread a turn answers now is never idle, however long ago its
-    // newest message was written (review W5-11): a long tool loop's reply
-    // would otherwise land in a thread the conversation had left.
-    let minutes = if state.chat_live.running(t.id) {
-        0
-    } else {
-        ongoing.idle_minutes
-    };
-    let idle = store::thread_idle(&state.db, t.id, minutes)
-        .await
-        .map_err(internal)?;
-    Ok(match (new, idle) {
-        // An empty thread is reused, even when a new one is asked for.
-        (true, None) => Decision::Keep(Box::new(t)),
-        (true, Some(_)) => Decision::New(CurrentReason::Requested),
-        (false, Some(true)) => Decision::New(CurrentReason::Idle),
-        (false, _) => Decision::Keep(Box::new(t)),
-    })
-}
-
 /// The sentence that says why a new thread started, naming the setting
 /// behind it.
 fn note(reason: CurrentReason, folder: &ChatFolder, idle_minutes: i64) -> String {
@@ -225,38 +172,19 @@ pub async fn current(
     ChatPath(id): ChatPath<i64>,
     ChatOptJson(req): ChatOptJson<CurrentRequest>,
 ) -> Response {
-    // Held from the read to the write, and no longer (review W5-9): the
-    // answer is built after it, so another client's `current` of the folder
-    // does not wait for this one's voice resolution.
-    let held = state.chat_folder_locks.lock(id).await;
+    // The decision holds the folder's lock from the read to the write, and
+    // no longer (review W5-9): the answer is built after it, so another
+    // client's `current` of the folder does not wait for this one's voice
+    // resolution.
+    let mut picked = match pick::pick(&state, &caller, id, req.new).await {
+        Ok(p) => p,
+        Err(r) => return refused(r),
+    };
     loop {
-        let folder = match folder_as(&state, &caller, id).await {
-            Ok(f) => f,
-            Err(r) => return r,
-        };
-        let Some(ongoing) = folder.ongoing.clone() else {
-            return err_json(
-                StatusCode::CONFLICT,
-                "not_ongoing",
-                format!(
-                    "folder '{}' is not an ongoing conversation — mark it one in its settings",
-                    folder.name
-                ),
-            );
-        };
-        let Some(model) = folder.defaults.model_alias.clone() else {
-            return err_json(
-                StatusCode::CONFLICT,
-                "folder_no_model",
-                format!(
-                    "folder '{}' names no model: set the folder's model in its defaults",
-                    folder.name
-                ),
-            );
-        };
-        let reason = match decide(&state, &caller, &folder, &ongoing, req.new).await {
-            Ok(Decision::Keep(t)) => {
-                drop(held);
+        let reason = match picked.pick() {
+            Pick::Keep(t) => {
+                let t = t.clone();
+                drop(picked);
                 return Json(CurrentThread {
                     thread: thread_object(&state, &t).await,
                     rolled_over: false,
@@ -265,29 +193,23 @@ pub async fn current(
                 })
                 .into_response();
             }
-            Ok(Decision::New(reason)) => reason,
-            Err(r) => return r,
+            Pick::New { reason, .. } => *reason,
         };
-        let t = thread_from(&state, &folder, &model, "chat");
-        let by = caller.named();
-        let created = store::create_current_thread(
-            &state.db,
-            id,
-            &t,
-            ongoing.current_thread_id,
-            reason.as_str(),
-            Some(&by),
-        )
-        .await;
-        let new_id = match created {
+        let new_id = match picked.create(&state, &caller).await {
             Ok(Some(new_id)) => new_id,
             // The current thread moved meanwhile (a delete, a move, an
             // archive took it): decide again on what is there now.
-            Ok(None) => continue,
-            Err(e) => return internal(e),
+            Ok(None) => {
+                picked = match picked.again(&state, &caller).await {
+                    Ok(p) => p,
+                    Err(r) => return refused(r),
+                };
+                continue;
+            }
+            Err(r) => return refused(r),
         };
-        drop(held);
-        state.chat_feed.wake();
+        let (folder, idle_minutes) = (picked.folder().clone(), picked.idle_minutes());
+        drop(picked);
         let Ok(Some(t)) = store::get_chat_thread(&state.db, new_id).await else {
             return internal("the thread vanished immediately after being created");
         };
@@ -302,9 +224,21 @@ pub async fn current(
             thread: thread_object(&state, &t).await,
             rolled_over: true,
             reason: Some(told),
-            note: Some(note(told, &folder, ongoing.idle_minutes)),
+            note: Some(note(told, &folder, idle_minutes)),
         })
         .into_response();
+    }
+}
+
+/// A decision's refusal as the route answers it: the 404 of any folder the
+/// caller cannot see, `409 not_ongoing`, `409 folder_no_model`, or the
+/// store's 500.
+fn refused(r: pick::Refusal) -> Response {
+    match r {
+        pick::Refusal::NotFound => super::not_found(),
+        pick::Refusal::NotOngoing(m) => err_json(StatusCode::CONFLICT, "not_ongoing", m),
+        pick::Refusal::NoModel(m) => err_json(StatusCode::CONFLICT, "folder_no_model", m),
+        pick::Refusal::Internal(e) => internal(e),
     }
 }
 

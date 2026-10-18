@@ -329,32 +329,37 @@ pub(crate) async fn embed_in_process(
 /// corpus must never take vectors from a fallback. The row is `key`'s: a
 /// device's, when a turn of one embeds its query (client-apps design L4), or
 /// nobody's — the label's internal identity.
-pub(crate) async fn embed_once(
-    state: &SharedState,
-    alias: &str,
+///
+/// Erased ([`crate::erased`]): the embedders, probes and ingest jobs of
+/// quickdoc and the knowledge bases await it.
+pub(crate) fn embed_once<'a>(
+    state: &'a SharedState,
+    alias: &'a str,
     inputs: Vec<String>,
-    ingress_proto: &str,
+    ingress_proto: &'a str,
     key: KeyRef,
-) -> Result<(Route, GateHeaders, EmbeddingsResponse), Failed> {
-    let started = Instant::now();
-    state.telemetry.request_started();
-    let result = embed_in_process(state, alias, inputs, None, true).await;
-    log_in_process_aux(
-        state,
-        key,
-        alias,
-        ingress_proto,
-        started,
-        match &result {
-            Ok((_, headers, _)) | Err((_, headers, _)) => headers.fallback_reason(),
-        },
-        match &result {
-            Ok((route, _, resp)) => Ok((route, resp.usage)),
-            Err((route, _, e)) => Err((route.as_deref(), e)),
-        },
-    )
-    .await;
-    result
+) -> crate::erased::Erased<'a, Result<(Route, GateHeaders, EmbeddingsResponse), Failed>> {
+    futures::FutureExt::boxed(async move {
+        let started = Instant::now();
+        state.telemetry.request_started();
+        let result = embed_in_process(state, alias, inputs, None, true).await;
+        log_in_process_aux(
+            state,
+            key,
+            alias,
+            ingress_proto,
+            started,
+            match &result {
+                Ok((_, headers, _)) | Err((_, headers, _)) => headers.fallback_reason(),
+            },
+            match &result {
+                Ok((route, _, resp)) => Ok((route, resp.usage)),
+                Err((route, _, e)) => Err((route.as_deref(), e)),
+            },
+        )
+        .await;
+        result
+    })
 }
 
 /// `POST /v1/rerank` (Jina shape in/out — quickdoc §9a).

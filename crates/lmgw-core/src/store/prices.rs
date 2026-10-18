@@ -62,10 +62,11 @@ pub async fn upsert_price(
     Ok(())
 }
 
-pub async fn delete_price(pool: &SqlitePool, id: i64) -> DbResult<()> {
-    sqlx::query("DELETE FROM prices WHERE id = ?1")
+/// Delete one price row; whether a row with that id existed.
+pub async fn delete_price(pool: &SqlitePool, id: i64) -> DbResult<bool> {
+    let done = sqlx::query("DELETE FROM prices WHERE id = ?1")
         .bind(id)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(done.rows_affected() > 0)
 }

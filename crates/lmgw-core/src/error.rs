@@ -16,12 +16,14 @@ pub enum GatewayError {
     /// is fixed by rotating a credential and the other never is.
     #[error("agent '{agent}' is disabled; its token is refused until it is enabled again")]
     AgentDisabled { agent: String },
-    /// A capability refusal from the gate (principals §3.5, §3.9), carried
-    /// into this type only so that `/v1` and `/mcp` can render it in the
-    /// **client's** dialect and log it like any other refusal.
+    /// A refusal whose status the refusing layer decides, carried into this
+    /// type so that `/v1` and `/mcp` can render it in the **client's**
+    /// dialect and log it like any other refusal: the principal gate's
+    /// capability refusals (principals §3.5, §3.9), and `/v1/systemone`'s
+    /// route check, a `501 not_supported` (decision-models design §2.2).
     ///
-    /// Its `status`, `code` and `message` are the `principal::Refusal`'s own —
-    /// the gate is the one place that decides them, and a second wording here
+    /// Its `status`, `code` and `message` are the refusing layer's own — that
+    /// layer is the one place that decides them, and a second wording here
     /// would be a second policy.
     #[error("{message}")]
     Refused {
@@ -455,6 +457,7 @@ impl GatewayError {
             Self::Unauthorized(_) | Self::AgentDisabled { .. } => "authentication_error",
             Self::Refused { status, .. } => match status {
                 401 => "authentication_error",
+                501 => "invalid_request_error",
                 _ => "permission_error",
             },
             Self::Upstream { .. }
@@ -484,6 +487,7 @@ impl GatewayError {
             Self::Unauthorized(_) | Self::AgentDisabled { .. } => "authentication_error",
             Self::Refused { status, .. } => match status {
                 401 => "authentication_error",
+                501 => "invalid_request_error",
                 _ => "permission_error",
             },
             Self::BadRequest(_)
@@ -574,6 +578,40 @@ impl From<serde_json::Error> for GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal's status is its layer's: `/v1/systemone`'s 501 reads as a
+    /// request problem in both dialects, not as a permission one, and a
+    /// capability refusal keeps its own type (decision-models design §2.2).
+    #[test]
+    fn a_refusal_types_by_its_status() {
+        let refused = |status| GatewayError::Refused {
+            status,
+            code: "not_supported",
+            message: "m".into(),
+        };
+        let types = |e: &GatewayError| {
+            (
+                e.http_status().as_u16(),
+                e.openai_type(),
+                e.anthropic_type(),
+            )
+        };
+        assert_eq!(
+            types(&refused(501)),
+            (501, "invalid_request_error", "invalid_request_error")
+        );
+        assert_eq!(
+            types(&refused(403)),
+            (403, "permission_error", "permission_error")
+        );
+        assert_eq!(
+            types(&refused(401)),
+            (401, "authentication_error", "authentication_error")
+        );
+        let body = refused(501).to_openai_json();
+        assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+        assert_eq!(body["error"]["code"], "not_supported", "{body}");
+    }
 
     fn exceeded(max_output: Option<u64>) -> GatewayError {
         GatewayError::ContextExceeded {

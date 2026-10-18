@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+use lmgw_api_types::chat_threads::ThreadDetail;
 use lmgw_core::config::{Protocol, Settings, UpstreamKind};
 use lmgw_core::realtime::heard_response_for_tests;
 use lmgw_core::store::{self, NewAlias, NewUpstream};
@@ -29,6 +30,7 @@ use lmgw_core::web::spoken_turn_for_tests;
 
 use super::session::{hearing, quiet, rows, session};
 use super::turns::{audio, hears, row_written, thread, world};
+use crate::common::round_trips;
 use crate::realtime_chat_thread::{of_type, say, until_type, World};
 use crate::support::gpu_world::{Gpu, ANSWER, GIB};
 use crate::support::realtime_audio::Asr;
@@ -87,6 +89,7 @@ impl Cloud {
                 expose_all: false,
                 expose_prefix: String::new(),
                 supports_responses: false,
+                catalog_all_modalities: true,
             },
         )
         .await
@@ -189,6 +192,9 @@ async fn chat_row_marker(g: &Gpu) -> Option<String> {
 
 async fn verdict(w: &World, tid: i64) -> Value {
     let t = w.get(&format!("/chat/api/threads/{tid}")).await;
+    // The `lead` and the forecast (`blocked`) of a live verdict, read into
+    // the document's type and written back, and checked against the document.
+    round_trips::<ThreadDetail>("a thread under a block", &t);
     t["thread"]["voice_resolved"]["audio_input"].clone()
 }
 

@@ -1,21 +1,25 @@
-//! Who reaches a device-hosted label (client-apps design §5.6, L16), on
-//! every plane that asks a [`ToolScope`](super::ToolScope): `/mcp`,
-//! `/v1/responses` `mcp` blocks, realtime `mcp` tools, `/v1/mcp/servers`,
-//! Chat turns.
+//! Who reaches a device-hosted label (client-apps design §5.6, L16 as
+//! changed 2026-10-15), on every plane that asks a
+//! [`ToolScope`](super::ToolScope): `/mcp`, `/v1/responses` `mcp` blocks,
+//! realtime `mcp` tools, `/v1/mcp/servers`, Chat turns.
 //!
 //! | Principal | Reaches the label |
 //! |---|---|
-//! | owner key, owner cookie | yes |
+//! | owner key, owner cookie | yes, every tool |
 //! | the gateway's own runs (`ToolScope::gateway()`) | yes, as the owner's |
-//! | the device that hosts it | yes (its own tools) |
-//! | a client key or device key with tool scope `allow` | only if a pattern names the label: its literal text before the first wildcard starts with `<label>__` |
-//! | a client key or device key with tool scope `all` or `deny` | no |
+//! | the device that hosts it | yes, every tool (its own) |
+//! | a client key or device key whose device-tools grant names the label | yes; its tool scope then filters the label's tools as it does any server's (`all` every one, an `allow` list's patterns, a `deny` list's exclusions) |
+//! | any other client key or device key | no, whatever its tool scope says (`*` and `kai__*` alike) |
 //! | an agent | only if its manifest's `tools[]` names the label |
 //! | anonymous | **no**, whatever *Require API key* says |
 //!
+//! **The grant decides reach, the scope filters tools.** One mechanism: an
+//! `allow` pattern naming the label no longer reaches it by itself, and a
+//! grant without a pattern for it is enough under `all`.
+//!
 //! So a `List::All` — anonymous, an `all` key — carries "except the
-//! device-hosted namespaces", read from the snapshot's device rows, and it
-//! narrows for a device row it does not reach whole
+//! device-hosted namespaces it is not granted", read from the snapshot's
+//! device rows, and it narrows for a device row it does not reach
 //! (`ToolScope::narrows_for`), which is what closes review W3-9: an `all`
 //! device writing another device's label into a thread or a folder default
 //! is refused like any label out of its reach — and only that: its other
@@ -36,7 +40,7 @@ use std::collections::HashMap;
 
 use lmgw_api_types::scope::fold;
 
-use crate::config::{KeyPolicy, ScopeMode, Snapshot};
+use crate::config::Snapshot;
 
 /// One device-hosted label in the snapshot.
 #[derive(Debug, Clone)]
@@ -58,6 +62,8 @@ pub(super) struct Hosted {
     pub(super) every: bool,
     /// The caller's own key: a device reaches the label it hosts.
     pub(super) own: Option<i64>,
+    /// The labels the caller's key's device-tools grant names, folded.
+    granted: Vec<String>,
     labels: Vec<HostedLabel>,
     /// Every exposed name the aggregate routes now, to its server's id
     /// (module doc). Empty when there is no device row to tell apart.
@@ -73,14 +79,20 @@ impl Hosted {
         }
     }
 
-    /// The labels `snap` has device rows for, reached as `own`'s, with the
-    /// aggregate's `routes` (exposed name → server id) telling whose a name
-    /// is.
-    pub(super) fn of(snap: &Snapshot, own: Option<i64>, routes: HashMap<String, i64>) -> Self {
+    /// The labels `snap` has device rows for, reached as `own`'s with the
+    /// device-tools grant `granted`, with the aggregate's `routes`
+    /// (exposed name → server id) telling whose a name is.
+    pub(super) fn of(
+        snap: &Snapshot,
+        own: Option<i64>,
+        granted: &[String],
+        routes: HashMap<String, i64>,
+    ) -> Self {
         let labels = labels(snap);
         Self {
             every: false,
             own,
+            granted: granted.iter().map(|l| fold(l.trim())).collect(),
             routes: if labels.is_empty() {
                 HashMap::new()
             } else {
@@ -135,6 +147,18 @@ impl Hosted {
     pub(super) fn whole(&self, h: &HostedLabel) -> bool {
         self.every || self.own == Some(h.key_id)
     }
+
+    /// Granted by the caller's key's device-tools grant: reached, its tool
+    /// scope filtering the label's tools as any server's.
+    pub(super) fn granted(&self, h: &HostedLabel) -> bool {
+        self.granted.contains(&fold(&h.label))
+    }
+
+    /// Reached at all, through the caller's key: [`Self::whole`] or
+    /// [`Self::granted`]. An agent's manifest is the scope's to read.
+    pub(super) fn reaches(&self, h: &HostedLabel) -> bool {
+        self.whole(h) || self.granted(h)
+    }
 }
 
 /// The device-hosted labels of `snap`'s device rows.
@@ -154,44 +178,11 @@ fn labels(snap: &Snapshot) -> Vec<HostedLabel> {
         .collect()
 }
 
-/// The patterns of an `allow` tool scope that name `h` explicitly: their
-/// literal text before the first wildcard starts with `<label>__`. `*` or
-/// `d*` names nothing; `desktop__*` and `desktop__see_screen` do. Empty
-/// for any other mode.
-fn naming<'a>(policy: &'a KeyPolicy, h: &HostedLabel) -> impl Iterator<Item = &'a str> + 'a {
-    let ns = h.ns.clone();
-    let allow = policy.tool_scope_mode == ScopeMode::Allow;
-    policy
-        .tool_scope_patterns
-        .lines()
-        .map(str::trim)
-        .filter(move |p| allow && !p.is_empty())
-        .filter(move |p| {
-            let head = fold(p.split('*').next().unwrap_or_default());
-            head.starts_with(&ns)
-        })
-}
-
-/// Whether a key's tool scope names `h` at all (§5.6).
-pub(super) fn names_label(policy: &KeyPolicy, h: &HostedLabel) -> bool {
-    naming(policy, h).next().is_some()
-}
-
-/// Whether one of the patterns naming `h` matches `name`.
-pub(super) fn admits_named(policy: &KeyPolicy, h: &HostedLabel, name: &str) -> bool {
-    let named: Vec<&str> = naming(policy, h).collect();
-    lmgw_api_types::scope::patterns_match(&named.join("\n"), name)
-}
-
-/// Whether the patterns naming `h` admit every name in it: one is
-/// `<label>__*` itself.
-pub(super) fn admits_whole(policy: &KeyPolicy, h: &HostedLabel) -> bool {
-    naming(policy, h).any(|p| fold(p) == format!("{}*", h.ns))
-}
-
 /// Every principal that reaches `label`, hosted by device key `key_id`, as
 /// the Devices card lists them (§5.6): the owner, the device, each key and
-/// device whose scope names the label, each agent whose manifest does.
+/// device whose device-tools grant names the label and whose tool scope admits some
+/// tool of its namespace, each agent whose
+/// manifest does.
 pub async fn reachers(
     state: &crate::state::SharedState,
     snap: &Snapshot,
@@ -199,12 +190,6 @@ pub async fn reachers(
     label: &str,
 ) -> Vec<String> {
     use crate::config::ApiKeyKind;
-    let h = HostedLabel {
-        label: label.to_string(),
-        ns: fold(&format!("{label}__")),
-        key_id,
-        server_id: 0,
-    };
     let mut out = vec!["owner".to_string()];
     let mut keys: Vec<&crate::config::ApiKey> = snap.api_keys.iter().collect();
     keys.sort_by_key(|k| (k.id != key_id, k.name.clone()));
@@ -216,7 +201,10 @@ pub async fn reachers(
                     crate::devices::short_name(&k.name)
                 ));
             }
-            ApiKeyKind::Device | ApiKeyKind::Key if names_label(&k.policy, &h) => {
+            ApiKeyKind::Device | ApiKeyKind::Key
+                if k.policy.grants_device_tools(label)
+                    && super::namespace_reachable(&k.policy, label) =>
+            {
                 out.push(k.described());
             }
             ApiKeyKind::Agent => {
@@ -241,7 +229,7 @@ mod tests {
     use super::super::{List, ToolScope};
     use super::*;
     use crate::config::{
-        ApiKey, ApiKeyKind, DeviceAdmin, McpServer, McpTransport, ScopeMode, SelfAdmin,
+        ApiKey, ApiKeyKind, DeviceAdmin, KeyPolicy, McpServer, McpTransport, ScopeMode, SelfAdmin,
     };
 
     fn row(id: i64, name: &str, prefix: &str, device_key_id: Option<i64>) -> McpServer {
@@ -294,7 +282,7 @@ mod tests {
                 labels: labels.iter().map(|l| l.to_string()).collect(),
                 allowed: allowed.iter().map(|l| l.to_string()).collect(),
             },
-            hosted: Hosted::of(&snap(), None, HashMap::new()),
+            hosted: Hosted::of(&snap(), None, &[], HashMap::new()),
             spellings: HashMap::new(),
         }
     }
@@ -304,13 +292,21 @@ mod tests {
             self_admin: false,
             cap: SelfAdmin::Off,
             list: List::All,
-            hosted: Hosted::of(snap, None, routes),
+            hosted: Hosted::of(snap, None, &[], routes),
             spellings: HashMap::new(),
         }
     }
 
-    /// Device key `key_id`, as its own caller, with an `allow` list.
-    fn device(snap: &Snapshot, key_id: i64, allow: &str, r: HashMap<String, i64>) -> ToolScope {
+    /// Key `key_id` (a device, or a client key when `device` is false), as
+    /// its own caller: its tool scope in `mode` with `patterns`, its
+    /// device-tools grant `grant` — the list `principal_list` would read.
+    fn key(
+        snap: &Snapshot,
+        key_id: i64,
+        (mode, patterns): (ScopeMode, &str),
+        grant: &[&str],
+        r: HashMap<String, i64>,
+    ) -> ToolScope {
         let key = ApiKey {
             id: key_id,
             name: format!("device:d{key_id}"),
@@ -320,24 +316,34 @@ mod tests {
             key_plain: None,
             agent_id: None,
             policy: KeyPolicy {
-                tool_scope_mode: ScopeMode::Allow,
-                tool_scope_patterns: allow.into(),
+                tool_scope_mode: mode,
+                tool_scope_patterns: patterns.into(),
+                device_tools: grant.iter().map(|l| l.to_string()).collect(),
                 ..KeyPolicy::default()
             },
             note: String::new(),
             hosts_label: None,
             self_admin: DeviceAdmin::Off,
+            link: Default::default(),
         };
         ToolScope {
             self_admin: false,
             cap: SelfAdmin::Off,
-            list: List::Key {
-                name: key.described(),
-                policy: key.policy.clone(),
+            list: match mode {
+                ScopeMode::All => List::All,
+                _ => List::Key {
+                    name: key.described(),
+                    policy: key.policy.clone(),
+                },
             },
-            hosted: Hosted::of(snap, Some(key_id), r),
+            hosted: Hosted::of(snap, Some(key_id), &key.policy.device_tools, r),
             spellings: HashMap::new(),
         }
+    }
+
+    /// Device key `key_id` with an `allow` list and no grant.
+    fn device(snap: &Snapshot, key_id: i64, allow: &str, r: HashMap<String, i64>) -> ToolScope {
+        key(snap, key_id, (ScopeMode::Allow, allow), &[], r)
     }
 
     /// An agent reaches a device's label only when its manifest names it.
@@ -347,11 +353,106 @@ mod tests {
         let row = &s.mcp_servers[&9];
         let with = agent(&["desktop"], &["desktop__echo"]);
         assert!(with.may_reach(row) && with.admits("desktop__echo"));
+        assert!(!with.holds_back(row));
         let without = agent(&["github"], &["github__search"]);
         assert!(!without.may_reach(row) && !without.admits("desktop__echo"));
+        assert!(without.holds_back(row));
         assert!(without
             .refusal("desktop__echo")
             .contains("a paired device's hosted tools"));
+    }
+
+    /// The grant decides reach, with every mode; the scope filters the
+    /// granted label's tools as any server's (L16 as changed 2026-10-15).
+    #[test]
+    fn the_grant_decides_reach_and_the_scope_filters_the_tools() {
+        let s = snap();
+        let row = &s.mcp_servers[&9];
+        let r = || routes(&[("desktop__echo", 9), ("desktop__shout", 9)]);
+        let reach = |scope: &ToolScope| {
+            (
+                scope.may_reach(row),
+                scope.admits("desktop__echo"),
+                scope.admits("desktop__shout"),
+            )
+        };
+
+        // `all`: nothing without the grant, every tool with it.
+        let all = key(&s, 7, (ScopeMode::All, ""), &[], r());
+        assert_eq!(reach(&all), (false, false, false));
+        assert!(all.narrows_for(row) && all.holds_back(row));
+        let all = key(&s, 7, (ScopeMode::All, ""), &["desktop"], r());
+        assert_eq!(reach(&all), (true, true, true));
+        assert!(!all.narrows_for(row) && !all.holds_back(row));
+        assert!(all.admits_namespace("desktop"));
+        // Matched case-insensitively, as the namespace is.
+        let all = key(&s, 7, (ScopeMode::All, ""), &["Desktop"], r());
+        assert_eq!(reach(&all), (true, true, true));
+
+        // `allow`: a pattern naming the label reaches nothing alone; with
+        // the grant, the patterns pick the tools.
+        let named = key(&s, 7, (ScopeMode::Allow, "desktop__*"), &[], r());
+        assert_eq!(reach(&named), (false, false, false));
+        assert!(named
+            .refusal("desktop__echo")
+            .contains("a paired device's hosted tools"));
+        let one = key(
+            &s,
+            7,
+            (ScopeMode::Allow, "desktop__echo"),
+            &["desktop"],
+            r(),
+        );
+        assert_eq!(reach(&one), (true, true, false));
+        assert!(one
+            .refusal("desktop__shout")
+            .contains("outside the tool scope"));
+        assert!(!one.admits_namespace("desktop"));
+        let star = key(&s, 7, (ScopeMode::Allow, "*"), &["desktop"], r());
+        assert_eq!(reach(&star), (true, true, true));
+        let other = key(&s, 7, (ScopeMode::Allow, "docs__*"), &["desktop"], r());
+        assert_eq!(reach(&other), (false, false, false));
+        assert!(!other.holds_back(row), "granted, the scope keeps it out");
+        assert!(other.admits("docs__query"));
+
+        // `deny`: nothing without the grant, all but the denied with it.
+        let deny = key(&s, 7, (ScopeMode::Deny, "github__*"), &[], r());
+        assert_eq!(reach(&deny), (false, false, false));
+        let deny = key(
+            &s,
+            7,
+            (ScopeMode::Deny, "desktop__shout"),
+            &["desktop"],
+            r(),
+        );
+        assert_eq!(reach(&deny), (true, true, false));
+
+        // A grant of another label reaches nothing here.
+        let elsewhere = key(&s, 7, (ScopeMode::All, ""), &["kai"], r());
+        assert_eq!(reach(&elsewhere), (false, false, false));
+    }
+
+    /// The hosting device reaches its own label whole, its own list and
+    /// grant saying nothing about it; the owner and the gateway reach it.
+    #[test]
+    fn the_host_and_the_gateway_reach_it_without_a_grant() {
+        let s = snap();
+        let row = &s.mcp_servers[&9];
+        let host = key(
+            &s,
+            3,
+            (ScopeMode::Allow, "docs__*"),
+            &[],
+            routes(&[("desktop__echo", 9)]),
+        );
+        assert!(host.may_reach(row) && host.admits("desktop__echo"));
+        assert!(!host.holds_back(row));
+        assert!(
+            !host.admits("docs_x__y"),
+            "its list still binds every other server"
+        );
+        assert!(ToolScope::gateway().admits("desktop__echo"));
+        assert!(ToolScope::gateway().may_reach(row) && !ToolScope::gateway().holds_back(row));
     }
 
     /// `All` holds a device's label back unless it is the owner's, the
@@ -369,7 +470,7 @@ mod tests {
         assert!(!anon.narrows_for(&s.mcp_servers[&4]) && !anon.narrows_for(&s.mcp_servers[&5]));
         assert!(!anon.narrows());
         let host = ToolScope {
-            hosted: Hosted::of(&s, Some(3), routes(&[("desktop__echo", 9)])),
+            hosted: Hosted::of(&s, Some(3), &[], routes(&[("desktop__echo", 9)])),
             spellings: HashMap::new(),
             ..anon.clone()
         };

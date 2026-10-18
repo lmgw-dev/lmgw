@@ -11,7 +11,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::DocsJobStarted;
+use lmgw_api_types::CorpusCreated;
 use serde_json::json;
 
 use crate::widgets::{use_toasts, Modal, ModalFooter, ModelPicker, Select};
@@ -128,11 +128,11 @@ fn WizardForm(seed: WizardSeed, open: RwSignal<bool>) -> impl IntoView {
         creating.set(true);
         error.set(None);
         spawn_local(async move {
-            let res = crate::api::post::<DocsJobStarted, _>("/api/docs/corpora", &payload).await;
+            let res = crate::api::post::<CorpusCreated, _>("/api/docs/corpora", &payload).await;
             creating.set(false);
             match res {
                 Ok(r) => {
-                    let corpus = r.corpus.unwrap_or_default();
+                    let corpus = r.corpus;
                     toasts.ok(format!("corpus {} created", corpus.corpus_id));
                     created.set(Some((corpus.id, corpus.corpus_id)));
                     state.bump();

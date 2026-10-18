@@ -13,6 +13,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::status::RuntimeStatus;
 
+/// The text a transcription or a task answered, and the event stream reader.
+pub mod transcript;
+
+/// The lab's form on the lab store: the speech builder, the settings a
+/// preset keeps, the whole form a kept group stores, its routes.
+pub mod form;
+pub use form::{
+    speech_body, AsrForm, AudioAsk, AudioLabForm, AudioRoute, AudioSettings, GroupQuery, PcmFormat,
+    SpeechForm, TaskForm,
+};
+
 /// One enabled audio model, as the lab's pickers need it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -65,22 +76,92 @@ pub struct AudioLabModels<R = RuntimeStatus> {
 pub struct LabVoicesQuery {
     /// The model alias to list voices for.
     pub model: String,
-    /// `1`, `true`, `yes` or `on` starts the model when it is not running and
-    /// asks its own server. Without it only a container that is already up is
-    /// read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start: Option<String>,
 }
 
-/// The answer to `GET /audio-lab/api/voices` for a local model that is not
-/// running: nothing was started and nothing is known.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a voice name comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct VoicesNotRunning {
-    /// Always empty.
-    pub voices: Vec<String>,
-    /// Always `false`.
-    pub running: bool,
+pub enum LabVoiceKind {
+    /// A preset of the model's row.
+    #[default]
+    Preset,
+    /// A clip of the voice library (when the class's voice directory is it).
+    Library,
+    /// A voice the model's package ships.
+    Native,
+    /// A voice embedding file in the package's `embeddings/` folder.
+    Embedding,
+    /// A name only the model's own server reported: a running container
+    /// (or a remote upstream) knows it, lmgw's catalog does not.
+    Engine,
+}
+
+/// One voice name of a model.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LabVoice {
+    /// The name to send as `voice`.
+    pub id: String,
+    /// Where the name comes from: a preset, a library clip, a shipped voice,
+    /// an embedding, or a name only the model's own server reported.
+    pub kind: LabVoiceKind,
+    /// Where lmgw puts the name in the engine's request: `voice`, or
+    /// `options.voice_id` for a native voice of a family that reads that.
+    pub send: String,
+    /// For a library clip: whether its transcript is recorded. Absent for
+    /// every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub transcript: Option<bool>,
+}
+
+/// Where the list of `GET /audio-lab/api/voices` was read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LabVoicesSource {
+    /// lmgw's own catalog (the model's presets, its package's voices, the
+    /// voice library), plus the names a running container added.
+    #[default]
+    Catalog,
+    /// A remote upstream, asked: it has no container and no catalog here.
+    Upstream,
+}
+
+/// The answer to `GET /audio-lab/api/voices`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LabVoices {
+    /// Every voice name the model answers to, sorted by id.
+    pub voices: Vec<LabVoice>,
+    /// What speaks when a request names no voice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub default: Option<String>,
+    /// Voices the model's package names but lacks on disk; the Audio
+    /// catalog's Download on the package fetches them.
+    pub missing: Vec<String>,
+    /// Whether this model refuses a library clip without a recorded
+    /// transcript.
+    pub needs_transcript: bool,
+    /// The GPU hold (or a benchmark, or another program's VRAM) keeps this
+    /// model from speaking right now; the list is still answered. A request
+    /// now is refused, or answered by [`Self::fallback`].
+    pub held: bool,
+    /// Where the list was read: lmgw's catalog, or a remote upstream.
+    pub source: LabVoicesSource,
+    /// Whether a running container was also asked for names the catalog
+    /// lacks. Nothing is ever started for it.
+    pub engine_asked: bool,
+    /// The fallback alias that would answer a request now, when the gate
+    /// re-routes this model to one (see [`Self::held`]). The list is still the
+    /// model's own catalog; the fallback's provider is never asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub fallback: Option<String>,
 }
 
 /// One reference clip of the voice library.
@@ -114,6 +195,7 @@ pub struct ClipList {
     pub clips: Vec<Clip>,
     /// Present, with a 200, when no audio models directory is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub error: Option<String>,
 }
 
@@ -233,6 +315,7 @@ pub struct LabError {
     /// A machine-readable word, on the refusals that have one (for example
     /// `dev_shared_models_dir`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub code: Option<String>,
 }
 
@@ -246,6 +329,10 @@ pub struct DetailsQuery {
     #[serde(default, deserialize_with = "de_flag")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub details: bool,
+    /// The kept group (`POST /audio-lab/api/groups`) whose run this request
+    /// is; absent, nothing is kept.
+    #[serde(default)]
+    pub group: Option<i64>,
 }
 
 /// `POST /audio-lab/api/tasks/run`'s query.
@@ -257,6 +344,10 @@ pub struct TaskRunQuery {
     #[serde(default, deserialize_with = "de_flag")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub stream: bool,
+    /// The kept group (`POST /audio-lab/api/groups`) whose run this request
+    /// is; absent, nothing is kept.
+    #[serde(default)]
+    pub group: Option<i64>,
 }
 
 /// `?flag=1` / `?flag=true` / absent: a bare query flag, which serde's bool

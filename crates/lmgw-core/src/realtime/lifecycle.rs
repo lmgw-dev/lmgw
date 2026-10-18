@@ -73,6 +73,7 @@ mod pending;
 mod producing;
 mod refusal;
 mod snapshot;
+mod stop;
 #[cfg(test)]
 mod tests;
 mod timing;

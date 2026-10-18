@@ -128,18 +128,11 @@ pub(crate) struct Untranscribed {
     pub headers: GateHeaders,
 }
 
-impl Untranscribed {
-    /// The fallback the audio went to, as [`Transcript::answered_by`].
-    pub(crate) fn answered_by(&self) -> Option<&str> {
-        self.headers.fallback()
-    }
-}
-
 /// The Chat's dictation (chat-voice design §5): a recording transcribed by
 /// the thread's ASR alias, with the language the thread's user speaks, through
 /// the same gate as any request — so its GPU-hold and outside-VRAM fallbacks
 /// answer as configured, and say so in [`Transcript::answered_by`] — or,
-/// when it fails, in [`Untranscribed::answered_by`]. The row carries
+/// when it fails, in the headers of [`Untranscribed`]. The row carries
 /// `proto`, the label the thread's turns carry: `chat`
 /// (`ClientProto::Chat`), or `admin` for an Admin Chat thread.
 /// `filename` and `mime` say its container to the upstream (OpenAI's

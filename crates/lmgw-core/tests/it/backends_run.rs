@@ -9,7 +9,6 @@ use crate::support::backends_fake as support;
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use lmgw_api_types::builds::{BuildCheckMergeArgs, ImageUseKind, MergeOutcome};
 use lmgw_core::agents::container::Signal;
 use lmgw_core::backends::run::{self, LOG_CHUNK_BYTES};
@@ -18,6 +17,7 @@ use lmgw_core::backends::{
     images, paths, BuildExtra, BuildRunPatch, BuildRunStatus, BuildTrigger, Engine, Forge,
     ForgeLookup, ForgePr, NewBuildRun,
 };
+use lmgw_core::erased::Erased;
 use lmgw_core::jobs;
 use lmgw_core::store;
 use support::*;
@@ -545,10 +545,14 @@ async fn a_dev_instance_tags_only_into_the_dev_namespace() {
 /// A forge that never answers.
 struct SilentForge;
 
-#[async_trait]
 impl ForgeLookup for SilentForge {
-    async fn pr(&self, _repo_url: &str, _forge: Forge, _number: u64) -> Result<ForgePr, String> {
-        std::future::pending().await
+    fn pr<'a>(
+        &'a self,
+        _repo_url: &'a str,
+        _forge: Forge,
+        _number: u64,
+    ) -> Erased<'a, Result<ForgePr, String>> {
+        Box::pin(async move { std::future::pending().await })
     }
 }
 
@@ -932,15 +936,21 @@ struct MergedPr {
     merge_commit: String,
 }
 
-#[async_trait]
 impl ForgeLookup for MergedPr {
-    async fn pr(&self, _repo_url: &str, _forge: Forge, number: u64) -> Result<ForgePr, String> {
-        Ok(ForgePr {
-            number,
-            state: "closed".into(),
-            merged_at: Some("2026-09-20T10:00:00Z".into()),
-            merge_commit_sha: self.merge_commit.clone(),
-            ..ForgePr::default()
+    fn pr<'a>(
+        &'a self,
+        _repo_url: &'a str,
+        _forge: Forge,
+        number: u64,
+    ) -> Erased<'a, Result<ForgePr, String>> {
+        Box::pin(async move {
+            Ok(ForgePr {
+                number,
+                state: "closed".into(),
+                merged_at: Some("2026-09-20T10:00:00Z".into()),
+                merge_commit_sha: self.merge_commit.clone(),
+                ..ForgePr::default()
+            })
         })
     }
 }
@@ -1077,7 +1087,7 @@ async fn build_env_reports_the_host_and_the_presets() {
     let h = Harness::new().await;
     let env = run::build_env(&h.state).await;
     assert_eq!(env.arch_auto, vec!["89"]);
-    assert_eq!(env.driver_cuda_max.as_deref(), Some("13.1"));
+    assert_eq!(env.driver_cuda_max.as_deref(), Some("12.4"));
     assert_eq!(env.cuda_default, "13.0.0");
     assert!(env.git_ok);
     assert_eq!(env.builds_dir, h.builds_dir().display().to_string());

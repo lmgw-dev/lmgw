@@ -557,7 +557,9 @@ pub fn CorpusJobLine(id: i64) -> impl IntoView {
     let cancel = move |_| {
         let Some(j) = job.get_untracked() else { return };
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/job_cancel", &json!({ "id": j.id })).await {
+            match crate::api::post::<MessageAck, _>("/api/op/job_cancel", &json!({ "id": j.id }))
+                .await
+            {
                 Ok(_) => toasts.ok("cancel requested"),
                 Err(e) => toasts.err(e.to_string()),
             }
@@ -706,7 +708,10 @@ fn CorpusRow(
     });
 
     let score = match c.eval_score {
-        Some(s) => format!("hit@{} {:.2}", c.eval_k.max(1), s),
+        Some(s) => match c.eval_k {
+            Some(k) => format!("hit@{k} {s:.2}"),
+            None => format!("hit rate {s:.2}"),
+        },
         None => "never measured".into(),
     };
     let best = c
@@ -818,7 +823,9 @@ fn CorpusRow(
 }
 
 /// Start a download the way a click on `<a download>` does; the router leaves
-/// a `download` link alone.
+/// a `download` link alone. In the desktop app the shell asks where to save
+/// it (a Save As dialog with the server's or `filename`'s name), as it does
+/// for every download of the window; a browser decides for itself.
 pub fn download(href: &str, filename: &str) {
     let doc = document();
     let Ok(el) = doc.create_element("a") else {

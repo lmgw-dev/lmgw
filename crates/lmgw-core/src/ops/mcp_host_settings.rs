@@ -5,7 +5,6 @@
 //! applies from each task's next poll.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
 
 use crate::config::McpSettings;
 
@@ -61,13 +60,13 @@ pub fn apply_mcp_settings(m: &mut McpSettings, p: McpSettingsPatch) -> Result<()
 }
 
 /// `mcp` as `GET /api/settings-full` reports it.
-pub fn mcp_settings_view(m: &McpSettings) -> Value {
-    json!(lmgw_api_types::mcp_host::HostSettings {
+pub fn mcp_settings_view(m: &McpSettings) -> lmgw_api_types::mcp_host::HostSettings {
+    lmgw_api_types::mcp_host::HostSettings {
         host_max_message_mb: m.host_max_message_mb,
         host_max_frame_mb: m.host_max_frame_mb,
         host_ping_interval_s: m.host_ping_interval_s,
         task_poll_interval_s: m.task_poll_interval_s,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +122,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.task_poll_interval_s, 2);
-        assert_eq!(mcp_settings_view(&m)["task_poll_interval_s"], 2);
+        assert_eq!(mcp_settings_view(&m).task_poll_interval_s, 2);
     }
 }

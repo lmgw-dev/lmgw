@@ -37,6 +37,7 @@ use super::oci::ImageRef;
 use super::run::{short_id, Podman};
 use super::updates;
 use crate::agents::container::{terminate, Exit, Spawned};
+use crate::erased::Erased;
 use crate::jobs::{self, JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress};
 use crate::state::SharedState;
 use crate::store;
@@ -269,148 +270,151 @@ impl Pulling<'_> {
     }
 }
 
-#[async_trait::async_trait]
 impl JobExecutor for ImagePullExecutor {
     fn kind(&self) -> JobKind {
         JobKind::ImagePull
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let Input { image } =
-            serde_json::from_value(input).map_err(|e| format!("image_pull input: {e}"))?;
-        let state = ctx.state.clone();
-        let podman = Podman::of(&state);
-        let old_id = podman.image_id(&image).await?;
-        let old_digests = match &old_id {
-            Some(_) => podman.repo_digests(&image).await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let mut pulling = Pulling {
-            ctx: &ctx,
-            detail: ImagePullJobDetail {
-                image: image.clone(),
-                old_id: old_id.clone(),
-                last_line: format!("podman pull {image}"),
-            },
-            log: Vec::new(),
-        };
-        pulling.publish().await;
-
-        let argv = ["pull", "--", image.as_str()].map(String::from).to_vec();
-        let Spawned {
-            mut stdout,
-            mut stderr,
-            mut status,
-            kill,
-        } = state
-            .agent_spawner()
-            .spawn("podman", &argv)
-            .await
-            .map_err(|e| format!("podman pull {image} could not be started: {e}"))?;
-        let (mut out_open, mut err_open) = (true, true);
-        let mut exit: Option<std::io::Result<Exit>> = None;
-        let mut exited_at: Option<Instant> = None;
-        let mut tick = tokio::time::interval(CANCEL_POLL);
-        while exit.is_none() || out_open || err_open {
-            tokio::select! {
-                l = stdout.recv(), if out_open => match l {
-                    Some(l) => pulling.line(&l).await,
-                    None => out_open = false,
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let Input { image } =
+                serde_json::from_value(input).map_err(|e| format!("image_pull input: {e}"))?;
+            let state = ctx.state.clone();
+            let podman = Podman::of(&state);
+            let old_id = podman.image_id(&image).await?;
+            let old_digests = match &old_id {
+                Some(_) => podman.repo_digests(&image).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let mut pulling = Pulling {
+                ctx: &ctx,
+                detail: ImagePullJobDetail {
+                    image: image.clone(),
+                    old_id: old_id.clone(),
+                    last_line: format!("podman pull {image}"),
                 },
-                l = stderr.recv(), if err_open => match l {
-                    Some(l) => pulling.line(&l).await,
-                    None => err_open = false,
-                },
-                ended = &mut status, if exit.is_none() => {
-                    exit = Some(ended);
-                    exited_at = Some(Instant::now());
-                }
-                _ = tick.tick() => {
-                    if exit.is_none() && ctx.canceled() {
-                        let ended = terminate(&kill, &mut status, CANCEL_GRACE).await;
-                        pulling.drain(&mut stdout, &mut stderr).await;
-                        tracing::info!("pull of {image} canceled: podman {}", describe(&ended));
-                        return Ok(JobOutcome::Canceled);
-                    }
-                    if exited_at.is_some_and(|t| t.elapsed() > PIPE_DRAIN_GRACE) {
-                        break;
-                    }
-                }
-            }
-        }
-        let ended = exit.expect("the loop ends only once podman has exited");
-        if !matches!(ended, Ok(Exit::Code(0))) {
-            let tail: Vec<&str> = pulling
-                .log
-                .iter()
-                .rev()
-                .take(5)
-                .rev()
-                .map(String::as_str)
-                .collect();
-            return Err(format!(
-                "podman pull {image} {}: {}",
-                describe(&ended),
-                if tail.is_empty() {
-                    "it printed nothing".to_string()
-                } else {
-                    tail.join(" / ")
-                }
-            ));
-        }
+                log: Vec::new(),
+            };
+            pulling.publish().await;
 
-        let new_id = podman.image_id(&image).await?.ok_or_else(|| {
-            format!("podman pull {image} succeeded, but the reference names no image afterwards")
-        })?;
-        let new_digests = podman.repo_digests(&image).await.unwrap_or_default();
-        let updated = old_id.as_deref() != Some(new_id.as_str());
-        if let (true, Some(old)) = (updated, &old_id) {
-            let dropped = state.runtime().forget_help(old);
-            tracing::info!(
-                "pulled {image}: {} → {}{}",
-                short_id(old),
-                short_id(&new_id),
-                if dropped > 0 {
-                    format!(" (dropped {dropped} cached flag vocabular(ies) of the old image)")
-                } else {
-                    String::new()
+            let argv = ["pull", "--", image.as_str()].map(String::from).to_vec();
+            let Spawned {
+                mut stdout,
+                mut stderr,
+                mut status,
+                kill,
+            } = state
+                .agent_spawner()
+                .spawn("podman", &argv)
+                .await
+                .map_err(|e| format!("podman pull {image} could not be started: {e}"))?;
+            let (mut out_open, mut err_open) = (true, true);
+            let mut exit: Option<std::io::Result<Exit>> = None;
+            let mut exited_at: Option<Instant> = None;
+            let mut tick = tokio::time::interval(CANCEL_POLL);
+            while exit.is_none() || out_open || err_open {
+                tokio::select! {
+                    l = stdout.recv(), if out_open => match l {
+                        Some(l) => pulling.line(&l).await,
+                        None => out_open = false,
+                    },
+                    l = stderr.recv(), if err_open => match l {
+                        Some(l) => pulling.line(&l).await,
+                        None => err_open = false,
+                    },
+                    ended = &mut status, if exit.is_none() => {
+                        exit = Some(ended);
+                        exited_at = Some(Instant::now());
+                    }
+                    _ = tick.tick() => {
+                        if exit.is_none() && ctx.canceled() {
+                            let ended = terminate(&kill, &mut status, CANCEL_GRACE).await;
+                            pulling.drain(&mut stdout, &mut stderr).await;
+                            tracing::info!("pull of {image} canceled: podman {}", describe(&ended));
+                            return Ok(JobOutcome::Canceled);
+                        }
+                        if exited_at.is_some_and(|t| t.elapsed() > PIPE_DRAIN_GRACE) {
+                            break;
+                        }
+                    }
                 }
-            );
-        }
-        let mut used_by = match UsageIndex::load(&state).await {
-            Ok(u) => u.followers(&image, old_id.as_deref()),
-            Err(e) => {
-                tracing::warn!("after pulling {image}: who uses it could not be told: {e}");
-                Vec::new()
             }
-        };
-        let mut seen = Vec::new();
-        used_by.retain(|u| {
-            let fresh = !seen.contains(u);
-            if fresh {
-                seen.push(u.clone());
+            let ended = exit.expect("the loop ends only once podman has exited");
+            if !matches!(ended, Ok(Exit::Code(0))) {
+                let tail: Vec<&str> = pulling
+                    .log
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .rev()
+                    .map(String::as_str)
+                    .collect();
+                return Err(format!(
+                    "podman pull {image} {}: {}",
+                    describe(&ended),
+                    if tail.is_empty() {
+                        "it printed nothing".to_string()
+                    } else {
+                        tail.join(" / ")
+                    }
+                ));
             }
-            fresh
-        });
-        // The update check keys a reference by its qualified spelling.
-        let qualified = ImageRef::parse(&image)
-            .map(|r| r.reference())
-            .unwrap_or_else(|| image.clone());
-        updates::after_pull(&state, &qualified, &new_digests).await;
 
-        let result = ImagePullResult {
-            image,
-            old_id,
-            new_id,
-            old_digests,
-            new_digests,
-            updated,
-            used_by,
-            log: pulling.log,
-        };
-        Ok(JobOutcome::Done(
-            serde_json::to_value(&result).map_err(|e| e.to_string())?,
-        ))
+            let new_id = podman.image_id(&image).await?.ok_or_else(|| {
+                format!(
+                    "podman pull {image} succeeded, but the reference names no image afterwards"
+                )
+            })?;
+            let new_digests = podman.repo_digests(&image).await.unwrap_or_default();
+            let updated = old_id.as_deref() != Some(new_id.as_str());
+            if let (true, Some(old)) = (updated, &old_id) {
+                let dropped = state.runtime().forget_help(old);
+                tracing::info!(
+                    "pulled {image}: {} → {}{}",
+                    short_id(old),
+                    short_id(&new_id),
+                    if dropped > 0 {
+                        format!(" (dropped {dropped} cached flag vocabular(ies) of the old image)")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            let mut used_by = match UsageIndex::load(&state).await {
+                Ok(u) => u.followers(&image, old_id.as_deref()),
+                Err(e) => {
+                    tracing::warn!("after pulling {image}: who uses it could not be told: {e}");
+                    Vec::new()
+                }
+            };
+            let mut seen = Vec::new();
+            used_by.retain(|u| {
+                let fresh = !seen.contains(u);
+                if fresh {
+                    seen.push(u.clone());
+                }
+                fresh
+            });
+            // The update check keys a reference by its qualified spelling.
+            let qualified = ImageRef::parse(&image)
+                .map(|r| r.reference())
+                .unwrap_or_else(|| image.clone());
+            updates::after_pull(&state, &qualified, &new_digests).await;
+
+            let result = ImagePullResult {
+                image,
+                old_id,
+                new_id,
+                old_digests,
+                new_digests,
+                updated,
+                used_by,
+                log: pulling.log,
+            };
+            Ok(JobOutcome::Done(
+                serde_json::to_value(&result).map_err(|e| e.to_string())?,
+            ))
+        })
     }
 }
 

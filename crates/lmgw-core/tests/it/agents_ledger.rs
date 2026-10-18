@@ -540,6 +540,7 @@ async fn an_agent_tokens_responses_run_gets_only_its_allow_list() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -919,6 +920,7 @@ async fn x_lmgw_run_puts_a_containers_own_call_on_the_runs_meter() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

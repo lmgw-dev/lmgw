@@ -15,7 +15,15 @@
 //!   `revoked`;
 //! - `profiles`: the `profile.*` events (personality-profiles design §3.2);
 //! - `deleted_device`: `device.revoked` and who hears it (MCP Tasks design
-//!   §4.1, client-apps design §2.2).
+//!   §4.1, client-apps design §2.2);
+//! - `messages`: `message.*` (WP10) — the messages whole with the thread's
+//!   title, the ids that went, rendered at delivery, L3;
+//! - `push`: the feed as a device's push channel (device link design §7) —
+//!   the stream's own keep-alive and its maximum, the split tick,
+//!   `hello.open_approvals`, `caught_up`, `approval.requested.thread_title`;
+//! - `hello`: what `hello` tells a device about itself (`urls`, `cert`,
+//!   `dashboard_url`) and what its feed does to its connection
+//!   (`TCP_USER_TIMEOUT`, the details `Links` keeps).
 
 use std::time::Duration;
 
@@ -26,8 +34,11 @@ use crate::realtime_chat_thread::{settings, World};
 mod deleted_device;
 mod device;
 mod gaps;
+mod hello;
 mod live;
+mod messages;
 mod profiles;
+mod push;
 mod revoke;
 mod stored;
 mod tasks;
@@ -159,14 +170,15 @@ impl Feed {
     }
 }
 
-/// The thread or folder a stored event is about; `-1` for one about
-/// neither (a `profile.*` event, whose `id` is the profile's).
+/// The thread or folder a stored event is about (a `message.*` event's
+/// thread); `-1` for one about neither (a `profile.*` event, whose `id` is
+/// the profile's).
 pub(crate) fn subject(f: &Frame) -> i64 {
     let d = &f.data;
     if f.event.starts_with("profile.") {
         return -1;
     }
-    if f.event.starts_with("thread.") {
+    if f.event.starts_with("thread.") || f.event.starts_with("message.") {
         d.get("thread_id")
             .or_else(|| d.get("id"))
             .and_then(Value::as_i64)
@@ -189,6 +201,24 @@ pub(crate) fn about_thread(frames: &[Frame], id: i64) -> Vec<&Frame> {
                     && f.data.get("id").and_then(Value::as_i64) == Some(id))
         })
         .collect()
+}
+
+/// `data` validates against the feed's documented schema for `event`.
+pub(crate) fn documented(event: &str, data: &Value) {
+    let doc = lmgw_core::openapi::admin_doc();
+    let schema = &doc["paths"]["/chat/api/feed"]["get"]["responses"]["200"]
+        [lmgw_api_types::openapi_ext::SSE_EVENTS][event];
+    assert!(schema.is_object(), "{event} is documented");
+    let mut root = schema.clone();
+    root.as_object_mut()
+        .unwrap()
+        .insert("components".into(), doc["components"].clone());
+    let result = jsonschema::validate(&root, data);
+    assert!(
+        result.is_ok(),
+        "{event}: {data} does not validate against the document: {:#?}",
+        result.err()
+    );
 }
 
 /// Change a setting of `w` and publish it.

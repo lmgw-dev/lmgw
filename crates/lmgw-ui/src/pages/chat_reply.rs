@@ -6,7 +6,7 @@
 //! a stored row carries the last two. `message_id` 0 or `saved: false` means
 //! the server refused the save — the bubble is not a row, whatever it shows.
 
-use serde_json::Value;
+use lmgw_api_types::chat_frames::DoneFrame;
 
 /// The note under a reply that was not stored.
 pub(super) const UNSAVED_NOTE: &str =
@@ -26,27 +26,28 @@ pub(super) struct Finished {
 }
 
 impl Finished {
-    pub fn from_done(done: &Value) -> Self {
-        let text = |k: &str| {
-            done[k]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
+    pub fn from_done(done: &DoneFrame) -> Self {
+        // A turn that saved nothing (stopped, refused, a warm-up) says none
+        // of it.
+        let Some(saved) = &done.saved else {
+            return Self::default();
         };
-        let saved = done["saved"].as_bool().unwrap_or(true);
+        let text = |t: Option<&str>| t.filter(|s| !s.is_empty()).map(str::to_string);
         Self {
-            id: done["message_id"].as_i64().filter(|id| *id > 0 && saved),
-            model: text("model"),
-            answered_by: text("answered_by"),
-            images_note: text("images_note"),
+            id: Some(saved.message_id).filter(|id| *id > 0 && saved.saved),
+            model: text(Some(&saved.model)),
+            answered_by: text(saved.answered_by.as_deref()),
+            images_note: text(saved.images_note.as_deref()),
         }
     }
 
     /// The frame described a refused save: a `done` that carries a row id of 0
     /// or `saved: false`. A bare `{aborted: true}` (a stopped turn) says
     /// nothing either way.
-    pub fn refused(done: &Value) -> bool {
-        done["saved"].as_bool() == Some(false) || done["message_id"].as_i64() == Some(0)
+    pub fn refused(done: &DoneFrame) -> bool {
+        done.saved
+            .as_ref()
+            .is_some_and(|s| !s.saved || s.message_id == 0)
     }
 }
 
@@ -66,7 +67,7 @@ pub(super) fn answer_label(model: Option<&str>, answered_by: Option<&str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use lmgw_api_types::chat_frames::DoneSaved;
 
     #[test]
     fn labels_the_answering_model() {
@@ -86,26 +87,53 @@ mod tests {
         assert_eq!(answer_label(None, None), None);
     }
 
+    /// A `done` that saved something: the reply's row id, and whether it is
+    /// stored.
+    fn done(message_id: i64, saved: bool) -> DoneFrame {
+        DoneFrame {
+            aborted: false,
+            saved: Some(DoneSaved {
+                message_id,
+                saved,
+                model: "m".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
     #[test]
     fn a_done_frame_says_whether_the_reply_is_a_row() {
-        let ok = Finished::from_done(
-            &json!({"message_id": 7, "saved": true, "model": "m", "answered_by": null}),
-        );
+        let ok = Finished::from_done(&done(7, true));
         assert_eq!(ok.id, Some(7));
         assert_eq!(ok.model.as_deref(), Some("m"));
         assert_eq!(ok.answered_by, None);
-        // Zero or `saved: false` is no row, and is a refusal; an older server
-        // without `saved` still reads by the id.
-        for d in [
-            json!({"message_id": 0, "saved": false}),
-            json!({"message_id": 0}),
-            json!({"message_id": 9, "saved": false}),
-        ] {
-            assert_eq!(Finished::from_done(&d).id, None, "{d}");
-            assert!(Finished::refused(&d), "{d}");
+        assert!(!Finished::refused(&done(7, true)));
+        // Zero or `saved: false` is no row, and is a refusal.
+        for d in [done(0, false), done(0, true), done(9, false)] {
+            assert_eq!(Finished::from_done(&d).id, None, "{d:?}");
+            assert!(Finished::refused(&d), "{d:?}");
         }
-        assert_eq!(Finished::from_done(&json!({"message_id": 3})).id, Some(3));
-        // A stopped turn's bare done is neither.
-        assert!(!Finished::refused(&json!({"aborted": true})));
+        // A stopped turn's bare done, and the warm-up's, are neither.
+        for d in [DoneFrame::aborted(), DoneFrame::default()] {
+            assert_eq!(Finished::from_done(&d), Finished::default());
+            assert!(!Finished::refused(&d), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn a_done_frame_names_who_answered_and_what_the_images_became() {
+        let mut d = done(3, true);
+        let saved = d.saved.as_mut().unwrap();
+        saved.answered_by = Some("gpt-5.2".into());
+        saved.images_note = Some("placeholders".into());
+        let f = Finished::from_done(&d);
+        assert_eq!(f.answered_by.as_deref(), Some("gpt-5.2"));
+        assert_eq!(f.images_note.as_deref(), Some("placeholders"));
+        // An empty text is none.
+        let saved = d.saved.as_mut().unwrap();
+        saved.answered_by = Some(String::new());
+        saved.model = String::new();
+        let f = Finished::from_done(&d);
+        assert_eq!((f.answered_by, f.model), (None, None));
     }
 }

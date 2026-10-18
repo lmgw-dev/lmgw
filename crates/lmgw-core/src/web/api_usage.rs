@@ -916,6 +916,14 @@ const FAR_FUTURE_HOUR_KEY: &str = "9999-12-31T23";
 async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
     let snap = st.snapshot();
     let now = Utc::now();
+    // Every device's pairing token, for its pairing (device link design
+    // §9.3).
+    let tokens: std::collections::HashMap<i64, store::TokenRow> = store::device_tokens(&st.db)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|t| (t.key_id, t))
+        .collect();
 
     let mut keys = Vec::with_capacity(snap.api_keys.len());
     for k in &snap.api_keys {
@@ -956,6 +964,7 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
             scope_patterns: k.policy.scope_patterns.clone(),
             tool_scope_mode: k.policy.tool_scope_mode.as_str().to_string(),
             tool_scope_patterns: k.policy.tool_scope_patterns.clone(),
+            device_tools: k.policy.device_tools.clone(),
             budget_micro: k.policy.budget_micro,
             budget_period: k.policy.budget_period.as_str().to_string(),
             rpm_limit: k.policy.rpm_limit,
@@ -983,16 +992,8 @@ async fn keys_inner(st: &SharedState) -> Result<dto::KeysResponse, String> {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-            open_links: st
-                .devices
-                .links
-                .counts(k.id)
-                .into_iter()
-                .map(|(kind, count)| lmgw_api_types::OpenLinks {
-                    kind: kind.to_string(),
-                    count,
-                })
-                .collect(),
+            open_links: open_links(st, k.id),
+            pairing: device.then(|| crate::devices::pairing_view(k, tokens.get(&k.id), now)),
         });
     }
 
@@ -1035,23 +1036,7 @@ async fn prices_inner(st: &SharedState) -> Result<dto::PricesResponse, String> {
     let rows = store::list_prices(&st.db)
         .await
         .map_err(|e| e.to_string())?;
-    let prices = rows
-        .iter()
-        .map(|p| dto::PriceRowView {
-            id: p.id,
-            scope_kind: p.scope_kind.as_str().to_string(),
-            scope_key: p.scope_key.clone(),
-            unit: p.unit.as_str().to_string(),
-            price_in: p.price_in,
-            price_out: p.price_out,
-            price_cache_read: p.price_cache_read,
-            price_cache_write: p.price_cache_write,
-            source: p.source.as_str().to_string(),
-            note: p.note.clone(),
-            updated_at: p.updated_at.clone(),
-            price: p.price,
-        })
-        .collect();
+    let prices = rows.iter().map(crate::ops::price_row_view).collect();
 
     // What the spend total cannot cover, and how much it has already failed to
     // cover: the configured aliases with no price *and* the passthrough models
@@ -1080,13 +1065,7 @@ pub async fn prices(State(st): State<SharedState>) -> Response {
 // *is* the export, and nothing is written to disk to produce it.
 // ---------------------------------------------------------------------------
 
-fn csv_field(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
+use crate::labs::csv::csv_field;
 
 /// The billable units' six columns (billable-units design §8.5) are the
 /// last: a spreadsheet that reads the older columns by position keeps
@@ -1227,6 +1206,31 @@ pub async fn export_csv(State(st): State<SharedState>, Query(q): Query<ExportQue
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// A device's open connections by kind, each with its start, its peer and
+/// the keep-alive it asked for (device link design §9.3).
+fn open_links(st: &SharedState, key_id: i64) -> Vec<lmgw_api_types::OpenLinks> {
+    let details = st.devices.links.details(key_id);
+    st.devices
+        .links
+        .counts(key_id)
+        .into_iter()
+        .map(|(kind, count)| lmgw_api_types::OpenLinks {
+            kind: kind.to_string(),
+            count,
+            links: details
+                .iter()
+                .filter(|d| d.kind.as_str() == kind)
+                .map(|d| lmgw_api_types::OpenLink {
+                    since: d.since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    peer: d.peer.map(|p| p.to_string()),
+                    keepalive_s: d.keepalive_s,
+                    call: d.call.as_deref().map(str::to_string),
+                })
+                .collect(),
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

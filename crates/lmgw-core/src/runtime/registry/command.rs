@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use crate::erased::Erased;
+
 #[derive(Debug, Clone)]
 pub struct CmdOutput {
     pub status: i32,
@@ -29,26 +31,34 @@ impl CmdOutput {
 /// API surface. Adding `ps`/`inspect` methods would force every existing fake
 /// to grow implementations for verbs it does not care about, and would make
 /// the *next* verb a breaking change to a trait three test files implement.
-#[async_trait::async_trait]
 pub trait CommandRunner: Send + Sync {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput>;
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>>;
 }
 
-/// The real runner: `podman` as a child process.
+/// The real runner: `podman` as a child process, a [`crate::child::system_tool`].
 pub struct TokioRunner;
 
-#[async_trait::async_trait]
 impl CommandRunner for TokioRunner {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        let out = tokio::process::Command::new(program)
-            .args(args)
-            .kill_on_drop(true)
-            .output()
-            .await?;
-        Ok(CmdOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            let out = crate::child::system_tool_tokio(&mut tokio::process::Command::new(program))
+                .args(args)
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            Ok(CmdOutput {
+                status: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
         })
     }
 }
@@ -62,13 +72,18 @@ impl CommandRunner for TokioRunner {
 /// instead of starting (or stopping) something on a live box.
 pub struct NoRuntime(pub String);
 
-#[async_trait::async_trait]
 impl CommandRunner for NoRuntime {
-    async fn run(&self, _program: &str, _args: &[String]) -> std::io::Result<CmdOutput> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            self.0.clone(),
-        ))
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                self.0.clone(),
+            ))
+        })
     }
 }
 

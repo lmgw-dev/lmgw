@@ -41,6 +41,8 @@ use std::rc::{Rc, Weak};
 
 use futures::FutureExt;
 use leptos::prelude::*;
+use lmgw_api_types::chat_threads::ServedModel;
+use lmgw_api_types::SettingsFull;
 use lmgw_client::realtime::{
     self as protocol, ClientEvent, ErrorFacts, ServerEvent, SessionFacts, TurnDetection, Updates,
 };
@@ -173,13 +175,9 @@ impl Live {
         *self.player.borrow_mut() = Some(p);
         // Push-to-talk's pre-roll is the owner's `realtime.prefix_padding_ms`;
         // `ping_interval_s` bounds the gateway's end.
-        if let Ok(v) = crate::api::get::<Value>("/api/settings-full").await {
-            if let Some(ms) = v["realtime"]["prefix_padding_ms"].as_u64() {
-                self.preroll_ms.set(ms as u32);
-            }
-            if let Some(s) = v["realtime"]["ping_interval_s"].as_u64() {
-                self.ping_s.set(Some(s.min(u64::from(u32::MAX)) as u32));
-            }
+        if let Ok(full) = crate::api::get::<SettingsFull>("/api/settings-full").await {
+            self.preroll_ms.set(full.realtime.prefix_padding_ms);
+            self.ping_s.set(Some(full.realtime.ping_interval_s));
         }
         if self.over.get() {
             return;
@@ -438,20 +436,19 @@ impl Live {
             ServerEvent::ChatReply(reply) => super::bubbles::reply(self, &reply),
             ServerEvent::ModelState(m) => self.model_state(&m),
             ServerEvent::Timing(v) => {
-                if let Ok(t) = serde_json::from_value::<VoiceTiming>(v) {
-                    self.rt.served.try_update(|s| {
-                        let ans = |m: &Option<super::super::spoken::Served>| {
-                            m.as_ref()
-                                .and_then(|m| m.answered_by.clone().filter(|b| *b != m.alias))
-                        };
-                        *s = Served {
-                            asr: ans(&t.models.asr),
-                            chat: ans(&t.models.chat),
-                            tts: ans(&t.models.tts),
-                        };
-                    });
-                    self.rt.timing.try_set(Some(t));
-                }
+                let t = VoiceTiming::of_typed(&v);
+                self.rt.served.try_update(|s| {
+                    let ans = |m: &Option<ServedModel>| {
+                        m.as_ref()
+                            .and_then(|m| m.answered_by.clone().filter(|b| *b != m.alias))
+                    };
+                    *s = Served {
+                        asr: ans(&t.models.asr),
+                        chat: ans(&t.models.chat),
+                        tts: ans(&t.models.tts),
+                    };
+                });
+                self.rt.timing.try_set(Some(t));
             }
             ServerEvent::Thread(t) => {
                 self.rt.admin_tools.try_set(Some(t.admin_tools));

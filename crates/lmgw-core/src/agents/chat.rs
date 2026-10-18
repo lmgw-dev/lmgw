@@ -21,7 +21,8 @@
 //! same reason. The thread opens, the Chat page's own model picker is right
 //! there, and the caller is told.
 
-use serde_json::{json, Value};
+use lmgw_api_types::AgentChatOpened;
+use serde_json::Value;
 
 use crate::state::SharedState;
 use crate::store::{self, ThreadMcp};
@@ -63,7 +64,7 @@ pub async fn open(
     state: &SharedState,
     id: &str,
     values: &serde_json::Map<String, Value>,
-) -> Result<Value, String> {
+) -> Result<AgentChatOpened, String> {
     let row = store::get_agent(&state.db, id)
         .await
         .map_err(|e| e.to_string())?
@@ -188,14 +189,14 @@ pub async fn open(
     .map_err(|e| e.to_string())?;
     state.chat_feed.wake();
 
-    Ok(json!({
-        "ok": true,
-        "id": m.id,
-        "thread_id": thread_id,
-        "model": alias,
-        "tools": m.labels(),
-        "url": format!("/chat?t={thread_id}"),
-        "warnings": warnings,
-        "message": format!("opened a thread for '{}'", m.name),
-    }))
+    Ok(AgentChatOpened {
+        ok: true,
+        id: m.id.clone(),
+        thread_id,
+        model: alias,
+        tools: m.labels(),
+        url: format!("/chat?t={thread_id}"),
+        warnings,
+        message: format!("opened a thread for '{}'", m.name),
+    })
 }

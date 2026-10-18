@@ -5,16 +5,16 @@
 //! name (`deny_unknown_fields`).
 //!
 //! What differs from the dashboard's shape, because every self-admin argument
-//! is a flat scalar: the four option maps arrive as JSON strings, the
-//! default voice as a preset name or a JSON string, and `extra_run_args` as
-//! shell-quoted text. An empty one of these means "leave unchanged", as an
+//! is a flat scalar or a list of strings: the four option maps arrive as JSON
+//! strings, the default voice as a preset name or a JSON string. An empty one of these means "leave unchanged", as an
 //! empty optional string does on every other tool; `{}` empties a map, and
 //! `clear` resets the rest. And `model_id` alone selects the row to change.
 
 use serde_json::{json, Map, Value};
 
+use lmgw_api_types::WithNextStep;
+
 use crate::ops;
-use crate::runtime::argv;
 use crate::state::SharedState;
 
 use super::arg_str;
@@ -38,46 +38,38 @@ pub(super) async fn run(
             let action =
                 arg_str(&a, "action")?.ok_or("action is required (list|refresh|download)")?;
             let family = arg_str(&a, "family")?;
-            let mut v = ops::audio_catalog(
-                state,
-                action,
-                family,
-                arg_str(&a, "package")?,
-                arg_str(&a, "search")?,
+            ops::backends::to_json(
+                ops::audio_catalog(
+                    state,
+                    action,
+                    family,
+                    arg_str(&a, "package")?,
+                    arg_str(&a, "search")?,
+                )
+                .await,
             )
-            .await?;
-            if action == "download" {
-                v["next_step"] = json!(format!(
-                    "follow the queued files with lmgw__hf_downloads until each says 'done', \
-                     then lmgw__audio_model_set action=create with this package's \
-                     suggested_model_id, suggested_path, suggested_task and suggested_mode — \
-                     lmgw__audio_catalog action=list family={} shows them, and the options \
-                     the family takes",
-                    family.unwrap_or_default()
-                ));
-            }
-            Ok(v)
         }
         "lmgw__audio_model_set" => {
             flatten(&mut a)?;
             select_by_model_id(state, &mut a);
             let created = a.get("action").and_then(Value::as_str) == Some("create");
-            let mut v = ops::audio_model_set(state, ops::patch_from_args(Some(a.clone()))?).await?;
-            if created {
-                let model_id = a
-                    .get("model_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let public = state.snapshot().audio_public_name(model_id);
-                v["next_step"] = json!(format!(
-                    "the container starts on the first request: POST /v1/audio/speech (task \
-                     tts) or /v1/audio/transcriptions (task asr) with model '{public}' proves \
-                     it loads; lmgw__local_model_get target=audio model_id={model_id} reads \
-                     the row back, and lmgw__container model={model_id} action=logs shows a \
-                     start that failed"
-                ));
+            let saved = ops::audio_model_set(state, ops::patch_from_args(Some(a.clone()))?).await?;
+            if !created {
+                return ops::backends::to_json(Ok(saved));
             }
-            Ok(v)
+            let model_id = a
+                .get("model_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let public = state.snapshot().audio_public_name(model_id);
+            let next_step = format!(
+                "the container starts on the first request: POST /v1/audio/speech (task \
+                 tts) or /v1/audio/transcriptions (task asr) with model '{public}' proves \
+                 it loads; lmgw__local_model_get target=audio model_id={model_id} reads \
+                 the row back, and lmgw__container model={model_id} action=logs shows a \
+                 start that failed"
+            );
+            ops::backends::to_json(Ok(WithNextStep::new(saved, next_step)))
         }
         "lmgw__voice_transcribe" => ops::backends::to_json(
             ops::voice_transcribe(state, arg_str(&a, "clip")?, arg_str(&a, "alias")?).await,
@@ -112,14 +104,6 @@ fn flatten(a: &mut Map<String, Value>) -> Result<(), String> {
             let parsed: Value = serde_json::from_str(t)
                 .map_err(|e| format!("default_voice_preset: not a JSON object ({e})"))?;
             a.insert("default_voice_preset".into(), parsed);
-        }
-    }
-    if let Some(Value::String(s)) = a.get("extra_run_args") {
-        if s.trim().is_empty() {
-            a.remove("extra_run_args");
-        } else {
-            let tokens = argv::parse_args_text(s).map_err(|e| format!("extra_run_args: {e}"))?;
-            a.insert("extra_run_args".into(), json!(tokens));
         }
     }
     Ok(())

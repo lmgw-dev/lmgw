@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
@@ -27,6 +26,7 @@ use crate::embed::{tokenize, ApproxTokenCounter, EmbedIdentity, Embedder, Rerank
 use crate::error::{QuickdocError, Result};
 use crate::store::{self, Chunk, Corpus};
 use crate::vector::{self, VectorMatrix};
+use crate::BoxFut;
 
 /// BM25 column weights, in `chunk_fts` column order. Headings and derived
 /// titles are short and topical, so a hit there says more than one buried in a
@@ -208,7 +208,6 @@ pub struct SearchResult {
 /// [`hybrid_search`], written once. A docs corpus ([`Retriever`]) and the
 /// gateway's knowledge bases are two implementations of this trait over two
 /// schemas, so neither grows a second copy of the ranking.
-#[async_trait]
 pub trait SearchSource: Send + Sync {
     /// What a hit carries back to the caller.
     type Doc: Clone + Send + Sync;
@@ -221,13 +220,18 @@ pub trait SearchSource: Send + Sync {
     fn resident_bytes(&self) -> usize;
     /// Stage 1: `(id, bm25)` best first (lower BM25 is better), at most `k`.
     /// `expr` is already a safe MATCH expression ([`fts_match_expression`]).
-    async fn fts(&self, expr: &str, weights: &FtsWeights, k: usize) -> Result<Vec<(String, f32)>>;
+    fn fts<'a>(
+        &'a self,
+        expr: &'a str,
+        weights: &'a FtsWeights,
+        k: usize,
+    ) -> BoxFut<'a, Result<Vec<(String, f32)>>>;
     /// Stage 2: exact KNN, `(id, cosine)` best first, at most `k`. `query` is
     /// L2-normalised and exactly [`Self::dims`] wide.
     fn knn(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>>;
     /// The documents behind `ids`. An id the store no longer has is simply
     /// absent from the map.
-    async fn fetch(&self, ids: &[String]) -> Result<HashMap<String, Self::Doc>>;
+    fn fetch<'a>(&'a self, ids: &'a [String]) -> BoxFut<'a, Result<HashMap<String, Self::Doc>>>;
     /// The document's id, as the stages returned it.
     fn doc_id(&self, doc: &Self::Doc) -> String;
     /// What the reranker scores and the budget counts: what a caller actually
@@ -744,7 +748,6 @@ impl Retriever {
     }
 }
 
-#[async_trait]
 impl SearchSource for Retriever {
     type Doc = Chunk;
 
@@ -764,34 +767,41 @@ impl SearchSource for Retriever {
         self.matrix.resident_bytes()
     }
 
-    async fn fts(&self, expr: &str, w: &FtsWeights, k: usize) -> Result<Vec<(String, f32)>> {
-        let rows = sqlx::query(
-            "SELECT c.id AS id, bm25(chunk_fts, ?1, ?2, ?3, ?4) AS score
+    fn fts<'a>(
+        &'a self,
+        expr: &'a str,
+        w: &'a FtsWeights,
+        k: usize,
+    ) -> BoxFut<'a, Result<Vec<(String, f32)>>> {
+        Box::pin(async move {
+            let rows = sqlx::query(
+                "SELECT c.id AS id, bm25(chunk_fts, ?1, ?2, ?3, ?4) AS score
              FROM chunk_fts JOIN chunk c ON c.rowid = chunk_fts.rowid
              WHERE chunk_fts MATCH ?5 AND c.corpus_id = ?6
              ORDER BY score ASC LIMIT ?7",
-        )
-        .bind(w.payload as f64)
-        .bind(w.heading_path as f64)
-        .bind(w.derived_title as f64)
-        .bind(w.derived_summary as f64)
-        .bind(expr)
-        .bind(self.corpus.id)
-        .bind(k as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .iter()
-            .map(|r| (r.get("id"), r.get::<f64, _>("score") as f32))
-            .collect())
+            )
+            .bind(w.payload as f64)
+            .bind(w.heading_path as f64)
+            .bind(w.derived_title as f64)
+            .bind(w.derived_summary as f64)
+            .bind(expr)
+            .bind(self.corpus.id)
+            .bind(k as i64)
+            .fetch_all(&self.pool)
+            .await?;
+            Ok(rows
+                .iter()
+                .map(|r| (r.get("id"), r.get::<f64, _>("score") as f32))
+                .collect())
+        })
     }
 
     fn knn(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         self.matrix.search(&self.corpus.corpus_id(), query, k)
     }
 
-    async fn fetch(&self, ids: &[String]) -> Result<HashMap<String, Chunk>> {
-        store::get_chunks(&self.pool, ids).await
+    fn fetch<'a>(&'a self, ids: &'a [String]) -> BoxFut<'a, Result<HashMap<String, Chunk>>> {
+        Box::pin(async move { store::get_chunks(&self.pool, ids).await })
     }
 
     fn doc_id(&self, doc: &Chunk) -> String {
@@ -940,7 +950,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl SearchSource for TwoDocs {
         type Doc = (String, String);
         fn label(&self) -> String {
@@ -955,30 +964,42 @@ mod tests {
         fn resident_bytes(&self) -> usize {
             self.matrix.resident_bytes()
         }
-        async fn fts(&self, expr: &str, _: &FtsWeights, k: usize) -> Result<Vec<(String, f32)>> {
-            let terms: Vec<String> = tokenize(expr);
-            let mut out: Vec<(String, f32)> = self
-                .docs
-                .iter()
-                .filter_map(|(id, t)| {
-                    let n = tokenize(t).iter().filter(|w| terms.contains(w)).count();
-                    (n > 0).then(|| (id.clone(), -(n as f32)))
-                })
-                .collect();
-            out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            out.truncate(k);
-            Ok(out)
+        fn fts<'a>(
+            &'a self,
+            expr: &'a str,
+            _: &'a FtsWeights,
+            k: usize,
+        ) -> BoxFut<'a, Result<Vec<(String, f32)>>> {
+            Box::pin(async move {
+                let terms: Vec<String> = tokenize(expr);
+                let mut out: Vec<(String, f32)> = self
+                    .docs
+                    .iter()
+                    .filter_map(|(id, t)| {
+                        let n = tokenize(t).iter().filter(|w| terms.contains(w)).count();
+                        (n > 0).then(|| (id.clone(), -(n as f32)))
+                    })
+                    .collect();
+                out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                out.truncate(k);
+                Ok(out)
+            })
         }
         fn knn(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
             self.matrix.search("two", query, k)
         }
-        async fn fetch(&self, ids: &[String]) -> Result<HashMap<String, Self::Doc>> {
-            Ok(self
-                .docs
-                .iter()
-                .filter(|(id, _)| ids.contains(id))
-                .map(|d| (d.0.clone(), d.clone()))
-                .collect())
+        fn fetch<'a>(
+            &'a self,
+            ids: &'a [String],
+        ) -> BoxFut<'a, Result<HashMap<String, Self::Doc>>> {
+            Box::pin(async move {
+                Ok(self
+                    .docs
+                    .iter()
+                    .filter(|(id, _)| ids.contains(id))
+                    .map(|d| (d.0.clone(), d.clone()))
+                    .collect())
+            })
         }
         fn doc_id(&self, doc: &Self::Doc) -> String {
             doc.0.clone()
@@ -1031,19 +1052,24 @@ mod tests {
     /// Scores the first document only; the second is "over its limit".
     struct Partial;
 
-    #[async_trait]
     impl Reranker for Partial {
         fn model(&self) -> String {
             "partial".into()
         }
-        async fn rerank(&self, _q: &str, _d: &[String]) -> Result<Vec<f32>> {
-            unreachable!("the pipeline asks for rerank_scores")
+        fn rerank<'a>(&'a self, _q: &'a str, _d: &'a [String]) -> BoxFut<'a, Result<Vec<f32>>> {
+            Box::pin(async move { unreachable!("the pipeline asks for rerank_scores") })
         }
-        async fn rerank_scores(&self, _q: &str, d: &[String]) -> Result<Vec<Option<f32>>> {
-            Ok(d.iter()
-                .enumerate()
-                .map(|(i, _)| (i == 0).then_some(-5.0))
-                .collect())
+        fn rerank_scores<'a>(
+            &'a self,
+            _q: &'a str,
+            d: &'a [String],
+        ) -> BoxFut<'a, Result<Vec<Option<f32>>>> {
+            Box::pin(async move {
+                Ok(d.iter()
+                    .enumerate()
+                    .map(|(i, _)| (i == 0).then_some(-5.0))
+                    .collect())
+            })
         }
     }
 

@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::chat_folders::{FolderOngoing, OngoingInput};
+use crate::voice_resolved::VoiceResolved;
 
 mod tasks;
 pub use tasks::*;
@@ -88,6 +89,17 @@ pub enum KbMode {
     Unknown(String),
 }
 
+impl KbMode {
+    /// The value as the wire spells it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Tool => "tool",
+            Self::Unknown(s) => s,
+        }
+    }
+}
+
 /// How voice mode detects the end of the user's turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +119,25 @@ pub enum TurnDetectionMode {
     Unknown(String),
 }
 
+impl TurnDetectionMode {
+    /// The value as the wire spells it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::SemanticVad => "semantic_vad",
+            Self::ServerVad => "server_vad",
+            Self::PushToTalk => "push_to_talk",
+            Self::Unknown(s) => s,
+        }
+    }
+}
+
+/// What a reader that finds no value holds: an empty unknown value.
+impl Default for TurnDetectionMode {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
 /// Whether a voice turn may reach the chat model as audio.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +154,24 @@ pub enum AudioInputMode {
     #[serde(untagged)]
     #[cfg_attr(feature = "schema", schemars(skip))]
     Unknown(String),
+}
+
+impl AudioInputMode {
+    /// The value as the wire spells it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Unknown(s) => s,
+        }
+    }
+}
+
+/// What a reader that finds no value holds: an empty unknown value.
+impl Default for AudioInputMode {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
 }
 
 /// A thread's own voice settings. Every field is optional and absent when
@@ -264,11 +313,11 @@ pub struct Thread {
     /// `reply_language`, `read_aloud`, `turn_detection`, `audio_input`,
     /// `seed`, the `problems` that block a voice feature now, and
     /// `realtime`: whether voice mode can bind the thread.
-    #[cfg_attr(feature = "schema", schemars(extend("type" = "object")))]
-    pub voice_resolved: serde_json::Value,
+    pub voice_resolved: VoiceResolved,
     /// Whether the last reply can be continued. Present where the thread
     /// is read whole, as `POST /chat/api/folders/{id}/current` answers it.
     #[serde(rename = "continue", default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub continue_state: Option<ContinueState>,
 }
 
@@ -413,7 +462,10 @@ mod tests {
                 title: "T".into(),
                 ..Default::default()
             },
-            voice_resolved: json!({"seed": null}),
+            voice_resolved: VoiceResolved {
+                seed: Some(7),
+                ..Default::default()
+            },
             continue_state: Some(ContinueState {
                 ok: false,
                 reason: Some("no reply".into()),
@@ -422,7 +474,8 @@ mod tests {
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["id"], 7);
         assert_eq!(v["continue"], json!({"ok": false, "reason": "no reply"}));
-        assert_eq!(v["voice_resolved"], json!({"seed": null}));
+        assert_eq!(v["voice_resolved"]["seed"], 7);
+        assert_eq!(v["voice_resolved"]["asr"]["alias"], json!(null));
         let back: Thread = serde_json::from_value(v).unwrap();
         assert_eq!(back, t);
         // Without `continue` where a thread is not read whole.
@@ -480,6 +533,19 @@ mod tests {
             Some(TurnDetectionMode::PushToTalk)
         );
         assert_eq!(row.voice.audio_input, Some(AudioInputMode::On));
+    }
+
+    /// `as_str` is the wire's spelling, the text the value serializes to.
+    #[test]
+    fn a_knowledge_mode_is_spelled_as_it_is_sent() {
+        for (mode, text) in [
+            (KbMode::Auto, "auto"),
+            (KbMode::Tool, "tool"),
+            (KbMode::Unknown("hybrid".into()), "hybrid"),
+        ] {
+            assert_eq!(mode.as_str(), text);
+            assert_eq!(serde_json::to_value(&mode).unwrap(), json!(text));
+        }
     }
 
     #[cfg(feature = "schema")]

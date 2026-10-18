@@ -146,7 +146,6 @@
         "event_id",
         "message_id",
         "type",
-        "unheard",
         "voice"
       ],
       "type": "lmgw.chat.reply",

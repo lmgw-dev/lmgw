@@ -24,7 +24,6 @@
 //! any response is sent once more by the client and listed in
 //! `results.retried` (decision 62); only a second failure is the phase's.
 
-use async_trait::async_trait;
 use lmgw_api_types::bench::{
     GpuIdentity, Phase, PhaseError, PointPlan, ProbeKind, ProbeReport, RunResults, ServerFacts,
     SuiteParams, Timeline,
@@ -37,6 +36,7 @@ use super::probes::Caps;
 use super::sampler::Sampler;
 use super::{corpus, facts, points};
 use crate::agent::Cancel;
+use crate::erased::Erased;
 
 /// The server under test, and what the row says it can do.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -69,12 +69,11 @@ pub struct Progress {
 
 /// Where a run reports to. The integration's implementation forwards
 /// progress to the job and writes the row on every `phase_done`.
-#[async_trait]
 pub trait BenchSink: Send + Sync {
-    async fn progress(&self, p: Progress);
+    fn progress<'a>(&'a self, p: Progress) -> Erased<'a, ()>;
     /// `phase` just ended (done, failed or canceled); `record` is everything
     /// measured so far.
-    async fn phase_done(&self, phase: Phase, record: &Record);
+    fn phase_done<'a>(&'a self, phase: Phase, record: &'a Record) -> Erased<'a, ()>;
 }
 
 /// What a run measured: the `results`, `probes`, `timeline` and `gpu`
@@ -182,15 +181,18 @@ struct Staged<'a> {
     client: &'a LlamaClient,
 }
 
-#[async_trait]
 impl BenchSink for Staged<'_> {
-    async fn progress(&self, p: Progress) {
-        self.client.set_stage(&p.stage);
-        self.sink.progress(p).await;
+    fn progress<'a>(&'a self, p: Progress) -> Erased<'a, ()> {
+        Box::pin(async move {
+            self.client.set_stage(&p.stage);
+            self.sink.progress(p).await;
+        })
     }
 
-    async fn phase_done(&self, phase: Phase, record: &Record) {
-        self.sink.phase_done(phase, record).await;
+    fn phase_done<'a>(&'a self, phase: Phase, record: &'a Record) -> Erased<'a, ()> {
+        Box::pin(async move {
+            self.sink.phase_done(phase, record).await;
+        })
     }
 }
 

@@ -2,8 +2,7 @@
 //! and the close that says so (realtime design §10.4; package A review 1,
 //! A2 review 1).
 
-use super::super::handshake::{Limits, CLOSE_TOO_BIG};
-use super::super::liveness::{End, CLOSE_NO_PONG};
+use super::super::link::{Close, End, Transport};
 
 /// Why the session ends early.
 pub(super) enum Stop {
@@ -17,14 +16,15 @@ pub(super) enum Stop {
 }
 
 impl Stop {
-    /// The close frame to send, if any — the one the reader loop sends for
-    /// the same frame, without its flush (the output is what waits) — and
-    /// the log line, worded for what happened: a failed read is not "the
-    /// client closed" (A2 review 1).
-    pub fn close(self, limits: &Limits) -> (Option<(u16, String)>, String) {
+    /// The close to send, if any — the one the reader loop sends for the
+    /// same end, without its flush (the output is what waits), a failed
+    /// read's read off the transport's bounds — and the log line, worded
+    /// for what happened: a failed read is not "the client closed" (A2
+    /// review 1).
+    pub fn close(self, transport: &Transport) -> (Option<Close>, String) {
         match self {
             Self::NoPong(reason) => (
-                Some((CLOSE_NO_PONG, reason.clone())),
+                Some(Close::NoResponse(reason.clone())),
                 format!("closed — {reason}"),
             ),
             Self::Gone(End::Closed) => (
@@ -33,9 +33,9 @@ impl Stop {
                  waited; the session ends without waiting for it to read"
                     .into(),
             ),
-            Self::Gone(End::Failed(e)) => match limits.close_reason(e) {
+            Self::Gone(End::Failed(e)) => match transport.too_big(e) {
                 Some(reason) => (
-                    Some((CLOSE_TOO_BIG, reason.clone())),
+                    Some(Close::TooBig(reason.clone())),
                     format!("closed — {reason}"),
                 ),
                 None => (
@@ -51,6 +51,8 @@ impl Stop {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::handshake::Limits;
+    use super::super::super::link::ws::close_frame;
     use super::*;
     use crate::config::RealtimeSettings;
     use tokio_tungstenite::tungstenite;
@@ -62,25 +64,26 @@ mod tests {
             max_frame_mb: 9,
             ..Default::default()
         });
+        let transport = Transport::WebSocket(limits);
         let too_long =
             tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
                 size: 10 << 20,
                 max_size: limits.max_message,
             });
-        let (close, log) = Stop::Gone(End::Failed(axum::Error::new(too_long))).close(&limits);
-        let (code, reason) = close.expect("a 1009 close");
+        let (close, log) = Stop::Gone(End::Failed(axum::Error::new(too_long))).close(&transport);
+        let (code, reason) = close_frame(close.expect("a 1009 close"));
         assert_eq!(code, 1009);
         assert!(reason.contains("realtime.max_message_mb"), "{reason}");
         assert_eq!(log, format!("closed — {reason}"));
         // Any other failed read: no close of its own, and no word of a
         // client that closed.
         let other = axum::Error::new(std::io::Error::other("reset"));
-        let (close, log) = Stop::Gone(End::Failed(other)).close(&limits);
+        let (close, log) = Stop::Gone(End::Failed(other)).close(&transport);
         assert!(close.is_none());
         assert!(log.starts_with("a read failed"), "{log}");
-        let (close, log) = Stop::Gone(End::Closed).close(&limits);
+        let (close, log) = Stop::Gone(End::Closed).close(&transport);
         assert!(close.is_none() && log.contains("read side ended"), "{log}");
-        let (close, _) = Stop::NoPong("no pong".into()).close(&limits);
-        assert_eq!(close, Some((1011, "no pong".into())));
+        let (close, _) = Stop::NoPong("no pong".into()).close(&transport);
+        assert_eq!(close.map(close_frame), Some((1011, "no pong".into())));
     }
 }

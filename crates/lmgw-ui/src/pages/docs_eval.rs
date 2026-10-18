@@ -206,7 +206,10 @@ pub fn EvalDashboard() -> impl IntoView {
                     .selected_corpus()
                     .map(|c| {
                         let score = match c.eval_score {
-                            Some(s) => format!("hit@{} {s:.3}", c.eval_k.max(1)),
+                            Some(s) => match c.eval_k {
+                                Some(k) => format!("hit@{k} {s:.3}"),
+                                None => format!("hit rate {s:.3}"),
+                            },
                             None => "never measured".into(),
                         };
                         let best = match c.eval_best {
@@ -219,9 +222,11 @@ pub fn EvalDashboard() -> impl IntoView {
                                 <span class="mono-sm">{score}</span>
                                 <span class="dim">"·"</span>
                                 <span class="mono-sm">{best}</span>
-                                {(!c.eval_at.is_empty())
-                                    .then(|| {
-                                        view! { <span class="dim mono-sm">{c.eval_at.clone()}</span> }
+                                {c
+                                    .eval_at
+                                    .clone()
+                                    .map(|at| {
+                                        view! { <span class="dim mono-sm">{at}</span> }
                                     })}
                                 {c
                                     .eval_regression
@@ -635,8 +640,14 @@ fn CandidateRow(
 #[component]
 fn RunRow(r: EvalRunRow) -> impl IntoView {
     let open = RwSignal::new(false);
-    let params = serde_json::to_string_pretty(&r.params).unwrap_or_default();
-    let report = serde_json::to_string_pretty(&r.report).unwrap_or_default();
+    // A stored value that did not parse is absent on the wire; say so rather
+    // than show an empty box.
+    let pretty = |v: &Option<serde_json::Value>| match v {
+        Some(v) => serde_json::to_string_pretty(v).unwrap_or_default(),
+        None => "not readable".to_string(),
+    };
+    let params = pretty(&r.params);
+    let report = pretty(&r.report);
     let notes = {
         let mut n = Vec::new();
         if r.regression {

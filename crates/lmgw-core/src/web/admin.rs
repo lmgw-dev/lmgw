@@ -12,9 +12,9 @@ use crate::state::SharedState;
 // Upstreams
 // ---------------------------------------------------------------------------
 
-/// Probe an upstream's model list with its stored credentials. `Ok("")` means
+/// Probe an upstream's model list with its stored credentials. `Ok(())` means
 /// reachable; the error carries the upstream's own complaint, truncated.
-pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<String, String> {
+pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<(), String> {
     // A llama.cpp row's `/props` facts are asked again, now (llama egress
     // §4.2): of its server, and of a router about what its aliases name.
     let aliased: Vec<String> = state
@@ -26,9 +26,14 @@ pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<S
         .collect();
     state.llama_facts.retest(&state.http, u, aliased);
     let base = u.base();
+    // The catalog's own request, so a row whose upstream refuses
+    // `output_modalities=all` fails its Test with the option named.
+    let asked_all = crate::catalog::request::asks_all_modalities(&state.snapshot(), u);
     let rb = match u.protocol {
         Protocol::Openai | Protocol::LlamaCpp => {
-            let mut rb = state.http.get(format!("{base}/models"));
+            let mut rb = state
+                .http
+                .get(crate::catalog::request::openai_models_url(base, asked_all));
             if let Some(k) = u.api_key.as_deref().filter(|k| !k.is_empty()) {
                 rb = rb.bearer_auth(k);
             }
@@ -61,12 +66,13 @@ pub(crate) async fn test_upstream(state: &SharedState, u: &Upstream) -> Result<S
         .map_err(|e| e.to_string())?;
     let status = resp.status();
     if status.is_success() {
-        Ok(String::new())
+        Ok(())
     } else {
         let body = resp.text().await.unwrap_or_default();
         Err(format!(
-            "{status}: {}",
-            body.chars().take(200).collect::<String>()
+            "{status}: {}{}",
+            body.chars().take(200).collect::<String>(),
+            crate::catalog::request::refusal_hint(asked_all, status.as_u16())
         ))
     }
 }

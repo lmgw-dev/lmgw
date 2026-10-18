@@ -5,8 +5,11 @@
 //! `Inference` (`principal::Principal::holds`), and its policy applies whole.
 //! What is specific to a device lives here:
 //!
-//! - **pairing** (`pairing`): the minted plaintext and the `lmgw-pair:` link
-//!   that carries it once (§1.4);
+//! - **pairing** (`pairing`, `tokens`, `enrol`; device link design §3): the
+//!   `lmgw-pair:` link v2 that carries a one-time pairing token once, the
+//!   token's single use and its failed uses counted, and `POST
+//!   /devices/enrol`, where the device sends its public key and gets its
+//!   certificate, to be served once the owner confirms its code;
 //! - **its connections** (`links`): which of its long-lived connections are
 //!   open now — the Devices card's "online (feed, voice, tools)" — and the
 //!   `last_seen_at` stamp written as one opens or closes (L15);
@@ -19,18 +22,42 @@
 //!   link watch the same signal when they exist. Only a device's connections
 //!   count as "online" and stamp `last_seen_at`.
 
+/// `POST /devices/enrol`: a device's public key for its certificate (device
+/// link design §3.4).
+mod enrol;
+pub mod grant_audit;
+/// Which device row a client certificate's key opens (device link design
+/// §4.7).
+mod keys;
 mod links;
 mod minted;
 mod pairing;
+/// Whether a pairing token is pending: what each device listener handshake
+/// asks (device link design §4.2).
+mod pending;
 mod revoke;
+/// The device listener's own `/devices/*` routes and their body limit
+/// (device link design §4.6).
+mod routes;
 mod stream;
+/// lmgw's device CA and the certificates it issues (device link design §2).
+pub mod tls;
+/// Pairing tokens and their failed uses (device link design §3.3).
+pub mod tokens;
 
-pub use links::{LinkGuard, LinkKind, Links};
+pub use keys::{DeviceKeys, KeyLookup, KeyMatch, MemoryKeys, StoredKeys};
+pub use links::{LinkDetail, LinkGuard, LinkKind, Links};
 pub use minted::MintedLinks;
-pub(crate) use pairing::namespaces_overlap;
-pub use pairing::{label_refusal, mint, pairing_link, KEY_PREFIX, LOOPBACK_NOTE, NAME_PREFIX};
-pub use revoke::{RevocationWatch, Revocations, RevokeReason};
+pub use pairing::{
+    all_loopback, check_urls, device_tools_grant, label_refusal, pairing_link, proposed_for_device,
+    proposed_urls, Proposed, KEY_PREFIX, LOOPBACK_NOTE, NAME_PREFIX,
+};
+pub(crate) use pairing::{is_invisible, namespaces_overlap};
+pub use pending::PendingTokens;
+pub use revoke::{RevocationWatch, Revocations, RevokeReason, RECHECK};
+pub use routes::{read_body, routes, too_large, with_body_limit};
 pub use stream::until_revoked;
+pub use tokens::EnrolFailures;
 
 use crate::config::ApiKeyKind;
 use crate::principal::Principal;
@@ -102,6 +129,80 @@ pub fn reach(snap: &crate::config::Snapshot, key_id: Option<i64>) -> crate::stor
     crate::store::AdminThreads::of_device(key_id.is_some_and(|id| may_do(snap, id).allows_read()))
 }
 
+/// The status block's `devices` (device link design §9.2): the trust half,
+/// the device listener and pairing.
+pub fn status(state: &crate::state::AppState) -> lmgw_api_types::device_link::DevicesStatus {
+    let alive = state.devices.pending.count(chrono::Utc::now()) as u64;
+    lmgw_api_types::device_link::DevicesStatus {
+        listener: state.devices.listener.status(state),
+        pairing: state
+            .devices
+            .failures
+            .status(alive, tokio::time::Instant::now()),
+        ..state.devices.trust.status(&state.data_dir)
+    }
+}
+
+/// A device row's pairing as the Keys list shows it (device link design
+/// §3.6, §9.3), with its latest token `token`, at `now`.
+pub fn pairing_view(
+    key: &crate::config::ApiKey,
+    token: Option<&crate::store::TokenRow>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> lmgw_api_types::device_link::DevicePairingView {
+    use crate::config::{DeviceCredential, DeviceLink};
+    use lmgw_api_types::device_link::{DevicePairingState, DevicePairingView, PairingTokenView};
+    let link = &key.link;
+    let credential = DeviceLink::credential(&key.key_hash);
+    let waiting = link.waiting.as_ref();
+    DevicePairingView {
+        state: match credential {
+            _ if waiting.is_some() => DevicePairingState::Enrolled,
+            DeviceCredential::V1 => DevicePairingState::V1,
+            DeviceCredential::Pending => DevicePairingState::Waiting,
+            DeviceCredential::Key(_) if link.confirmed_at.is_some() => {
+                DevicePairingState::Confirmed
+            }
+            DeviceCredential::Key(_) => DevicePairingState::Enrolled,
+        },
+        token: token.map(|t| PairingTokenView {
+            created_at: t.created_at.clone(),
+            expires_at: t.expires_at.clone(),
+            used_at: t.used_at.clone(),
+            used_from: t.used_from.clone(),
+            ended_at: t.ended_at.clone(),
+            alive: t.alive(now),
+        }),
+        enrolled_at: link.enrolled_at.clone(),
+        enrolled_from: link.enrolled_from.clone(),
+        client: link.client_info.clone(),
+        confirm_code: match waiting {
+            Some(w) => DeviceLink::confirm_code(&w.key_hash),
+            None => DeviceLink::confirm_code(&key.key_hash),
+        },
+        kept_code: waiting.and_then(|_| DeviceLink::confirm_code(&key.key_hash)),
+        confirmed_at: link.confirmed_at.clone(),
+        contested_at: link.contested_at.clone(),
+        contested_from: link.contested_from.clone(),
+        cert_not_after: link.cert_not_after.clone(),
+        cert_notice_after: link.cert_notice_after.clone(),
+        urls: link.urls.clone(),
+        local_only: link.local_only,
+    }
+}
+
+/// A snapshot was published: every server certificate carries the hosts of
+/// every device's URL list from now on (§2.2; the leaf cache empties when
+/// they changed).
+pub fn published(state: &crate::state::AppState, snap: &crate::config::Snapshot) {
+    let urls = snap
+        .api_keys
+        .iter()
+        .filter(|k| k.kind == ApiKeyKind::Device)
+        .flat_map(|k| k.link.urls.iter().map(String::as_str));
+    state.devices.trust.leaves.set_url_hosts(urls);
+}
+
 /// `device:phone` reads as `phone` in a sentence that already says "device".
 pub fn short_name(name: &str) -> &str {
     name.strip_prefix(NAME_PREFIX).unwrap_or(name)
@@ -120,6 +221,19 @@ pub struct Devices {
     /// level that caps it: what a realtime session lists its `lmgw` tools
     /// again on (review P-8, 2026-10-07).
     pub reach_moves: ReachMoves,
+    /// lmgw's device CA, its server certificates and the store of its key's
+    /// wrapping key (device link design §2).
+    pub trust: tls::Trust,
+    /// The device listener: on, off, where, and what it serves now (device
+    /// link design §4).
+    pub listener: crate::server::DeviceListener,
+    /// Which device row a client certificate's key opens (§4.7).
+    pub keys: KeyLookup,
+    /// The pending pairing tokens: whether a handshake may come without a
+    /// certificate (§4.2).
+    pub pending: PendingTokens,
+    /// Failed enrolments per address, and the last hour's (§3.3).
+    pub failures: EnrolFailures,
 }
 
 /// A device's level of lmgw's admin tools moved (`ApiKey::self_admin`,
@@ -187,27 +301,69 @@ impl DeviceConnection {
     }
 }
 
-/// Open a connection for `principal`, when it is a key; `None` for
+/// Open a connection for `ctx`'s principal, when it is a key; `None` for
 /// `Anonymous`, whose connections nothing can revoke.
 ///
-/// `mark` is the revocation generation when the principal was resolved
-/// (`RequestCtx::revocation_mark`): a revocation raised between the gate and
-/// this call still ends the connection; `None` (a context built by hand)
-/// counts from now. Only a device's connection is counted as a link
-/// ([`LinkKind`]).
+/// `ctx.revocation_mark` is the revocation generation when the principal was
+/// resolved: a revocation raised between the gate and this call still ends
+/// the connection; `None` (a context built by hand) counts from now. A
+/// device on the device listener's connection also ends at its
+/// certificate's `notAfter` (`ctx.cert_not_after`). Only a device's
+/// connection is counted as a link ([`LinkKind`]).
 pub async fn connect(
     state: &SharedState,
-    principal: &Principal,
-    mark: Option<u64>,
+    ctx: &crate::proxy::RequestCtx,
     kind: LinkKind,
 ) -> Option<DeviceConnection> {
-    let watch = watch(state, principal, mark)?;
-    let link = match principal {
+    connect_with(state, ctx, kind, None).await
+}
+
+/// [`connect`] for a link that asked for a keep-alive of `keepalive_s`
+/// seconds (a device's feed): the card shows it beside the link, with the
+/// peer and the start (§9.3).
+pub async fn connect_with(
+    state: &SharedState,
+    ctx: &crate::proxy::RequestCtx,
+    kind: LinkKind,
+    keepalive_s: Option<u32>,
+) -> Option<DeviceConnection> {
+    open_link(state, ctx, kind, keepalive_s, None).await
+}
+
+/// [`connect`] for a realtime session ([`LinkKind::Voice`]): on a WebRTC
+/// call `call` is its id, which the card shows beside the link (calls
+/// design §9).
+pub async fn connect_voice(
+    state: &SharedState,
+    ctx: &crate::proxy::RequestCtx,
+    call: Option<std::sync::Arc<str>>,
+) -> Option<DeviceConnection> {
+    open_link(state, ctx, LinkKind::Voice, None, call).await
+}
+
+async fn open_link(
+    state: &SharedState,
+    ctx: &crate::proxy::RequestCtx,
+    kind: LinkKind,
+    keepalive_s: Option<u32>,
+    call: Option<std::sync::Arc<str>>,
+) -> Option<DeviceConnection> {
+    let watch = watch(state, ctx)?;
+    let link = match &ctx.principal {
         Principal::Key {
             id,
             kind: ApiKeyKind::Device,
             ..
-        } => Some(LinkGuard::open(state, *id, kind).await),
+        } => {
+            let detail = LinkDetail {
+                kind,
+                since: chrono::Utc::now(),
+                peer: ctx.conn.as_ref().map(|c| c.peer),
+                keepalive_s,
+                call,
+            };
+            Some(LinkGuard::open(state, *id, detail).await)
+        }
         _ => None,
     };
     Some(DeviceConnection { _link: link, watch })
@@ -223,23 +379,28 @@ pub async fn revoked(conn: Option<&mut DeviceConnection>) -> RevokeReason {
     }
 }
 
-/// A watch on `principal`'s key that counts nothing — no link, no
+/// A watch on `ctx`'s principal's key that counts nothing — no link, no
 /// `last_seen_at`: what a request that is not a connection of its own
 /// watches while it runs (a Chat turn's stream, a read-aloud, a warm, the
 /// `/mcp` notification stream; review W2-2). `None` for `Anonymous`.
-pub fn watch(state: &SharedState, principal: &Principal, mark: Option<u64>) -> Option<Watched> {
+pub fn watch(state: &SharedState, ctx: &crate::proxy::RequestCtx) -> Option<Watched> {
+    let principal = &ctx.principal;
     let Principal::Key {
         id, fingerprint, ..
     } = principal
     else {
         return None;
     };
-    let mark = mark.unwrap_or_else(|| state.devices.revocations.mark());
+    let mark = ctx
+        .revocation_mark
+        .unwrap_or_else(|| state.devices.revocations.mark());
     Some(Watched {
-        watch: state
-            .devices
-            .revocations
-            .watch_from(*id, mark, fingerprint.clone()),
+        watch: state.devices.revocations.watch_from(
+            *id,
+            mark,
+            fingerprint.clone(),
+            ctx.cert_not_after,
+        ),
         state: state.clone(),
         who: who(principal),
         device: principal.is_device_key(),
@@ -363,6 +524,11 @@ mod tests {
             (RevokeReason::Rotated, true, "key_unknown: "),
             (RevokeReason::Expired, true, "key_expired: "),
             (RevokeReason::Deleted, false, "revoked: "),
+            (
+                RevokeReason::CertificateExpired,
+                true,
+                "certificate_expired: ",
+            ),
         ] {
             let text = close_reason(reason, &who, device);
             assert!(text.len() <= 123, "{}", text.len());
@@ -376,7 +542,7 @@ mod tests {
         let short = close_reason(RevokeReason::Rotated, "device 'desk'", true);
         assert_eq!(
             short,
-            "key_unknown: device 'desk' was rotated — pair it again"
+            "key_unknown: the key of device 'desk' was replaced — pair it again"
         );
     }
 }

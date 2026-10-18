@@ -65,6 +65,7 @@ pub use ownership::{Origin, OwnerDrain};
 
 mod acquire;
 mod command;
+mod decision_route;
 mod errors;
 mod inputs;
 mod lease;
@@ -83,6 +84,7 @@ pub use command::{
     ephemeral_port, llama_server_candidates, throwaway_args, without_gpus, CmdOutput,
     CommandRunner, ImageFacts, NoRuntime, PortAllocator, PortRetry, TokioRunner, HIDE_GPUS,
 };
+pub use decision_route::{DecisionRoute, RouteRefresh};
 pub use errors::RuntimeError;
 pub use inputs::{AcquireSpec, StartSpec};
 pub use llama_props::{unknown_until, LlamaEntry, Refresh};
@@ -125,6 +127,14 @@ const HEALTH_POLL: Duration = Duration::from_millis(250);
 /// may take this long and no longer, so a connection that hangs cannot hold
 /// the next look back (`Registry::await_health`).
 const CONTAINER_EXIT_POLL: Duration = Duration::from_secs(2);
+
+/// What one live read of a running server's own facts (`GET /props`, a
+/// decision row's `GET /v1/models`) may take outside a start, as the local
+/// model test reads them: what one readiness probe may take
+/// ([`CONTAINER_EXIT_POLL`]). Those routes answer at once from a server that
+/// has just answered a request, and a read cut short replaces only a failed
+/// one ([`Registry::refresh_llama_props`], [`Registry::refresh_decision_route`]).
+pub const LIVE_FACT_READ: Duration = CONTAINER_EXIT_POLL;
 
 /// `podman stop -t` grace, in seconds (§3.6).
 ///

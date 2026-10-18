@@ -56,7 +56,7 @@ mod tests {
         assert_eq!(
             close_kind(CLOSE_TOO_BIG, "x"),
             CloseKind::Other {
-                code: CLOSE_TOO_BIG
+                code: Some(CLOSE_TOO_BIG)
             }
         );
         let r = requests::mcp_host();

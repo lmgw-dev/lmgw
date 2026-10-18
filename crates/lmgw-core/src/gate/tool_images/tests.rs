@@ -339,6 +339,7 @@ fn entry(
     LlamaEntry {
         props: f.ok_or_else(|| "GET /props could not be read".to_string()),
         ubatch_advisory: advisory.map(str::to_string),
+        decision_route: None,
     }
 }
 

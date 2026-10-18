@@ -1,6 +1,6 @@
 //! Hugging Face — the intended way to get a model onto this box
 
-use serde_json::{json, Value};
+use lmgw_api_types as dto;
 
 use crate::hf;
 use crate::jobs::{self, JobKind};
@@ -185,13 +185,13 @@ pub async fn hf_repo(
     repo: &str,
     search: Option<&str>,
     target: &str,
-) -> Result<Value, String> {
+) -> Result<dto::RepoFiles, String> {
     let target = hf::normalize_target(target)?;
     let snap = state.snapshot();
     let files = hf::list_repo_files(&state.http, &snap.settings.hf_token, repo).await?;
     let needle = search.map(str::to_ascii_lowercase);
 
-    let mut out: Vec<Value> = Vec::new();
+    let mut out: Vec<dto::RepoFile> = Vec::new();
     let mut seen_parts: Vec<String> = Vec::new();
     for f in &files {
         if !hf::accepts_file(target, &f.path) {
@@ -220,40 +220,59 @@ pub async fn hf_repo(
         } else {
             f.size.unwrap_or(0)
         };
-        out.push(json!({
-            "file": if parts.len() > 1 { parts[0].clone() } else { f.path.clone() },
-            "role": match target {
+        out.push(dto::RepoFile {
+            file: if parts.len() > 1 {
+                parts[0].clone()
+            } else {
+                f.path.clone()
+            },
+            role: match target {
                 "image" => classify_image_file(&f.path, Some(repo)),
                 _ => classify_repo_file(&f.path, target),
-            },
-            "quant": quant_label(&f.path),
-            "parts": parts.len(),
-            "size_bytes": total,
-            "size": hf::fmt_bytes(total),
-        }));
+            }
+            .to_string(),
+            quant: quant_label(&f.path),
+            parts: parts.len() as u32,
+            size_bytes: total,
+            size: hf::fmt_bytes(total),
+        });
     }
-    if out.is_empty() {
-        return Err(format!(
-            "no {} files in {repo} matching that filter",
-            hf::accepted_extensions_phrase(target)
-        ));
-    }
-    Ok(json!({
-        "repo": repo,
-        "target": target,
-        "files": out,
-        "note": match target {
-            "image" => "Roles are filename heuristics, not facts read out of the files: \
+    // Nothing to list is an answer, not a refusal: the repo exists, the
+    // request was valid, and the empty `files` says so.
+    let nothing = out.is_empty();
+    let filter = if search.is_some_and(|s| !s.trim().is_empty()) {
+        " matching that search"
+    } else {
+        ""
+    };
+    Ok(dto::RepoFiles {
+        repo: repo.to_string(),
+        target: target.to_string(),
+        files: out,
+        note: if nothing {
+            format!(
+                "Nothing matched: no {} files in {repo}{filter}.",
+                hf::accepted_extensions_phrase(target)
+            )
+        } else {
+            match target {
+                "image" => {
+                    "Roles are filename heuristics, not facts read out of the files: \
                         'diffusion' / 'checkpoint' is what loads the pipeline, 'vae', \
                         'text_encoder', 'lora' and 'upscaler' are its components. One image \
                         pipeline spans several repos, so prefer lmgw__image_recipes — it \
                         names every component of a known family with its repo, file and \
                         size — and use lmgw__hf_add target=image for a file a recipe does \
-                        not cover.",
-            _ => "Pass one 'weights' file to lmgw__hf_add; its mmproj and \
-                  drafter companions are fetched with it by default.",
+                        not cover."
+                }
+                _ => {
+                    "Pass one 'weights' file to lmgw__hf_add; its mmproj companion \
+                  (and, for target=chat, its drafter) is fetched with it by default."
+                }
+            }
+            .to_string()
         },
-    }))
+    })
 }
 
 /// Download a repo file and, by default, its companions.
@@ -270,7 +289,7 @@ pub async fn hf_add(
     quant: Option<&str>,
     target: &str,
     companions: bool,
-) -> Result<Value, String> {
+) -> Result<dto::HfAddResult, String> {
     hf::validate_repo(repo)?;
     let target = hf::normalize_target(target)?;
     // Refused before the hub is asked, like an unset models dir.
@@ -366,35 +385,35 @@ pub async fn hf_add(
     // exactly one projector/drafter shared by all of them.
     let dir = chosen.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
     let mut wanted = vec![chosen.clone()];
-    let mut extras: Vec<Value> = Vec::new();
+    let mut extras: Vec<dto::HfCompanion> = Vec::new();
     // Companions are a llama.cpp repo's shape — a projector and a drafter
-    // beside the weights. An image pipeline's components live in *other*
-    // repos (§2.7), so there is nothing here to pull along and the recipe
-    // verbs are what fetch a whole pipeline.
+    // beside the weights. An aux row has no drafter (an encoder, a reranker
+    // or a decision model does not speculate), so aux takes the projector
+    // only (decision-models design §3.2). An image pipeline's components
+    // live in *other* repos (§2.7), so there is nothing here to pull along
+    // and the recipe verbs are what fetch a whole pipeline.
     if companions && target != "image" {
         for f in &ggufs {
             let same_dir = f.path.rsplit_once('/').map(|(d, _)| d).unwrap_or("") == dir;
             let role = classify_repo_file(&f.path, target);
-            if same_dir && matches!(role, "mmproj" | "drafter") && !wanted.contains(&f.path) {
+            let companion = match target {
+                "aux" => role == "mmproj",
+                _ => matches!(role, "mmproj" | "drafter"),
+            };
+            if same_dir && companion && !wanted.contains(&f.path) {
                 wanted.push(f.path.clone());
-                extras.push(json!({ "file": f.path, "role": role }));
+                extras.push(dto::HfCompanion {
+                    file: f.path.clone(),
+                    role: role.to_string(),
+                });
             }
         }
     }
 
-    let queued = crate::web::hf::queue_files(state, repo, &wanted, target).await?;
-    // Hand back the row ids and destination paths: without them a caller can
-    // only re-list every download ever tracked and diff it to find its own.
-    let tracked = store::list_hf_models(&state.db).await.unwrap_or_default();
-    let queued_rows: Vec<Value> = tracked
-        .iter()
-        .filter(|r| r.repo == repo && wanted.contains(&r.file))
-        .map(|r| {
-            json!({
-                "id": r.id, "file": r.file, "dest_path": r.dest_path, "status": r.status,
-            })
-        })
-        .collect();
+    // The rows the queueing itself wrote, with their ids and destination
+    // paths: without them a caller can only re-list every download ever
+    // tracked and diff it to find its own.
+    let queued_rows = crate::web::hf::queue_files(state, repo, &wanted, target).await?;
     // A sharded `.safetensors` is not a split GGUF: sd-server opens one file
     // and has no loader that reassembles shards, and lmgw will not guess the
     // sibling names for a format whose index it does not read. What was asked
@@ -408,31 +427,32 @@ pub async fn hf_add(
              component (lmgw__image_recipes names one for every family it ships)"
         ));
     }
-    Ok(json!({
-        "ok": true,
-        "repo": repo,
-        "weights": chosen,
-        "companions": extras,
-        "files_queued": queued,
-        "downloads": queued_rows,
-        "warnings": warnings,
-        "gguf_path": hf::dest_rel_path(repo, &chosen).unwrap_or_default(),
-        "dest_prefix": format!("{repo}/"),
-        "target": target,
-        "message": match target {
+    let n = queued_rows.len();
+    Ok(dto::HfAddResult {
+        ok: true,
+        repo: repo.to_string(),
+        weights: chosen.clone(),
+        companions: extras,
+        files_queued: n as u32,
+        downloads: queued_rows,
+        warnings,
+        gguf_path: hf::dest_rel_path(repo, &chosen).unwrap_or_default(),
+        dest_prefix: format!("{repo}/"),
+        target: target.to_string(),
+        message: match target {
             "aux" => format!(
-                "queued {queued} file(s) into the aux (embedding / rerank) models dir; poll \
+                "queued {n} file(s) into the aux (embedding / rerank / decision) models dir; poll \
                  lmgw__hf_downloads until status is 'done', then call lmgw__local_model_plan \
                  with gguf_path '{repo}/{chosen}' and target=aux — it returns the parameters \
                  lmgw__aux_model_set action=create takes"
             ),
             "audio" => format!(
-                "queued {queued} file(s) into the audio models dir; poll lmgw__hf_downloads \
+                "queued {n} file(s) into the audio models dir; poll lmgw__hf_downloads \
                  until status is 'done', then configure the model on the dashboard's Audio \
                  page (audio.cpp models need a family and task)"
             ),
             "image" => format!(
-                "queued {queued} file(s) into the image models dir as '{repo}/{chosen}'; poll \
+                "queued {n} file(s) into the image models dir as '{repo}/{chosen}'; poll \
                  lmgw__hf_downloads until status is 'done'. An image pipeline needs more than \
                  this one file — its VAE and text encoders live in other repos — so either \
                  run lmgw__image_recipe_add for a known family (it queues every component and \
@@ -440,12 +460,12 @@ pub async fn hf_add(
                  this path to see which components a matching recipe still wants"
             ),
             _ => format!(
-                "queued {queued} file(s); poll lmgw__hf_downloads until status is \
+                "queued {n} file(s); poll lmgw__hf_downloads until status is \
                  'done', then call lmgw__local_model_plan with gguf_path \
                  '{repo}/{chosen}' to get ready-to-apply parameters"
             ),
         },
-    }))
+    })
 }
 
 /// Tracked downloads with live byte progress.
@@ -455,39 +475,39 @@ pub async fn hf_add(
 /// downloads had their own registry — `lmgw__hf_downloads` is a documented
 /// agent workflow ("poll until status is 'done'") and it keeps working
 /// verbatim. `job_id` is additive, for cancelling.
-pub async fn hf_downloads(state: &SharedState) -> Result<Value, String> {
+pub async fn hf_downloads(state: &SharedState) -> Result<dto::DownloadsView, String> {
     let rows = store::list_hf_models(&state.db)
         .await
         .map_err(|e| e.to_string())?;
     let active = state.jobs.live_of_kind(JobKind::HfDownload);
-    let items: Vec<Value> = rows
+    let items: Vec<dto::DownloadRow> = rows
         .iter()
         .map(|r| {
             let key = jobs::hf_download::job_key(r.id);
             let live = active
                 .iter()
                 .find(|j| j.key.as_deref() == Some(key.as_str()));
-            json!({
-                "id": r.id,
-                "repo": r.repo,
-                "file": r.file,
-                "dest_path": r.dest_path,
-                "target": r.target,
-                "status": r.status,
-                "error": r.error,
-                "size": r.size_bytes.map(|b| hf::fmt_bytes(b.max(0) as u64)),
-                "downloaded_at": r.downloaded_at,
-                "received_bytes": live.map(|j| j.done),
-                "percent": live.and_then(|j| j.percent),
-                "job_id": live.map(|j| j.id),
+            dto::DownloadRow {
+                id: r.id,
+                repo: r.repo.clone(),
+                file: r.file.clone(),
+                dest_path: r.dest_path.clone(),
+                target: r.target.clone(),
+                status: r.status.clone(),
+                error: r.error.clone(),
+                size: r.size_bytes.map(|b| hf::fmt_bytes(b.max(0) as u64)),
+                downloaded_at: r.downloaded_at.clone(),
+                received_bytes: live.map(|j| j.done),
+                percent: live.and_then(|j| j.percent),
+                job_id: live.map(|j| j.id),
                 // What the download asked for and what it got; null on a row
                 // from before lmgw recorded them (unknown, not guessed).
-                "requested_revision": r.requested_revision,
-                "resolved_commit": r.resolved_commit,
-            })
+                requested_revision: r.requested_revision.clone(),
+                resolved_commit: r.resolved_commit.clone(),
+            }
         })
         .collect();
-    Ok(json!({ "downloads": items, "active": active.len() }))
+    Ok(dto::DownloadsView { downloads: items })
 }
 
 /// Background jobs (§9c) — the poll half of the live feed. `limit <= 0` returns
@@ -497,7 +517,7 @@ pub async fn jobs_list(
     kind: Option<&str>,
     active_only: bool,
     limit: i64,
-) -> Result<Value, String> {
+) -> Result<dto::JobsView, String> {
     let kind = match kind.map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => Some(JobKind::parse(k).ok_or_else(|| {
             format!(
@@ -512,14 +532,15 @@ pub async fn jobs_list(
         None => None,
     };
     let items = jobs::list(state, kind, active_only, limit).await?;
-    Ok(json!({ "jobs": items, "active": state.jobs.live().len() }))
+    Ok(dto::JobsView {
+        jobs: items.into_iter().map(crate::knowledge::wire::job).collect(),
+    })
 }
 
 /// Ask a running job to stop (§9c). Cooperative — the executor finishes on its
 /// own terms, so this reports the request, not the completion.
-pub async fn job_cancel(state: &SharedState, id: i64) -> Result<Value, String> {
-    let message = jobs::cancel(state, id).await?;
-    Ok(json!({ "ok": true, "message": message }))
+pub async fn job_cancel(state: &SharedState, id: i64) -> Result<dto::MessageAck, String> {
+    Ok(dto::MessageAck::new(jobs::cancel(state, id).await?))
 }
 
 /// Re-fetch, untrack or update-check a tracked download.
@@ -528,25 +549,33 @@ pub async fn hf_set(
     action: &str,
     id: Option<i64>,
     target: &str,
-) -> Result<Value, String> {
+) -> Result<dto::HfSetAnswer, String> {
     let need_id = || id.ok_or_else(|| format!("'{action}' requires id (see lmgw__hf_downloads)"));
     match action {
         "redownload" => {
             let file = crate::web::hf::redownload(state, need_id()?).await?;
-            Ok(json!({ "ok": true, "message": format!("re-downloading {file}") }))
+            Ok(dto::HfSetAnswer::Done(dto::MessageAck::new(format!(
+                "re-downloading {file}"
+            ))))
         }
         "delete" => {
             crate::web::hf::delete_tracked(state, need_id()?).await?;
-            Ok(json!({ "ok": true, "message": "entry untracked and file removed" }))
+            Ok(dto::HfSetAnswer::Done(dto::MessageAck::new(
+                "entry untracked and file removed",
+            )))
         }
         "cancel" => {
             let message = crate::web::hf::cancel_download(state, need_id()?).await?;
-            Ok(json!({ "ok": true, "message": message }))
+            Ok(dto::HfSetAnswer::Done(dto::MessageAck::new(message)))
         }
         "check_updates" => {
             let (n, errors) =
                 crate::web::hf::check_updates(state, hf::normalize_target(target)?).await;
-            Ok(json!({ "ok": errors.is_empty(), "updates_available": n, "errors": errors }))
+            Ok(dto::HfSetAnswer::Checked(dto::HfUpdatesChecked {
+                ok: errors.is_empty(),
+                updates_available: n as u64,
+                errors,
+            }))
         }
         other => Err(format!(
             "unknown action '{other}' (redownload|cancel|delete|check_updates)"

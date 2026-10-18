@@ -162,6 +162,16 @@ impl Egress for OpenaiEgress {
     fn parse_rerank(&self, body: &[u8]) -> Result<RerankResponse, GatewayError> {
         openai_wire::parse_rerank(body)
     }
+
+    fn build_systemone(
+        &self,
+        http: &reqwest::Client,
+        up: &Upstream,
+        model: &str,
+        body: &openai_wire::SystemOneBody,
+    ) -> Result<reqwest::RequestBuilder, GatewayError> {
+        openai_wire::build_systemone(http, up, model, body)
+    }
 }
 
 /// Count `text` with the model's tiktoken encoding (OpenAI's tokenizer is

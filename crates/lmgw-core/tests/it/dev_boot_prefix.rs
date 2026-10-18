@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use lmgw_core::agents::container::{KIND_AGENT, LABEL_INSTANCE, LABEL_KIND, LABEL_RUN};
 use lmgw_core::config::{default_container_prefix, dev_instance_override};
+use lmgw_core::erased::Erased;
 use lmgw_core::mcp::container::LABEL_MCP;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner};
 use lmgw_core::state::AppState;
@@ -93,26 +93,31 @@ fn ok(stdout: String) -> CmdOutput {
     }
 }
 
-#[async_trait]
 impl CommandRunner for InstalledAppPodman {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        if args.first().map(String::as_str) != Some("ps") {
-            return Ok(ok(String::new()));
-        }
-        let filters: Vec<&str> = args
-            .iter()
-            .zip(args.iter().skip(1))
-            .filter(|(f, _)| *f == "--filter")
-            .map(|(_, v)| v.as_str())
-            .collect();
-        let rows: Vec<&Value> = self
-            .containers
-            .iter()
-            .filter(|c| filters.iter().all(|f| Self::matches(c, f)))
-            .collect();
-        Ok(ok(serde_json::to_string(&rows).unwrap()))
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            if args.first().map(String::as_str) != Some("ps") {
+                return Ok(ok(String::new()));
+            }
+            let filters: Vec<&str> = args
+                .iter()
+                .zip(args.iter().skip(1))
+                .filter(|(f, _)| *f == "--filter")
+                .map(|(_, v)| v.as_str())
+                .collect();
+            let rows: Vec<&Value> = self
+                .containers
+                .iter()
+                .filter(|c| filters.iter().all(|f| Self::matches(c, f)))
+                .collect();
+            Ok(ok(serde_json::to_string(&rows).unwrap()))
+        })
     }
 }
 

@@ -24,6 +24,9 @@
 /// [`audio_engine::cpu_run_args`]), shared so the gateway and the audio
 /// editor strip the same flags and warn about the same ones.
 pub mod audio_engine;
+/// An aux row's thread count ([`aux_engine::threads_in_effect`]), shared so
+/// the gateway renders `--threads` by the rule the aux editor shows.
+pub mod aux_engine;
 /// Benchmark runs (benchmark design §4–§7): the suite's parameters, the
 /// measured points, probes, timeline and identity — the shapes `bench_runs`
 /// stores as JSON columns. A namespace of its own, like [`builds`], because
@@ -40,6 +43,13 @@ pub mod builds;
 /// `CandidateAliasView` (candidate-aliases design §4.1) — its own module
 /// because the derived half alone is a dozen-plus fields.
 pub mod candidate_alias;
+/// The `capabilities` object of a model on `GET /v1/models`, all the way
+/// down: the shapes only; the gateway derives and checks them.
+pub mod capabilities;
+/// The names clients call local models by ([`public_names::prefixed`],
+/// [`public_names::aux_prefix`]), shared so the aux editor names a draft as
+/// the gateway names the row.
+pub mod public_names;
 // The client-apps design record, §4.3.
 /// The Chat API's thread and folder shapes: the list rows, an open thread,
 /// a folder, what a folder create takes — the types the gateway serializes
@@ -79,10 +89,28 @@ pub mod chat_turn;
 /// labels, the language hint's shape — checked by the gateway and said
 /// before Save by the dashboard.
 pub mod chat_voice;
+// The labs-store design record, §2.
+/// The Decision lab: its form and the one `/v1/systemone` body builder, the
+/// examples, the model list with its facts and limits, an Ask and a count.
+pub mod decision_lab;
+// The device link design record, §3.
+/// The device link: the pairing link v2's fixed parts,
+/// `POST /devices/enrol`'s body and answer, the device listener's refusal
+/// codes and the confirmation code's form.
+pub mod device_link;
 pub mod image_lab;
+// The labs-store design record, §1.
 /// The Knowledge bases API: bases, files, uploads, jobs' answers, the source
 /// viewer and the search playground.
 pub mod knowledge;
+/// The lab store: groups, runs and artifacts the three labs keep, and the
+/// answers of `/labs/api/{lab}/*`.
+pub mod lab_store;
+/// What a Chat thread's voice resolves to (chat-voice design §2.3): the
+/// thread answers' `voice_resolved`, each value with the level it came from.
+/// A namespace of its own, like [`chat_voice`], because its names (`Stage`,
+/// `Fallback`, `Sourced`) only make sense inside it.
+pub mod voice_resolved;
 // The client-apps design record, §5.
 /// MCP Apps on `/mcp` (§7): the revision followed, its identifiers, and
 /// the Chat `tool` result frame's fields a host reads.
@@ -93,12 +121,25 @@ pub mod mcp_host;
 /// OpenAPI extension-key names (api-docs design §4.4), read by both the
 /// document builder (lmgw-core) and the page that renders it (lmgw-ui).
 pub mod openapi_ext;
+/// A JSON pretty-printer that keeps every object's members in order (the
+/// labs' raw views; `serde_json`'s map would sort them).
+pub mod ordered_json;
 /// `GET /v1/realtime`'s settings section and the `realtime_budget` op
 /// (realtime design §12) — a namespace of its own, like [`bench_ops`].
 pub mod realtime;
 pub mod scope;
+/// The answers only the self-admin tools (`lmgw__*`) give, one module per tool
+/// group; they are not in the OpenAPI document.
+pub mod self_admin;
+/// TypeSafe's System One wire, `POST /v1/systemone` (decision-models design
+/// §2.8): the one `/v1` protocol whose schema is generated from types,
+/// because lmgw is itself a client of it.
+pub mod systemone;
 
-pub use candidate_alias::CandidateAliasView;
+pub use candidate_alias::{
+    AddableCandidate, CandidateAliasAnswer, CandidateAliasPreview, CandidateAliasSaved,
+    CandidateAliasStatus, CandidateAliasView,
+};
 
 mod container;
 pub use container::*;
@@ -108,8 +149,10 @@ mod model_detail;
 pub use model_detail::*;
 mod model_reads;
 pub use model_reads::*;
+mod model_saved;
+pub use model_saved::*;
 mod ack;
-pub use ack::{Ack, MessageAck};
+pub use ack::{Ack, IdAck, MessageAck, RowSaved, WithNextStep};
 mod status;
 pub use status::*;
 mod connect;
@@ -148,3 +191,5 @@ mod admin_level;
 pub use admin_level::*;
 mod agents;
 pub use agents::*;
+mod session;
+pub use session::*;

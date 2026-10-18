@@ -1,21 +1,28 @@
 //! The Chat change feed (client-apps design §2): `GET /chat/api/feed`, one
-//! SSE stream per client, carrying what changed in the Chat — threads and
-//! folders created, updated and deleted (stored, resumable by cursor) — and
-//! what is happening now — turns, bound voice sessions, the GPU hold (live).
+//! SSE stream per client, carrying what changed in the Chat — threads,
+//! folders and messages created, updated and deleted (stored, resumable by
+//! cursor) — and what is happening now — turns, bound voice sessions, the
+//! GPU hold (live).
 //!
-//! - **Stored** (`store::feed`): every thread and folder write records a
-//!   change in its own transaction; [`Feed::wake`] tells the open streams
-//!   to read the table once the write committed. Delivery renders the
-//!   thread or folder as it is then (`render`).
+//! - **Stored** (`store::feed`): every thread, folder and message write
+//!   records a change in its own transaction; [`Feed::wake`] tells the open
+//!   streams to read the table once the write committed. Delivery renders
+//!   the thread, folder or messages as they are then (`render`,
+//!   `messages`).
 //! - **Live** (`live`): turns and bound sessions register in the live half
 //!   as they start, and publish their end as they drop; the hold is
 //!   published when a snapshot changes it.
-//! - **One stream** (`stream`): `hello`, the catch-up, then both kinds in
-//!   order, keep-alive comments, and `revoked` when the key is.
+//! - **One stream** (`stream`): `hello`, the catch-up, `caught_up`, then
+//!   both kinds in order, keep-alive comments at the stream's own interval
+//!   (`keepalive`), and `revoked` when the key is.
+//! - **For a device that was away** (device link design §7.3): `hello`
+//!   lists the calls waiting for a decision at the head it opened at
+//!   (`approvals`), and `caught_up` says when the catch-up up to that head
+//!   is over.
 //! - **The dashboard** (`dashboard`): `/api/events`' `chat` frame reads the
-//!   same table on the same wake, for the owner, and names the threads
-//!   whose messages changed from the message marks (`marks`), which the
-//!   table does not hold yet.
+//!   same table on the same wake, for the owner. It names what the records
+//!   name: the threads and folders that changed, and the threads whose
+//!   messages changed (`message.*`).
 //!
 //! Who sees what is decided at delivery: a device never receives an event
 //! about an Admin Chat thread, stored or live, in the catch-up, `hello` or
@@ -46,8 +53,9 @@ use crate::store::feed as table;
 mod approvals;
 pub(super) mod dashboard;
 mod devices;
+mod keepalive;
 mod live;
-mod marks;
+mod messages;
 mod opening;
 mod render;
 mod stream;
@@ -62,9 +70,6 @@ pub struct Feed {
     stored: watch::Sender<u64>,
     /// Turns, bound sessions and the hold.
     pub(crate) live: LiveFeed,
-    /// The threads whose messages changed (`marks`): moved by every message
-    /// write of a stored thread, read by the dashboard's `chat` frame.
-    messages: watch::Sender<marks::Marks>,
 }
 
 impl Feed {
@@ -76,36 +81,7 @@ impl Feed {
                 snap.settings.chat_feed_live_buffer,
                 hold_of(&snap.settings.hold),
             ),
-            messages: watch::Sender::new(marks::Marks::default()),
         }
-    }
-
-    /// Thread `thread_id`'s messages changed: a write through the Chat's
-    /// repository seam went through (`web::chat_repo`). A temporary thread
-    /// is never in the feed (L7).
-    pub(crate) fn messages_changed(&self, thread_id: i64) {
-        if thread_id > 0 {
-            self.messages.send_modify(|m| m.mark(thread_id));
-        }
-    }
-
-    /// Stored threads `ids` were deleted: their message marks go, so they do
-    /// not pile up for threads that are gone (`marks`). Nobody is woken:
-    /// the delete's own record names each thread to every reader.
-    pub(crate) fn threads_deleted(&self, ids: &[i64]) {
-        if !ids.is_empty() {
-            self.messages.send_if_modified(|m| {
-                m.forget(ids);
-                false
-            });
-        }
-    }
-
-    /// The threads whose messages were marked after generation `seen`, and
-    /// the generation now (tests).
-    #[cfg(test)]
-    pub(crate) fn marked_since(&self, seen: u64) -> (Vec<i64>, u64) {
-        self.messages.borrow().since(seen)
     }
 
     /// A write that recorded a change has committed: every open stream reads
@@ -139,10 +115,23 @@ pub(crate) struct FeedQuery {
     /// URL it opened, so its `since` is the old one and the header the new.
     #[serde(default)]
     since: Option<String>,
+    /// Seconds between this stream's keep-alive comments, from 1 to
+    /// `chat_feed_keepalive_max_s` (Settings → Chat → Change feed → Longest
+    /// keep-alive, default 900); a value outside is a 400 `bad_request`
+    /// naming the bound and the setting. Without it the stream keeps the
+    /// gateway's `chat_feed_keepalive_s`. `hello.keepalive_s` says the value
+    /// the stream keeps. Only the comments follow it: stored events are
+    /// read at the gateway's own interval whatever this one is. A phone
+    /// holding its feed in the background asks a long one (about 120), so
+    /// its radio wakes less.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    keepalive_s: Option<i64>,
 }
 
-/// `GET /chat/api/feed[?since=<cursor>]` (§2.1): the change feed as SSE, for
-/// the owner and for a paired device. Without a cursor it starts now.
+/// `GET /chat/api/feed[?since=<cursor>][&keepalive_s=<n>]` (§2.1, device
+/// link design §7.1): the change feed as SSE, for the owner and for a
+/// paired device. Without a cursor it starts now.
 ///
 /// Fails closed (review W4-9): the Chat API's own [`Caller`] extractor
 /// refuses a request without a resolved principal (500) or with an
@@ -162,6 +151,10 @@ pub(super) async fn feed(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| q.since.filter(|s| !s.trim().is_empty()));
+    let keepalive_s = match keepalive::of_stream(&state.snapshot().settings, q.keepalive_s) {
+        Ok(k) => k,
+        Err(message) => return err_json(StatusCode::BAD_REQUEST, "bad_request", message),
+    };
     let cursor = match given.as_deref().map(|s| (s, Cursor::parse(s))) {
         None => None,
         Some((_, Some(c))) => Some(c),
@@ -176,7 +169,17 @@ pub(super) async fn feed(
             );
         }
     };
-    match opening::frames(&state, &caller, &ctx, cursor).await {
+    match opening::frames(
+        &state,
+        &caller,
+        &ctx,
+        Asked {
+            cursor,
+            keepalive_s,
+        },
+    )
+    .await
+    {
         Ok(frames) => {
             let frames = frames.map(Ok::<_, Infallible>);
             // Ends when the server stops, without an event: the client's
@@ -188,20 +191,32 @@ pub(super) async fn feed(
     }
 }
 
+/// What a feed's request asked for: where it resumes (`None`: now) and
+/// the seconds between its keep-alive comments (`keepalive`).
+struct Asked {
+    cursor: Option<Cursor>,
+    keepalive_s: u32,
+}
+
 /// Where the table and a device's levels stood when a feed was opened
-/// (`table::bounds_and_switch`): the wake subscribed first, then the epoch,
-/// then the head with the levels in one transaction, so nothing committed
-/// after this moment is missed.
+/// (`table::opening`): the wake subscribed first, then the epoch, then the
+/// head with the levels and the replies waiting for a decision in one
+/// transaction, so nothing committed after this moment is missed and the
+/// open approvals are the ones at the head.
 struct Read {
     stored: watch::Receiver<u64>,
     epoch: String,
     bounds: table::Bounds,
     levels: table::Levels,
+    /// The replies whose calls wait at `bounds.head`, for every reader:
+    /// `hello` lists those in the reader's reach (`approvals::open`).
+    waiting: Vec<table::WaitingReply>,
 }
 
 impl Read {
-    /// Subscribe to the table's wake, then read the epoch, the head and
-    /// device `key_id`'s levels (`None`: the owner's, which are none).
+    /// Subscribe to the table's wake, then read the epoch, the head, device
+    /// `key_id`'s levels (`None`: the owner's, which are none) and the
+    /// waiting replies.
     async fn now(
         state: &SharedState,
         key_id: Option<i64>,
@@ -209,25 +224,27 @@ impl Read {
         let mut stored = state.chat_feed.stored.subscribe();
         stored.borrow_and_update();
         let epoch = table::epoch(&state.db).await?;
-        let (bounds, levels) = table::bounds_and_switch(&state.db, key_id).await?;
+        let at = table::opening(&state.db, key_id).await?;
         Ok(Self {
             stored,
             epoch,
-            bounds,
-            levels,
+            bounds: at.bounds,
+            levels: at.levels,
+            waiting: at.waiting,
         })
     }
 
-    /// [`Self::now`] again with the same wake: the head and the levels as
-    /// they are now.
+    /// [`Self::now`] again with the same wake: the head, the levels and the
+    /// waiting replies as they are now.
     async fn again(
         &mut self,
         state: &SharedState,
         key_id: i64,
     ) -> Result<(), crate::error::GatewayError> {
-        let (bounds, levels) = table::bounds_and_switch(&state.db, Some(key_id)).await?;
-        self.bounds = bounds;
-        self.levels = levels;
+        let at = table::opening(&state.db, Some(key_id)).await?;
+        self.bounds = at.bounds;
+        self.levels = at.levels;
+        self.waiting = at.waiting;
         Ok(())
     }
 
@@ -244,8 +261,10 @@ impl Read {
     }
 }
 
-/// Open one client's stream at where the table stood (`read`): `hello`,
-/// then the `resync` its cursor may owe.
+/// Open one client's stream at where the table stood (`read`), from the
+/// cursor it `asked` for and keeping a comment every keep-alive it asked
+/// for (`keepalive`): `hello`, then the `resync` its cursor may owe;
+/// `caught_up` follows once the stream reached the head (`stream`).
 ///
 /// **A device's reach** (its admin-tools switch, reviews P-1 and P-5): the
 /// switch is read in the transaction that reads the table's head, so it is
@@ -259,7 +278,10 @@ async fn open(
     state: &SharedState,
     caller: &Caller,
     ctx: &RequestCtx,
-    cursor: Option<Cursor>,
+    Asked {
+        cursor,
+        keepalive_s,
+    }: Asked,
     read: Read,
 ) -> Result<stream::FeedStream, crate::error::GatewayError> {
     let snap = state.snapshot();
@@ -269,6 +291,7 @@ async fn open(
         epoch,
         bounds,
         levels,
+        waiting,
     } = read;
     let key_id = key_of(caller);
     // The reach now: a device's from its row and the gateway's level, read
@@ -314,6 +337,9 @@ async fn open(
         _ => stream::tag_at(state, start.cursor).await?,
     };
     let (principal, hosts_label) = principal_of(&ctx.principal, &snap);
+    // A device's row as the snapshot holds it: its URLs, certificate and
+    // whether it is this computer's (device link design §7.2).
+    let device = key_id.and_then(|id| snap.api_keys.iter().find(|k| k.id == id));
     let hello = Hello {
         epoch: epoch.clone(),
         cursor: Cursor {
@@ -322,7 +348,7 @@ async fn open(
             tag: tag.clone(),
         }
         .to_string(),
-        keepalive_s: settings.chat_feed_keepalive_s,
+        keepalive_s,
         retention_days: settings.chat_feed_retention_days,
         principal,
         hosts_label,
@@ -331,6 +357,18 @@ async fn open(
         hold: now.hold,
         voice: now.voice,
         turns: now.turns,
+        // At the head, in the reach now: the catch-up's `approval.*` are
+        // already in it (device link design §7.3).
+        open_approvals: approvals::open(&waiting, admin),
+        urls: device.map(|k| k.link.urls.clone()).unwrap_or_default(),
+        cert: device.and_then(|k| cert_of(&k.link)),
+        dashboard_url: device.and_then(|k| {
+            crate::net::dashboard_url(
+                &settings.bind_addr,
+                k.link.local_only,
+                ctx.conn.as_ref().map(|c| c.local.ip()),
+            )
+        }),
     };
     let mut out = VecDeque::from([stream::frame(event::HELLO, &hello)]);
     if let Some(reason) = start.resync {
@@ -341,8 +379,13 @@ async fn open(
     }
     // Counted as the device's feed link, `last_seen_at` stamped; watched
     // for revocation for every key (§1.6).
-    let conn =
-        crate::devices::connect(state, &ctx.principal, ctx.revocation_mark, LinkKind::Feed).await;
+    //
+    // A device's feed sets `TCP_USER_TIMEOUT` on its connection's socket
+    // from `keepalive_s` (§7.1, D16): a keep-alive that a vanished phone
+    // never acknowledges then fails within one more interval and the stream
+    // ends. `Links` records the keep-alive, the peer and the start.
+    set_user_timeout(ctx, keepalive_s);
+    let conn = crate::devices::connect_with(state, ctx, LinkKind::Feed, Some(keepalive_s)).await;
     Ok(stream::FeedStream {
         state: state.clone(),
         admin,
@@ -359,16 +402,50 @@ async fn open(
         page_size: settings.chat_feed_page_size.max(1),
         stored,
         live,
-        keepalive: stream::FeedStream::keepalive(settings.chat_feed_keepalive_s),
+        keepalive: stream::FeedStream::keepalive(keepalive_s),
+        backstop: stream::FeedStream::keepalive(settings.chat_feed_keepalive_s),
+        told_caught_up: false,
         conn,
         out,
         pending: VecDeque::new(),
+        queue: VecDeque::new(),
+        purge: None,
         dirty: true,
         ended: false,
         stalled: None,
         waiting: None,
     })
 }
+
+/// `hello.cert` from a device row: its latest certificate's dates; `None`
+/// before it has one.
+fn cert_of(link: &crate::config::DeviceLink) -> Option<lmgw_api_types::chat_feed::HelloCert> {
+    Some(lmgw_api_types::chat_feed::HelloCert {
+        not_after: link.cert_not_after.clone()?,
+        notice_after: link.cert_notice_after.clone()?,
+    })
+}
+
+/// Set `TCP_USER_TIMEOUT` on a device feed's connection to its keep-alive
+/// (device link design §7.1): data the peer never acknowledges ends the
+/// connection one interval after the comment that could not be delivered.
+/// Only the device listener's connections carry a socket handle; a failure
+/// is logged, never a refusal (the stream's own timers still work).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn set_user_timeout(ctx: &RequestCtx, keepalive_s: u32) {
+    let Some(socket) = ctx.conn.as_ref().and_then(|c| c.socket.as_ref()) else {
+        return;
+    };
+    let timeout = std::time::Duration::from_secs(u64::from(keepalive_s));
+    if let Err(e) = socket.set_tcp_user_timeout(Some(timeout)) {
+        tracing::warn!("device feed: TCP_USER_TIMEOUT not set: {e}");
+    }
+}
+
+/// Where the option does not exist (socket2 has it on Linux and Android
+/// here), the stream's own timers are all there is.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn set_user_timeout(_: &RequestCtx, _: u32) {}
 
 /// The device key a feed reads for; `None` for the owner.
 fn key_of(caller: &Caller) -> Option<i64> {

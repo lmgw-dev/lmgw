@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 use lmgw_api_types::openapi_ext;
 
+use super::answer_defaults;
 use super::registry::{Dialect, SchemaFn};
 
 /// Draft 2020-12, refs into `#/components/schemas` (so a ref reads
@@ -73,11 +74,6 @@ impl Sent {
         sync_required(&mut value, &embed(&mut self.gs, f));
         value
     }
-
-    /// Register `f`'s components as sent without embedding it anywhere.
-    pub(crate) fn touch(&mut self, f: SchemaFn) {
-        f(&mut self.gs);
-    }
 }
 
 /// The *serialize* contract twin of [`generator`]: a field is optional only
@@ -133,7 +129,7 @@ pub(crate) fn apply_sent_required(
         if let Some(de) = g.definitions().get(name) {
             let mut synced = de.clone();
             sync_required(&mut synced, ser);
-            if &synced != de {
+            if &synced != de || answer_defaults::has(de) {
                 split.insert(name.clone());
             }
         }
@@ -181,10 +177,21 @@ pub(crate) fn apply_sent_required(
             }
         }
     }
-    // The answer's lists.
+    // The answer's lists, and no `default` keyword anywhere in it: the
+    // request-side twins above kept theirs.
     for (name, ser) in sent_defs {
         if let Some(de) = g.definitions_mut().get_mut(name) {
             sync_required(de, ser);
+            answer_defaults::strip(de);
+        }
+    }
+    for methods in paths.values_mut().filter_map(Value::as_object_mut) {
+        for op in methods.values_mut().filter_map(Value::as_object_mut) {
+            // Each response object, not the map: its `default` key is the
+            // dialect's error response, not a keyword.
+            if let Some(Value::Object(responses)) = op.get_mut("responses") {
+                responses.values_mut().for_each(answer_defaults::strip);
+            }
         }
     }
     split

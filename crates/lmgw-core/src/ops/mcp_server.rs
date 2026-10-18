@@ -1,7 +1,7 @@
 //! Southbound MCP server patch: `McpServerPatch` and `mcp_server_set`.
 
+use lmgw_api_types as dto;
 use serde::Deserialize;
-use serde_json::{json, Value};
 
 use crate::config::McpTransport;
 use crate::runtime::argv;
@@ -14,8 +14,9 @@ use super::*;
 mod device_row;
 pub(crate) use device_row::SAMPLING_REFUSAL as DEVICE_SAMPLING_REFUSAL;
 
-/// Sparse patch for a southbound MCP server. List-valued fields arrive as
-/// newline-delimited text (`args`, `extra_run_args`), `KEY=VALUE` lines
+/// Sparse patch for a southbound MCP server. `extra_run_args` is a list of
+/// strings; the other list-valued fields arrive as newline-delimited text
+/// (`args`), `KEY=VALUE` lines
 /// (`env`), or `Name: Value` lines (`headers`) — flat strings rather than
 /// nested JSON, so a small local model can fill them in.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -36,7 +37,8 @@ pub struct McpServerPatch {
     pub env: Option<String>,
     pub cwd: Option<String>,
     pub container_image: Option<String>,
-    pub extra_run_args: Option<String>,
+    /// One `podman run` argument per entry.
+    pub extra_run_args: Option<Vec<String>>,
     pub url: Option<String>,
     /// `Name: value` lines — where an HTTP server's bearer goes.
     #[schemars(transform = lmgw_api_types::openapi_ext::secret)]
@@ -130,13 +132,22 @@ fn reject_device_word(
     }
 }
 
+/// What an update-class action did, for the answer's sentence.
+pub(crate) fn saved_verb(action: &str) -> &'static str {
+    match action {
+        "enable" => "enabled",
+        "disable" => "disabled",
+        _ => "updated",
+    }
+}
+
 /// `writer` is who asks: a self-admin tool's move of a row with headers to
 /// another address must restate them ([`RowWriter`]).
 pub async fn mcp_server_set(
     state: &SharedState,
     p: McpServerPatch,
     writer: RowWriter,
-) -> Result<Value, String> {
+) -> Result<dto::McpServerSaved, String> {
     let snap = state.snapshot();
     let id_of = || p.id.ok_or_else(|| format!("'{}' requires id", p.action));
 
@@ -186,9 +197,12 @@ pub async fn mcp_server_set(
                 env: parse_env(p.env.as_deref().unwrap_or_default())?,
                 cwd: opt(&p.cwd),
                 container_image,
-                extra_run_args: argv::parse_args_text(
-                    p.extra_run_args.as_deref().unwrap_or_default(),
-                )?,
+                extra_run_args: p
+                    .extra_run_args
+                    .as_deref()
+                    .map(arg_list)
+                    .transpose()?
+                    .unwrap_or_default(),
                 url,
                 headers: parse_headers(p.headers.as_deref().unwrap_or_default())?,
                 tool_prefix,
@@ -206,7 +220,12 @@ pub async fn mcp_server_set(
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(json!({ "ok": true, "id": id, "message": format!("MCP server '{name}' created") }))
+            Ok(dto::McpServerSaved {
+                ok: true,
+                id,
+                message: format!("MCP server '{name}' created"),
+                ..Default::default()
+            })
         }
         "update" | "enable" | "disable" => {
             let id = id_of()?;
@@ -313,8 +332,8 @@ pub async fn mcp_server_set(
                 env,
                 cwd: opt(&p.cwd).or(cur.cwd),
                 container_image: opt(&p.container_image).or(cur.container_image),
-                extra_run_args: match p.extra_run_args.as_deref() {
-                    Some(raw) => argv::parse_args_text(raw)?,
+                extra_run_args: match &p.extra_run_args {
+                    Some(a) => arg_list(a)?,
                     None => cur.extra_run_args,
                 },
                 url,
@@ -334,9 +353,12 @@ pub async fn mcp_server_set(
             // Reconciles the live connection (start/stop/restart) as a side
             // effect, and fires tools/list_changed to every /mcp subscriber.
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(
-                json!({ "ok": true, "id": id, "message": format!("MCP server '{}' updated", new.name) }),
-            )
+            Ok(dto::McpServerSaved {
+                ok: true,
+                id,
+                message: format!("MCP server '{}' {}", new.name, saved_verb(&p.action)),
+                ..Default::default()
+            })
         }
         "delete" => {
             let id = id_of()?;
@@ -356,10 +378,12 @@ pub async fn mcp_server_set(
             // threads (MCP Tasks design §1.6).
             crate::web::chat_tasks::servers_gone(state).await;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(json!({
-                "ok": true, "id": id,
-                "message": format!("MCP server '{}' deleted", cur.name),
-            }))
+            Ok(dto::McpServerSaved {
+                ok: true,
+                id,
+                message: format!("MCP server '{}' deleted", cur.name),
+                ..Default::default()
+            })
         }
         "test" => {
             let id = id_of()?;
@@ -368,10 +392,12 @@ pub async fn mcp_server_set(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no MCP server with id {id}"))?;
             match state.mcp.test_connection(&server).await {
-                Ok(n) => Ok(json!({
-                    "ok": true, "id": id, "tool_count": n,
-                    "message": format!("connected to '{}' — {n} tools", server.name),
-                })),
+                Ok(n) => Ok(dto::McpServerSaved {
+                    ok: true,
+                    id,
+                    tool_count: Some(n as u64),
+                    message: format!("connected to '{}' — {n} tools", server.name),
+                }),
                 Err(e) => Err(format!("test failed for '{}': {e}", server.name)),
             }
         }
@@ -404,6 +430,7 @@ mod tests {
             note: String::new(),
             hosts_label: Some("phone".into()),
             self_admin: crate::config::DeviceAdmin::Off,
+            link: Default::default(),
         });
         for name in ["phone", "PHONE", "phone.", "phone_", "phone!"] {
             let e = reject_device_label(&snap, name).expect_err(name);

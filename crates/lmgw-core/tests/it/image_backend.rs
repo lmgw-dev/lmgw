@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use lmgw_core::config::{hash_api_key, KeyPolicy, ScopeMode, Settings};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::Registry;
 use lmgw_core::server::build_router;
 use lmgw_core::state::{AppState, SharedState};
@@ -51,17 +52,18 @@ fn image_row(model_id: &str) -> NewImageModel {
 /// is the wiremock the port allocator points at.
 struct FakePodman;
 
-#[async_trait::async_trait]
 impl lmgw_core::runtime::registry::CommandRunner for FakePodman {
-    async fn run(
-        &self,
-        _program: &str,
-        _args: &[String],
-    ) -> std::io::Result<lmgw_core::runtime::registry::CmdOutput> {
-        Ok(lmgw_core::runtime::registry::CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<lmgw_core::runtime::registry::CmdOutput>> {
+        Box::pin(async move {
+            Ok(lmgw_core::runtime::registry::CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -166,6 +168,7 @@ async fn setup_cloud(mock: &MockServer) -> (SharedState, String) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -814,6 +817,7 @@ async fn a_non_openai_upstream_is_refused() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

@@ -1,5 +1,7 @@
 //! `ops-usage`: price-sheet mutations (api-docs design §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 use crate::openapi::ops::args;
 
@@ -20,7 +22,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: Some("lmgw__price_set"),
         args: OpArgs::Hand(args::price_set),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::PriceSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -33,10 +35,10 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "price_delete",
         tag: TAG,
         summary: "Delete one price row",
-        description: None,
+        description: Some("404 not_found for an id no price row has."),
         tool: Some("lmgw__price_delete"),
         args: OpArgs::Tool,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::IdAck>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -50,7 +52,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__prices_sync"),
         args: OpArgs::Tool,
-        response: Resp::Json(|g| g.root_schema_for::<crate::catalog::PriceSyncSummary>()),
+        response: Resp::Json(|g| g.root_schema_for::<dto::PriceSyncSummary>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

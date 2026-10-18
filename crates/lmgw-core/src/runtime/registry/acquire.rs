@@ -383,12 +383,18 @@ impl Registry {
                                     warnings.extend(caps.warnings(row));
                                 }
                             }
+                            let decision_route = ready.decision_route;
                             let llama = ready.props.map(|props| LlamaEntry {
                                 props,
                                 ubatch_advisory: advisory.clone(),
+                                decision_route,
                             });
                             let unread = llama.as_ref().and_then(|l| l.props.as_ref().err());
-                            for w in warnings.iter().chain(unread) {
+                            let no_route = llama
+                                .as_ref()
+                                .and_then(|l| l.decision_route.as_ref())
+                                .and_then(super::DecisionRoute::warning);
+                            for w in warnings.iter().chain(unread).chain(no_route) {
                                 tracing::warn!(
                                     container = %name,
                                     "{class} model '{model_id}' started with a warning: {w}"
@@ -530,8 +536,14 @@ impl Registry {
                 EngineArgs::Llama(_) => Some(self.read_llama_props_by(port, deadline).await),
                 _ => None,
             };
+            // A decision row's route, after `/props` and in the same budget
+            // (decision-models design §3.6).
+            let decision_route = self
+                .decision_route_of(render, port, deadline, props.as_ref())
+                .await;
             return Ok(Ready {
                 props,
+                decision_route,
                 ..Ready::default()
             });
         }
@@ -641,6 +653,9 @@ struct Ready {
     /// llama-server's `GET /props`, read once it answered `/health`: the
     /// facts or why there are none. `None` for every other engine.
     props: Option<Result<Arc<crate::egress::llama_cpp::props::LlamaFacts>, String>>,
+    /// A decision row's route check, read after `/props`; `None` for every
+    /// other row.
+    decision_route: Option<super::DecisionRoute>,
     warnings: Vec<String>,
 }
 

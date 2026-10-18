@@ -16,12 +16,13 @@ use std::rc::Rc;
 
 use futures::future::{select, Either, FutureExt};
 use leptos::prelude::*;
+use lmgw_api_types::chat_frames::ToolFrame;
 use serde_json::Value;
 
 use super::chat::{scroll_down, ChatThread, Msg, Stats, ToolCard};
 use super::chat_approvals;
 use super::chat_reply::Finished;
-use super::chat_stream::{send_stream_coded, ChatEvent, Refusal};
+use super::chat_stream::{send_stream_coded, ChatEvent, Refusal, ToolEvent};
 use super::chat_sync::OwnEdits;
 use super::chat_voice::PageVoice;
 use crate::scope::Scope;
@@ -194,8 +195,8 @@ pub(super) async fn run_turn(
                     scroll_down(false);
                 }
             }
-            ChatEvent::Tool(v) => {
-                apply_tool_frame(a_tools, &v);
+            ChatEvent::Tool(step) => {
+                apply_tool_frame(a_tools, &step);
                 if here() {
                     scroll_down(false);
                 }
@@ -281,17 +282,15 @@ pub(super) async fn run_turn(
                     a_images_note.set(fin.images_note);
                 }
                 let (up, uc) = usage_seen2.get();
-                let total_ms = done["total_ms"]
-                    .as_f64()
-                    .unwrap_or(js_sys::Date::now() - t0);
-                let ttft = done["ttfb_ms"]
-                    .as_f64()
+                let saved = done.saved.as_ref();
+                let total_ms = saved.map_or(js_sys::Date::now() - t0, |s| s.total_ms as f64);
+                let ttft = saved
+                    .and_then(|s| s.ttfb_ms)
+                    .map(|ms| ms as f64)
                     .or_else(|| first_at2.get().map(|f| f - t0));
-                let s = if !done["timings"].is_null() {
-                    let mut s = Stats::from_timings(&done["timings"], cm);
-                    s.tps = done["timings"]["predicted_per_second"]
-                        .as_f64()
-                        .filter(|v| v.is_finite());
+                let s = if let Some(t) = saved.and_then(|s| s.timings.as_ref()) {
+                    let mut s = Stats::from_timings(t, cm);
+                    s.tps = t.predicted_per_second;
                     if up.is_some() {
                         s.prompt_tokens = up;
                     }
@@ -324,15 +323,10 @@ pub(super) async fn run_turn(
                         ..Default::default()
                     }
                 };
-                let ignored = done["reasoning_ignored"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
+                let ignored = saved
+                    .map(|s| s.reasoning_ignored.clone())
                     .unwrap_or_default();
-                let reasoning_note = done["reasoning_note"].as_str().map(str::to_string);
+                let reasoning_note = saved.and_then(|s| s.reasoning_note.clone());
                 // The composer's line says it once: a model that reasoned
                 // although off was asked.
                 voice.status.reasoning(&done);
@@ -344,7 +338,7 @@ pub(super) async fn run_turn(
                         ..s
                     },
                 )));
-                if done["aborted"].as_bool().unwrap_or(false) && !continuing && !superseded2.get() {
+                if done.aborted && !continuing && !superseded2.get() {
                     a_content.update(|c| c.push_str(" ⏹"));
                 }
                 if let Some(s) = &speech2 {
@@ -354,7 +348,7 @@ pub(super) async fn run_turn(
                     }
                 }
             }
-            ChatEvent::Voice(name, data) => voice.turn_frame(speech2.as_deref(), name, &data),
+            ChatEvent::Voice(frame) => voice.turn_frame(speech2.as_deref(), &frame),
         }
     };
     let sig = signal.unwrap_or_else(|| web_sys::AbortController::new().unwrap().signal());
@@ -417,14 +411,17 @@ pub(super) async fn run_turn(
 }
 
 /// A `tool` frame: find or open the card at its index and apply the step.
-pub(super) fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
+/// An event this build does not know still opens its card, and applies
+/// nothing to it.
+pub(super) fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, step: &ToolEvent) {
     // A call that waits for a decision names no index: it is one of the
     // cards already shown.
-    if v["event"] == "approval" {
-        chat_approvals::hold_for_frame(tools, v);
+    let Some(index) = step.index() else {
+        if let ToolEvent::Frame(ToolFrame::Approval(req)) = step {
+            chat_approvals::hold_for_frame(tools, req);
+        }
         return;
-    }
-    let index = v["index"].as_i64().unwrap_or(0);
+    };
     tools.update(|tools| {
         let card = match tools.iter().find(|c| c.index == index) {
             Some(c) => *c,
@@ -443,30 +440,177 @@ pub(super) fn apply_tool_frame(tools: RwSignal<Vec<ToolCard>>, v: &Value) {
                 c
             }
         };
-        match v["event"].as_str().unwrap_or("") {
-            "start" => card
-                .name
-                .set(v["name"].as_str().unwrap_or("tool").to_string()),
-            "args" => card
-                .args
-                .update(|a| a.push_str(v["fragment"].as_str().unwrap_or(""))),
-            "ready" => {
-                if let Some(n) = v["name"].as_str() {
-                    card.name.set(n.to_string());
-                }
-                if let Some(args) = v.get("arguments") {
-                    card.args
-                        .set(serde_json::to_string_pretty(args).unwrap_or_default());
-                }
+        let ToolEvent::Frame(frame) = step else {
+            return;
+        };
+        match frame {
+            ToolFrame::Start(f) => card.name.set(f.name.clone()),
+            ToolFrame::Args(f) => card.args.update(|a| a.push_str(&f.fragment)),
+            ToolFrame::Ready(f) => {
+                card.name.set(f.name.clone());
+                card.args
+                    .set(serde_json::to_string_pretty(&f.arguments).unwrap_or_default());
             }
-            "result" => {
-                card.output
-                    .set(v["output"].as_str().unwrap_or("").to_string());
-                card.is_error.set(v["is_error"].as_bool().unwrap_or(false));
-                card.ms.set(v["ms"].as_i64());
+            ToolFrame::Result(f) => {
+                card.output.set(f.output.clone());
+                card.is_error.set(f.is_error);
+                card.ms.set(i64::try_from(f.ms).ok());
                 card.done.set(true);
             }
-            _ => {}
+            ToolFrame::Approval(_) => {}
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::chat_stream::{frame, ChatEvent};
+    use super::*;
+    use serde_json::json;
+
+    /// What a card shows.
+    #[derive(Debug, PartialEq)]
+    struct Shown {
+        index: i64,
+        name: String,
+        args: String,
+        output: String,
+        is_error: bool,
+        ms: Option<i64>,
+        done: bool,
+    }
+
+    impl Shown {
+        /// The card of a call that was only opened.
+        fn opened(index: i64) -> Self {
+            Self {
+                index,
+                name: String::new(),
+                args: String::new(),
+                output: String::new(),
+                is_error: false,
+                ms: None,
+                done: false,
+            }
+        }
+    }
+
+    fn apply(tools: RwSignal<Vec<ToolCard>>, f: Value) {
+        match frame("tool", f) {
+            Some(ChatEvent::Tool(step)) => apply_tool_frame(tools, &step),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The cards a stream's `tool` frames build, in an owner of their own.
+    fn run(frames: Vec<Value>) -> Vec<Shown> {
+        let owner = Owner::new();
+        owner.with(|| {
+            let tools = RwSignal::new(Vec::<ToolCard>::new());
+            for f in frames {
+                apply(tools, f);
+            }
+            tools.with_untracked(|t| {
+                t.iter()
+                    .map(|c| Shown {
+                        index: c.index,
+                        name: c.name.get_untracked(),
+                        args: c.args.get_untracked(),
+                        output: c.output.get_untracked(),
+                        is_error: c.is_error.get_untracked(),
+                        ms: c.ms.get_untracked(),
+                        done: c.done.get_untracked(),
+                    })
+                    .collect()
+            })
+        })
+    }
+
+    #[test]
+    fn a_call_builds_its_card_from_start_to_result() {
+        let cards = run(vec![
+            json!({"event": "start", "index": 0, "name": "docs__read"}),
+            json!({"event": "args", "index": 0, "fragment": "{\"a\":"}),
+            json!({"event": "args", "index": 0, "fragment": "1}"}),
+            json!({"event": "ready", "index": 0, "name": "docs__read", "arguments": {"a": 1}}),
+            json!({"event": "result", "index": 0, "name": "docs__read", "output": "text",
+                   "is_error": true, "ms": 41}),
+            json!({"event": "start", "index": 1, "name": "docs__list"}),
+        ]);
+        assert_eq!(
+            cards,
+            [
+                Shown {
+                    index: 0,
+                    name: "docs__read".into(),
+                    args: serde_json::to_string_pretty(&json!({"a": 1})).unwrap(),
+                    output: "text".into(),
+                    is_error: true,
+                    ms: Some(41),
+                    done: true,
+                },
+                Shown {
+                    name: "docs__list".into(),
+                    ..Shown::opened(1)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_event_opens_its_card_and_changes_nothing() {
+        // A newer gateway's event: the card at its index, once.
+        let cards = run(vec![
+            json!({"event": "progress", "index": 2, "percent": 40}),
+            json!({"event": "progress", "index": 2, "percent": 80}),
+        ]);
+        assert_eq!(cards, [Shown::opened(2)]);
+        // On a card already open it applies nothing.
+        let cards = run(vec![
+            json!({"event": "start", "index": 0, "name": "docs__read"}),
+            json!({"event": "progress", "index": 0}),
+        ]);
+        assert_eq!(
+            cards,
+            [Shown {
+                name: "docs__read".into(),
+                ..Shown::opened(0)
+            }]
+        );
+        // No event and no index: the first card.
+        assert_eq!(run(vec![json!({})]), [Shown::opened(0)]);
+    }
+
+    #[test]
+    fn an_approval_holds_the_card_of_its_call_and_opens_none() {
+        let owner = Owner::new();
+        owner.with(|| {
+            let tools = RwSignal::new(Vec::<ToolCard>::new());
+            apply(
+                tools,
+                json!({"event": "start", "index": 0, "name": "mail__send"}),
+            );
+            apply(
+                tools,
+                json!({"event": "ready", "index": 0, "name": "mail__send",
+                       "arguments": {"to": "x"}, "needs_approval": true}),
+            );
+            apply(
+                tools,
+                json!({"event": "approval", "approval_request_id": "mcpr_1",
+                       "server_label": "mail", "name": "send", "arguments": "{\"to\":\"x\"}"}),
+            );
+            tools.with_untracked(|t| {
+                assert_eq!(t.len(), 1);
+                assert_eq!(
+                    t[0].approval.hold.get_untracked(),
+                    Some(chat_approvals::Hold::Gated {
+                        id: "mcpr_1".into(),
+                        label: "mail".into()
+                    })
+                );
+                assert!(t[0].done.get_untracked());
+            });
+        });
+    }
 }

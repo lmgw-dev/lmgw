@@ -19,6 +19,10 @@ pub struct NewUpstream {
     pub expose_all: bool,
     pub expose_prefix: String,
     pub supports_responses: bool,
+    /// `catalog_all_modalities`: the catalog request asks for every output
+    /// modality (decision-models design §6.2). Not on [`Upstream`]: the
+    /// snapshot carries the rows where it is off (`Snapshot::catalog_bare`).
+    pub catalog_all_modalities: bool,
 }
 
 pub async fn list_upstreams(pool: &SqlitePool) -> DbResult<Vec<Upstream>> {
@@ -50,8 +54,8 @@ pub async fn insert_upstream(pool: &SqlitePool, u: &NewUpstream) -> DbResult<i64
     let headers = serde_json::to_string(&u.extra_headers)
         .map_err(|e| GatewayError::Internal(e.to_string()))?;
     let res = sqlx::query(
-        "INSERT INTO upstreams (name, protocol, kind, base_url, api_key, extra_headers, timeout_ms, enabled, expose_all, expose_prefix, supports_responses)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO upstreams (name, protocol, kind, base_url, api_key, extra_headers, timeout_ms, enabled, expose_all, expose_prefix, supports_responses, catalog_all_modalities)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )
     .bind(&u.name)
     .bind(u.protocol.as_str())
@@ -64,6 +68,7 @@ pub async fn insert_upstream(pool: &SqlitePool, u: &NewUpstream) -> DbResult<i64
     .bind(u.expose_all as i64)
     .bind(&u.expose_prefix)
     .bind(u.supports_responses as i64)
+    .bind(u.catalog_all_modalities as i64)
     .execute(pool)
     .await?;
     Ok(res.last_insert_rowid())
@@ -82,7 +87,8 @@ pub async fn update_upstream(
         sqlx::query(
             "UPDATE upstreams SET name=?2, protocol=?3, kind=?4, base_url=?5, api_key=?6,
              extra_headers=?7, timeout_ms=?8, enabled=?9, expose_all=?10, expose_prefix=?11,
-             supports_responses=?12, updated_at=datetime('now') WHERE id=?1",
+             supports_responses=?12, catalog_all_modalities=?13, updated_at=datetime('now')
+             WHERE id=?1",
         )
         .bind(id)
         .bind(&u.name)
@@ -96,13 +102,15 @@ pub async fn update_upstream(
         .bind(u.expose_all as i64)
         .bind(&u.expose_prefix)
         .bind(u.supports_responses as i64)
+        .bind(u.catalog_all_modalities as i64)
         .execute(pool)
         .await?;
     } else {
         sqlx::query(
             "UPDATE upstreams SET name=?2, protocol=?3, kind=?4, base_url=?5,
              extra_headers=?6, timeout_ms=?7, enabled=?8, expose_all=?9, expose_prefix=?10,
-             supports_responses=?11, updated_at=datetime('now') WHERE id=?1",
+             supports_responses=?11, catalog_all_modalities=?12, updated_at=datetime('now')
+             WHERE id=?1",
         )
         .bind(id)
         .bind(&u.name)
@@ -115,6 +123,7 @@ pub async fn update_upstream(
         .bind(u.expose_all as i64)
         .bind(&u.expose_prefix)
         .bind(u.supports_responses as i64)
+        .bind(u.catalog_all_modalities as i64)
         .execute(pool)
         .await?;
     }

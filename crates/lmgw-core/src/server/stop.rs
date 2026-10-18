@@ -33,6 +33,12 @@
 //! the drain and then that wait share it, and what was still open when it
 //! ran out is said in the log ([`Stops::open_requests`]). A stop never waits
 //! longer, whatever a client or an upstream does.
+//!
+//! **A generation per listener** (device link design §4.4): the plain
+//! listener and the device listener each have their own, and a request
+//! carries its listener's ([`ServedAt::via`]). Turning the device listener
+//! off or moving it ends its streams, sessions and calls, never the plain
+//! listener's; a gateway stop stops both, within the one bound.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -44,6 +50,7 @@ use futures::stream::{BoxStream, StreamExt};
 use futures::Stream;
 use tokio::sync::watch;
 
+use super::conn::Via;
 use crate::state::SharedState;
 
 /// The close code a realtime session ends with when its server stops:
@@ -66,21 +73,32 @@ pub const STOP_WITHIN: Duration = Duration::from_secs(10);
 /// The bound's earlier name, for the suites that wait on a stop.
 pub const SESSIONS_END_WITHIN: Duration = STOP_WITHIN;
 
-/// The generation of the server a request came in on: put on every request
-/// by `serve_app`, before anything else reads it (review F-3). A stream or a
-/// session it opens ends at that server's stop, however long it took to get
-/// going. Read through `RequestCtx::served_at`, or from the extensions where
-/// no context is resolved (the agent proxy).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ServedAt(pub u64);
+/// The listener a request came in on, and that listener's generation then:
+/// put on every request by the serving loop, before anything else reads it
+/// (review F-3). A stream or a session it opens ends at that listener's stop,
+/// however long it took to get going, and never at the other listener's
+/// (device link design §4.4). Read through `RequestCtx::served_at`, or from
+/// the extensions where no context is resolved (the agent proxy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ServedAt {
+    pub via: Via,
+    pub at: u64,
+}
 
-/// The servers' stops: a generation that moves on each time one stops, the
-/// sessions and turns running per generation they were opened at, and the
-/// requests in flight.
+/// The listeners' stops (device link design §4.4): per listener, a
+/// generation that moves on each time it stops; the sessions and turns
+/// running per listener and generation they were opened at; the request
+/// rows being written; and the requests in flight.
+///
+/// One per gateway, holding both listeners' generations: the plain
+/// listener's moves when a gateway stop (or a restart) stops it, the device
+/// listener's when it is turned off or moved, and at a gateway stop. A
+/// stream watches the one its request came in on.
 #[derive(Debug)]
 pub struct Stops {
-    generation: watch::Sender<u64>,
-    running: Arc<watch::Sender<BTreeMap<u64, usize>>>,
+    plain: watch::Sender<u64>,
+    devices: watch::Sender<u64>,
+    running: Arc<watch::Sender<BTreeMap<Option<ServedAt>, usize>>>,
     open: Arc<std::sync::Mutex<Open>>,
 }
 
@@ -89,13 +107,14 @@ pub struct Stops {
 #[derive(Debug, Default)]
 struct Open {
     next: u64,
-    by_id: BTreeMap<u64, (u64, String)>,
+    by_id: BTreeMap<u64, (ServedAt, String)>,
 }
 
 impl Default for Stops {
     fn default() -> Self {
         Self {
-            generation: watch::Sender::new(0),
+            plain: watch::Sender::new(0),
+            devices: watch::Sender::new(0),
             running: Arc::new(watch::Sender::new(BTreeMap::new())),
             open: Arc::default(),
         }
@@ -106,8 +125,9 @@ impl Default for Stops {
 /// ([`Stops::running_at`]).
 #[derive(Debug)]
 pub struct Running {
-    at: u64,
-    running: Arc<watch::Sender<BTreeMap<u64, usize>>>,
+    /// `None`: a request row being written ([`Stops::writing`]).
+    at: Option<ServedAt>,
+    running: Arc<watch::Sender<BTreeMap<Option<ServedAt>, usize>>>,
 }
 
 /// One request in flight ([`Stops::request`]): gone when its response has
@@ -142,31 +162,60 @@ impl Drop for Running {
 }
 
 impl Stops {
-    /// The generation now: a stream opened now ends at the next stop.
-    pub fn now(&self) -> u64 {
-        *self.generation.borrow()
+    fn lane(&self, via: Via) -> &watch::Sender<u64> {
+        match via {
+            Via::Plain => &self.plain,
+            Via::Devices => &self.devices,
+        }
     }
 
-    /// A server stopped: every stream opened before this ends. The
-    /// generation it stopped: what [`Self::ended`] waits on.
-    pub fn stop(&self) -> u64 {
+    /// The plain listener's generation now: what a stream or a turn with no
+    /// request of its own (in-process, the dashboard's own work) is opened
+    /// at.
+    pub fn now(&self) -> ServedAt {
+        self.now_of(Via::Plain)
+    }
+
+    /// `via`'s generation now: a stream opened now on it ends at its next
+    /// stop.
+    pub fn now_of(&self, via: Via) -> ServedAt {
+        ServedAt {
+            via,
+            at: *self.lane(via).borrow(),
+        }
+    }
+
+    /// The plain listener stopped ([`Self::stop_of`]).
+    pub fn stop(&self) -> ServedAt {
+        self.stop_of(Via::Plain)
+    }
+
+    /// `via` stopped: every stream opened on it before this ends; the other
+    /// listener's go on. The generation it stopped: what [`Self::ended`]
+    /// waits on.
+    pub fn stop_of(&self, via: Via) -> ServedAt {
         let mut stopped = 0;
-        self.generation.send_modify(|g| {
+        self.lane(via).send_modify(|g| {
             stopped = *g;
             *g += 1;
         });
-        stopped
+        ServedAt { via, at: stopped }
     }
 
-    /// A session or a turn starts now: held until it has ended.
+    /// A session or a turn starts now on the plain listener: held until it
+    /// has ended.
     pub fn running(&self) -> Running {
         self.running_at(self.now())
     }
 
-    /// A session or a turn of a request that came in on the server of
-    /// generation `at` ([`ServedAt`]): held until it has ended. That
-    /// server's stop waits for it.
-    pub fn running_at(&self, at: u64) -> Running {
+    /// A session or a turn of a request that came in at `at`
+    /// ([`ServedAt`]): held until it has ended. That listener's stop waits
+    /// for it.
+    pub fn running_at(&self, at: ServedAt) -> Running {
+        self.held(Some(at))
+    }
+
+    fn held(&self, at: Option<ServedAt>) -> Running {
         self.running.send_modify(|m| *m.entry(at).or_default() += 1);
         Running {
             at,
@@ -174,32 +223,48 @@ impl Stops {
         }
     }
 
-    /// Work every stop waits for, whichever server it belongs to: a request
-    /// row being written. Counted at the first generation, which every stop
-    /// takes in.
+    /// Work every stop waits for, whichever listener it belongs to: a
+    /// request row being written ([`Self::ended`]).
     pub fn writing(&self) -> Running {
-        self.running_at(0)
+        self.held(None)
     }
 
-    /// `at` when a request carried it, else the generation now: what a
-    /// stream or a turn without a request's generation is opened at.
-    pub fn at_or_now(&self, at: Option<u64>) -> u64 {
+    /// `at` when a request carried it, else the plain listener's generation
+    /// now: what a stream or a turn without a request's generation is
+    /// opened at.
+    pub fn at_or_now(&self, at: Option<ServedAt>) -> ServedAt {
         at.unwrap_or_else(|| self.now())
     }
 
-    /// Wait, at most `within`, until every session and turn opened at
-    /// generation `stopped` or before has ended; how many still run.
-    pub async fn ended(&self, stopped: u64, within: Duration) -> usize {
+    /// Wait, at most `within`, until every session and turn opened on
+    /// `stopped.via` at `stopped.at` or before has ended, and every request
+    /// row being written; how many still run.
+    pub async fn ended(&self, stopped: ServedAt, within: Duration) -> usize {
         let mut rx = self.running.subscribe();
-        let open = |m: &BTreeMap<u64, usize>| m.range(..=stopped).map(|(_, n)| n).sum::<usize>();
+        let open = |m: &BTreeMap<Option<ServedAt>, usize>| {
+            m.iter()
+                .filter(|(k, _)| k.is_none_or(|k| k.via == stopped.via && k.at <= stopped.at))
+                .map(|(_, n)| n)
+                .sum::<usize>()
+        };
         let _ = tokio::time::timeout(within, rx.wait_for(|m| open(m) == 0)).await;
         let n = open(&rx.borrow());
         n
     }
 
-    /// A request came in on the server of generation `at`, as `what`
-    /// ("GET /chat/api/feed"): in flight until the guard drops.
-    pub fn request(&self, at: u64, what: String) -> InFlight {
+    /// The sessions and turns running on `via` now, of every generation.
+    pub fn running_on(&self, via: Via) -> usize {
+        self.running
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.is_some_and(|k| k.via == via))
+            .map(|(_, n)| n)
+            .sum()
+    }
+
+    /// A request came in at `at`, as `what` ("GET /chat/api/feed"): in
+    /// flight until the guard drops.
+    pub fn request(&self, at: ServedAt, what: String) -> InFlight {
         let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
         open.next += 1;
         let id = open.next;
@@ -210,9 +275,9 @@ impl Stops {
         }
     }
 
-    /// The requests of the server of generation `at` still in flight, as
-    /// they came in ("GET /chat/api/feed"), oldest first.
-    pub fn open_requests(&self, at: u64) -> Vec<String> {
+    /// The requests that came in at `at` and are still in flight, as they
+    /// came in ("GET /chat/api/feed"), oldest first.
+    pub fn open_requests(&self, at: ServedAt) -> Vec<String> {
         self.open
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -223,24 +288,24 @@ impl Stops {
             .collect()
     }
 
-    /// Resolves once a stop came after generation `opened_at`.
-    pub fn stopped_after(&self, opened_at: u64) -> impl Future<Output = ()> + Send + 'static {
-        let mut rx = self.generation.subscribe();
+    /// Resolves once `opened_at`'s listener stopped after `opened_at`.
+    pub fn stopped_after(&self, opened_at: ServedAt) -> impl Future<Output = ()> + Send + 'static {
+        let mut rx = self.lane(opened_at.via).subscribe();
         async move {
             // The sender lives in the state for as long as any stream does;
             // a closed channel is a state that went, and nothing waits on it.
-            let _ = rx.wait_for(|g| *g > opened_at).await;
+            let _ = rx.wait_for(|g| *g > opened_at.at).await;
         }
     }
 }
 
-/// `events` until the server of generation `at` stops (`None`: the server
+/// `events` until the listener of `at` stops (`None`: the plain listener
 /// serving now — a stream with no request's [`ServedAt`]), then `last` (the
 /// frame that says so, if the stream has one) and the end. Dropping the
 /// stream drops what produced `events`, as a client that goes away does.
 pub fn until_stopped<T, S>(
     stops: &Stops,
-    at: Option<u64>,
+    at: Option<ServedAt>,
     events: S,
     last: Option<T>,
 ) -> BoxStream<'static, T>
@@ -265,8 +330,8 @@ where
 }
 
 /// `server::serve_app_within`'s body: serve `app` on `listener`, every
-/// request carrying this server's generation and counted in flight; at
-/// `shutdown`, the stop (module doc), all of it within `within`.
+/// request carrying the plain listener's generation and counted in flight;
+/// at `shutdown`, the stop (module doc), all of it within `within`.
 pub(super) async fn serve_stopping<L>(
     state: &SharedState,
     listener: L,
@@ -276,21 +341,15 @@ pub(super) async fn serve_stopping<L>(
 ) -> anyhow::Result<()>
 where
     L: axum::serve::Listener<Addr = std::net::SocketAddr>,
-    for<'a> std::net::SocketAddr:
-        axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
+    for<'a> super::Conn: axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, L>>,
 {
     // This server's generation, put on every request before anything reads
     // it (review F-3): a stream or a session ends at this server's stop
     // however long it took to open, and the stop waits for the turns its
     // requests started. Outermost, so even the agent proxy (above the
     // principal) sees it, and every request is counted in flight.
-    let served_at = state.stops.now();
-    let app = app
-        .layer(axum::middleware::from_fn_with_state(
-            (state.clone(), served_at),
-            in_flight_mw,
-        ))
-        .layer(axum::Extension(ServedAt(served_at)));
+    let served_at = state.stops.now_of(Via::Plain);
+    let app = stamped(state, app, served_at);
     let st = state.clone();
     let stopped = std::sync::Arc::new(std::sync::OnceLock::new());
     let at = stopped.clone();
@@ -301,15 +360,16 @@ where
              and waits for its sessions and turns (at most {} s)",
             within.as_secs_f64()
         );
-        let _ = at.set((st.stops.stop(), tokio::time::Instant::now()));
+        let _ = at.set((st.stops.stop_of(Via::Plain), tokio::time::Instant::now()));
     };
-    // With the peer address on every request: the agent proxy tells an app
-    // who reached lmgw in `X-Forwarded-For` (origins §4.6), and that address
-    // is the TCP peer's, never a header a client wrote.
+    // With the connection on every request (`Conn`): the agent proxy tells
+    // an app who reached lmgw in `X-Forwarded-For` (origins §4.6), and that
+    // address is the TCP peer's, never a header a client wrote; a call's
+    // candidate is the local address (calls §3.2).
     let drain = std::future::IntoFuture::into_future(
         axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            app.into_make_service_with_connect_info::<super::Conn>(),
         )
         .with_graceful_shutdown(shutdown),
     );
@@ -352,26 +412,65 @@ where
     Ok(())
 }
 
+/// `app` with `served_at` on every request, each counted in flight
+/// ([`Stops::request`]): what both listeners serve.
+pub(super) fn stamped(state: &SharedState, app: Router, served_at: ServedAt) -> Router {
+    app.layer(axum::middleware::from_fn_with_state(
+        (state.clone(), served_at),
+        in_flight_mw,
+    ))
+    .layer(axum::Extension(served_at))
+}
+
 /// Counts every request in flight on this server, as it came in ("GET
 /// /chat/api/feed"), until its response has been sent whole or dropped:
 /// what a drain that runs out of time names ([`Stops::open_requests`]).
 async fn in_flight_mw(
-    axum::extract::State((state, served_at)): axum::extract::State<(SharedState, u64)>,
+    axum::extract::State((state, served_at)): axum::extract::State<(SharedState, ServedAt)>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use http_body_util::BodyExt;
     let what = format!("{} {}", req.method(), req.uri().path());
     let guard = state.stops.request(served_at, what);
     let res = next.run(req).await;
     // Held by the body, which goes when the response has been sent whole
-    // (or the client went away); size hints and trailers kept.
+    // (or the client went away).
     res.map(|body| {
-        axum::body::Body::new(body.map_frame(move |frame| {
-            let _held = &guard;
-            frame
-        }))
+        axum::body::Body::new(Held {
+            body,
+            _guard: guard,
+        })
     })
+}
+
+/// A response body that holds its request's [`InFlight`] until it is sent
+/// whole or dropped, and says its length as the body it wraps does: hyper
+/// writes `content-length` from it, and a WebSocket client reads a refused
+/// upgrade's body raw, as it came with the head, so a chunked one reads as
+/// no JSON at all (device link WP3; `map_frame` dropped the size hint).
+struct Held {
+    body: axum::body::Body,
+    _guard: InFlight,
+}
+
+impl hyper::body::Body for Held {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        hyper::body::Body::poll_frame(std::pin::Pin::new(&mut self.get_mut().body), cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        hyper::body::Body::is_end_stream(&self.body)
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::Body::size_hint(&self.body)
+    }
 }
 
 /// The next Ctrl-C (SIGINT) or SIGTERM, by name: what a quit starts on, in
@@ -439,15 +538,96 @@ mod tests {
         assert_eq!(stops.ended(stops.now(), Duration::ZERO).await, 0);
     }
 
+    /// Device link design §4.4: the device listener's stop ends its own
+    /// streams and waits for its own sessions, never the plain listener's,
+    /// and the other way round.
+    #[tokio::test]
+    async fn a_listener_s_stop_leaves_the_other_listener_alone() {
+        let stops = Stops::default();
+        let plain = stops.running();
+        let device = stops.running_at(stops.now_of(Via::Devices));
+        let mut plain_stream = until_stopped(
+            &stops,
+            Some(stops.now()),
+            futures::stream::pending::<u8>(),
+            Some(1),
+        );
+        let mut device_stream = until_stopped(
+            &stops,
+            Some(stops.now_of(Via::Devices)),
+            futures::stream::pending::<u8>(),
+            Some(2),
+        );
+        assert_eq!(
+            (stops.running_on(Via::Plain), stops.running_on(Via::Devices)),
+            (1, 1)
+        );
+        let stopped = stops.stop_of(Via::Devices);
+        assert_eq!(
+            device_stream.next().await,
+            Some(2),
+            "the device stream ends"
+        );
+        assert_eq!(device_stream.next().await, None);
+        assert_eq!(
+            stops.ended(stopped, Duration::from_millis(20)).await,
+            1,
+            "the device session is waited for"
+        );
+        drop(device);
+        assert_eq!(
+            stops.ended(stopped, Duration::from_millis(20)).await,
+            0,
+            "and the plain one is not"
+        );
+        let poll = futures::FutureExt::now_or_never(plain_stream.next());
+        assert!(poll.is_none(), "the plain stream runs on");
+        let stopped = stops.stop_of(Via::Plain);
+        assert_eq!(plain_stream.next().await, Some(1));
+        drop(plain);
+        assert_eq!(stops.ended(stopped, Duration::ZERO).await, 0);
+    }
+
+    /// A counted request's answer keeps its length: hyper writes
+    /// `content-length` from it, which a WebSocket client reading a refused
+    /// upgrade's body needs (device link WP3), and the count ends with the
+    /// body.
+    #[tokio::test]
+    async fn a_counted_answer_keeps_its_length() {
+        use tower::ServiceExt;
+        let state = crate::state::AppState::init_for_tests().await.unwrap();
+        let at = state.stops.now();
+        let app = stamped(
+            &state,
+            Router::new().route("/", axum::routing::get(|| async { "twelve bytes" })),
+            at,
+        );
+        let resp = app
+            .oneshot(axum::http::Request::new(axum::body::Body::empty()))
+            .await
+            .unwrap();
+        let body = resp.into_body();
+        assert_eq!(hyper::body::Body::size_hint(&body).exact(), Some(12));
+        assert_eq!(state.stops.open_requests(at), ["GET /"]);
+        drop(body);
+        assert!(state.stops.open_requests(at).is_empty());
+    }
+
     #[test]
     fn the_requests_in_flight_are_named_per_server() {
         let stops = Stops::default();
-        let a = stops.request(0, "GET /chat/api/feed".into());
-        let _b = stops.request(1, "GET /api/events".into());
-        assert_eq!(stops.open_requests(0), ["GET /chat/api/feed"]);
+        let g0 = stops.now();
+        let a = stops.request(g0, "GET /chat/api/feed".into());
+        stops.stop();
+        let g1 = stops.now();
+        let _b = stops.request(g1, "GET /api/events".into());
+        let d = stops.now_of(Via::Devices);
+        let _c = stops.request(d, "GET /chat/api/feed".into());
+        assert_eq!(stops.open_requests(g0), ["GET /chat/api/feed"]);
         drop(a);
-        assert!(stops.open_requests(0).is_empty());
-        assert_eq!(stops.open_requests(1), ["GET /api/events"]);
+        assert!(stops.open_requests(g0).is_empty());
+        assert_eq!(stops.open_requests(g1), ["GET /api/events"]);
+        assert_eq!(stops.open_requests(d), ["GET /chat/api/feed"]);
     }
 
     #[tokio::test]

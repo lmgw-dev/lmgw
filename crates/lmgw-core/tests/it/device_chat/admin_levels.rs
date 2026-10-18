@@ -189,9 +189,8 @@ async fn lowering_the_level_mid_session_narrows_the_device_at_once() {
     let desk = pair(&w, "desktop", json!({ "self_admin": "full" })).await;
     let mut feed = Feed::open(&w, &desk.client, "", None).await;
     assert_eq!(feed.hello()["self_admin"], json!("full"));
-    let bearer = format!("Bearer {}", desk.key);
     let mut ws = w
-        .connect("model=chatty", &[("authorization", bearer.as_str())])
+        .connect_as(&desk, "model=chatty")
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");

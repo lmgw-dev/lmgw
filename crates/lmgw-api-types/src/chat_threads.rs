@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::chat::{present, ContinueState, Thread, ThreadMcp, ThreadVoice};
 use crate::chat::{MessageTask, ThreadTask};
 use crate::chat_approvals::ApprovalRequest;
+use crate::voice_resolved::VoiceResolved;
 
 /// `POST /chat/api/threads`'s body.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,14 +150,12 @@ pub struct SettingsAck {
     /// The thread's own voice settings as stored now.
     pub voice: ThreadVoice,
     /// What the voice resolves to now, as `voice_resolved` of
-    /// `GET /chat/api/threads/{id}`: an object with `asr` and `tts` (alias,
-    /// whether it runs on this machine, what answers for it while the GPU
-    /// is held), `voice`, `speech_style`, `language`, `reply_language`,
-    /// `language_notes`, `read_aloud`, `turn_detection`, `audio_input`,
-    /// `seed`, the `problems` that block a voice feature now, and
-    /// `realtime`.
-    #[cfg_attr(feature = "schema", schemars(extend("type" = "object")))]
-    pub voice_resolved: serde_json::Value,
+    /// `GET /chat/api/threads/{id}`: `asr` and `tts` (alias, whether it runs
+    /// on this machine, what answers for it while the GPU is held), `voice`,
+    /// `speech_style`, `language`, `reply_language`, `language_notes`,
+    /// `read_aloud`, `turn_detection`, `audio_input`, `seed`, the `problems`
+    /// that block a voice feature now, and `realtime`.
+    pub voice_resolved: VoiceResolved,
 }
 
 /// `POST /chat/api/threads/{id}/speech/stop`'s answer.
@@ -262,12 +261,14 @@ pub struct Message {
     /// For a reply that a fallback without sight answered: who, for which
     /// model, and what went to it in the images' place. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub images_note: Option<String>,
     /// How the turn was spoken; `null` for a typed turn.
     pub voice: Option<MessageVoice>,
     /// On a late MCP task result (role `tool`): the task's facts. Absent
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub task: Option<MessageTask>,
     /// When the message was written (UTC, `YYYY-MM-DD HH:MM:SS`).
     pub created_at: String,
@@ -277,6 +278,7 @@ pub struct Message {
     /// (`POST /chat/api/threads/{id}/approvals` decides them). Absent when
     /// none wait.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub pending_approvals: Option<Vec<ApprovalRequest>>,
 }
 
@@ -346,11 +348,19 @@ pub struct AttachmentMeta {
     pub extracted_tokens: Option<i64>,
     /// For a draft: why it cannot be sent to the thread's current model.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub blockers: Option<Vec<String>>,
     /// For a draft: what it becomes on the way, sent all the same (an image
     /// as a placeholder, a PDF's pages as its text) under a fallback that
     /// cannot see.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub hints: Option<Vec<String>>,
 }
 
@@ -419,31 +429,75 @@ pub struct MessageVoice {
     /// `dictation` or `realtime`.
     pub via: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub asr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub asr_answered_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub asr_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub audio_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub tts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub tts_answered_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub voice: Option<String>,
     /// The reply's text after the heard part, shown behind a "not heard"
     /// marker. Not in `content`, so the model never sees it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub unheard: Option<String>,
     /// On a user message: `audio` when the chat model heard the turn;
     /// absent on the transcript path.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub input: Option<InputPath>,
     /// On a user message the model heard: why its transcription failed.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub transcript_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub timing: Option<VoiceTiming>,
 }
 
@@ -463,6 +517,24 @@ pub enum InputPath {
     Unknown(String),
 }
 
+impl InputPath {
+    /// The value as the wire spells it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Audio => "audio",
+            Self::Transcript => "transcript",
+            Self::Unknown(s) => s,
+        }
+    }
+}
+
+/// What a reader that finds no value holds: an empty unknown value.
+impl Default for InputPath {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
 /// A spoken reply's timing: each stage measured from the one before,
 /// `to_first_audio_ms` their sum from the end of speech, `cold` the stages
 /// that loaded during the turn.
@@ -478,6 +550,10 @@ pub struct VoiceTiming {
     /// How long the chat model reasoned before its first token (part of
     /// `first_token_ms`); absent when it did not reason.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub reasoning_ms: Option<u64>,
     pub first_clause_ms: Option<u64>,
     pub first_audio_ms: Option<u64>,
@@ -488,17 +564,33 @@ pub struct VoiceTiming {
     /// `announcement` when the first clause said was an announcement of a
     /// skipped block.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub first_clause: Option<String>,
     pub models: VoiceModels,
     /// How the turn reached the chat model; absent with audio input off.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub input: Option<InputPath>,
     /// Why the transcript went where audio input is on.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub input_why: Option<String>,
     /// How long the first output was held for the turn's transcript; absent
     /// on the transcript path.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub transcript_wait_ms: Option<u64>,
 }
 
@@ -521,6 +613,10 @@ pub struct ServedModel {
     pub alias: String,
     pub answered_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub voice: Option<String>,
 }
 
@@ -568,9 +664,11 @@ pub struct SearchHit {
     pub kind: String,
     /// The message, for kind `m`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub message_id: Option<i64>,
     /// The message's role, for kind `m`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub role: Option<String>,
     /// The text around the match, with the match between U+E000 and U+E001
     /// (private-use characters; escape the text before turning them into

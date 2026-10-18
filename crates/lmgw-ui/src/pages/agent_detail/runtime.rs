@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{AgentProvenance, AgentRuntime};
-use serde_json::{json, Value};
+use lmgw_api_types::{AgentProvenance, AgentPulled, AgentReimported, AgentRuntime};
+use serde_json::json;
 
 use crate::pages::agents::short_ts;
 use crate::widgets::{use_toasts, Explain, Section};
@@ -74,11 +74,9 @@ pub fn provenance_rows(p: &AgentProvenance) -> Vec<(String, String)> {
     )];
     out.push((
         "digest".to_string(),
-        if p.digest.is_empty() {
-            "podman could not report one".to_string()
-        } else {
-            p.digest.clone()
-        },
+        p.digest
+            .clone()
+            .unwrap_or_else(|| "podman could not report one".to_string()),
     ));
     if !p.manifest_path.is_empty() {
         out.push(("manifest".to_string(), p.manifest_path.clone()));
@@ -159,30 +157,23 @@ pub(super) fn RuntimeBlock(
         busy.set(true);
         pulled.set(None);
         spawn_local(async move {
-            let op = if reimport {
-                "agent_reimport"
+            let body = json!({ "id": agent_id.get_value() });
+            // What the page keeps of either answer: its message, the pull's
+            // note on how the manifests compared, and whether they differ (a
+            // re-import has adopted the new one, so there is nothing to offer).
+            let res = if reimport {
+                crate::api::post::<AgentReimported, _>("/api/op/agent_reimport", &body)
+                    .await
+                    .map(|r| (r.message, String::new(), false))
             } else {
-                "agent_pull"
+                crate::api::post::<AgentPulled, _>("/api/op/agent_pull", &body)
+                    .await
+                    .map(|r| (r.message, r.note, r.manifest_differs == Some(true)))
             };
-            let res = crate::api::post::<Value, _>(
-                &format!("/api/op/{op}"),
-                &json!({ "id": agent_id.get_value() }),
-            )
-            .await;
             busy.set(false);
             match res {
-                Ok(v) => {
-                    let message = v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("done")
-                        .to_string();
-                    let note = v
-                        .get("note")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    offer_reimport.set(v["manifest_differs"] == json!(true));
+                Ok((message, note, differs)) => {
+                    offer_reimport.set(differs);
                     pulled.set(Some(if note.is_empty() {
                         message.clone()
                     } else {

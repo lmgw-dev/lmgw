@@ -34,6 +34,7 @@ fn route(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }

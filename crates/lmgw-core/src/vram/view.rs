@@ -181,11 +181,17 @@ pub(super) fn peak_note(footprint_note: Option<&str>, peak: Option<u64>) -> Stri
     }
 }
 
-const ESTIMATE_NOTE: &str =
-    "Estimates are weights + KV cache read from the GGUF and the section's \
-                             own flags — a lower bound, because compute buffers, the CUDA context \
-                             and allocator slack have no metadata to derive them from. That \
-                             remainder is the headroom setting.";
+const ESTIMATE_NOTE: &str = "Estimates are weights + KV cache + compute buffers, read from the \
+                             GGUF and the section's own flags: the KV cache as llama.cpp lays it \
+                             out for the row's slots and speculative decoding, the compute \
+                             buffer of every context the row runs (a chat model's MTP or draft \
+                             context too) from its ubatch, batch and context, fitted to \
+                             llama.cpp's own figures (within a few percent where the masks and \
+                             a quantized cache's copy dominate; a chat context's activations \
+                             -5 % to +42 %, at most 80 MiB; an encoder's up to 30 % high). Not \
+                             derived, and so not in them: the \
+                             CUDA context, allocator slack and a projector's compute buffer. \
+                             That remainder is the headroom setting.";
 
 impl VramScheduler {
     /// The whole plane, for the status surfaces.

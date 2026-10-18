@@ -304,7 +304,7 @@ async fn resolve(state: &SharedState, args: &Map<String, Value>) -> Result<Value
             .into_iter()
             .map(|s| s.root)
             .collect();
-        out.push(json!({
+        let mut row = json!({
             "corpus_id": c.corpus_id(),
             "library": c.library,
             "version": c.version,
@@ -316,20 +316,34 @@ async fn resolve(state: &SharedState, args: &Map<String, Value>) -> Result<Value
             "ingest_model": c.ingest_model,
             "ingest_prompt_version": c.ingest_prompt_version,
             "embed_model": c.embed_identity().to_string(),
-            "eval_score": c.eval_score,
-            "eval_k": c.eval_k,
-            "eval_best": c.eval_best,
-            "eval_at": c.eval_at,
             "embed_status": status.embed_status,
             "eval_status": status.eval_status,
             "flags": status.flags,
             "warnings": status.warnings,
-        }));
+        });
+        // A corpus never evaluated has no score, depth or instant; the keys
+        // are left out rather than stood in for by zero and "".
+        let eval = [
+            ("eval_score", c.eval_score.map(Value::from)),
+            ("eval_k", (c.eval_k > 0).then(|| Value::from(c.eval_k))),
+            ("eval_best", c.eval_best.map(Value::from)),
+            (
+                "eval_at",
+                (!c.eval_at.is_empty()).then(|| Value::from(c.eval_at.clone())),
+            ),
+        ];
+        for (key, value) in eval {
+            if let Some(value) = value {
+                row[key] = value;
+            }
+        }
+        out.push(row);
     }
 
     let mut hint = String::from(
         "pass one of these corpus_id values to docs__query. `eval_score` is this gateway's own \
-         measured hit rate for the corpus — higher is better, and a corpus flagged \
+         measured hit rate for the corpus (absent until it has been evaluated) — higher is \
+         better, and a corpus flagged \
          `eval_regression` still answers, it has just scored below its own best.",
     );
     if mid_re_embed {

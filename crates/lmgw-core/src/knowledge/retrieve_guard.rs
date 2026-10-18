@@ -30,10 +30,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use quickdoc_core::embed::{EmbedIdentity, Embedder, Reranker, TokenCounter};
 use quickdoc_core::error::{QuickdocError, Result as QResult};
 
+use crate::erased::Erased;
 use crate::state::SharedState;
 
 use super::limit;
@@ -56,42 +56,43 @@ pub struct BoundedEmbedder {
     pub notes: Notes,
 }
 
-#[async_trait]
 impl Embedder for BoundedEmbedder {
     fn identity(&self) -> EmbedIdentity {
         self.inner.identity()
     }
 
-    async fn embed(&self, texts: &[String]) -> QResult<Vec<Vec<f32>>> {
-        let input = limit::input_limit(&self.state, &self.alias).await;
-        let Some(max) = input.tokens else {
-            return self.inner.embed(texts).await;
-        };
-        let mut shortened = Vec::with_capacity(texts.len());
-        for t in texts {
-            let (counter, _) = limit::cached_counter(&self.state, &self.alias, t).await;
-            let counter = if limit::near_limit(counter.count(t) as u64, max) {
-                limit::calibrate(&self.state, &self.alias, t).await.0
-            } else {
-                shortened.push(t.clone());
-                continue;
+    fn embed<'a>(&'a self, texts: &'a [String]) -> Erased<'a, QResult<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            let input = limit::input_limit(&self.state, &self.alias).await;
+            let Some(max) = input.tokens else {
+                return self.inner.embed(texts).await;
             };
-            let (tail, cut) = limit::fit_tail(t, max as usize, &*counter);
-            if cut {
-                note(
-                    &self.notes,
-                    format!(
-                        "query shortened to the embedding model's {max}-token input ({}): the \
+            let mut shortened = Vec::with_capacity(texts.len());
+            for t in texts {
+                let (counter, _) = limit::cached_counter(&self.state, &self.alias, t).await;
+                let counter = if limit::near_limit(counter.count(t) as u64, max) {
+                    limit::calibrate(&self.state, &self.alias, t).await.0
+                } else {
+                    shortened.push(t.clone());
+                    continue;
+                };
+                let (tail, cut) = limit::fit_tail(t, max as usize, &*counter);
+                if cut {
+                    note(
+                        &self.notes,
+                        format!(
+                            "query shortened to the embedding model's {max}-token input ({}): the \
                          search used its last {} of {} tokens",
-                        input.source,
-                        counter.count(tail),
-                        counter.count(t)
-                    ),
-                );
+                            input.source,
+                            counter.count(tail),
+                            counter.count(t)
+                        ),
+                    );
+                }
+                shortened.push(tail.to_string());
             }
-            shortened.push(tail.to_string());
-        }
-        self.inner.embed(&shortened).await
+            self.inner.embed(&shortened).await
+        })
     }
 }
 
@@ -103,7 +104,6 @@ pub struct BoundedReranker {
     pub notes: Notes,
 }
 
-#[async_trait]
 impl Reranker for BoundedReranker {
     fn model(&self) -> String {
         self.inner.model()
@@ -111,65 +111,76 @@ impl Reranker for BoundedReranker {
 
     /// Every pair must fit: for callers that cannot take an unscored
     /// candidate. The pipeline calls [`rerank_scores`](Self::rerank_scores).
-    async fn rerank(&self, query: &str, documents: &[String]) -> QResult<Vec<f32>> {
-        let scores = self.rerank_scores(query, documents).await?;
-        let skipped = scores.iter().filter(|s| s.is_none()).count();
-        if skipped > 0 {
-            return Err(QuickdocError::Reranker(format!(
-                "{skipped} of {} pairs are over the reranker's input limit and were not scored",
-                documents.len()
-            )));
-        }
-        Ok(scores.into_iter().flatten().collect())
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> Erased<'a, QResult<Vec<f32>>> {
+        Box::pin(async move {
+            let scores = self.rerank_scores(query, documents).await?;
+            let skipped = scores.iter().filter(|s| s.is_none()).count();
+            if skipped > 0 {
+                return Err(QuickdocError::Reranker(format!(
+                    "{skipped} of {} pairs are over the reranker's input limit and were not scored",
+                    documents.len()
+                )));
+            }
+            Ok(scores.into_iter().flatten().collect())
+        })
     }
 
-    async fn rerank_scores(&self, query: &str, documents: &[String]) -> QResult<Vec<Option<f32>>> {
-        let input = limit::input_limit(&self.state, &self.alias).await;
-        let Some(max) = input.tokens else {
-            return self.inner.rerank_scores(query, documents).await;
-        };
-        let (counter, _) = limit::cached_counter(&self.state, &self.alias, query).await;
-        // `count` carries two special tokens, so `count(q) + count(d)` is the
-        // pair with the four a query + document pair is wrapped in. The
-        // documents are counted by tiktoken (local; what each chunk stores)
-        // times the remembered ratio — no tokenizer round-trip per document.
-        // The query is counted exactly when it is near the limit.
-        let mut q = counter.count(query) as u64;
-        if limit::near_limit(q, max) {
-            let (exact, _) = limit::calibrate(&self.state, &self.alias, query).await;
-            q = exact.count(query) as u64;
-        }
-        let fits: Vec<bool> = documents
-            .iter()
-            .map(|d| q + counter.count(d) as u64 <= max)
-            .collect();
-        let sendable: Vec<String> = documents
-            .iter()
-            .zip(&fits)
-            .filter(|(_, ok)| **ok)
-            .map(|(d, _)| d.clone())
-            .collect();
-        let skipped = documents.len() - sendable.len();
-        if sendable.is_empty() {
-            return Err(QuickdocError::Reranker(format!(
+    fn rerank_scores<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> Erased<'a, QResult<Vec<Option<f32>>>> {
+        Box::pin(async move {
+            let input = limit::input_limit(&self.state, &self.alias).await;
+            let Some(max) = input.tokens else {
+                return self.inner.rerank_scores(query, documents).await;
+            };
+            let (counter, _) = limit::cached_counter(&self.state, &self.alias, query).await;
+            // `count` carries two special tokens, so `count(q) + count(d)` is the
+            // pair with the four a query + document pair is wrapped in. The
+            // documents are counted by tiktoken (local; what each chunk stores)
+            // times the remembered ratio — no tokenizer round-trip per document.
+            // The query is counted exactly when it is near the limit.
+            let mut q = counter.count(query) as u64;
+            if limit::near_limit(q, max) {
+                let (exact, _) = limit::calibrate(&self.state, &self.alias, query).await;
+                q = exact.count(query) as u64;
+            }
+            let fits: Vec<bool> = documents
+                .iter()
+                .map(|d| q + counter.count(d) as u64 <= max)
+                .collect();
+            let sendable: Vec<String> = documents
+                .iter()
+                .zip(&fits)
+                .filter(|(_, ok)| **ok)
+                .map(|(d, _)| d.clone())
+                .collect();
+            let skipped = documents.len() - sendable.len();
+            if sendable.is_empty() {
+                return Err(QuickdocError::Reranker(format!(
                 "none of the {} candidates fits {}'s {max}-token limit for a query + chunk pair \
                  ({}); the query alone takes {q} tokens",
                 documents.len(),
                 self.alias,
                 input.source
             )));
-        }
-        let scores = self.inner.rerank(query, &sendable).await?;
-        if scores.len() != sendable.len() {
-            return Err(QuickdocError::RerankCount {
-                want: sendable.len(),
-                got: scores.len(),
-            });
-        }
-        if skipped > 0 {
-            note(
-                &self.notes,
-                format!(
+            }
+            let scores = self.inner.rerank(query, &sendable).await?;
+            if scores.len() != sendable.len() {
+                return Err(QuickdocError::RerankCount {
+                    want: sendable.len(),
+                    got: scores.len(),
+                });
+            }
+            if skipped > 0 {
+                note(
+                    &self.notes,
+                    format!(
                     "{skipped} of {} candidates were too long for '{}' ({max} tokens per query + \
                      chunk pair: {}) and were not reranked — they keep their search score, are \
                      marked rerank_skipped, and rank behind the reranked ones",
@@ -177,12 +188,13 @@ impl Reranker for BoundedReranker {
                     self.alias,
                     input.source
                 ),
-            );
-        }
-        let mut real = scores.into_iter();
-        Ok(fits
-            .iter()
-            .map(|ok| if *ok { real.next() } else { None })
-            .collect())
+                );
+            }
+            let mut real = scores.into_iter();
+            Ok(fits
+                .iter()
+                .map(|ok| if *ok { real.next() } else { None })
+                .collect())
+        })
     }
 }

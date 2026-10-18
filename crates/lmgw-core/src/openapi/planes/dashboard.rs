@@ -36,6 +36,7 @@ fn base(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
@@ -306,7 +307,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             description: "audio.cpp's own spec catalog, from the cached snapshot only — an \
-                empty fetched_at means \"never fetched here\"; a page load never waits on \
+                absent fetched_at means \"never fetched here\"; a page load never waits on \
                 GitHub.",
             response: Resp::Json(|g| g.root_schema_for::<dto::AudioCatalog>()),
             ..base(

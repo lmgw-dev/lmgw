@@ -35,6 +35,7 @@ async fn setup(base: &str, protocol: Protocol, caps: Option<Value>) -> (SharedSt
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

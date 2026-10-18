@@ -3,6 +3,7 @@
 
 use lmgw_api_types::chat_feed::ThreadChanged;
 use lmgw_api_types::chat_folders::{CurrentReason, CurrentThread, FolderOngoing};
+use lmgw_api_types::voice_resolved::{SpeechStyle, Stage, VoiceResolved, VoiceSource};
 use serde_json::{json, Value};
 
 use super::*;
@@ -229,9 +230,33 @@ fn a_folder_is_byte_for_byte_the_old_one() {
     }
 }
 
+/// A resolved voice with one stage named and the rest as the gateway
+/// writes an unset one.
+fn resolved_voice(asr: Option<&str>, tts: Option<&str>) -> VoiceResolved {
+    let stage = |alias: Option<&str>| Stage {
+        alias: alias.map(str::to_string),
+        source: alias.map(|_| VoiceSource::Thread),
+        ..Default::default()
+    };
+    VoiceResolved {
+        asr: stage(asr),
+        tts: stage(tts),
+        speech_style: SpeechStyle {
+            source: VoiceSource::Chat,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 #[test]
 fn an_open_thread_is_byte_for_byte_the_old_one() {
-    let resolved = json!({"asr": {"alias": "parakeet", "source": "thread"}, "seed": null});
+    let resolved_dto = resolved_voice(Some("parakeet"), None);
+    let resolved = serde_json::to_value(&resolved_dto).unwrap();
+    assert_eq!(
+        resolved["asr"]["source"], "thread",
+        "the voice is a typed tree"
+    );
     let continue_state = json!({"ok": false, "reason": "there is no reply to continue yet"});
     for (name, t) in rows() {
         // `thread_json`, then `get_thread`'s and `current`'s `continue`.
@@ -239,7 +264,7 @@ fn an_open_thread_is_byte_for_byte_the_old_one() {
         old["voice_resolved"] = resolved.clone();
         let mut dto = api::Thread {
             row: thread_row(&t, &purge(), None),
-            voice_resolved: resolved.clone(),
+            voice_resolved: resolved_dto.clone(),
             continue_state: None,
         };
         assert_eq!(bytes(&wire(&dto)), bytes(&old), "{name}");
@@ -315,7 +340,8 @@ fn current_s_answer_is_byte_for_byte_the_old_one() {
         reason: Option<CurrentReason>,
         note: Option<String>,
     }
-    let resolved = json!({"tts": {"alias": "supertonic"}});
+    let resolved_dto = resolved_voice(None, Some("supertonic"));
+    let resolved = serde_json::to_value(&resolved_dto).unwrap();
     for (name, t) in rows() {
         let mut thread = old_thread_row_json(&t, &purge());
         thread["voice_resolved"] = resolved.clone();
@@ -329,7 +355,7 @@ fn current_s_answer_is_byte_for_byte_the_old_one() {
         let new = CurrentThread {
             thread: api::Thread {
                 row: thread_row(&t, &purge(), None),
-                voice_resolved: resolved.clone(),
+                voice_resolved: resolved_dto.clone(),
                 continue_state: Some(api::ContinueState {
                     ok: true,
                     reason: None,
@@ -374,5 +400,26 @@ fn the_wire_is_pinned() {
     assert_eq!(
         folder_of("bare"),
         r#"{"archive_days":null,"created_at":"2026-10-06 09:00:00","defaults":{"frequency_penalty":null,"kb_budget_tokens":null,"kb_ids":null,"kb_mode":null,"max_tokens":null,"mcp_tools":null,"min_p":null,"model_alias":null,"presence_penalty":null,"profile_id":null,"reasoning_budget":null,"reasoning_effort":null,"reasoning_enabled":null,"repeat_penalty":null,"seed":null,"stop":null,"system_prompt":null,"temperature":null,"top_k":null,"top_p":null,"voice":null},"devices_hidden":false,"id":4,"name":"Misc","ongoing":null,"purge_days":null,"sort":0,"threads_active":0,"threads_archived":0,"updated_at":"2026-10-06 09:00:00"}"#
+    );
+}
+
+/// A rate llama.cpp gave no number for is left out of the `stats` and `done`
+/// frames' timings, not sent as `null` or `0`.
+#[test]
+fn timings_without_a_rate_write_no_key_for_it() {
+    let t = timings(&crate::ir::Timings {
+        prompt_n: 7,
+        prompt_ms: Some(14.0),
+        prompt_per_second: None,
+        predicted_n: 2,
+        predicted_ms: None,
+        predicted_per_second: None,
+        cache_n: None,
+        draft_n: None,
+        draft_n_accepted: None,
+    });
+    assert_eq!(
+        wire(&t),
+        json!({"prompt_n": 7, "prompt_ms": 14.0, "predicted_n": 2})
     );
 }

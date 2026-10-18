@@ -2,7 +2,9 @@
 //! the rules the dashboard's voice panel and every other client run alike.
 //!
 //! - [`realtime`]: the realtime protocol of a session bound to a Chat
-//!   thread — the server events parsed, the client events built;
+//!   thread — the server events parsed, the client events built — on a
+//!   WebSocket or a WebRTC call, with the call's close reasons and the
+//!   parts an oversized event travels in;
 //! - [`voice`]: the voice state derived from those events, and the
 //!   truncate-first rule;
 //! - [`truncate`]: each reply's audio, and the truncate that keeps what was
@@ -15,7 +17,14 @@
 //!   extension's identifiers, the Chat `tool` ready and result frames a
 //!   host reads;
 //! - [`requests`]: the requests of the routes a client uses, and readers of
-//!   their answers;
+//!   their answers, the device link's enrolment among them;
+//! - [`pairing`]: the device link's pairing link v2, what it pins and
+//!   carries, the device's URLs and their order;
+//! - `tls` (feature `tls`): the device link's pinned TLS, the enrolment's
+//!   verifier and the client configuration every lmgw-facing connection
+//!   is built from, with the app's crypto provider;
+//! - [`ongoing`]: which Chat folder an ongoing conversation lives in, the
+//!   rule every client runs alike;
 //! - [`base64`]: the audio's encoding.
 //!
 //! **Sans-IO.** Nothing here opens a socket, reads a clock or spawns a
@@ -37,10 +46,20 @@
 pub use lmgw_api_types as types;
 
 pub mod base64;
+mod der;
 pub mod feed;
 pub mod mcp_host;
 pub use lmgw_api_types::mcp_apps;
+pub mod ongoing;
+pub mod pairing;
 pub mod realtime;
 pub mod requests;
+mod rfc3339;
+#[cfg(test)]
+mod test_pki;
+// The crate's own tests build it with or without the feature, so the
+// workspace's test run checks the trust pin (Cargo.toml, `[features]`).
+#[cfg(any(feature = "tls", test))]
+pub mod tls;
 pub mod truncate;
 pub mod voice;

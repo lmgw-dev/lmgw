@@ -19,7 +19,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
 use leptos_router::hooks::use_navigate;
-use lmgw_api_types::{AgentCard, AgentImportReport};
+use lmgw_api_types::{AgentCard, AgentEnabled, AgentImportReport, AgentInstalled, AgentsRestored};
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 
@@ -181,15 +181,12 @@ pub fn Agents() -> impl IntoView {
         }
         busy.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/agents_restore", &json!({})).await;
+            let res =
+                crate::api::post::<AgentsRestored, _>("/api/op/agents_restore", &json!({})).await;
             busy.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("restored")
-                        .to_string());
+                    toasts.ok(v.message);
                     reload();
                 }
                 Err(e) => toasts.err(e.to_string()),
@@ -338,7 +335,7 @@ fn Card(c: AgentCard, on_change: Callback<()>) -> impl IntoView {
         busy.set(true);
         enabled.set(want);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentEnabled, _>(
                 "/api/op/agent_enable",
                 &json!({ "id": id.get_value(), "enabled": want }),
             )
@@ -346,11 +343,7 @@ fn Card(c: AgentCard, on_change: Callback<()>) -> impl IntoView {
             busy.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     on_change.try_run(());
                 }
                 Err(e) => {
@@ -656,13 +649,13 @@ fn InstallModal(open: RwSignal<bool>, on_change: Callback<()>) -> impl IntoView 
                 "validate_only": validate_only,
             });
             // The answer carries more than the import report (image, digest,
-            // whether anything was downloaded); the extra keys are ignored
-            // here, and the Run tab prints them from the row's provenance.
-            let res =
-                crate::api::post::<AgentImportReport, _>("/api/op/agent_install", &body).await;
+            // whether anything was downloaded); the dialog shows the report,
+            // and the Run tab prints the rest from the row's provenance.
+            let res = crate::api::post::<AgentInstalled, _>("/api/op/agent_install", &body).await;
             busy.set(false);
             match res {
-                Ok(r) => {
+                Ok(installed) => {
+                    let r = installed.report;
                     let committed = !r.validate_only;
                     let id = r.id.clone();
                     report.set(Some(r));

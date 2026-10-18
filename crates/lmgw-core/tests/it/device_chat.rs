@@ -80,6 +80,7 @@ mod approval_floor;
 mod approval_runtime;
 mod approval_tighten;
 mod bind;
+mod client_send;
 mod collections;
 mod profiles;
 mod profiles_admin;
@@ -90,27 +91,14 @@ mod turns;
 mod walk;
 mod writes;
 
-/// A device paired on `w` with `policy` (`key_set`'s fields) — its id and
-/// key, and a client that presents the key.
-pub(crate) struct Device {
-    pub id: i64,
-    pub key: String,
-    pub client: reqwest::Client,
-}
+/// A device paired on `w` with `policy` (`key_set`'s fields), enrolled and
+/// confirmed (device link design §3): its id, a client that reaches the
+/// device listener as it whatever URL it is given, and the address a
+/// WebSocket opens at to do the same (`support::device_pair`).
+pub(crate) type Device = crate::support::device_pair::Paired;
 
 pub(crate) async fn pair(w: &World, name: &str, policy: Value) -> Device {
-    let mut body = json!({ "kind": "device", "name": name });
-    for (k, v) in policy.as_object().cloned().unwrap_or_default() {
-        body[k] = v;
-    }
-    let (status, v) = op(w, "key_create", body).await;
-    assert_eq!(status, 200, "{v}");
-    let key = v["key"].as_str().unwrap().to_string();
-    Device {
-        id: v["id"].as_i64().unwrap(),
-        client: bearer(&key),
-        key,
-    }
+    crate::support::device_pair::pair(&w.state, &w.gw, name, policy).await
 }
 
 pub(crate) fn bearer(key: &str) -> reqwest::Client {

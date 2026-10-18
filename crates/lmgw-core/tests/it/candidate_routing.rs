@@ -727,7 +727,7 @@ async fn a_pinned_caller_is_refused_a_candidate_alias() {
     let err = lmgw_core::gate::open_pinned(
         &g.state,
         "writer",
-        lmgw_core::gate::RouteCheck::Text("/v1/count_tokens"),
+        lmgw_core::gate::RouteCheck::Count("/v1/count_tokens"),
     )
     .await
     .unwrap_err();

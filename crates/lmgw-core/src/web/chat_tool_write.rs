@@ -250,6 +250,16 @@ async fn refusal(state: &SharedState, scope: &ToolScope, entry: &ThreadMcp) -> O
     // server's first out-of-scope tool is named — what `/v1/mcp/servers`
     // already shows the same device.
     let server = named.filter(|s| scope.may_reach(s)).cloned();
+    // Another device's hosted tools this device is not granted: said so
+    // (client-apps design §5.3, 2026-10-15). The writer chose the label
+    // itself, so the answer names the label and the remedy but not the
+    // hosting device; a turn's frame for a label attached earlier does.
+    if named.is_some_and(|s| !builtin && scope.holds_back(s)) {
+        return Some(format!(
+            "'{label}': this device may not use the tools of a paired device's hosted label: \
+             grant it under the device's policy (Device tools)"
+        ));
+    }
     if !builtin && server.is_none() {
         return Some(format!(
             "'{label}': no MCP server with this label is within the tool scope of {}",

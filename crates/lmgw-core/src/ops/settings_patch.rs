@@ -1,7 +1,7 @@
 //! Sparse patch for gateway settings: `SettingsPatch` and `settings_set`.
 
+use lmgw_api_types as dto;
 use serde::Deserialize;
-use serde_json::{json, Value};
 
 use crate::config::{Settings, Snapshot};
 use crate::state::SharedState;
@@ -54,8 +54,12 @@ pub struct SettingsPatch {
     /// Keep the Chat change feed's records this many days; `0` keeps every
     /// record. A client away longer resumes with a `resync`.
     pub chat_feed_retention_days: Option<i64>,
-    /// Seconds between the Chat feed's keep-alive comments, at least 1.
+    /// Seconds between the Chat feed's keep-alive comments, from 1 to
+    /// `chat_feed_keepalive_max_s`.
     pub chat_feed_keepalive_s: Option<i64>,
+    /// The longest keep-alive a feed may ask for itself
+    /// (`GET /chat/api/feed?keepalive_s=`), from 1 to 86400 seconds.
+    pub chat_feed_keepalive_max_s: Option<i64>,
     /// Records the Chat feed reads per query while a client catches up,
     /// from 1 to 10000.
     pub chat_feed_page_size: Option<i64>,
@@ -124,6 +128,12 @@ pub struct SettingsPatch {
     /// checked as the dashboard's save checks them. The self-admin tool takes
     /// it as a JSON-encoded object (`hoist_json_arg`).
     pub realtime: Option<super::RealtimeSettingsPatch>,
+    /// Settings → Network & access → Devices: the device link's bounds (a
+    /// pairing token's lifetime, the certificates' validity, the
+    /// connection timeouts, the failed-enrolment rate), each refused by
+    /// name outside its range. Taken by this op only: like `bind_addr`, an
+    /// access setting the lmgw__settings_set tool refuses.
+    pub devices: Option<super::DevicesSettingsPatch>,
 }
 
 /// A GPU-hold fallback alias is "usable" (gpu-hold design §2) when it
@@ -194,7 +204,10 @@ pub async fn validate_stt_alias(state: &SharedState, alias: &str) -> Result<(), 
     }
 }
 
-pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value, String> {
+pub async fn settings_set(
+    state: &SharedState,
+    p: SettingsPatch,
+) -> Result<dto::SettingsSaved, String> {
     // Held across the whole read-modify-write: see `AppState::settings_write`.
     let guard = state.settings_write.lock().await;
     let snap = state.snapshot();
@@ -230,6 +243,7 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
         super::ChatFeedPatch {
             chat_feed_retention_days: p.chat_feed_retention_days,
             chat_feed_keepalive_s: p.chat_feed_keepalive_s,
+            chat_feed_keepalive_max_s: p.chat_feed_keepalive_max_s,
             chat_feed_page_size: p.chat_feed_page_size,
             chat_feed_live_buffer: p.chat_feed_live_buffer,
         },
@@ -310,9 +324,27 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
     if let Some(r) = p.realtime {
         changed.extend(super::apply_realtime(state, &mut s.realtime, r).await?);
     }
+    let mut changed: Vec<String> = changed.into_iter().map(String::from).collect();
+    // When each device-link setting applies, said in the answer (§9.1), and
+    // each WebRTC listener setting (calls design §9).
+    let mut applies: Vec<String> = crate::config::webrtc_applies(&changed);
+    let mut listener_moved = false;
+    if let Some(d) = p.devices {
+        listener_moved = super::touches_listener(&d);
+        for c in super::apply_devices(&mut s.devices, d, &s.bind_addr)? {
+            applies.push(c.note());
+            changed.push(c.key);
+        }
+    }
 
     if changed.is_empty() {
         return Err("no settings supplied — nothing to change".into());
+    }
+    if changed
+        .iter()
+        .any(|k| k.starts_with("devices.") || crate::config::WEBRTC_KEYS.contains(&k.as_str()))
+    {
+        crate::config::webrtc_port_collision(&s)?;
     }
     store::save_settings(&state.db, &s)
         .await
@@ -323,7 +355,11 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
     // against the snapshot of then (`reconcile_mcp`).
     drop(guard);
     state.reconcile_mcp().await;
-    let message = match published.reload_failed {
+    // The device listener follows at once (device link design §4.1).
+    if listener_moved {
+        applies.extend(super::apply_devices_listener(state).await);
+    }
+    let mut message = match published.reload_failed {
         None => format!("updated {}", changed.join(", ")),
         Some(e) => format!(
             "updated {} — the rest of the configuration could not be reloaded ({e}); these \
@@ -331,9 +367,12 @@ pub async fn settings_set(state: &SharedState, p: SettingsPatch) -> Result<Value
             changed.join(", ")
         ),
     };
-    Ok(json!({
-        "ok": true,
-        "changed": changed,
-        "message": message,
-    }))
+    if !applies.is_empty() {
+        message = format!("{message} ({})", applies.join("; "));
+    }
+    Ok(dto::SettingsSaved {
+        ok: true,
+        changed,
+        message,
+    })
 }

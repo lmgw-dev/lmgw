@@ -1,9 +1,13 @@
 //! The route-kind guards the request gate runs before dispatch
 //! ([`crate::gate::open`]): a media model on a text route, a reranker
-//! answering `/v1/embeddings`, an embedder answering `/v1/rerank`.
+//! answering `/v1/embeddings`, an embedder answering `/v1/rerank`, and the
+//! decision kind's both ways ([`decision`]).
 
-use crate::config::Route;
+use crate::config::{AuxKind, Route};
 use crate::error::GatewayError;
+
+mod decision;
+pub(crate) use decision::{decision_route_guard, refuse_decision_row};
 
 /// Refuse a **media** model — image or audio — on one of the text routes,
 /// **before admission**, because merely resolving one is enough for the next
@@ -54,22 +58,29 @@ pub(crate) fn refuse_media_route(
 /// nothing downstream can tell the difference (verified live). Silently
 /// forwarding that fills a corpus with zero vectors that look fine until
 /// every search returns noise, so the kind lmgw itself recorded is the gate,
-/// and a misrouted alias fails loudly instead.
+/// and a misrouted alias fails loudly instead. A decision row is refused too
+/// (decision-models design §2.2): llama-server answers it with a 400.
 pub(crate) fn refuse_reranker_for_embeddings(
     snap: &crate::config::Snapshot,
     route: &Route,
     alias: &str,
 ) -> Result<(), GatewayError> {
-    match snap.aux_model_for(route) {
-        Some(m) if m.kind == crate::config::AuxKind::Rerank => {
-            Err(GatewayError::BadRequest(format!(
-                "'{alias}' resolves to the rerank model '{}' — rerankers cannot produce \
-                 embeddings (llama-server would answer with an all-zero vector). Request an \
-                 embedding model, or send this one to /v1/rerank.",
-                m.model_id
-            )))
-        }
-        _ => Ok(()),
+    let Some(m) = snap.aux_model_for(route) else {
+        return Ok(());
+    };
+    match m.kind {
+        AuxKind::Embed => Ok(()),
+        AuxKind::Rerank => Err(GatewayError::BadRequest(format!(
+            "'{alias}' resolves to the rerank model '{}' — rerankers cannot produce \
+             embeddings (llama-server would answer with an all-zero vector). Request an \
+             embedding model, or send this one to /v1/rerank.",
+            m.model_id
+        ))),
+        AuxKind::Decision => Err(decision::decision_row_refusal(
+            m,
+            alias,
+            Some("/v1/embeddings"),
+        )),
     }
 }
 
@@ -77,24 +88,27 @@ pub(crate) fn refuse_reranker_for_embeddings(
 /// ([`crate::gate::RouteCheck::Rerank`]) — the mirror image of
 /// [`refuse_reranker_for_embeddings`]. A section without `reranking = true`
 /// answers a rerank request with whatever its pooling produces, which is not
-/// a relevance score and would silently reorder a corpus's answers. Models
-/// lmgw has no kind for (a remote provider's) are forwarded — their kind is
-/// theirs to know.
+/// a relevance score and would silently reorder a corpus's answers. A
+/// decision row is refused too (decision-models design §2.2): llama-server
+/// answers it with a 501. Models lmgw has no kind for (a remote provider's)
+/// are forwarded — their kind is theirs to know.
 pub(crate) fn refuse_embedder_for_rerank(
     snap: &crate::config::Snapshot,
     route: &Route,
     alias: &str,
 ) -> Result<(), GatewayError> {
-    match snap.aux_model_for(route) {
-        Some(m) if m.kind == crate::config::AuxKind::Embed => {
-            Err(GatewayError::BadRequest(format!(
-                "'{alias}' resolves to the embedding model '{}' — an embedding section \
-                 cannot rank (it has no cross-encoder head, and llama-server would answer \
-                 with its pooling output instead of a relevance score). Request a rerank \
-                 model, or send this one to /v1/embeddings.",
-                m.model_id
-            )))
-        }
-        _ => Ok(()),
+    let Some(m) = snap.aux_model_for(route) else {
+        return Ok(());
+    };
+    match m.kind {
+        AuxKind::Rerank => Ok(()),
+        AuxKind::Embed => Err(GatewayError::BadRequest(format!(
+            "'{alias}' resolves to the embedding model '{}' — an embedding section \
+             cannot rank (it has no cross-encoder head, and llama-server would answer \
+             with its pooling output instead of a relevance score). Request a rerank \
+             model, or send this one to /v1/embeddings.",
+            m.model_id
+        ))),
+        AuxKind::Decision => Err(decision::decision_row_refusal(m, alias, Some("/v1/rerank"))),
     }
 }

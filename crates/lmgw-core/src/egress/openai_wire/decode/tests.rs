@@ -46,3 +46,26 @@ fn reasoning_is_read_under_either_name() {
     );
     assert_eq!(whole(json!({"content": "OK"})), "");
 }
+
+/// llama.cpp writes a non-finite rate as `null`; a missing key is the same
+/// "no number". Neither becomes a measured zero.
+#[test]
+fn a_null_or_missing_timing_is_unknown_not_zero() {
+    let t = super::parse_timings(Some(&json!({
+        "prompt_n": 10,
+        "prompt_ms": null,
+        "predicted_n": 4,
+        "predicted_ms": 50.0,
+        "predicted_per_second": 80.0
+    })))
+    .expect("prompt_n marks a timings block");
+    assert_eq!(
+        (
+            t.prompt_ms,
+            t.prompt_per_second,
+            t.predicted_ms,
+            t.predicted_per_second
+        ),
+        (None, None, Some(50.0), Some(80.0))
+    );
+}

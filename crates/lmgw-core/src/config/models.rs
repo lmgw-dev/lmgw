@@ -128,8 +128,8 @@ impl LocalModel {
     }
 }
 
-/// What an [`AuxModel`] is served as. Both kinds are llama.cpp GGUFs in their
-/// own containers; they differ only in which flag the rendered argv carries
+/// What an [`AuxModel`] is served as. Every kind is a llama.cpp GGUF in its
+/// own container; they differ only in which flag the rendered argv carries
 /// and which ingress may route to them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -143,6 +143,12 @@ pub enum AuxKind {
     /// vector, which would poison whatever corpus is being built. The refusal
     /// lives in [`Snapshot::aux_model_for`]'s caller (`proxy::embeddings_inner`).
     Rerank,
+    /// A decision model (decision-models design §3.1): its header carries
+    /// `{arch}.decision.type`, and llama-server answers TypeSafe's System One
+    /// questions on `/v1/systemone` from it. No kind flag: the server turns
+    /// on embedding mode itself for the types that need it, and
+    /// `--reranking` crashes it at load (§1.4, Appendix A.10).
+    Decision,
 }
 
 impl AuxKind {
@@ -150,6 +156,7 @@ impl AuxKind {
         match self {
             Self::Embed => "embed",
             Self::Rerank => "rerank",
+            Self::Decision => "decision",
         }
     }
 
@@ -157,6 +164,41 @@ impl AuxKind {
         match s {
             "embed" => Some(Self::Embed),
             "rerank" => Some(Self::Rerank),
+            "decision" => Some(Self::Decision),
+            _ => None,
+        }
+    }
+
+    /// The route that serves a row of this kind
+    /// ([`lmgw_api_types::public_names::aux_endpoint`], which the aux editor
+    /// names it by).
+    pub fn endpoint(&self) -> &'static str {
+        lmgw_api_types::public_names::aux_endpoint(self.as_str())
+    }
+}
+
+/// Where an aux row computes when it says so (decision-models design §3.3).
+/// The CPU is the only value: a row without one runs on the GPU, as every aux
+/// row did before the field existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuxBackend {
+    /// `--n-gpu-layers 0`, and the class's run args without the GPU
+    /// passthrough: no VRAM charged, never evicted, served under the GPU
+    /// hold ([`crate::runtime::Placement::Cpu`]).
+    Cpu,
+}
+
+impl AuxBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "cpu" => Some(Self::Cpu),
             _ => None,
         }
     }
@@ -164,10 +206,10 @@ impl AuxKind {
 
 /// A model served by the *second* llama-server router container — the **aux**
 /// router (§8), so named because it hosts every small stateless model class:
-/// embeddings and rerankers. Slimmer than [`LocalModel`] — neither class uses
-/// chat sampling/jinja/speculative-decode params. Exposure goes through the
-/// synthetic aux upstream under [`Settings::aux_router`]'s prefix, so there is
-/// no `public` flag here: enabled = routable.
+/// embeddings, rerankers and decision models. Slimmer than [`LocalModel`] —
+/// none of them uses chat sampling/jinja/speculative-decode params. Exposure
+/// goes through the synthetic aux upstream under [`Settings::aux_router`]'s
+/// prefix, so there is no `public` flag here: enabled = routable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuxModel {
     pub id: i64,
@@ -176,15 +218,39 @@ pub struct AuxModel {
     pub model_id: String,
     /// GGUF path relative to the aux models dir (mounted at /models).
     pub gguf_path: String,
-    /// Embedding or reranking; decides the flag the rendered argv carries.
+    /// Embedding, reranking or decisions; decides the flag the rendered argv
+    /// carries.
     pub kind: AuxKind,
     /// `--pooling` strategy (`none` | `mean` | `cls` | `last` | `rank`);
     /// `None` lets llama-server pick the model's default. Always `None` for
     /// [`AuxKind::Rerank`] — `reranking = true` selects rank pooling itself and
-    /// a second `pooling` key breaks it (spike-verified).
+    /// a second `pooling` key breaks it (spike-verified) — and for
+    /// [`AuxKind::Decision`], whose server reads the head the file declares.
     pub pooling: Option<String>,
     /// `--ctx-size`; `None` = llama-server default.
     pub ctx_size: Option<i64>,
+    /// `--ubatch-size` (decision-models design §3.3); `None` = llama-server's
+    /// default. An encoder whose input llama-server cannot split
+    /// ([`crate::runtime::aux::splits_input`]) evaluates a whole input in one
+    /// ubatch, so this bounds every input it answers.
+    pub ubatch_size: Option<i64>,
+    /// `--batch-size`; `None` = llama-server's default. llama.cpp lowers the
+    /// ubatch to the batch, and embedding mode lowers the batch to the ubatch,
+    /// so a row that raises one raises both.
+    pub batch_size: Option<i64>,
+    /// `--mmproj`: a projector relative to the aux models dir, rendered onto
+    /// `/models` like `gguf_path`. Charged in the row's VRAM footprint.
+    pub mmproj_path: Option<String>,
+    /// `Some(Cpu)` runs the row on the CPU (§3.3): `--n-gpu-layers 0`, no GPU
+    /// passthrough in the inherited run args, no VRAM charged, served under
+    /// the GPU hold. `None` runs it on the GPU.
+    pub backend: Option<AuxBackend>,
+    /// `--threads`. `None` renders nothing on the GPU, and on the CPU this
+    /// machine's physical cores (the logical CPU count where the core
+    /// topology cannot be read), as an audio row switched to the CPU does —
+    /// unless the row's freeform args name a count, which then renders
+    /// ([`crate::runtime::aux::threads_in_effect`]).
+    pub threads: Option<i64>,
     /// Freeform extra llama-server flags without a dedicated field.
     pub args: Vec<String>,
     /// `--sleep-idle-seconds` (0 = never sleep).

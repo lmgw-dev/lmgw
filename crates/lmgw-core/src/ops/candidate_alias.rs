@@ -13,7 +13,8 @@
 //! still lived there.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+
+use lmgw_api_types as dto;
 
 use crate::candidates::{self, FacetSet};
 use crate::capabilities::exposed;
@@ -204,28 +205,33 @@ async fn saved_view(
     id: i64,
     alias: &str,
     message: String,
-) -> Result<Value, String> {
+) -> Result<dto::CandidateAliasSaved, String> {
     let snap = state.reload_snapshot().await.map_err(|e| e.to_string())?;
     let Some(row) = snap.candidate_aliases.get(&alias.to_lowercase()) else {
         // Deleted by a concurrent call between the write and this read —
         // report success on the write itself rather than erroring on a
         // vanished row.
-        return Ok(json!({ "ok": true, "id": id, "message": message }));
+        return Ok(dto::CandidateAliasSaved {
+            ok: true,
+            id,
+            message,
+            ..Default::default()
+        });
     };
     let derived = candidates::derive::derive(state, &snap, row).await;
-    Ok(json!({
-        "ok": true,
-        "id": id,
-        "enabled_facets": derived.enabled.names(),
-        "common_facets": derived.common.names(),
-        "routable": derived.routable,
-        "problems": derived.problems,
-        "advisories": derived.advisories,
-        "fallback_usable": derived.fallback_usable,
-        "context_length": derived.context_length,
-        "max_output_tokens": derived.max_output_tokens,
-        "message": message,
-    }))
+    Ok(dto::CandidateAliasSaved {
+        ok: true,
+        id,
+        enabled_facets: Some(derived.enabled.names()),
+        common_facets: Some(derived.common.names()),
+        routable_candidates: Some(derived.routable),
+        problems: Some(derived.problems),
+        advisories: Some(derived.advisories),
+        fallback_usable: Some(derived.fallback_usable),
+        context_length: Some(derived.context_length),
+        max_output_tokens: Some(derived.max_output_tokens),
+        message,
+    })
 }
 
 /// `candidate_alias_set action=preview` (UI phase, candidate-aliases design
@@ -251,7 +257,11 @@ async fn saved_view(
 /// list's filter, computed once here (same cached GGUF reads `derive` itself
 /// already pays for its own candidates) instead of one request per row a
 /// picker would otherwise cost.
-async fn preview(state: &SharedState, snap: &Snapshot, p: &CandidateAliasPatch) -> Value {
+async fn preview(
+    state: &SharedState,
+    snap: &Snapshot,
+    p: &CandidateAliasPatch,
+) -> dto::CandidateAliasPreview {
     // The row this draft edits, when it names one — an untouched field then
     // previews the same "carried forward" value `update` would use. Nothing
     // found (a fresh draft, or a name not saved yet) previews like `create`.
@@ -401,33 +411,38 @@ async fn preview(state: &SharedState, snap: &Snapshot, p: &CandidateAliasPatch) 
             })
             .map(|f| f.as_str().to_string())
             .collect();
-        addable.push(json!({ "id": m.model_id, "missing": missing }));
+        addable.push(dto::AddableCandidate {
+            id: m.model_id.clone(),
+            missing,
+        });
     }
 
-    json!({
-        "ok": error.is_none(),
-        "enabled_facets": enabled.names(),
-        "common_facets": derived.common.names(),
-        "unsupported_by": derived.unsupported_by,
-        "routable": derived.routable,
-        "problems": derived.problems,
-        "advisories": derived.advisories,
-        "fallback_usable": fallback_usable,
-        "context_length": derived.context_length,
-        "max_output_tokens": derived.max_output_tokens,
-        "addable": addable,
-        "error": error,
-    })
+    dto::CandidateAliasPreview {
+        ok: error.is_none(),
+        enabled_facets: enabled.names(),
+        common_facets: derived.common.names(),
+        unsupported_by: derived.unsupported_by,
+        routable_candidates: derived.routable,
+        problems: derived.problems,
+        advisories: derived.advisories,
+        fallback_usable,
+        context_length: derived.context_length,
+        max_output_tokens: derived.max_output_tokens,
+        addable,
+        error,
+    }
 }
 
 pub async fn candidate_alias_set(
     state: &SharedState,
     p: CandidateAliasPatch,
-) -> Result<Value, String> {
+) -> Result<dto::CandidateAliasAnswer, String> {
     let snap = state.snapshot();
 
     match p.action.as_str() {
-        "preview" => Ok(preview(state, &snap, &p).await),
+        "preview" => Ok(dto::CandidateAliasAnswer::Preview(
+            preview(state, &snap, &p).await,
+        )),
         "create" => {
             super::require_all(&[
                 ("alias", super::opt(&p.alias).is_some()),
@@ -479,6 +494,7 @@ pub async fn candidate_alias_set(
                 format!("candidate alias '{alias}' created"),
             )
             .await
+            .map(dto::CandidateAliasAnswer::Saved)
         }
         "update" | "enable" | "disable" => {
             let all = store::list_candidate_aliases(&state.db)
@@ -563,9 +579,13 @@ pub async fn candidate_alias_set(
                 state,
                 cur.id,
                 &new_alias,
-                format!("candidate alias '{new_alias}' updated"),
+                format!(
+                    "candidate alias '{new_alias}' {}",
+                    super::saved_verb(&p.action)
+                ),
             )
             .await
+            .map(dto::CandidateAliasAnswer::Saved)
         }
         "delete" => {
             let all = store::list_candidate_aliases(&state.db)
@@ -576,13 +596,40 @@ pub async fn candidate_alias_set(
                 .await
                 .map_err(|e| e.to_string())?;
             state.reload_snapshot().await.map_err(|e| e.to_string())?;
-            Ok(json!({
-                "ok": true, "id": cur.id,
-                "message": format!("candidate alias '{}' deleted", cur.alias),
+            Ok(dto::CandidateAliasAnswer::Saved(dto::CandidateAliasSaved {
+                ok: true,
+                id: cur.id,
+                message: format!("candidate alias '{}' deleted", cur.alias),
+                ..Default::default()
             }))
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable|preview)"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+
+    /// A row deleted between the write and the read-back is still a success of
+    /// the write: `{ok, id, message}`, with none of the derived keys (and not
+    /// `null` ones).
+    #[tokio::test]
+    async fn a_row_that_vanished_before_the_read_back_answers_the_write_alone() {
+        let state = AppState::init_for_tests().await.unwrap();
+        let answer = saved_view(&state, 7, "ghost", "candidate alias 'ghost' created".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::ops::backends::to_json(Ok(answer)).unwrap(),
+            serde_json::json!({
+                "ok": true,
+                "id": 7,
+                "message": "candidate alias 'ghost' created",
+            })
+        );
     }
 }

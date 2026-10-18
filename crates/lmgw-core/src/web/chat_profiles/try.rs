@@ -46,6 +46,7 @@ use lmgw_api_types::chat_profiles::{
     PreviewAnswer, PreviewRequest, PreviewTokens, ProfileDraft, SpeakRequest, TestAnswer,
     TestRequest, TestUsage,
 };
+use lmgw_api_types::ApiError;
 
 use super::super::agentchat::refused;
 use super::super::chat::err_json;
@@ -58,6 +59,7 @@ use super::super::chat_turn::{self, VoiceTurn};
 use super::super::{chat_sampling, chat_voice};
 use crate::config::chat_profile::{normalise_draft, ChatProfile};
 use crate::config::Snapshot;
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ingress::ClientProto;
 use crate::ir::{ChatRequest, Message, Params, ReasoningControl, Role, StreamDelta};
@@ -358,27 +360,29 @@ struct TestRoute<'a> {
     answering: std::sync::Mutex<Answering>,
 }
 
-#[async_trait::async_trait]
 impl PerRoute for TestRoute<'_> {
-    async fn request(
-        &self,
-        route: &crate::config::Route,
-        hold: Option<&crate::vram::LocalHold>,
-        rerouted: Option<&crate::gate::GateHeaders>,
-        ir: &ChatRequest,
-    ) -> Result<Option<ChatRequest>, GatewayError> {
-        let headers = rerouted.unwrap_or(&self.admitted);
-        let answered_by = chat_turn::answered_by(&self.state.snapshot(), headers);
-        let answering = chat_turn::answering(answered_by.as_deref(), headers, &ir.model_alias);
-        let fit =
-            chat_turn::fit_route(self.state, (route, hold), answering, ir, (false, false)).await?;
-        self.lock().answered_by = answered_by;
-        if !fit.params_changed {
-            return Ok(None);
-        }
-        let mut req = ir.clone();
-        req.params = fit.params;
-        Ok(Some(req))
+    fn request<'a>(
+        &'a self,
+        route: &'a crate::config::Route,
+        hold: Option<&'a crate::vram::LocalHold>,
+        rerouted: Option<&'a crate::gate::GateHeaders>,
+        ir: &'a ChatRequest,
+    ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>> {
+        Box::pin(async move {
+            let headers = rerouted.unwrap_or(&self.admitted);
+            let answered_by = chat_turn::answered_by(&self.state.snapshot(), headers);
+            let answering = chat_turn::answering(answered_by.as_deref(), headers, &ir.model_alias);
+            let fit =
+                chat_turn::fit_route(self.state, (route, hold), answering, ir, (false, false))
+                    .await?;
+            self.lock().answered_by = answered_by;
+            if !fit.params_changed {
+                return Ok(None);
+            }
+            let mut req = ir.clone();
+            req.params = fit.params;
+            Ok(Some(req))
+        })
     }
 
     fn fitted(&self, fitted: &Fitted) {
@@ -588,9 +592,10 @@ pub async fn speak_profile(
 
 /// A refusal of Speak in the Chat's flat JSON, with the speech's own code.
 fn speech_refusal(status: StatusCode, code: &str, message: String) -> Response {
-    (
-        status,
-        Json(serde_json::json!({ "code": code, "message": message })),
-    )
-        .into_response()
+    let body = ApiError {
+        code: code.to_string(),
+        message,
+        ..Default::default()
+    };
+    (status, Json(body)).into_response()
 }

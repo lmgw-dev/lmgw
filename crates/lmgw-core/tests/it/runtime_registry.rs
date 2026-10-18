@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lmgw_core::config::{ImageModel, LlamaParams};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::argv::LlamaArgs;
 use lmgw_core::runtime::descriptor::ModelRuntime;
 use lmgw_core::runtime::descriptor::RungPos;
@@ -118,104 +119,109 @@ fn success() -> CmdOutput {
     }
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Fake {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman", "the registry only ever shells podman");
-        // Recorded before any awaiting, so a test can observe that a start is
-        // in flight while it is still parked on the gate.
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args[0].as_str() {
-            // The sd-server vocabulary probe is a `run` too, but a
-            // throwaway one: it must not consume a queued reply meant for a
-            // real start. Matched on its entrypoint, so the llama help read
-            // (which the tests below drive through `run_replies`) is
-            // untouched.
-            "run" if is_sdcpp_help(args) => {
-                let help = self.help.lock().unwrap().clone();
-                Ok(match help {
-                    Some(text) => CmdOutput {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman", "the registry only ever shells podman");
+            // Recorded before any awaiting, so a test can observe that a start is
+            // in flight while it is still parked on the gate.
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args[0].as_str() {
+                // The sd-server vocabulary probe is a `run` too, but a
+                // throwaway one: it must not consume a queued reply meant for a
+                // real start. Matched on its entrypoint, so the llama help read
+                // (which the tests below drive through `run_replies`) is
+                // untouched.
+                "run" if is_sdcpp_help(args) => {
+                    let help = self.help.lock().unwrap().clone();
+                    Ok(match help {
+                        Some(text) => CmdOutput {
+                            status: 0,
+                            stdout: text,
+                            stderr: String::new(),
+                        },
+                        None => CmdOutput {
+                            status: 127,
+                            stdout: String::new(),
+                            stderr: "error while loading shared libraries: libcuda.so.1".into(),
+                        },
+                    })
+                }
+                "run" => {
+                    let gate = self.gate.lock().unwrap().clone();
+                    if let Some(mut rx) = gate {
+                        while !*rx.borrow_and_update() {
+                            if rx.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    let barrier = self.barrier.lock().unwrap().clone();
+                    if let Some(b) = barrier {
+                        b.wait().await;
+                    }
+                    let reply = self.run_replies.lock().unwrap().pop_front();
+                    match reply {
+                        Some(Reply::Spawn(msg)) => {
+                            Err(std::io::Error::new(std::io::ErrorKind::NotFound, msg))
+                        }
+                        Some(Reply::Out(out)) => Ok(out),
+                        None => Ok(success()),
+                    }
+                }
+                "logs" => Ok(CmdOutput {
+                    status: 0,
+                    stdout: self.logs.lock().unwrap().clone(),
+                    stderr: String::new(),
+                }),
+                "wait" => {
+                    let gate = self.wait_gates.lock().unwrap().pop_front().flatten();
+                    if let Some(mut rx) = gate {
+                        while !*rx.borrow_and_update() {
+                            if rx.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(success())
+                }
+                "stop" if *self.fail_stop.lock().unwrap() => Ok(CmdOutput {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: "Error: container is not stopping\n".into(),
+                }),
+                "image" if args[1] == "inspect" => {
+                    let image = args.last().unwrap();
+                    let mut images = self.images.lock().unwrap();
+                    Ok(match images.get_mut(image) {
+                        Some(q) if q.len() > 1 => q.pop_front().unwrap(),
+                        Some(q) => q.front().cloned().unwrap_or_else(success),
+                        None => success(),
+                    })
+                }
+                "inspect" if *self.inspect_gone.lock().unwrap() => Ok(CmdOutput {
+                    status: 125,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "Error: no such container {}\n",
+                        args.last().cloned().unwrap_or_default()
+                    ),
+                }),
+                "inspect" => Ok(match self.inspect.lock().unwrap().clone() {
+                    Some(json) => CmdOutput {
                         status: 0,
-                        stdout: text,
+                        stdout: json,
                         stderr: String::new(),
                     },
-                    None => CmdOutput {
-                        status: 127,
-                        stdout: String::new(),
-                        stderr: "error while loading shared libraries: libcuda.so.1".into(),
-                    },
-                })
-            }
-            "run" => {
-                let gate = self.gate.lock().unwrap().clone();
-                if let Some(mut rx) = gate {
-                    while !*rx.borrow_and_update() {
-                        if rx.changed().await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                let barrier = self.barrier.lock().unwrap().clone();
-                if let Some(b) = barrier {
-                    b.wait().await;
-                }
-                let reply = self.run_replies.lock().unwrap().pop_front();
-                match reply {
-                    Some(Reply::Spawn(msg)) => {
-                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, msg))
-                    }
-                    Some(Reply::Out(out)) => Ok(out),
-                    None => Ok(success()),
-                }
-            }
-            "logs" => Ok(CmdOutput {
-                status: 0,
-                stdout: self.logs.lock().unwrap().clone(),
-                stderr: String::new(),
-            }),
-            "wait" => {
-                let gate = self.wait_gates.lock().unwrap().pop_front().flatten();
-                if let Some(mut rx) = gate {
-                    while !*rx.borrow_and_update() {
-                        if rx.changed().await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Ok(success())
-            }
-            "stop" if *self.fail_stop.lock().unwrap() => Ok(CmdOutput {
-                status: 1,
-                stdout: String::new(),
-                stderr: "Error: container is not stopping\n".into(),
-            }),
-            "image" if args[1] == "inspect" => {
-                let image = args.last().unwrap();
-                let mut images = self.images.lock().unwrap();
-                Ok(match images.get_mut(image) {
-                    Some(q) if q.len() > 1 => q.pop_front().unwrap(),
-                    Some(q) => q.front().cloned().unwrap_or_else(success),
                     None => success(),
-                })
+                }),
+                _ => Ok(success()),
             }
-            "inspect" if *self.inspect_gone.lock().unwrap() => Ok(CmdOutput {
-                status: 125,
-                stdout: String::new(),
-                stderr: format!(
-                    "Error: no such container {}\n",
-                    args.last().cloned().unwrap_or_default()
-                ),
-            }),
-            "inspect" => Ok(match self.inspect.lock().unwrap().clone() {
-                Some(json) => CmdOutput {
-                    status: 0,
-                    stdout: json,
-                    stderr: String::new(),
-                },
-                None => success(),
-            }),
-            _ => Ok(success()),
-        }
+        })
     }
 }
 

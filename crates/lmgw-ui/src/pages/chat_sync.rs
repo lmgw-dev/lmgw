@@ -51,6 +51,7 @@ mod rows;
 mod rules;
 
 use leptos::prelude::*;
+use lmgw_api_types::chat::ThreadList;
 use lmgw_api_types::ChatChanged;
 
 use super::chat::{
@@ -108,7 +109,9 @@ impl ListRead {
     pub(super) async fn fetch(self) -> Option<(u64, Result<ThreadsResponse, crate::api::Error>)> {
         let ticket = self.latest.next()?;
         self.out.try_update_value(|n| *n += 1);
-        let got = crate::api::get::<ThreadsResponse>(self.url()).await;
+        let got = crate::api::get::<ThreadList>(self.url())
+            .await
+            .map(ThreadsResponse::from);
         self.out.try_update_value(|n| *n = n.saturating_sub(1));
         Some((ticket, got))
     }

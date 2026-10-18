@@ -51,6 +51,7 @@ async fn setup(upstream_base: &str, mode: SelfAdmin) -> (SharedState, Gw) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -174,18 +175,19 @@ async fn register_mcp(state: &SharedState, url: &str) -> i64 {
 
 // ---- the dashboard plane ----
 
+/// `GET /api/tools`, read through the dashboard's DTO: the answer must come
+/// back as it was sent and validate against the document.
 async fn inventory(base: &Gw) -> lmgw_api_types::ToolInventory {
-    let text = base
+    let live: Value = base
         .client()
         .get(format!("{base}/api/tools"))
         .send()
         .await
         .unwrap()
-        .text()
+        .json()
         .await
         .unwrap();
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("/api/tools does not decode as the UI's DTO ({e}): {text}"))
+    common::round_trips::<lmgw_api_types::ToolInventory>("GET /api/tools", &live)
 }
 
 /// `POST /api/op/{name}` → `(http status, body)`.
@@ -201,8 +203,13 @@ async fn op(base: &Gw, name: &str, body: Value) -> (u16, Value) {
     (status, r.json().await.unwrap_or(Value::Null))
 }
 
+/// `tool_set`; an answer is the documented acknowledgement, as sent.
 async fn set_tool(base: &Gw, name: &str, enabled: bool) -> (u16, Value) {
-    op(base, "tool_set", json!({"name": name, "enabled": enabled})).await
+    let (status, body) = op(base, "tool_set", json!({"name": name, "enabled": enabled})).await;
+    if status == 200 {
+        common::round_trips::<lmgw_api_types::MessageAck>("POST /api/op/tool_set", &body);
+    }
+    (status, body)
 }
 
 // ---- the northbound MCP planes ----
@@ -523,7 +530,7 @@ async fn disabling_a_server_tool_hides_it_from_mcp_and_from_the_thread_picker() 
 
     // The Chat picker reads this endpoint; a tick the send would refuse would
     // be a lie, so the tool is gone from here too.
-    let picker: Value = base
+    let live: Value = base
         .client()
         .get(format!("{base}/api/mcp-servers/{id}/tools"))
         .send()
@@ -532,13 +539,17 @@ async fn disabling_a_server_tool_hides_it_from_mcp_and_from_the_thread_picker() 
         .json()
         .await
         .unwrap();
-    let offered: Vec<&str> = picker["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
-    assert_eq!(offered, vec!["stub__ping"], "{picker}");
+    let picker = common::round_trips::<lmgw_api_types::McpServerToolsResponse>(
+        "GET /api/mcp-servers/{id}/tools",
+        &live,
+    );
+    let offered: Vec<&str> = picker.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(offered, vec!["stub__ping"], "{live}");
+    assert_eq!(picker.tools[0].upstream_name, "ping");
+    assert_eq!(
+        picker.tools[0].description.as_deref(),
+        Some("ping the input")
+    );
 }
 
 /// The switch is owner state, so it must never become invisible: a record whose
@@ -596,6 +607,26 @@ async fn disabling_a_name_the_gateway_does_not_offer_is_refused() {
         .as_str()
         .unwrap_or_default()
         .contains("nope__nothing"));
+}
+
+/// What the switch answers, to the word: the dashboard shows the sentence, and
+/// the answer is `{ok, message}` and nothing else.
+#[tokio::test]
+async fn the_switch_says_what_it_did() {
+    let mock = MockServer::start().await;
+    let (_state, base) = setup(&mock.uri(), SelfAdmin::Full).await;
+    for (enabled, message) in [
+        (
+            false,
+            "'docs__resolve' is disabled — it is no longer listed or callable",
+        ),
+        (true, "'docs__resolve' is offered again"),
+        (true, "'docs__resolve' was not disabled"),
+    ] {
+        let (status, body) = set_tool(&base, "docs__resolve", enabled).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, json!({"ok": true, "message": message}));
+    }
 }
 
 /// Both halves of the composition are reported, because fixing one of them

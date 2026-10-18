@@ -5,7 +5,8 @@
 //! drawer and a folder's defaults.
 
 use leptos::prelude::*;
-use serde::{Deserialize, Serialize};
+use lmgw_api_types::chat::{AudioInputMode, TurnDetectionMode};
+use lmgw_api_types::chat_threads::SettingsAck;
 use serde_json::{json, Value};
 
 use super::chat::ChatThread;
@@ -64,148 +65,22 @@ mod viz;
 
 /// A thread's own voice settings (`chat_threads.voice`): every field
 /// optional, absent = inherit Settings → Chat → Voice, then Settings →
-/// Realtime. Serialized as the server takes it: only what is set.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ThreadVoice {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub asr_alias: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tts_alias: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub voice: Option<String>,
-    /// The language the user speaks (the ASR's); `auto`: none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
-    /// The language replies are in (the model's and the TTS's); `auto`:
-    /// the spoken one, whatever Settings say.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_language: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub read_aloud: Option<bool>,
-    /// `semantic_vad` | `server_vad` | `push_to_talk`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_detection: Option<String>,
-    /// `off` | `on`: whether a voice turn goes to the chat model as audio.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_input: Option<String>,
-    /// `Some("")`: no style for this thread (not inherited).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub speech_style: Option<String>,
-    /// The thread's TTS seed, drawn by the server on first use.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u32>,
-}
+/// Realtime. Serialized as the server takes it: only what is set. The type
+/// is the gateway's.
+pub use lmgw_api_types::chat::ThreadVoice;
 
 /// `voice_resolved`: each field as the gateway resolves it, with where it
-/// came from (`thread` | `chat` | `realtime`; `speech_in` for a reply
-/// language that follows the spoken one).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct VoiceResolved {
-    pub asr: StageResolved,
-    pub tts: StageResolved,
-    pub voice: Named,
-    pub speech_style: StyleResolved,
-    /// The language the user speaks.
-    pub language: Sourced<Option<String>>,
-    /// The language replies are in; absent from an older server.
-    pub reply_language: Sourced<Option<String>>,
-    /// Where a stage's model does not take its language as set.
-    pub language_notes: Vec<LanguageNote>,
-    pub read_aloud: Sourced<bool>,
-    pub turn_detection: Sourced<String>,
-    /// Whether a voice turn goes to the chat model as audio, and why not.
-    pub audio_input: Option<AudioInputResolved>,
-    pub seed: Option<u32>,
-    pub problems: Vec<VoiceProblem>,
-    pub realtime: RealtimeResolved,
-}
+/// came from (`thread` | `profile` | `chat` | `realtime`; `row` for a speech
+/// style the model describes itself, `speech_in` for a reply language that
+/// follows the spoken one). The types are the ones the gateway writes it
+/// with (`lmgw_api_types::voice_resolved`), a stage and the voice under the
+/// names this page has always used.
+pub use lmgw_api_types::voice_resolved::{
+    Sourced, Stage as StageResolved, VoiceName as Named, VoiceProblem, VoiceResolved, VoiceSource,
+};
 
-/// A value and the level it came from (`None`: no level sets it).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Sourced<T: Default> {
-    pub value: T,
-    pub source: Option<String>,
-}
-
-/// One speech stage: the alias, its source, what the thread inherits
-/// without its own, on this machine or not, run by lmgw or not, CPU, and
-/// what a block (the GPU hold; a benchmark run's lease, CPU rows too) would
-/// answer with (or why its named fallback cannot).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct StageResolved {
-    pub alias: Option<String>,
-    pub source: Option<String>,
-    pub inherited: Option<String>,
-    pub local: Option<bool>,
-    /// lmgw runs it in a container of its own, so a block applies to it.
-    pub managed: bool,
-    pub cpu: bool,
-    pub fallback: Option<FallbackResolved>,
-    pub fallback_unusable: Option<FallbackUnusable>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct FallbackResolved {
-    pub alias: String,
-    pub local: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct FallbackUnusable {
-    pub alias: String,
-    pub why: String,
-}
-
-/// The voice: `name` is the one asked for; with none, realtime's chain
-/// decides, starting from `inherits` (realtime's default voice). `note`
-/// says why a voice set further out is not used.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Named {
-    pub name: Option<String>,
-    pub source: Option<String>,
-    pub inherits: Option<String>,
-    pub note: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct StyleResolved {
-    pub text: String,
-    pub source: Option<String>,
-}
-
-/// A speech model its language does not reach as set (the ASR the spoken
-/// one, the TTS the reply's):
-/// `{stage, alias, message}` — `message` is the whole sentence.
-pub use lmgw_api_types::chat_voice::LanguageNote;
-
-/// What blocks a voice feature: `{stage, code, message}`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct VoiceProblem {
-    pub stage: String,
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct RealtimeResolved {
-    pub ok: bool,
-    /// The refusal's machine code (`chat_thread_admin`).
-    pub code: Option<String>,
-    pub reason: Option<String>,
-    pub admin_tools: bool,
-}
-
-/// Where a value came from, in the page's words.
+/// Where a value came from, in the page's words; `source` is a
+/// `VoiceSource::as_str`.
 pub(super) fn source_label(source: Option<&str>) -> &'static str {
     match source {
         Some("thread") => "this thread",
@@ -224,17 +99,9 @@ pub(super) fn source_label(source: Option<&str>) -> &'static str {
 
 /// A settings answer's `voice` and `voice_resolved`, laid onto the thread
 /// as the page holds it (the server normalised what it took).
-pub(super) fn apply_answer(t: &mut ChatThread, answer: &Value) {
-    if let Ok(v) = serde_json::from_value::<ThreadVoice>(answer["voice"].clone()) {
-        if answer.get("voice").is_some() {
-            t.voice = v;
-        }
-    }
-    if let Ok(r) = serde_json::from_value::<VoiceResolved>(answer["voice_resolved"].clone()) {
-        if answer.get("voice_resolved").is_some() {
-            t.voice_resolved = Some(r);
-        }
-    }
+pub(super) fn apply_answer(t: &mut ChatThread, answer: &SettingsAck) {
+    t.voice = answer.voice.clone();
+    t.voice_resolved = Some(answer.voice_resolved.clone());
 }
 
 /// The Voice fields as typed. Held by the page with the rest of the
@@ -303,8 +170,12 @@ impl VoiceDraft {
             }
             .into(),
         );
-        self.turn.set(text(&v.turn_detection));
-        self.audio_input.set(text(&v.audio_input));
+        let spelled = |m: Option<&str>| m.map(str::to_string).unwrap_or_default();
+        self.turn.set(spelled(
+            v.turn_detection.as_ref().map(TurnDetectionMode::as_str),
+        ));
+        self.audio_input
+            .set(spelled(v.audio_input.as_ref().map(AudioInputMode::as_str)));
         self.seed.set(None);
     }
 
@@ -332,8 +203,8 @@ impl VoiceDraft {
                 "off" => Some(false),
                 _ => None,
             },
-            turn_detection: name(self.turn.get()),
-            audio_input: name(self.audio_input.get()),
+            turn_detection: name(self.turn.get()).and_then(wire_mode),
+            audio_input: name(self.audio_input.get()).and_then(wire_mode),
             speech_style: match self.style_mode.get().as_str() {
                 "none" => Some(String::new()),
                 // An own style left empty is none for this thread too.
@@ -387,6 +258,12 @@ impl VoiceDraft {
     }
 }
 
+/// A mode as the form spells it, read as the gateway's type: a name it knows
+/// is its variant, any other stays as typed (`Unknown`), as it would arrive.
+fn wire_mode<T: serde::de::DeserializeOwned>(text: String) -> Option<T> {
+    serde_json::from_value(Value::String(text)).ok()
+}
+
 /// A fresh seed for "New voice".
 pub(super) fn new_seed() -> u32 {
     (js_sys::Math::random() * f64::from(u32::MAX)) as u32
@@ -395,6 +272,34 @@ pub(super) fn new_seed() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The form holds the modes as text; the thread's voice holds them as
+    /// the gateway's types, and what the form saves must be the text it
+    /// held, a name this build does not know included.
+    #[test]
+    fn the_forms_mode_names_read_as_the_gateways_types_and_write_back_as_typed() {
+        assert_eq!(
+            wire_mode::<TurnDetectionMode>("push_to_talk".into()),
+            Some(TurnDetectionMode::PushToTalk)
+        );
+        assert_eq!(
+            wire_mode::<AudioInputMode>("on".into()),
+            Some(AudioInputMode::On)
+        );
+        let v = ThreadVoice {
+            turn_detection: wire_mode("lookahead".into()),
+            audio_input: wire_mode("off".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            v.turn_detection,
+            Some(TurnDetectionMode::Unknown("lookahead".into()))
+        );
+        assert_eq!(
+            json!(v),
+            json!({ "turn_detection": "lookahead", "audio_input": "off" })
+        );
+    }
 
     #[test]
     fn a_thread_voice_serializes_only_what_is_set() {
@@ -430,10 +335,11 @@ mod tests {
         assert_eq!(r.tts.inherited.as_deref(), Some("rt"));
         assert_eq!(r.voice.inherits.as_deref(), Some("M5"));
         assert_eq!(
-            source_label(r.turn_detection.source.as_deref()),
+            source_label(r.turn_detection.source.as_ref().map(VoiceSource::as_str)),
             "this thread"
         );
-        assert_eq!(r.turn_detection.value, "semantic_vad");
+        assert_eq!(r.turn_detection.value, TurnDetectionMode::SemanticVad);
+        assert_eq!(r.speech_style.source, VoiceSource::Realtime);
         assert_eq!(r.language.value, None);
         assert_eq!(
             r.reply_language,
@@ -443,5 +349,18 @@ mod tests {
         assert_eq!(r.realtime.code.as_deref(), Some("chat_thread_admin"));
         assert_eq!(r.seed, Some(1234567));
         assert_eq!(r.audio_input, None, "absent: an older server");
+    }
+
+    /// A source a newer gateway adds still reads, and the page words it as
+    /// not set rather than guessing.
+    #[test]
+    fn a_source_this_build_does_not_know_reads_and_is_worded_as_not_set() {
+        let s: Sourced<bool> =
+            serde_json::from_value(json!({"value": true, "source": "something_new"})).unwrap();
+        assert_eq!(s.source, Some(VoiceSource::Unknown("something_new".into())));
+        assert_eq!(
+            source_label(s.source.as_ref().map(VoiceSource::as_str)),
+            "not set"
+        );
     }
 }

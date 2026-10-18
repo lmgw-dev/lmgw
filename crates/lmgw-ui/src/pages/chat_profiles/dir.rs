@@ -21,7 +21,10 @@ impl ProfileDir {
         };
         provide_context(dir);
         dir.refresh();
-        window_event_listener(leptos::ev::focus, move |_| dir.refresh());
+        // Removed with the page: a window listener outlives the owner that
+        // added it.
+        let focus = window_event_listener(leptos::ev::focus, move |_| dir.refresh());
+        on_cleanup(move || focus.remove());
         dir
     }
 

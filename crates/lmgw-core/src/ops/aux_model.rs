@@ -1,62 +1,62 @@
-//! Aux models — embedders and rerankers (§8, per-model-containers §3.1)
+//! Aux models — embedders, rerankers and decision models (§8,
+//! per-model-containers §3.1, decision-models design §3)
 
 use serde::Deserialize;
-use serde_json::{json, Value};
 
 use lmgw_api_types as dto;
 
 use crate::config::{AuxKind, AuxModel, HoldFallbackMode, Snapshot};
-use crate::runtime::argv;
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
 use crate::store::{self, NewAuxModel};
 
 use super::*;
 
+mod fallback;
+mod fields;
+
 /// The `--pooling` values llama-server accepts. Checked at write time rather
 /// than left to the container, because the wrong one does not fail: it
 /// produces vectors that look fine and retrieve noise.
 pub const POOLING_VALUES: &[&str] = &["none", "mean", "cls", "last", "rank"];
 
-/// A list-valued argument as either surface sends it: newline/shell text from
-/// the tool plane (every self-admin argument is a flat scalar) or a ready token
-/// list from the dashboard, whose
-/// editor already splits lines. Tokens are taken verbatim — re-parsing them
-/// through shlex would eat the backslashes in an `--override-tensor` regex.
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
-pub enum ArgList {
-    Text(String),
-    Tokens(Vec<String>),
-}
-
-impl ArgList {
-    /// Blank text: what a flat tool argument left empty sends, which means
-    /// "not supplied" there, as an empty optional string does on every tool.
-    pub fn is_blank_text(&self) -> bool {
-        matches!(self, Self::Text(t) if t.trim().is_empty())
-    }
-
-    pub fn tokens(&self) -> Result<Vec<String>, String> {
-        match self {
-            Self::Text(t) => argv::parse_args_text(t),
-            Self::Tokens(v) => Ok(v
-                .iter()
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect()),
+/// A list-valued argument as every surface sends it: one entry per argument.
+/// Entries are taken verbatim apart from surrounding whitespace and empty ones
+/// — re-parsing them through shlex would eat the backslashes in an
+/// `--override-tensor` regex. An entry that is a flag followed by a value
+/// (`--cpus 2`) is refused, since it would reach the command line as one
+/// argument that no program understands; `--key=value` is fine.
+pub fn arg_list(v: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for t in v {
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
         }
+        let space = t.find(char::is_whitespace);
+        let equals = t.find('=');
+        if t.starts_with('-') && space.is_some_and(|s| equals.is_none_or(|e| s < e)) {
+            let (flag, value) = t.split_at(space.unwrap_or_default());
+            return Err(format!(
+                "'{t}' is two arguments in one entry: put '{flag}' and '{}' on separate entries \
+                 (one argument per entry, or per line in the dashboard)",
+                value.trim()
+            ));
+        }
+        out.push(t.to_string());
     }
+    Ok(out)
 }
 
-/// Sparse patch for an aux (embedding / rerank) model — a slimmer sibling of
-/// the local model patch: no sampling, no template, no speculation. What an aux row *does* need beyond a path is
-/// its kind and, for embedders, the pooling the model was trained with; both
-/// are read out of the GGUF by `lmgw__local_model_plan target=aux`.
+/// Sparse patch for an aux (embedding / rerank / decision) model — a slimmer
+/// sibling of the local model patch: no sampling, no template, no
+/// speculation. What an aux row *does* need beyond a path is its kind and,
+/// for embedders, the pooling the model was trained with; both are read out
+/// of the GGUF by `lmgw__local_model_plan target=aux`.
 ///
-/// Placement (`--n-gpu-layers`, `--threads`) has no column here: it goes in
-/// `extra_args` like every other flag without a field, and the VRAM planner
-/// reads `--n-gpu-layers 0` back out of it to charge a CPU-only model nothing.
+/// Placement, the batch sizes and a projector are fields
+/// (decision-models design §3.3): `backend`, `threads`, `ubatch_size`,
+/// `batch_size`, `mmproj_path`.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuxModelPatch {
@@ -64,34 +64,61 @@ pub struct AuxModelPatch {
     pub id: Option<i64>,
     pub model_id: Option<String>,
     pub gguf_path: Option<String>,
-    /// `embed` (default on create) | `rerank`.
+    /// `embed` (default on create) | `rerank` | `decision`.
     pub kind: Option<String>,
     /// `none` | `mean` | `cls` | `last` | `rank`; empty clears it back to
-    /// llama-server's choice. Never set on a rerank model.
+    /// llama-server's choice. Never set on a rerank or decision model.
     pub pooling: Option<String>,
+    /// `--ctx-size`; `ctx_size` in `clear` takes llama-server's default.
     pub ctx_size: Option<i64>,
+    /// `--ubatch-size`, 1 or more; `ubatch_size` in `clear` takes
+    /// llama-server's default. An encoder whose input llama-server cannot
+    /// split (any but a last-token embedder or a causal reranker) evaluates
+    /// a whole input in one ubatch, so this bounds every input it answers;
+    /// the plan sets it to the context there.
+    pub ubatch_size: Option<i64>,
+    /// `--batch-size`, 1 or more; `batch_size` in `clear` takes the default.
+    /// llama.cpp lowers the ubatch to the batch, so raise both together.
+    pub batch_size: Option<i64>,
+    /// A projector (`--mmproj`), relative to the aux models dir; empty (or
+    /// `mmproj_path` in `clear`) is none. Charged with the weights.
+    pub mmproj_path: Option<String>,
+    /// `cpu` runs the row on the CPU: `--n-gpu-layers 0`, the class's run
+    /// args without the GPU passthrough, no VRAM charged, served while the
+    /// GPU hold is on. Blank (or `backend` in `clear`) runs it on the GPU.
+    /// No other value is accepted.
+    pub backend: Option<String>,
+    /// `--threads`, 1 or more (no upper cap; above this machine's CPUs the
+    /// save says so). `threads` in `clear` renders none on the GPU, and on
+    /// the CPU this machine's physical cores (the logical CPU count where
+    /// the core topology cannot be read) unless the extra args name a
+    /// count.
+    pub threads: Option<i64>,
     /// Freeform llama-server flags. `args` is the dashboard's spelling.
     #[serde(alias = "args")]
-    pub extra_args: Option<ArgList>,
+    pub extra_args: Option<Vec<String>>,
     pub idle_seconds: Option<i64>,
     pub enabled: Option<bool>,
     /// Per-model image override; empty clears back to the class image.
     pub image: Option<String>,
     /// `podman run` args override; name it in `clear` to revert to
     /// inheriting the class setting. An empty list inherits too (it is never
-    /// stored as one); blank text leaves the current value.
-    pub extra_run_args: Option<ArgList>,
+    /// stored as one); absent leaves the current value.
+    pub extra_run_args: Option<Vec<String>>,
     pub warm_start: Option<bool>,
     /// `inherit` (default — which for this class means *no* fallback) |
     /// `none` | `alias`.
     pub hold_fallback_mode: Option<String>,
     pub hold_fallback: Option<String>,
-    /// Field names to reset: `extra_run_args`, `hold_fallback`, `extra_args`.
+    /// Field names to reset: `extra_run_args`, `hold_fallback`, `extra_args`,
+    /// `ctx_size`, `ubatch_size`, `batch_size`, `mmproj_path`, `backend`,
+    /// `threads`.
     pub clear: Option<String>,
 }
 
 /// The two things an aux row's *kind* decides, refused where they are typed
-/// rather than only dropped where the argv is rendered.
+/// rather than only dropped where the argv is rendered. A decision row takes
+/// neither kind flag and no pooling (decision-models design §3.5).
 ///
 /// - A model's argv carries its own kind flag and never the other one. An
 ///   `--reranking` left in an embedding model's extra args would make
@@ -114,6 +141,7 @@ pub fn check_aux_flags(
     let (own, other) = match kind {
         AuxKind::Embed => ("embedding", "reranking"),
         AuxKind::Rerank => ("reranking", "embedding"),
+        AuxKind::Decision => return fields::check_decision_flags(pooling, args),
     };
     if has(other) {
         return Err(format!(
@@ -150,22 +178,6 @@ pub fn check_aux_flags(
     Ok(())
 }
 
-/// The value after a flag in a freeform argv (`--mmproj x` or `--mmproj=x`).
-fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let mut it = args.iter();
-    while let Some(tok) = it.next() {
-        let key = tok.trim_start_matches('-');
-        if let Some((k, v)) = key.split_once('=') {
-            if k == flag {
-                return Some(v);
-            }
-        } else if key == flag {
-            return it.next().map(String::as_str);
-        }
-    }
-    None
-}
-
 /// Configuration an aux row renders cleanly but cannot serve, from the files
 /// it names and the header of its weights — the aux counterpart of
 /// [`model_warnings`], shared by `local_model_check`, `local_model_get` and
@@ -188,7 +200,7 @@ pub(super) async fn aux_model_problems(models_dir: &str, m: &AuxModel) -> Vec<St
     // A projector named in the escape hatch is a path like any other, and a
     // relative one is the usual mistake: llama-server resolves it against
     // its working directory, not /models.
-    if let Some(mm) = arg_after(&m.args, "mmproj") {
+    if let Some(mm) = crate::runtime::argv::flag_value(&m.args, "mmproj") {
         let rel = strip_models_prefix(mm);
         if mm.starts_with("/models/") || !mm.starts_with('/') {
             if !root.join(&rel).is_file() {
@@ -204,9 +216,27 @@ pub(super) async fn aux_model_problems(models_dir: &str, m: &AuxModel) -> Vec<St
         }
     }
 
-    let path = root.join(&m.gguf_path);
-    let Ok(Ok(summary)) = tokio::task::spawn_blocking(move || crate::gguf::summarize(&path)).await
-    else {
+    let read = |rel: &str| {
+        let path = root.join(rel);
+        async move {
+            tokio::task::spawn_blocking(move || crate::gguf::summarize(&path))
+                .await
+                .ok()
+                .and_then(Result::ok)
+        }
+    };
+    let summary = read(&m.gguf_path).await;
+    let projector = match &m.mmproj_path {
+        Some(mm) => read(mm).await,
+        None => None,
+    };
+    out.extend(fields::problems(
+        m,
+        root,
+        summary.as_ref(),
+        projector.as_ref(),
+    ));
+    let Some(summary) = summary else {
         return out;
     };
     match crate::modelinfo::role_of(&summary) {
@@ -258,25 +288,32 @@ pub(super) async fn aux_model_problems(models_dir: &str, m: &AuxModel) -> Vec<St
                 ));
             }
         }
-        AuxKind::Rerank => {}
+        // `fields::problems` reads the decision header.
+        AuxKind::Rerank | AuxKind::Decision => {}
     }
     out
 }
 
 /// Advisory problems with an aux row's freeform args, checked against the
 /// running build of the image it would use — the aux counterpart of
-/// [`config_warnings`], minus the chat-only structured fields.
+/// [`config_warnings`], minus the chat-only structured fields — and against
+/// the row's own fields (`fields::arg_warnings`).
 async fn aux_config_warnings(
     state: &SharedState,
     image: &str,
     run_args: &[String],
-    args: &[String],
+    m: &AuxModel,
 ) -> Vec<String> {
+    let args = &m.args;
+    // Read from the row alone, so an image whose `--help` cannot be read
+    // does not hide them.
+    let against_fields = fields::arg_warnings(m);
     let caps = match llama_vocabulary(state, image, run_args).await {
         Ok(caps) => caps,
-        Err(unchecked) => return vec![unchecked],
+        Err(unchecked) => return [vec![unchecked], against_fields].concat(),
     };
     let mut out = caps.validate_args(args);
+    out.extend(against_fields);
     for tok in args.iter().filter(|t| t.starts_with('-')) {
         let flag = tok.split('=').next().unwrap_or(tok);
         let key = flag.trim_start_matches('-');
@@ -339,32 +376,39 @@ pub(super) async fn aux_model_get(
         });
     let mut problems = aux_model_problems(&models_dir, m).await;
     let (image, run_args) = effective_aux_image(state, &m.image, &m.extra_run_args);
-    problems.extend(aux_config_warnings(state, &image, &run_args, &m.args).await);
+    problems.extend(aux_config_warnings(state, &image, &run_args, m).await);
     let command_line = command_line_preview(state, Class::Aux, &m.model_id);
+    let (threads_in_effect, threads_source) =
+        crate::runtime::aux::threads_in_effect(m, crate::host::cpu());
+    let licence = crate::modelinfo::licence::of_file(state, &models_dir, &m.gguf_path).await;
     Ok(Some(dto::AuxModelDetail {
         id: m.id,
         model_id: m.model_id.clone(),
-        public_name: snap.aux_public_name(&m.model_id),
+        public_name: snap.aux_public_name(m),
         kind: m.kind.as_str().to_string(),
-        endpoint: match m.kind {
-            AuxKind::Embed => "/v1/embeddings",
-            AuxKind::Rerank => "/v1/rerank",
-        }
-        .to_string(),
+        endpoint: m.kind.endpoint().to_string(),
         pooling: m.pooling.clone(),
         ctx_size: m.ctx_size,
+        ubatch_size: m.ubatch_size,
+        batch_size: m.batch_size,
+        mmproj_path: m.mmproj_path.clone(),
+        backend: m.backend.map(|b| b.as_str().to_string()),
+        threads: m.threads,
+        threads_in_effect,
+        threads_source,
         gguf_path: m.gguf_path.clone(),
         gguf_present: !models_dir.trim().is_empty()
             && std::path::Path::new(&models_dir)
                 .join(&m.gguf_path)
                 .is_file(),
+        licence,
         source: if origin.is_some() { "hf" } else { "manual" }.to_string(),
         downloaded_from: origin,
-        extra_args: argv::args_to_lines(&m.args),
+        extra_args: m.args.clone(),
         idle_seconds: m.idle_seconds,
         enabled: m.enabled,
         image: m.image.clone(),
-        extra_run_args: m.extra_run_args.as_ref().map(|a| argv::args_to_lines(a)),
+        extra_run_args: m.extra_run_args.clone(),
         warm_start: m.warm_start,
         hold_fallback_mode: m.hold_fallback_mode.as_str().to_string(),
         hold_fallback: m.hold_fallback.clone(),
@@ -442,7 +486,10 @@ pub fn resolve_hold_fallback_text(
 /// as the path boundary (a path that resolves to nothing is refused, naming
 /// the tools that find or fetch one), `reload_snapshot()` after every write,
 /// container hygiene keyed on the *current* model id.
-pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Value, String> {
+pub async fn aux_model_set(
+    state: &SharedState,
+    p: AuxModelPatch,
+) -> Result<dto::AuxModelSaved, String> {
     let snap = state.snapshot();
     let all = snap.aux_models.clone();
     let find = || -> Result<AuxModel, String> {
@@ -476,7 +523,8 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
         ))
     };
     let parse_kind = |s: &str| {
-        AuxKind::parse(s.trim()).ok_or_else(|| format!("unknown kind '{s}' (embed|rerank)"))
+        AuxKind::parse(s.trim())
+            .ok_or_else(|| format!("unknown kind '{s}' (embed|rerank|decision)"))
     };
     let reload = || async { state.reload_snapshot().await.map_err(|e| e.to_string()) };
 
@@ -487,27 +535,43 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 ("gguf_path", opt(&p.gguf_path).is_some()),
             ])?;
             let model_id = opt(&p.model_id).expect("checked above");
-            refuse_if_candidate_alias_name(&snap, &snap.aux_public_name(&model_id))?;
-            let gguf_path = strip_models_prefix(&opt(&p.gguf_path).expect("checked above"));
-            check_path(&gguf_path)?;
             let kind = match opt(&p.kind) {
                 Some(k) => parse_kind(&k)?,
                 None => AuxKind::Embed,
             };
+            // The kind picks the prefix (decision-models design §3.10).
+            let public_name = snap.aux_name_for(kind, &model_id);
+            refuse_if_candidate_alias_name(&snap, &public_name)?;
+            let gguf_path = strip_models_prefix(&opt(&p.gguf_path).expect("checked above"));
+            check_path(&gguf_path)?;
             let pooling = opt(&p.pooling);
             let args = match &p.extra_args {
-                Some(a) => a.tokens()?,
+                Some(a) => arg_list(a)?,
                 None => vec![],
             };
             check_aux_flags(kind, pooling.as_deref(), &args)?;
             let (hold_fallback_mode, hold_fallback) =
                 resolve_aux_hold_fallback(&snap, &p, (HoldFallbackMode::Inherit, None))?;
+            fallback::check_decision_fallback(
+                state,
+                &snap,
+                kind,
+                hold_fallback_mode,
+                hold_fallback.as_deref(),
+            )
+            .await?;
+            let f = fields::patched(&p, None)?;
             let new = NewAuxModel {
                 model_id: model_id.clone(),
                 gguf_path,
                 kind,
                 pooling,
                 ctx_size: p.ctx_size,
+                ubatch_size: f.ubatch_size,
+                batch_size: f.batch_size,
+                mmproj_path: f.mmproj_path,
+                backend: f.backend,
+                threads: f.threads,
                 args,
                 idle_seconds: p.idle_seconds.unwrap_or(300),
                 enabled: p.enabled.unwrap_or(true),
@@ -517,7 +581,7 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 // empty list without the clear is no override either.
                 extra_run_args: match &p.extra_run_args {
                     _ if clear_has(p.clear.as_deref(), "extra_run_args") => None,
-                    Some(a) => run_args_override(Some(a.tokens()?)),
+                    Some(a) => run_args_override(Some(arg_list(a)?)),
                     None => None,
                 },
                 warm_start: p.warm_start.unwrap_or(false),
@@ -525,27 +589,27 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 hold_fallback,
             };
             let (image, run_args) = effective_aux_image(state, &new.image, &new.extra_run_args);
-            let mut warnings = aux_config_warnings(state, &image, &run_args, &new.args).await;
-            warnings.extend(aux_model_problems(&models_dir, &as_aux_model(&new)).await);
+            let row = as_aux_model(&new);
+            let mut warnings = aux_config_warnings(state, &image, &run_args, &row).await;
+            warnings.extend(aux_model_problems(&models_dir, &row).await);
+            warnings.extend(fields::threads_note(new.threads, crate::host::cpu()));
             let id = store::insert_aux_model(&state.db, &new)
                 .await
                 .map_err(|e| e.to_string())?;
-            let snap = reload().await?;
-            Ok(json!({
-                "ok": true, "id": id, "warnings": warnings,
-                "public_name": snap.aux_public_name(&model_id),
-                "message": format!(
-                    "{} model '{model_id}' created — clients request it as '{}' on {}; run \
-                     lmgw__local_model_test model_id={model_id} target=aux to prove it loads \
-                     (its container starts on the first request)",
+            reload().await?;
+            Ok(dto::AuxModelSaved {
+                ok: true,
+                id,
+                warnings: Some(warnings),
+                message: format!(
+                    "{} model '{model_id}' created — clients request it as '{public_name}' on \
+                     {}; run lmgw__local_model_test model_id={model_id} target=aux to prove it \
+                     loads (its container starts on the first request)",
                     kind.as_str(),
-                    snap.aux_public_name(&model_id),
-                    match kind {
-                        AuxKind::Embed => "/v1/embeddings",
-                        AuxKind::Rerank => "/v1/rerank",
-                    }
+                    kind.endpoint()
                 ),
-            }))
+                public_name: Some(public_name),
+            })
         }
         "update" | "enable" | "disable" => {
             let cur = find()?;
@@ -570,7 +634,7 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 None => cur.pooling.clone(),
             };
             let args = match &p.extra_args {
-                Some(a) => a.tokens()?,
+                Some(a) => arg_list(a)?,
                 None if clear_has(p.clear.as_deref(), "extra_args") => vec![],
                 None => cur.args.clone(),
             };
@@ -581,13 +645,12 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 Some(s) => Some(s.to_string()),
                 None => cur.image.clone(),
             };
-            // An empty list inherits the class; blank text is "not supplied".
+            // An empty list inherits the class; absent leaves the current value.
             let extra_run_args = if clear_has(p.clear.as_deref(), "extra_run_args") {
                 None
             } else {
                 match &p.extra_run_args {
-                    Some(a) if a.is_blank_text() => cur.extra_run_args.clone(),
-                    Some(a) => Some(a.tokens()?),
+                    Some(a) => Some(arg_list(a)?),
                     None => cur.extra_run_args.clone(),
                 }
             };
@@ -597,21 +660,50 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 &p,
                 (cur.hold_fallback_mode, cur.hold_fallback.clone()),
             )?;
+            // A row turned into a decision row keeps no fallback that cannot
+            // answer System One, nor does one whose fallback changed (§2.4).
+            // Only then: an enable or a rename needs no catalog fetch, and
+            // the gate checks the fallback on every request anyway.
+            if kind != cur.kind
+                || hold_fallback_mode != cur.hold_fallback_mode
+                || hold_fallback != cur.hold_fallback
+            {
+                fallback::check_decision_fallback(
+                    state,
+                    &snap,
+                    kind,
+                    hold_fallback_mode,
+                    hold_fallback.as_deref(),
+                )
+                .await?;
+            }
             let new_aux_model_id = match (p.id, opt(&p.model_id)) {
                 (Some(_), Some(m)) => m,
                 _ => cur.model_id.clone(),
             };
             // Same rename guard as `model_set`/`local_model_set` (review
-            // finding X4).
-            if new_aux_model_id != cur.model_id {
-                refuse_if_candidate_alias_name(&snap, &snap.aux_public_name(&new_aux_model_id))?;
+            // finding X4). A kind change across the prefixes renames the row
+            // too (decision-models design §3.10).
+            let new_public_name = snap.aux_name_for(kind, &new_aux_model_id);
+            if new_public_name != snap.aux_public_name(&cur) {
+                refuse_if_candidate_alias_name(&snap, &new_public_name)?;
             }
+            let f = fields::patched(&p, Some(&cur))?;
             let new = NewAuxModel {
                 model_id: new_aux_model_id,
                 gguf_path,
                 kind,
                 pooling,
-                ctx_size: p.ctx_size.or(cur.ctx_size),
+                ctx_size: if clear_has(p.clear.as_deref(), "ctx_size") {
+                    None
+                } else {
+                    p.ctx_size.or(cur.ctx_size)
+                },
+                ubatch_size: f.ubatch_size,
+                batch_size: f.batch_size,
+                mmproj_path: f.mmproj_path,
+                backend: f.backend,
+                threads: f.threads,
                 args,
                 idle_seconds: p.idle_seconds.unwrap_or(cur.idle_seconds),
                 enabled,
@@ -622,8 +714,10 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                 hold_fallback,
             };
             let (image, run_args) = effective_aux_image(state, &new.image, &new.extra_run_args);
-            let mut warnings = aux_config_warnings(state, &image, &run_args, &new.args).await;
-            warnings.extend(aux_model_problems(&models_dir, &as_aux_model(&new)).await);
+            let row = as_aux_model(&new);
+            let mut warnings = aux_config_warnings(state, &image, &run_args, &row).await;
+            warnings.extend(aux_model_problems(&models_dir, &row).await);
+            warnings.extend(fields::threads_note(new.threads, crate::host::cpu()));
             store::update_aux_model(&state.db, cur.id, &new)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -648,16 +742,25 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
                     cur.model_id
                 ))
             };
-            Ok(json!({
-                "ok": true, "id": cur.id, "warnings": warnings,
-                "message": match note {
-                    Some(note) => format!("aux model '{}' updated — {note}", new.model_id),
+            Ok(dto::AuxModelSaved {
+                ok: true,
+                id: cur.id,
+                warnings: Some(warnings),
+                message: match note {
+                    Some(note) => format!(
+                        "aux model '{}' {} — {note}",
+                        new.model_id,
+                        saved_verb(&p.action)
+                    ),
                     None => format!(
-                        "aux model '{}' updated — it is not running, so the next request \
-                         starts it with the new configuration", new.model_id
+                        "aux model '{}' {} — it is not running, so the next request \
+                         starts it with the new configuration",
+                        new.model_id,
+                        saved_verb(&p.action)
                     ),
                 },
-            }))
+                ..Default::default()
+            })
         }
         "delete" => {
             let cur = find()?;
@@ -667,13 +770,15 @@ pub async fn aux_model_set(state: &SharedState, p: AuxModelPatch) -> Result<Valu
             reload().await?;
             // §3.4: immediately, not at the next boot.
             lifecycle::drop_model(state, Class::Aux, &cur.model_id).await;
-            Ok(json!({
-                "ok": true, "id": cur.id,
-                "message": format!(
+            Ok(dto::AuxModelSaved {
+                ok: true,
+                id: cur.id,
+                message: format!(
                     "aux model '{}' deleted — its container was stopped and removed",
                     cur.model_id
                 ),
-            }))
+                ..Default::default()
+            })
         }
         other => Err(format!(
             "unknown action '{other}' (create|update|delete|enable|disable)"
@@ -691,6 +796,11 @@ fn as_aux_model(n: &NewAuxModel) -> AuxModel {
         kind: n.kind,
         pooling: n.pooling.clone(),
         ctx_size: n.ctx_size,
+        ubatch_size: n.ubatch_size,
+        batch_size: n.batch_size,
+        mmproj_path: n.mmproj_path.clone(),
+        backend: n.backend,
+        threads: n.threads,
         args: n.args.clone(),
         idle_seconds: n.idle_seconds,
         enabled: n.enabled,

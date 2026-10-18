@@ -16,6 +16,21 @@
 //! comes again. An underrun with no tool running (a slow clause between two
 //! others) keeps `speaking`: the reply is mid-sentence.
 //!
+//! **On a WebRTC call** (realtime calls design §6.2, §8.3) the player is
+//! libwebrtc's, which the client cannot watch: lmgw says what it does.
+//! `output_audio_buffer.started` puts a response's audio in the player
+//! ([`Machine::output_started`]), `.stopped` says it played out
+//! ([`Machine::output_stopped`]) and `.cleared` that it was cut
+//! ([`Machine::output_cleared`]); `lmgw.output_audio.starved` is
+//! [`Machine::starved`]. `interrupted` shows for a cut that a barge-in made
+//! (its cancelled `response.done` said `turn_detected`,
+//! [`Machine::response_cancelled`]). Two facts stand beside the state:
+//! - [`Machine::playback_muted`]: the remote track is to be muted, from the
+//!   user's stop ([`Machine::stop_tapped`]) or a `cleared` until the next
+//!   response's `started`, so what libwebrtc still holds is never heard;
+//! - [`Machine::held_by`]: the bind waits (`lmgw.session.bind_pending`)
+//!   for the user's choice, and no session runs.
+//!
 //! **No clock.** Every method that needs the time takes it (`now_ms`, any
 //! monotonic milliseconds the client keeps).
 
@@ -77,6 +92,16 @@ pub struct Machine {
     tool: bool,
     /// `interrupted` shows until then.
     cut_until: Option<f64>,
+    /// A call's: the response a barge-in cancelled (`turn_detected`), whose
+    /// `cleared` shows `interrupted`.
+    barged: Option<String>,
+    /// A call's: the remote track is to be muted.
+    muted: bool,
+    /// The responses being cut when it was muted, whose `started` (one
+    /// that crossed the stop) does not lift the mute.
+    muted_for: Vec<String>,
+    /// A call's bind waits for the user's choice; the holder.
+    held_by: Option<String>,
 }
 
 impl Machine {
@@ -218,9 +243,96 @@ impl Machine {
 
     /// Nothing is open, waited for or playing, and the user does not speak:
     /// a quiet point, where a client may close or rebind its session
-    /// without cutting anything.
+    /// without cutting anything. A pending bind is quiet.
     pub fn quiet(&self) -> bool {
         !self.user && !self.awaiting && self.open.is_empty() && self.playing.is_none()
+    }
+
+    /// `lmgw.session.bind_pending {held_by}`: the call is connected and
+    /// holds no thread; it waits for the user's choice (take over, or hang
+    /// up). Again with a new holder when a third client took the thread.
+    pub fn bind_pending(&mut self, held_by: &str) {
+        self.held_by = Some(held_by.to_string());
+    }
+
+    /// `session.created`: the session runs, bound; a pending bind is over.
+    pub fn session_started(&mut self) {
+        self.held_by = None;
+    }
+
+    /// Who holds the thread while a call's bind waits for the user's
+    /// choice; `None` when it does not wait.
+    pub fn held_by(&self) -> Option<&str> {
+        self.held_by.as_deref()
+    }
+
+    /// The cancelled `response.done` of response `id`, with its
+    /// `status_details.reason`. `turn_detected` is a barge-in: on a call, its
+    /// `output_audio_buffer.cleared`, which follows at once, shows
+    /// `interrupted` ([`Self::output_cleared`]); a stop's `client_cancelled`
+    /// does not.
+    pub fn response_cancelled(&mut self, id: &str, reason: Option<&str>) {
+        if reason == Some("turn_detected") {
+            self.barged = Some(id.to_string());
+        }
+        self.response_done(id);
+    }
+
+    /// `output_audio_buffer.started`: lmgw sent response `id`'s first frame,
+    /// so its audio is in the player; and the mute lifts, unless `id` is a
+    /// response that was being cut when it began (a `started` that crossed
+    /// the stop), whose audio stays unheard.
+    pub fn output_started(&mut self, id: &str) {
+        if self.muted && self.muted_for.iter().any(|m| m == id) {
+            return;
+        }
+        self.muted = false;
+        self.muted_for.clear();
+        self.audio_started(id);
+    }
+
+    /// `output_audio_buffer.stopped`: response `id`'s audio played to its
+    /// end on the client.
+    pub fn output_stopped(&mut self, id: &str) {
+        self.played_out(id);
+    }
+
+    /// `output_audio_buffer.cleared`: lmgw stopped sending response `id`'s
+    /// audio before its end. Mute the remote track until the next
+    /// response's `started` ([`Self::playback_muted`]); `interrupted` shows
+    /// when a barge-in cut it ([`Self::response_cancelled`]).
+    pub fn output_cleared(&mut self, id: &str, now_ms: f64) {
+        let barge_in = self.barged.as_deref() == Some(id);
+        if barge_in {
+            self.barged = None;
+        }
+        self.cut(id, now_ms, barge_in);
+        self.mute(&[id]);
+    }
+
+    /// The user's stop on a call (the tap, then `lmgw.response.stop`): mute
+    /// the remote track now, before lmgw's events come, until the next
+    /// response's `started`.
+    pub fn stop_tapped(&mut self) {
+        let cut: Vec<String> = self.open.iter().chain(&self.playing).cloned().collect();
+        self.mute(&cut);
+    }
+
+    /// Whether the client mutes the remote track now: from a stop's tap or
+    /// a `cleared` until the next response's `started`. A fact beside the
+    /// state: it silences what libwebrtc's jitter buffer still holds, and
+    /// the state says what the voice does.
+    pub fn playback_muted(&self) -> bool {
+        self.muted
+    }
+
+    fn mute<S: AsRef<str>>(&mut self, cut: &[S]) {
+        self.muted = true;
+        for id in cut {
+            if !self.muted_for.iter().any(|m| m == id.as_ref()) {
+                self.muted_for.push(id.as_ref().to_string());
+            }
+        }
     }
 }
 
@@ -420,6 +532,102 @@ mod tests {
         // A late `played_out` of another response changes nothing.
         m.played_out("resp_b");
         assert_eq!(m.playing(), Some("resp_a"));
+    }
+
+    #[test]
+    fn a_call_s_player_facts_come_from_lmgw() {
+        let mut m = Machine::default();
+        m.response_created("r1");
+        assert_eq!(m.state(0.0), VoiceState::Thinking);
+        m.output_started("r1");
+        assert_eq!(m.state(0.0), VoiceState::Speaking);
+        // A tool after the spoken preamble: lmgw's underrun reads as thinking.
+        m.set_tool(true);
+        m.starved("r1", true);
+        assert_eq!(m.state(0.0), VoiceState::Thinking);
+        m.starved("r1", false);
+        m.set_tool(false);
+        // `response.done` waits for drained on a call; `stopped` follows it.
+        m.response_done("r1");
+        assert_eq!(m.state(0.0), VoiceState::Speaking);
+        m.output_stopped("r1");
+        assert_eq!(m.state(0.0), VoiceState::Idle);
+        assert!(m.quiet());
+        assert!(!m.playback_muted());
+    }
+
+    #[test]
+    fn a_barge_in_s_cleared_shows_interrupted_and_mutes_until_the_next_started() {
+        let mut m = Machine::default();
+        m.response_created("r1");
+        m.output_started("r1");
+        m.speech_started();
+        // Its cancel, then `cleared` at once.
+        m.response_cancelled("r1", Some("turn_detected"));
+        m.output_cleared("r1", 1000.0);
+        assert_eq!(m.state(1000.0), VoiceState::Interrupted);
+        assert!(m.playback_muted(), "what NetEQ holds is not heard");
+        assert_eq!(m.playing(), None);
+        assert_eq!(m.state(1000.0 + INTERRUPTED_MS), VoiceState::Listening);
+        m.speech_stopped();
+        m.response_created("r2");
+        assert!(m.playback_muted(), "until the next response's audio");
+        m.output_started("r2");
+        assert!(!m.playback_muted());
+        assert_eq!(m.state(2000.0), VoiceState::Speaking);
+    }
+
+    #[test]
+    fn a_stop_mutes_at_the_tap_and_its_cleared_shows_no_interrupted() {
+        let mut m = Machine::default();
+        m.response_created("r1");
+        m.output_started("r1");
+        m.stop_tapped();
+        assert!(m.playback_muted(), "at the tap, before lmgw answers");
+        m.response_cancelled("r1", Some("client_cancelled"));
+        m.output_cleared("r1", 500.0);
+        assert_eq!(m.state(500.0), VoiceState::Idle);
+        assert!(m.playback_muted());
+        // A stop with nothing open mutes too, and the next answer lifts it.
+        let mut m = Machine::default();
+        m.stop_tapped();
+        assert!(m.playback_muted());
+        m.response_created("r1");
+        m.output_started("r1");
+        assert!(!m.playback_muted());
+    }
+
+    #[test]
+    fn a_started_that_crossed_the_stop_does_not_lift_the_mute() {
+        let mut m = Machine::default();
+        m.response_created("r1");
+        // Thinking: the tap, while lmgw already sent r1's first frame.
+        m.stop_tapped();
+        m.output_started("r1");
+        assert!(m.playback_muted());
+        assert_eq!(m.playing(), None, "its audio is unheard");
+        m.response_cancelled("r1", Some("client_cancelled"));
+        m.output_cleared("r1", 0.0);
+        assert_eq!(m.state(0.0), VoiceState::Idle);
+        m.response_created("r2");
+        m.output_started("r2");
+        assert!(!m.playback_muted());
+        assert_eq!(m.playing(), Some("r2"));
+    }
+
+    #[test]
+    fn a_pending_bind_names_the_holder_until_the_session_starts() {
+        let mut m = Machine::default();
+        assert_eq!(m.held_by(), None);
+        m.bind_pending("device 'desktop'");
+        assert_eq!(m.held_by(), Some("device 'desktop'"));
+        assert_eq!(m.state(0.0), VoiceState::Idle);
+        assert!(m.quiet(), "a pending bind counts as quiet");
+        // A third client took the thread meanwhile.
+        m.bind_pending("the dashboard");
+        assert_eq!(m.held_by(), Some("the dashboard"));
+        m.session_started();
+        assert_eq!(m.held_by(), None);
     }
 
     #[test]

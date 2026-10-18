@@ -197,6 +197,7 @@ async fn setup(mock: &MockServer) -> SharedState {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -323,11 +324,18 @@ async fn resolve_reports_every_version_with_the_metadata_to_choose_between_them(
     qstore::set_corpus_eval_score(&state.corpus, newer, 0.9)
         .await
         .unwrap();
+    let measured = seed(&state, "axum", "0.6").await;
+    record_score(&state, measured, 0.5, 4).await;
 
     let v = call_json(&state, "docs__resolve", json!({"library": "axum"})).await;
     let m = v["matches"].as_array().unwrap();
-    assert_eq!(m.len(), 2);
+    assert_eq!(m.len(), 3);
     assert_eq!(m[0]["corpus_id"], "axum@0.8", "newest first: {v}");
+    // A corpus with a real run carries its depth and instant beside the score.
+    assert_eq!(m[2]["corpus_id"], "axum@0.6", "{v}");
+    assert_eq!(m[2]["eval_score"], 0.5);
+    assert_eq!(m[2]["eval_k"], 4);
+    assert!(m[2]["eval_at"].is_string(), "{}", m[2]);
     assert_eq!(m[0]["chunk_count"], 3);
     assert_eq!(m[0]["crawl_date"], "2026-08-29T10:00:00Z");
     assert_eq!(m[0]["source_kind"], "markdown");
@@ -336,8 +344,17 @@ async fn resolve_reports_every_version_with_the_metadata_to_choose_between_them(
     assert_eq!(m[0]["sources"][0], "https://docs.rs/axum");
     assert_eq!(m[0]["eval_score"], 0.9);
     assert_eq!(m[0]["embed_status"], "ok");
-    // Never measured is a different statement from "scored zero", and says so.
+    // Never measured is a different statement from "scored zero", and says so:
+    // the score, depth, best and instant keys are not there at all.
     assert_eq!(m[1]["eval_status"], "unmeasured");
+    for key in ["eval_score", "eval_k", "eval_best", "eval_at"] {
+        assert!(m[1].get(key).is_none(), "{key}: {}", m[1]);
+    }
+    assert!(
+        m[0].get("eval_k").is_none(),
+        "no depth was recorded: {}",
+        m[0]
+    );
     assert_eq!(v["next_step"], "docs__query");
 }
 
@@ -1072,8 +1089,16 @@ async fn an_eval_run_scores_the_corpus_and_lights_then_clears_the_badge() {
     let runs = qstore::list_eval_runs(&state.corpus, cid, 0).await.unwrap();
     assert_eq!(runs.len(), 3);
     assert_eq!(runs[0].hit_at_k, 1.0);
-    assert_eq!(runs[0].params["limit"], 1);
-    assert_eq!(runs[0].report["per_query"].as_array().unwrap().len(), 2);
+    let params = runs[0]
+        .params
+        .as_ref()
+        .expect("a stored run keeps its params");
+    assert_eq!(params["limit"], 1);
+    let report = runs[0]
+        .report
+        .as_ref()
+        .expect("a stored run keeps its report");
+    assert_eq!(report["per_query"].as_array().unwrap().len(), 2);
 }
 
 /// hit@1 and hit@10 are different measurements, and so are two runs with
@@ -2294,14 +2319,13 @@ async fn the_docs_tab_decodes_every_dashboard_response() {
     assert_eq!(run.k, 2);
     assert_eq!(run.queries, 1);
     assert!(
-        run.params.get("k_fts").is_some(),
-        "a run travels with the parameters it was measured under: {}",
         run.params
+            .as_ref()
+            .is_some_and(|p| p.get("k_fts").is_some()),
+        "a run travels with the parameters it was measured under: {}",
+        run.params.clone().unwrap_or_default()
     );
-    assert!(
-        !run.report.is_null(),
-        "the per-query breakdown came through"
-    );
+    assert!(run.report.is_some(), "the per-query breakdown came through");
 
     // ---- the request queue ----
     let requests: dto::DocRequestsResponse =
@@ -2407,7 +2431,7 @@ async fn the_docs_tab_decodes_every_dashboard_response() {
     );
 
     // ---- what the wizard gets back when it creates a corpus ----
-    let started: dto::DocsJobStarted = serde_json::from_str(
+    let started: dto::CorpusCreated = serde_json::from_str(
         &http
             .post(format!("{base}/api/docs/corpora"))
             .json(&json!({
@@ -2425,7 +2449,7 @@ async fn the_docs_tab_decodes_every_dashboard_response() {
     .unwrap();
     assert!(started.ok);
     assert!(started.job_id.is_none(), "start was not requested");
-    assert_eq!(started.corpus.unwrap().corpus_id, "tower@0.5");
+    assert_eq!(started.corpus.corpus_id, "tower@0.5");
 
     // ---- the tool inventory, which is where `docs__*` is finally visible ----
     //

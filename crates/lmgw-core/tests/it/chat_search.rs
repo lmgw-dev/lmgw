@@ -195,6 +195,7 @@ async fn edits_reindex_and_deletes_unindex() {
             content: "delta content".into(),
             ..Default::default()
         },
+        None,
     )
     .await
     .unwrap();
@@ -210,11 +211,13 @@ async fn edits_reindex_and_deletes_unindex() {
     assert!(ids(&search(&gw, "old").await).is_empty());
     assert_eq!(ids(&search(&gw, "heading").await), vec![t]);
 
-    store::delete_chat_message(&state.db, t, m2).await.unwrap();
+    store::delete_chat_message(&state.db, t, m2, None)
+        .await
+        .unwrap();
     assert!(ids(&search(&gw, "bravo").await).is_empty());
 
     // Regenerate cuts from a message on.
-    store::truncate_chat_messages(&state.db, t, m1, false)
+    store::truncate_chat_messages(&state.db, t, m1, false, None)
         .await
         .unwrap();
     assert!(ids(&search(&gw, "charlie").await).is_empty());

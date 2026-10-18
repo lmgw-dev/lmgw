@@ -40,32 +40,32 @@ fn answer(ir: &ChatRequest) -> Completion {
 /// Bills its row, then fails `canceled` — a turn stopped mid-stream.
 struct Stopped;
 
-#[async_trait]
 impl TurnRunner for Stopped {
-    async fn run_turn(
-        &self,
-        _ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        _ir: &'a ChatRequest,
         _deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        sink.billed(&usage(40, 7));
-        sink.billed_cost(RowCost::Priced(470));
-        Err(crate::proxy::canceled("stopped by the caller mid-stream"))
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            sink.billed(&usage(40, 7));
+            sink.billed_cost(RowCost::Priced(470));
+            Err(crate::proxy::canceled("stopped by the caller mid-stream"))
+        })
     }
 }
 
 /// Answers without saying what its row was billed.
 struct Silent;
 
-#[async_trait]
 impl TurnRunner for Silent {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         _deadline: Duration,
-        _sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        Ok(answer(ir))
+        _sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move { Ok(answer(ir)) })
     }
 }
 
@@ -111,27 +111,28 @@ struct Scripted {
     ends: Ends,
 }
 
-#[async_trait]
 impl TurnRunner for Scripted {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         _deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        if let Some(c) = self.cost {
-            sink.billed(&Usage::default());
-            sink.billed_cost(c);
-        }
-        match self.ends {
-            Ends::Answered => Ok(answer(ir)),
-            Ends::Stopped => Err(crate::proxy::canceled("stopped by the caller")),
-            Ends::Failed => Err(GatewayError::Upstream {
-                status: 502,
-                message: "the stream ended mid-way".into(),
-                provider_type: None,
-            }),
-        }
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            if let Some(c) = self.cost {
+                sink.billed(&Usage::default());
+                sink.billed_cost(c);
+            }
+            match self.ends {
+                Ends::Answered => Ok(answer(ir)),
+                Ends::Stopped => Err(crate::proxy::canceled("stopped by the caller")),
+                Ends::Failed => Err(GatewayError::Upstream {
+                    status: 502,
+                    message: "the stream ended mid-way".into(),
+                    provider_type: None,
+                }),
+            }
+        })
     }
 }
 

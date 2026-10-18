@@ -1,5 +1,7 @@
 //! The fake podman
 
+use lmgw_core::erased::Erased;
+
 use super::*;
 
 /// Drives [`World`] from the argv the registry renders. `run` marks the model
@@ -178,174 +180,179 @@ fn is_sdcpp_help(argv: &[String]) -> bool {
             .any(|w| w[0] == "--entrypoint" && w[1] == "/sd-server")
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Podman {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman", "the registry only ever shells podman");
-        self.world.lock().unwrap().calls.push(args.to_vec());
-        let ok = CmdOutput {
-            status: 0,
-            stdout: "c0ffee\n".into(),
-            stderr: String::new(),
-        };
-        match args[0].as_str() {
-            // Reconciliation's enumeration: an empty JSON list, which is what
-            // podman answers on a box with no managed containers — unless the
-            // test has the world report what it runs (`World::reports`).
-            "ps" => {
-                let w = self.world.lock().unwrap();
-                Ok(CmdOutput {
-                    status: 0,
-                    stdout: if w.reports { ps_rows(&w) } else { "[]".into() },
-                    stderr: String::new(),
-                })
-            }
-            "inspect"
-                if args.get(2).map(String::as_str) == Some("json")
-                    && self.world.lock().unwrap().reports =>
-            {
-                let gate = self.inspect_json_gate.lock().unwrap().clone();
-                parked(gate).await;
-                let name = args.last().cloned().unwrap_or_default();
-                let w = self.world.lock().unwrap();
-                Ok(match inspect_row(&w, &name) {
-                    Some(json) => CmdOutput {
-                        status: 0,
-                        stdout: json,
-                        stderr: String::new(),
-                    },
-                    None => CmdOutput {
-                        status: 125,
-                        stdout: String::new(),
-                        stderr: format!("Error: no such container {name}\n"),
-                    },
-                })
-            }
-            "wait" => {
-                let gate = self.wait_gate.lock().unwrap().clone();
-                parked(gate).await;
-                Ok(ok)
-            }
-            // The image class's flag-vocabulary probe (image-generation §2.6):
-            // a throwaway `--entrypoint /sd-server … --help` container. It is a
-            // `run` too, so it has to be matched before the real one — it
-            // carries no `--name` and no model label, and a start that reads it
-            // as a container start would assert on their absence.
-            "run" if is_sdcpp_help(args) => Ok(CmdOutput {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman", "the registry only ever shells podman");
+            self.world.lock().unwrap().calls.push(args.to_vec());
+            let ok = CmdOutput {
                 status: 0,
-                stdout: SD_HELP.into(),
+                stdout: "c0ffee\n".into(),
                 stderr: String::new(),
-            }),
-            "run" => {
-                let barrier = self.barrier.lock().unwrap().clone();
-                if let Some(b) = barrier {
-                    b.wait().await;
+            };
+            match args[0].as_str() {
+                // Reconciliation's enumeration: an empty JSON list, which is what
+                // podman answers on a box with no managed containers — unless the
+                // test has the world report what it runs (`World::reports`).
+                "ps" => {
+                    let w = self.world.lock().unwrap();
+                    Ok(CmdOutput {
+                        status: 0,
+                        stdout: if w.reports { ps_rows(&w) } else { "[]".into() },
+                        stderr: String::new(),
+                    })
                 }
-                let gate = self.gate.lock().unwrap().clone();
-                if let Some(mut rx) = gate {
-                    while !*rx.borrow_and_update() {
-                        if rx.changed().await.is_err() {
-                            break;
+                "inspect"
+                    if args.get(2).map(String::as_str) == Some("json")
+                        && self.world.lock().unwrap().reports =>
+                {
+                    let gate = self.inspect_json_gate.lock().unwrap().clone();
+                    parked(gate).await;
+                    let name = args.last().cloned().unwrap_or_default();
+                    let w = self.world.lock().unwrap();
+                    Ok(match inspect_row(&w, &name) {
+                        Some(json) => CmdOutput {
+                            status: 0,
+                            stdout: json,
+                            stderr: String::new(),
+                        },
+                        None => CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr: format!("Error: no such container {name}\n"),
+                        },
+                    })
+                }
+                "wait" => {
+                    let gate = self.wait_gate.lock().unwrap().clone();
+                    parked(gate).await;
+                    Ok(ok)
+                }
+                // The image class's flag-vocabulary probe (image-generation §2.6):
+                // a throwaway `--entrypoint /sd-server … --help` container. It is a
+                // `run` too, so it has to be matched before the real one — it
+                // carries no `--name` and no model label, and a start that reads it
+                // as a container start would assert on their absence.
+                "run" if is_sdcpp_help(args) => Ok(CmdOutput {
+                    status: 0,
+                    stdout: SD_HELP.into(),
+                    stderr: String::new(),
+                }),
+                "run" => {
+                    let barrier = self.barrier.lock().unwrap().clone();
+                    if let Some(b) = barrier {
+                        b.wait().await;
+                    }
+                    let gate = self.gate.lock().unwrap().clone();
+                    if let Some(mut rx) = gate {
+                        while !*rx.borrow_and_update() {
+                            if rx.changed().await.is_err() {
+                                break;
+                            }
                         }
                     }
-                }
-                let name = flag_value(args, "--name").unwrap_or_default().to_string();
-                let model = label_value(args, "lmgw.model=")
-                    .expect("every managed container is labelled with its model")
-                    .to_string();
-                let port: u16 = flag_value(args, "-p")
-                    .and_then(|p| p.rsplit(':').nth(1))
-                    .and_then(|p| p.parse().ok())
-                    .expect("every managed container publishes a host port");
-                let file = flag_value(args, "-m")
-                    .and_then(|m| m.rsplit('/').next())
-                    .unwrap_or_default()
-                    .to_string();
-                let ctx = flag_value(args, "--ctx-size").map(str::to_string);
-                let slots = flag_value(args, "--parallel")
-                    .and_then(|p| p.parse::<u64>().ok())
-                    .unwrap_or(1)
-                    .max(1);
-                let mut w = self.world.lock().unwrap();
-                match ctx.as_deref().and_then(|c| c.parse::<u64>().ok()) {
-                    Some(c) if w.context_rules => w.slot_ctx.insert(port, c / slots),
-                    _ => w.slot_ctx.remove(&port),
-                };
-                w.run_files.push((model.clone(), file.clone(), ctx));
-                if w.fail_run_file.as_deref() == Some(file.as_str()) {
-                    return Ok(CmdOutput {
-                        status: 125,
-                        stdout: String::new(),
-                        stderr: format!("Error: /models/{file}: no such file or directory\n"),
-                    });
-                }
-                if let Some(bytes) = w.files.get(&file).copied() {
-                    w.size.insert(model.clone(), bytes);
-                }
-                let pid = 5_000_000 + w.runs.len() as u32;
-                w.pids.insert(model.clone(), pid);
-                w.created.insert(name.clone(), unix_now());
-                w.names.insert(name, model.clone());
-                w.ports.insert(port, model.clone());
-                w.loaded.insert(model.clone());
-                w.argv.insert(model.clone(), args.to_vec());
-                w.runs.push(model);
-                Ok(ok)
-            }
-            // Per-process attribution's `State.Pid` read (§4.7): one line per
-            // running container it was asked about, and podman's own exit 125
-            // plus a stderr line for any name it does not know.
-            "inspect" if args.get(2).map(String::as_str) == Some(HOST_PID_FORMAT) => {
-                let names = args[3..].to_vec();
-                self.world.lock().unwrap().pid_inspects.push(names.clone());
-                let gate = self.inspect_gate.lock().unwrap().clone();
-                parked(gate).await;
-                let w = self.world.lock().unwrap();
-                let (mut stdout, mut stderr) = (String::new(), String::new());
-                for n in &names {
-                    let pid = w
-                        .names
-                        .get(n)
-                        .filter(|m| w.loaded.contains(*m))
-                        .and_then(|m| w.pids.get(m));
-                    match pid {
-                        Some(pid) => stdout.push_str(&format!("{n} {pid}\n")),
-                        None => stderr.push_str(&format!("Error: no such object: \"{n}\"\n")),
+                    let name = flag_value(args, "--name").unwrap_or_default().to_string();
+                    let model = label_value(args, "lmgw.model=")
+                        .expect("every managed container is labelled with its model")
+                        .to_string();
+                    let port: u16 = flag_value(args, "-p")
+                        .and_then(|p| p.rsplit(':').nth(1))
+                        .and_then(|p| p.parse().ok())
+                        .expect("every managed container publishes a host port");
+                    let file = flag_value(args, "-m")
+                        .and_then(|m| m.rsplit('/').next())
+                        .unwrap_or_default()
+                        .to_string();
+                    let ctx = flag_value(args, "--ctx-size").map(str::to_string);
+                    let slots = flag_value(args, "--parallel")
+                        .and_then(|p| p.parse::<u64>().ok())
+                        .unwrap_or(1)
+                        .max(1);
+                    let mut w = self.world.lock().unwrap();
+                    match ctx.as_deref().and_then(|c| c.parse::<u64>().ok()) {
+                        Some(c) if w.context_rules => w.slot_ctx.insert(port, c / slots),
+                        _ => w.slot_ctx.remove(&port),
+                    };
+                    w.run_files.push((model.clone(), file.clone(), ctx));
+                    if w.fail_run_file.as_deref() == Some(file.as_str()) {
+                        return Ok(CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr: format!("Error: /models/{file}: no such file or directory\n"),
+                        });
                     }
+                    if let Some(bytes) = w.files.get(&file).copied() {
+                        w.size.insert(model.clone(), bytes);
+                    }
+                    let pid = 5_000_000 + w.runs.len() as u32;
+                    w.pids.insert(model.clone(), pid);
+                    w.created.insert(name.clone(), unix_now());
+                    w.names.insert(name, model.clone());
+                    w.ports.insert(port, model.clone());
+                    w.loaded.insert(model.clone());
+                    w.argv.insert(model.clone(), args.to_vec());
+                    w.runs.push(model);
+                    Ok(ok)
                 }
-                Ok(CmdOutput {
-                    status: if stderr.is_empty() { 0 } else { 125 },
-                    stdout,
-                    stderr,
-                })
+                // Per-process attribution's `State.Pid` read (§4.7): one line per
+                // running container it was asked about, and podman's own exit 125
+                // plus a stderr line for any name it does not know.
+                "inspect" if args.get(2).map(String::as_str) == Some(HOST_PID_FORMAT) => {
+                    let names = args[3..].to_vec();
+                    self.world.lock().unwrap().pid_inspects.push(names.clone());
+                    let gate = self.inspect_gate.lock().unwrap().clone();
+                    parked(gate).await;
+                    let w = self.world.lock().unwrap();
+                    let (mut stdout, mut stderr) = (String::new(), String::new());
+                    for n in &names {
+                        let pid = w
+                            .names
+                            .get(n)
+                            .filter(|m| w.loaded.contains(*m))
+                            .and_then(|m| w.pids.get(m));
+                        match pid {
+                            Some(pid) => stdout.push_str(&format!("{n} {pid}\n")),
+                            None => stderr.push_str(&format!("Error: no such object: \"{n}\"\n")),
+                        }
+                    }
+                    Ok(CmdOutput {
+                        status: if stderr.is_empty() { 0 } else { 125 },
+                        stdout,
+                        stderr,
+                    })
+                }
+                "rm" if *self.fail_rm.lock().unwrap() => Ok(CmdOutput {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: "Error: cannot remove container: it is in use\n".into(),
+                }),
+                "stop" => {
+                    let gate = self.stop_gate.lock().unwrap().clone();
+                    parked(gate).await;
+                    if *self.fail_stop.lock().unwrap() {
+                        // Non-zero and the model stays in `loaded`: the container
+                        // really is still on the GPU afterwards, which is the
+                        // whole point of the seam.
+                        return Ok(CmdOutput {
+                            status: 1,
+                            stdout: String::new(),
+                            stderr: "Error: container is not stopping\n".into(),
+                        });
+                    }
+                    let name = args.last().cloned().unwrap_or_default();
+                    let mut w = self.world.lock().unwrap();
+                    if let Some(model) = w.names.get(&name).cloned() {
+                        w.loaded.remove(&model);
+                        w.stops.push(model);
+                    }
+                    Ok(ok)
+                }
+                _ => Ok(ok),
             }
-            "rm" if *self.fail_rm.lock().unwrap() => Ok(CmdOutput {
-                status: 1,
-                stdout: String::new(),
-                stderr: "Error: cannot remove container: it is in use\n".into(),
-            }),
-            "stop" => {
-                let gate = self.stop_gate.lock().unwrap().clone();
-                parked(gate).await;
-                if *self.fail_stop.lock().unwrap() {
-                    // Non-zero and the model stays in `loaded`: the container
-                    // really is still on the GPU afterwards, which is the
-                    // whole point of the seam.
-                    return Ok(CmdOutput {
-                        status: 1,
-                        stdout: String::new(),
-                        stderr: "Error: container is not stopping\n".into(),
-                    });
-                }
-                let name = args.last().cloned().unwrap_or_default();
-                let mut w = self.world.lock().unwrap();
-                if let Some(model) = w.names.get(&name).cloned() {
-                    w.loaded.remove(&model);
-                    w.stops.push(model);
-                }
-                Ok(ok)
-            }
-            _ => Ok(ok),
-        }
+        })
     }
 }

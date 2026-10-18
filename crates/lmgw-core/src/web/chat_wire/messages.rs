@@ -185,14 +185,14 @@ pub(crate) fn message_voice(v: &store::MessageVoice) -> api::MessageVoice {
     }
 }
 
-fn input_path(i: store::InputPath) -> api::InputPath {
+pub(crate) fn input_path(i: store::InputPath) -> api::InputPath {
     match i {
         store::InputPath::Audio => api::InputPath::Audio,
         store::InputPath::Transcript => api::InputPath::Transcript,
     }
 }
 
-fn timing_of(t: store::VoiceTiming) -> api::VoiceTiming {
+pub(crate) fn timing_of(t: store::VoiceTiming) -> api::VoiceTiming {
     let store::VoiceTiming {
         response_id,
         message_id,

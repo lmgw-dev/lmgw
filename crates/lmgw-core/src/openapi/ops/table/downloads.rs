@@ -16,7 +16,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__hf_add"),
         args: OpArgs::Tool,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::HfAddResult>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -27,10 +27,19 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "hf_set",
         tag: TAG,
         summary: "Re-fetch, cancel, untrack or check-updates on a tracked Hugging Face download",
-        description: None,
+        description: Some(
+            "Manage tracked Hugging Face downloads: re-fetch one, cancel a running transfer, \
+             untrack and delete its file, or ETag-check every completed download against the \
+             hub for updates. An audio catalog file is checked and re-fetched at the revision \
+             audio.catalog_revision takes it at now: under 'pinned' the commit its audio.cpp \
+             spec pins today, else main. The answer follows the action: `check_updates` answers \
+             HfUpdatesChecked (how many finished downloads of the `target` class differ from \
+             the hub, and one sentence per file it could not ask about, in which case `ok` is \
+             false); `redownload`, `cancel` and `delete` answer a MessageAck.",
+        ),
         tool: Some("lmgw__hf_set"),
         args: OpArgs::Tool,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::HfSetAnswer>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

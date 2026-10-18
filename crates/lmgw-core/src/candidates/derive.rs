@@ -298,13 +298,13 @@ pub async fn fallback_supports(
     fallback_alias: &str,
     enabled: FacetSet,
 ) -> Result<(), Facet> {
-    // `Box::pin`: `exposed_entry` → `entry_for` → `candidate_alias_entry` →
-    // `derive` → here is a call cycle the compiler sees statically (it never
-    // actually recurses at runtime — a fallback can never itself be a
-    // candidate alias, `Snapshot::usable_fallback` refuses that at save
-    // time), so the two mutually async fns need one heap indirection to
-    // have a finite size.
-    let caps = Box::pin(exposed::exposed_entry(state, fallback_alias))
+    // `exposed_entry` → `entry_for` → `candidate_alias_entry` → `derive` →
+    // here is a call cycle the compiler sees statically (it never actually
+    // recurses at runtime — a fallback can never itself be a candidate
+    // alias, `Snapshot::usable_fallback` refuses that at save time), so the
+    // two mutually async fns need one heap indirection to have a finite
+    // size: `exposed_entry`'s own, which is erased (`crate::erased`).
+    let caps = exposed::exposed_entry(state, fallback_alias)
         .await
         .and_then(|e| e.capabilities);
     for f in enabled.iter() {

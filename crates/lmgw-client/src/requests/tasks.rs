@@ -11,12 +11,12 @@
 //!   a send streams them (`text/event-stream`; read it with
 //!   [`crate::feed::SseDecoder`]). With nothing to answer, `409
 //!   nothing_to_answer`; while a turn of the thread runs, `409
-//!   turn_running` ([`super::read_refusal`]).
+//!   turn_running` ([`read_refusal`](crate::requests::read_refusal)).
 //! - [`cancel_task`]: `POST /chat/api/threads/{id}/tasks/{task}/cancel`,
 //!   read with [`read_task_cancelled`]; refusals `404 not_found` (the
 //!   thread), `404 task_not_found`, `409
 //!   task_ended`, `409 task_cancel_unsupported`, `502 task_cancel_refused`
-//!   ([`task_code`]).
+//!   ([`task_code`](crate::requests::tasks::task_code)).
 
 pub use lmgw_api_types::chat::{task_code, AnswerRequest, MessageTask, TaskCancelled, ThreadTask};
 

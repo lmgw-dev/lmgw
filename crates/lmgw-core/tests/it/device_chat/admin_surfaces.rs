@@ -255,9 +255,8 @@ async fn mcp_servers_and_responses_follow_the_switch() {
 async fn an_unbound_realtime_session_lists_lmgw_again_as_the_switch_moves() {
     let w = world(|_| {}).await;
     let desk = pair(&w, "desktop", json!({ "self_admin": "read_only" })).await;
-    let bearer = format!("Bearer {}", desk.key);
     let mut ws = w
-        .connect("model=chatty", &[("authorization", bearer.as_str())])
+        .connect_as(&desk, "model=chatty")
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");

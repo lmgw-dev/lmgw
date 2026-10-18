@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewAudioModel};
@@ -30,23 +31,28 @@ pub struct Podman {
     pub served: Mutex<HashMap<String, Served>>,
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Podman {
-    async fn run(&self, _program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        if args.first().map(String::as_str) == Some("run") {
-            *self.runs.lock().unwrap() += 1;
-            let model = args.iter().find_map(|a| a.strip_prefix("lmgw.model="));
-            if let (Some(model), Some(served)) = (model, audiocpp_options::served(args)) {
-                self.served
-                    .lock()
-                    .unwrap()
-                    .insert(model.to_string(), served);
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            if args.first().map(String::as_str) == Some("run") {
+                *self.runs.lock().unwrap() += 1;
+                let model = args.iter().find_map(|a| a.strip_prefix("lmgw.model="));
+                if let (Some(model), Some(served)) = (model, audiocpp_options::served(args)) {
+                    self.served
+                        .lock()
+                        .unwrap()
+                        .insert(model.to_string(), served);
+                }
             }
-        }
-        Ok(CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+            Ok(CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }

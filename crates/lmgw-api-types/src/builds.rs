@@ -952,6 +952,7 @@ pub struct BuildsResponse {
     /// answer). Every `used_by` is then empty **for that reason** — not
     /// because nothing uses the image — and the page should say so.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub usage_error: Option<String>,
 }
 
@@ -966,6 +967,7 @@ pub struct BuildGetResponse {
     pub more: bool,
     /// As `usage_error` of the builds response, for `view.used_by`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub usage_error: Option<String>,
 }
 

@@ -71,7 +71,7 @@ pub fn attachment_tokens(meta: &serde_json::Value) -> Option<i64> {
     meta.get("tokens").and_then(serde_json::Value::as_i64)
 }
 
-fn chat_attachment_meta_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatAttachmentMeta {
+pub(super) fn chat_attachment_meta_from_row(row: &sqlx::sqlite::SqliteRow) -> ChatAttachmentMeta {
     let meta = parse_attachment_meta(row.get::<Option<String>, _>("meta").as_deref());
     ChatAttachmentMeta {
         extracted_tokens: attachment_tokens(&meta),
@@ -418,6 +418,11 @@ pub async fn send_user_message_by(
         .bind(thread_id)
         .execute(&mut *tx)
         .await?;
+    // In the message's own transaction, as every message write records
+    // (client-apps design §2.2): a send that rolls back records nothing. The
+    // record names the message only; delivery renders it, files and all, as
+    // it is then.
+    feed::record_added(&mut tx, thread_id, msg_id, Some(&by.named)).await?;
 
     tx.commit().await?;
     Ok((SendMessageOutcome::Sent(msg_id), delivered))

@@ -75,6 +75,7 @@ async fn a_release_that_never_sees_the_slot_idle_ends_at_its_bound() {
 #[tokio::test]
 async fn a_stream_that_ends_normally_releases_at_once_on_both_relays() {
     let f = fixture(8 * GIB, 6 * GIB, 3 * GIB, 512).await;
+    let upstream = open_ended_upstream(&f).await;
     guard_chat_model(&f, 64, 32).await;
     assert_eq!(sized_chat(&f.gateway, "hi", 8).await.status(), 200);
     // No bound on the deferral: only a normal end can empty the pool below.
@@ -150,19 +151,11 @@ async fn a_stream_that_ends_normally_releases_at_once_on_both_relays() {
         "the legacy relay released at its end: {v}"
     );
 
-    // …and a hang-up, which keeps the cells until the slot lets go.
-    let long: String = "data: {\"choices\":[{\"text\":\"x\",\"index\":0}]}\n\n".repeat(200_000);
-    Mock::given(method("POST"))
-        .and(path("/v1/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(long, "text/event-stream"),
-        )
-        .up_to_n_times(1)
-        .with_priority(1)
-        .mount(&f.first)
-        .await;
+    // …and a hang-up, which keeps the cells until the slot lets go. The
+    // upstream is still sending when the client leaves — it never stops —
+    // so the relay cannot reach a normal end first: it finds the client gone
+    // on its next write.
+    upstream.stream_without_end();
     let resp = legacy(30).await.unwrap();
     assert_eq!(resp.status(), 200);
     drop(resp);

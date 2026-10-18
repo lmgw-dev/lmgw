@@ -115,9 +115,10 @@ pub(in crate::pages::settings) fn BudgetPanel(
             {body}
             <div class="row rt-budget-foot">
                 <span class="field-hint">
-                    "Each figure is what admission charges: a chat model's weights and KV \
-                     cache from its GGUF, an audio model's learned residency — or its size on \
-                     disk until it has served a request. A cloud stage holds nothing here."
+                    "Each figure is what admission charges: a chat model's weights, KV \
+                     cache and compute buffers from its GGUF and settings, an audio model's \
+                     learned residency — or its size on disk until it has served a request. \
+                     A cloud stage holds nothing here."
                 </span>
                 <button
                     class="btn ghost sm"

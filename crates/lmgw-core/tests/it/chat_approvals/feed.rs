@@ -35,6 +35,11 @@ async fn approval_records_are_hidden_from_a_device_that_cannot_see_the_thread() 
         .push(calls(&[(0, "call_1", "lmgw__status", "{}")], "tool_calls"));
     let frames = send(&w, &owner, tid, "how are you").await;
     let id = approval_frames(&frames)[0]["approval_request_id"].clone();
+    // The feed does not send a request whose call is decided by delivery
+    // (it renders at delivery, not at the write), so the request is read
+    // before the decision is made.
+    mine.until(10, |f| f.iter().any(|f| f.event == "approval.requested"))
+        .await;
     w.chat.push(Turn::text(&["All well."]));
     let (s, frames) = decide(
         &w,

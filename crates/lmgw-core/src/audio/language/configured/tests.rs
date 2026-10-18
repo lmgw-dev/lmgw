@@ -1,4 +1,4 @@
-//! The configured language against profiles shaped like the owner's rows
+//! The configured language against profiles shaped like real rows
 //! (read off the catalog and the packages: Supertonic-3, Qwen3-TTS
 //! CustomVoice, Kokoro, MagpieTTS, Pocket TTS, Nemotron ASR, Parakeet TDT)
 //! and like the families the table sorts otherwise (Sopro, MOSS-TTS v1.5,

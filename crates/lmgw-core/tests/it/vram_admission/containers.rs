@@ -38,6 +38,32 @@ fn hold(world: &Arc<Mutex<World>>, until: Until) {
     }
 }
 
+/// What `/slots` answers on `port`: one slot, processing while the model on
+/// that port is in [`World::busy`] (traffic that arrived on the container
+/// port directly). Counted in [`World::slots_calls`].
+pub(super) fn slots(world: &Mutex<World>, port: u16) -> Value {
+    let mut w = world.lock().unwrap();
+    *w.slots_calls.entry(port).or_insert(0) += 1;
+    let busy = w
+        .ports
+        .get(&port)
+        .is_some_and(|model| w.busy.contains(model));
+    // The shape llama-server actually serves (measured 2026-09-17 on
+    // `official-latest`): `id_task` is present on an *idle* slot too,
+    // carrying the id of the task it last finished — the server keeps
+    // `task_prev` and `to_json` falls back to it. Only a slot that has
+    // never run a task omits the key, and every victim these tests
+    // evict has served at least one request. An idle mock without the
+    // field would pass a probe that reads "has a task id" as "busy",
+    // which is exactly the bug that let an idle model sit on the card
+    // through a whole queue timeout.
+    json!([{
+        "id": 0,
+        "is_processing": busy,
+        "id_task": 0,
+    }])
+}
+
 /// One model's container: `/health` for the readiness poll (§10.3), `/slots`
 /// for the eviction busy probe (§10.7), and the inference routes a forwarded
 /// request lands on.
@@ -73,28 +99,7 @@ pub(super) async fn container(world: Arc<Mutex<World>>) -> MockServer {
     let w = world.clone();
     Mock::given(method("GET"))
         .and(path("/slots"))
-        .respond_with(move |_: &Request| {
-            let mut w = w.lock().unwrap();
-            *w.slots_calls.entry(port).or_insert(0) += 1;
-            let busy = w
-                .ports
-                .get(&port)
-                .is_some_and(|model| w.busy.contains(model));
-            // The shape llama-server actually serves (measured 2026-09-17 on
-            // `official-latest`): `id_task` is present on an *idle* slot too,
-            // carrying the id of the task it last finished — the server keeps
-            // `task_prev` and `to_json` falls back to it. Only a slot that has
-            // never run a task omits the key, and every victim these tests
-            // evict has served at least one request. An idle mock without the
-            // field would pass a probe that reads "has a task id" as "busy",
-            // which is exactly the bug that let an idle model sit on the card
-            // through a whole queue timeout.
-            ResponseTemplate::new(200).set_body_json(json!([{
-                "id": 0,
-                "is_processing": busy,
-                "id_task": 0,
-            }]))
-        })
+        .respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_json(slots(&w, port)))
         .mount(&server)
         .await;
 

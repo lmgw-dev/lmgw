@@ -28,6 +28,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::{use_location, use_navigate};
 use lmgw_api_types::builds::MAX_BUILD_UPDATE_CHECK_HOURS;
+use lmgw_api_types::MessageAck;
 use serde_json::{json, Map, Value};
 
 use crate::catalog::CatalogEntry;
@@ -46,6 +47,10 @@ use realtime::{BudgetPanel, SpeechStyleField, TagHintField, VoiceField, WordsFie
 /// The Chat's Voice group (chat-voice design §2.1).
 mod chat_profile;
 mod chat_voice;
+mod devices;
+mod read;
+/// Settings → Realtime → WebRTC calls (calls design §9).
+mod webrtc;
 
 // ---------------------------------------------------------------------------
 // The table
@@ -88,7 +93,7 @@ const CATS: &[(&str, &str, &str)] = &[
     (
         "realtime",
         "Realtime",
-        "spoken conversations on /v1/realtime: the voice cascade and its GPU memory, turns, barge-in, output",
+        "spoken conversations on /v1/realtime and WebRTC calls: the voice cascade and its GPU memory, turns, barge-in, output, the UDP listener",
     ),
     (
         "agents",
@@ -161,6 +166,7 @@ const fn class_group(
 const GROUPS: &[Group] = &[
     g("network", "listen", "Gateway"),
     g("network", "access", "Access"),
+    g("network", "devices", "Devices"),
     g("retention", "logs", "Request log"),
     g("retention", "jobs", "Job history"),
     g("retention", "chat", "Chat threads"),
@@ -175,7 +181,7 @@ const GROUPS: &[Group] = &[
     class_group(
         "aux_router",
         "Aux",
-        "llama-server · embeddings + rerank",
+        "llama-server · embeddings, rerank + decisions",
         "settings.runtimes.aux",
     ),
     class_group("audio", "Audio", "audio.cpp", "settings.runtimes.audio"),
@@ -201,6 +207,7 @@ const GROUPS: &[Group] = &[
     g("realtime", "rt-barge", "Barge-in"),
     g("realtime", "rt-output", "Output"),
     g("realtime", "rt-limits", "Connection"),
+    g("realtime", "rt-webrtc", "WebRTC calls"),
     g("agents", "agent-containers", "Agent containers"),
     g("agents", "tool-loop", "Responses tool loop"),
     g("agents", "mcp", "MCP"),
@@ -233,6 +240,9 @@ enum Ctl {
     /// (`build_update_check_hours`) the server refuses past a real maximum
     /// (`lmgw_api_types::builds::MAX_BUILD_UPDATE_CHECK_HOURS`).
     IntRange(i64, i64),
+    /// [`Ctl::IntRange`] where empty is `null`, which the row's placeholder
+    /// says the meaning of (`realtime.webrtc_port`: the HTTP port's number).
+    OptIntRange(i64, i64),
     /// Whole currency units in the box, micro-units in the patch; empty = 0.
     Money,
     Bool,
@@ -286,6 +296,12 @@ enum Ctl {
     Model(&'static [&'static str], Option<&'static str>, &'static str),
     // Acts at once; never in the draft.
     Hold,
+    /// The device listener's switch, scope and port, under a confirmation
+    /// ([`devices::ListenerPanel`]).
+    DeviceListener,
+    /// The WebRTC listener line, the firewall hint and the live calls —
+    /// read, never part of the draft ([`webrtc::WebRtcPanel`]).
+    WebRtc,
     Apply(&'static str),
     CheckNow,
     Theme,
@@ -320,7 +336,7 @@ impl Ctl {
             Ctl::Float(..) => Kind::Float,
             Ctl::Vad(col) => realtime::vad_kind(col),
             Ctl::Money => Kind::OptFloat,
-            Ctl::Profile => Kind::OptInt,
+            Ctl::Profile | Ctl::OptIntRange(..) => Kind::OptInt,
             Ctl::Bool | Ctl::TagHint => Kind::Flag,
             Ctl::Hold
             | Ctl::Apply(_)
@@ -328,7 +344,9 @@ impl Ctl {
             | Ctl::Theme
             | Ctl::Scale
             | Ctl::Link(_)
-            | Ctl::Budget => return None,
+            | Ctl::Budget
+            | Ctl::DeviceListener
+            | Ctl::WebRtc => return None,
         })
     }
 }
@@ -495,6 +513,18 @@ macro_rules! class_fields {
 
 const CHAT: [Def; 6] = class_fields!("router", "chat", ImageClass::Chat);
 const AUX: [Def; 6] = class_fields!("aux_router", "aux", ImageClass::Aux);
+/// The aux class's second prefix, shown after its `public_prefix`
+/// (decision-models design §3.10).
+const AUX_DECISION: [Def; 1] = [f(
+    "runtimes",
+    "aux_router",
+    "aux_router.decision_prefix",
+    "Decision prefix",
+    Ctl::Mono,
+)
+.s()
+.hint("decision models; empty = bare ids")
+.terms("systemone decide")];
 const IMAGE: [Def; 6] = class_fields!("image", "image", ImageClass::Image);
 
 const COMMON: &[Def] = &[
@@ -1072,8 +1102,19 @@ const REST: &[Def] = &[
     )
     .s()
     .unit("seconds")
-    .hint("told to each client, which takes a silent feed as dead after it; open feeds keep theirs")
+    .hint("told to each client, which takes a silent feed as dead after it; open feeds keep theirs; at most the longest keep-alive below")
     .terms("chat feed keepalive keep-alive ping dead link timeout"),
+    f(
+        "chat",
+        "feed",
+        "chat_feed_keepalive_max_s",
+        "Longest keep-alive",
+        Ctl::IntRange(1, lmgw_api_types::chat_feed::MAX_KEEPALIVE_S as i64),
+    )
+    .s()
+    .unit("seconds")
+    .hint("the most a feed may ask for itself, as a phone in the background does; bounds how long a feed whose device vanished stays open; at most 86 400 (a day)")
+    .terms("chat feed keepalive keep-alive maximum longest device phone background push"),
     f(
         "chat",
         "feed",
@@ -1083,7 +1124,7 @@ const REST: &[Def] = &[
     )
     .s()
     .unit("records")
-    .hint("read per query while a client catches up; bounds memory, every record is still sent; at most 10 000")
+    .hint("records read per query while a client catches up, each rendered only as it is sent; every record is still sent; at most 10 000")
     .terms("chat feed catch-up page size since"),
     f(
         "chat",
@@ -1303,13 +1344,17 @@ fn fields() -> impl Iterator<Item = &'static Def> {
     COMMON
         .iter()
         .chain(CHAT.iter())
-        .chain(AUX.iter())
+        .chain(AUX[..3].iter())
+        .chain(AUX_DECISION.iter())
+        .chain(AUX[3..].iter())
         .chain(AUDIO.iter())
         .chain(IMAGE.iter())
         .chain(BUILDS.iter())
         .chain(REST.iter())
         .chain(chat_voice::CHAT_VOICE.iter())
         .chain(realtime::REALTIME.iter())
+        .chain(webrtc::WEBRTC.iter())
+        .chain(devices::DEVICES.iter())
 }
 
 /// `vram.headroom_mb` → `f-vram-headroom-mb`: what `/settings/gpu#…` names.
@@ -1487,7 +1532,7 @@ fn range_error(d: &Def, text: &str) -> Option<String> {
             }),
             _ => None,
         },
-        Ctl::IntRange(min, max) => match t.parse::<i64>() {
+        Ctl::IntRange(min, max) | Ctl::OptIntRange(min, max) => match t.parse::<i64>() {
             Ok(n) if n < min || n > max => Some(format!("must be between {min} and {max}")),
             _ => None,
         },
@@ -1794,9 +1839,9 @@ pub fn Settings() -> impl IntoView {
     let scope = Scope::new();
     let load = move || {
         scope.spawn(async move {
-            match crate::api::get::<Value>("/api/settings-full").await {
+            match read::read_settings().await {
                 Ok(v) => take(v),
-                Err(e) => load_err.set(Some(e.to_string())),
+                Err(e) => load_err.set(Some(e)),
             }
         });
     };
@@ -1879,15 +1924,11 @@ pub fn Settings() -> impl IntoView {
         let sent = form.snapshot();
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/settings_set_full", &patch).await;
+            let res = crate::api::post::<MessageAck, _>("/api/op/settings_set_full", &patch).await;
             match res {
                 Ok(v) => {
                     save_err.set(None);
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("settings saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     // Read back what was stored: the server trims and
                     // normalises (a prefix loses its slashes), and the
                     // secrets' "stored" flags move. Not for a page that was
@@ -1896,7 +1937,7 @@ pub fn Settings() -> impl IntoView {
                     if !scope.alive() {
                         return;
                     }
-                    match crate::api::get::<Value>("/api/settings-full").await {
+                    match read::read_settings().await {
                         Ok(v) => {
                             form.saved(&sent, baseline(&v));
                             data.set(Some(v));
@@ -2204,7 +2245,9 @@ fn lay(d: &Def) -> Lay {
         | Ctl::Words
         | Ctl::SpeechStyle(_)
         | Ctl::TagHint
-        | Ctl::Budget => Lay::Block,
+        | Ctl::Budget
+        | Ctl::DeviceListener
+        | Ctl::WebRtc => Lay::Block,
         Ctl::Vad(_) => Lay::Vad,
         Ctl::Apply(_) | Ctl::CheckNow => Lay::Acts,
         Ctl::Theme | Ctl::Scale => Lay::Grid(Size::S),
@@ -2344,11 +2387,17 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
     let error = Signal::derive(move || form.error(k).or_else(|| shown.get().0));
     let warn = Signal::derive(move || shown.get().1);
     match d.ctl {
-        Ctl::Text | Ctl::Mono | Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Float(..) | Ctl::Money => {
+        Ctl::Text
+        | Ctl::Mono
+        | Ctl::Int(_)
+        | Ctl::IntRange(..)
+        | Ctl::OptIntRange(..)
+        | Ctl::Float(..)
+        | Ctl::Money => {
             let money = matches!(d.ctl, Ctl::Money);
             let numeric = matches!(
                 d.ctl,
-                Ctl::Int(_) | Ctl::IntRange(..) | Ctl::Float(..) | Ctl::Money
+                Ctl::Int(_) | Ctl::IntRange(..) | Ctl::OptIntRange(..) | Ctl::Float(..) | Ctl::Money
             );
             let class = if matches!(d.ctl, Ctl::Text) {
                 "input"
@@ -2748,6 +2797,10 @@ fn def_view(d: &'static Def, page: Page) -> AnyView {
             }
             .into_any()
         }
+        Ctl::DeviceListener => {
+            view! { <devices::ListenerPanel page=page id=id hidden=hidden/> }.into_any()
+        }
+        Ctl::WebRtc => view! { <webrtc::WebRtcPanel page=page id=id hidden=hidden/> }.into_any(),
         Ctl::Hold => view! {
             <div class="set-line" id=id hidden=move || hidden.get()>
                 <HoldSwitch page=page/>
@@ -2832,9 +2885,11 @@ fn explain(group: &'static str, page: Page) -> Option<AnyView> {
                 "still generating. Both routers run with --models-max 0 so their own count-based "
                 "eviction stays out of it. The live ledger and the queue are on "
                 <a href="/traffic">"Traffic"</a> ". "
-                "The estimate is weights + KV cache read from the GGUF — a lower bound, because "
-                "compute buffers and the driver's own context have no metadata to derive them "
-                "from. Headroom is that remainder. Telemetry comes from NVML on NVIDIA and from "
+                "The estimate is weights + KV cache + compute buffers, derived from the GGUF "
+                "and the row's slots, batch sizes, context and speculative decoding, a chat "
+                "model's MTP or draft context included. Not derived, and so not in it: the "
+                "driver's own context, allocator slack and a projector's compute buffer. "
+                "Headroom is that remainder. Telemetry comes from NVML on NVIDIA and from "
                 "amdgpu's sysfs counters on AMD; where neither answers there is nothing to "
                 "measure, so set a budget to plan against estimates alone, or leave it at 0 and "
                 "admission stays inactive, which the ledger says out loud."
@@ -3254,14 +3309,10 @@ fn CheckNowButton() -> impl IntoView {
         }
         checking.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/update_check", &json!({})).await;
+            let res = crate::api::post::<MessageAck, _>("/api/op/update_check", &json!({})).await;
             checking.set(false);
             match res {
-                Ok(v) => toasts.ok(v
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("checked")
-                    .to_string()),
+                Ok(v) => toasts.ok(v.message),
                 Err(e) => toasts.err(e.to_string()),
             }
         });

@@ -31,7 +31,7 @@ async fn a_device_approves_only_what_its_own_tool_scope_admits() {
         &w,
         "key_set",
         json!({"id": phone.id, "tool_scope_mode": "deny",
-               "tool_scope_patterns": "desktop__notify"}),
+               "tool_scope_patterns": "desktop__notify", "device_tools": ["desktop"]}),
     )
     .await;
     assert_eq!(s, 200, "{v}");
@@ -77,6 +77,51 @@ async fn a_device_approves_only_what_its_own_tool_scope_admits() {
         "{:?}",
         tool_results(&w, 1)
     );
+}
+
+/// A device without the device-tools grant cannot approve a call to a
+/// device's hosted tool, whatever its tool scope says: nothing is decided
+/// and nothing runs. Granted, the same device approves it.
+#[tokio::test]
+async fn an_ungranted_device_cannot_approve_a_hosted_call() {
+    let (w, d) = host_world().await;
+    let mut dev = linked(&w, &d, &["echo", "notify"]).await;
+    let phone = pair(&w, "phone", json!({})).await;
+    let owner = w.gw.client();
+    let tid = chat_thread(&w, &owner, "chatty").await;
+    attach(&w, &owner, tid).await;
+    both_calls(&w);
+    let frames = send(&w, &owner, tid, "tell me").await;
+    let id = approval_frames(&frames)[0]["approval_request_id"].clone();
+
+    let (s, r) = decide(
+        &w,
+        &phone.client,
+        tid,
+        json!([{"approval_request_id": id, "approve": true}]),
+    )
+    .await;
+    assert_eq!(s, 403, "{r:?}");
+    assert_eq!(r[0].1["code"], "approval_out_of_scope", "{r:?}");
+    assert_eq!(waiting(&w, tid).await[0]["approval_request_id"], id);
+    no_call(&mut dev).await;
+
+    let (s, v) = op(
+        &w,
+        "key_set",
+        json!({"id": phone.id, "device_tools": ["desktop"]}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    w.chat.push(Turn::text(&["Done."]));
+    let (s, frames) = decide(
+        &w,
+        &phone.client,
+        tid,
+        json!([{"approval_request_id": id, "approve": true}]),
+    )
+    .await;
+    assert_eq!(s, 200, "{frames:?}");
 }
 
 /// The owner's thread with lmgw's admin tools, every one gated, stopped on
@@ -158,7 +203,7 @@ async fn a_bound_session_approving_beyond_its_reach_is_refused() {
         &w,
         "key_set",
         json!({"id": phone.id, "tool_scope_mode": "deny",
-               "tool_scope_patterns": "desktop__notify"}),
+               "tool_scope_patterns": "desktop__notify", "device_tools": ["desktop"]}),
     )
     .await;
     assert_eq!(s, 200, "{v}");
@@ -168,13 +213,8 @@ async fn a_bound_session_approving_beyond_its_reach_is_refused() {
     both_calls(&w);
     let frames = send(&w, &owner, tid, "tell me").await;
     let id = approval_frames(&frames)[0]["approval_request_id"].clone();
-
-    let bearer = format!("Bearer {}", phone.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&phone, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");

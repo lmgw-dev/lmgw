@@ -21,9 +21,21 @@ use lmgw_api_types as dto;
 use crate::capabilities::{self, ModelCapabilities};
 use crate::config::{AuxKind, LlamaParams, LocalModel, Snapshot};
 use crate::gguf::{self, ModelSummary};
+use crate::runtime::aux::{LLAMA_DEFAULT_BATCH, LLAMA_DEFAULT_UBATCH};
 use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store;
+
+mod aux_batch;
+mod aux_plan;
+mod class_check;
+pub(crate) mod decision;
+pub(crate) mod licence;
+mod plan_fit;
+mod projector_floor;
+
+use aux_plan::aux_plan;
+pub(crate) use class_check::{aux_file_on_chat_row, chat_row_still_serves};
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -65,7 +77,8 @@ pub(crate) fn resolve(
             "'{rel}' is not in the {t} models directory ({models_dir}) — call lmgw__gguf_files \
              target={t} to see what is, or lmgw__hf_add target={t} to download it. The four \
              classes each have their own directory and a file in another class's directory \
-             is not visible here: embedding / rerank models live in the aux dir (target=aux), \
+             is not visible here: embedding / rerank / decision models live in the aux dir \
+             (target=aux), \
              chat models in the chat dir (target=chat), audio.cpp models in the audio dir \
              (target=audio), stable-diffusion.cpp pipelines in the image dir (target=image)."
         ));
@@ -165,9 +178,18 @@ const ENCODER_ARCHES: &[&str] = &[
 /// the same encoder with a classifier head (`pooling_type = rank`, or the
 /// `cls.output` tensors on older conversions). Projectors and drafters are
 /// companions of a chat model and classify as chat.
+///
+/// A decision model is tested first (decision-models design §3.2): its
+/// header's `{arch}.decision.type` is the key llama.cpp itself serves it by,
+/// and the same files carry what the later rules read — Laya's and Kev-4B's
+/// `cls.output*` head would make them rerankers, and the causal ones would
+/// fall through to chat.
 pub(crate) fn class_for(s: &ModelSummary) -> (&'static str, Option<AuxKind>) {
     if role_of(s) != "weights" {
         return ("chat", None);
+    }
+    if s.decision_type.is_some() {
+        return ("aux", Some(AuxKind::Decision));
     }
     let pooling = s.pooling_type.and_then(gguf::pooling_name);
     if pooling == Some("rank") || s.has_classifier_head {
@@ -203,14 +225,6 @@ fn spec_type_for(s: &ModelSummary) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 // Batch sizes a projector needs
 // ---------------------------------------------------------------------------
-
-/// llama-server's own `--batch-size` default: what a row that leaves
-/// `batch_size` unset runs with.
-pub(crate) const LLAMA_DEFAULT_BATCH: i64 = 2048;
-
-/// llama-server's own `--ubatch-size` default: what a row that leaves
-/// `ubatch_size` unset runs with.
-pub(crate) const LLAMA_DEFAULT_UBATCH: i64 = 512;
 
 /// The physical batch (`--ubatch-size`) a Gemma 4 projector needs, when
 /// llama.cpp decodes its images with non-causal attention (see
@@ -253,35 +267,6 @@ pub(crate) const GEMMA4_IMAGE_UBATCH: i64 = 1280;
 /// optional key is read).
 const GEMMA3_DEFAULT_SCALE_FACTOR: u64 = 4;
 
-/// The value of a llama-server flag in a row's freeform args, under any of
-/// its spellings (`--ubatch-size 2048`, `--ubatch-size=2048`, `-ub 2048`).
-/// The last one wins, because llama-server's own parser lets a later
-/// occurrence overwrite an earlier one.
-///
-/// `pub(crate)` so `gate::count::image_token_bound` can read a row's own
-/// `--image-max-tokens` the same way this module reads every other freeform
-/// flag, rather than duplicating the argv scan.
-pub(crate) fn arg_value<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
-    let mut found = None;
-    let mut it = args.iter().peekable();
-    while let Some(tok) = it.next() {
-        if !crate::runtime::argv::is_opt(tok) {
-            continue;
-        }
-        let key = tok.trim_start_matches('-');
-        match key.split_once('=') {
-            Some((k, v)) if names.contains(&k) => found = Some(v),
-            None if names.contains(&key) => {
-                if let Some(v) = it.next_if(|v| !crate::runtime::argv::is_opt(v)) {
-                    found = Some(v.as_str());
-                }
-            }
-            _ => {}
-        }
-    }
-    found
-}
-
 /// Whether a chat row hands llama-server a projector. `mmproj_path` wins over
 /// `no_mmproj` in the renderer; with neither field set, a `--mmproj` in the
 /// freeform args passes through and loads one just the same.
@@ -289,7 +274,8 @@ pub(crate) fn row_loads_projector(params: &LlamaParams, args: &[String]) -> bool
     if params.mmproj_path.as_deref().is_some_and(|p| !p.is_empty()) {
         return true;
     }
-    !params.no_mmproj && arg_value(args, &["mmproj", "mm"]).is_some_and(|p| !p.is_empty())
+    !params.no_mmproj
+        && crate::runtime::argv::flag_value(args, "mmproj").is_some_and(|p| !p.is_empty())
 }
 
 /// The value a chat row hands llama-server for `batch_size` or `ubatch_size`:
@@ -297,12 +283,13 @@ pub(crate) fn row_loads_projector(params: &LlamaParams, args: &[String]) -> bool
 /// (which the renderer passes through only while the field is unset). `None`
 /// when neither is set and llama-server's own default applies.
 pub(crate) fn row_batch_field(params: &LlamaParams, args: &[String], field: &str) -> Option<i64> {
-    let (stored, names): (Option<i64>, &[&str]) = match field {
-        "batch_size" => (params.batch_size, &["batch-size", "b"]),
-        "ubatch_size" => (params.ubatch_size, &["ubatch-size", "ub"]),
+    let (stored, key) = match field {
+        "batch_size" => (params.batch_size, "batch-size"),
+        "ubatch_size" => (params.ubatch_size, "ubatch-size"),
         _ => return None,
     };
-    stored.or_else(|| arg_value(args, names).and_then(|v| v.parse::<i64>().ok()))
+    stored
+        .or_else(|| crate::runtime::argv::flag_value(args, key).and_then(|v| v.parse::<i64>().ok()))
 }
 
 /// The `(batch, ubatch)` a chat row runs with, llama-server's defaults
@@ -498,7 +485,7 @@ fn row_projector_rel(params: &LlamaParams, args: &[String]) -> Option<String> {
     if let Some(p) = params.mmproj_path.as_deref().filter(|p| !p.is_empty()) {
         return Some(p.to_string());
     }
-    arg_value(args, &["mmproj", "mm"])
+    crate::runtime::argv::flag_value(args, "mmproj")
         .and_then(|v| v.strip_prefix("/models/"))
         .map(str::to_string)
 }
@@ -547,7 +534,8 @@ pub(crate) fn projector_ubatch_floor(
     attention: &ImageAttention,
     args: &[String],
 ) -> Option<(i64, String)> {
-    let budget = arg_value(args, &["image-max-tokens"]).and_then(|v| v.parse::<i64>().ok());
+    let budget = crate::runtime::argv::flag_value(args, "image-max-tokens")
+        .and_then(|v| v.parse::<i64>().ok());
     let (tokens, basis) = match attention {
         ImageAttention::Causal => return None,
         ImageAttention::NonCausal {
@@ -731,8 +719,9 @@ pub async fn gguf_files(
     };
 
     // Which configured rows name a file, per class: chat rows through any of
-    // their three path fields, aux rows through the weights path or a
-    // `--mmproj` in their extra args, audio rows through their model root.
+    // their three path fields, aux rows through the weights path, the
+    // projector (`mmproj_path`, or a `--mmproj`/`-mm` still in the args) or any
+    // other arg naming the file, audio rows through their model root.
     let used_by = |p: &str| -> Vec<String> {
         match class {
             Class::Chat => snap
@@ -749,10 +738,18 @@ pub async fn gguf_files(
                 .aux_models
                 .iter()
                 .filter(|m| {
+                    let bare =
+                        |s: &str| s.trim_start_matches("/models/").trim_start_matches('/') == p;
+                    // The projector the row loads: its `mmproj_path`, or a
+                    // `--mmproj`/`-mm` its args still carry.
+                    let projector = m
+                        .mmproj_path
+                        .as_deref()
+                        .filter(|v| !v.trim().is_empty())
+                        .or_else(|| crate::runtime::argv::flag_value(&m.args, "mmproj"));
                     m.gguf_path == p
-                        || m.args
-                            .iter()
-                            .any(|a| a.trim_start_matches("/models/").trim_start_matches('/') == p)
+                        || projector.is_some_and(bare)
+                        || m.args.iter().any(|a| bare(a))
                 })
                 .map(|m| m.model_id.clone())
                 .collect(),
@@ -817,7 +814,8 @@ pub async fn gguf_files(
         "kinds": crate::hf::accepted_extensions(t),
         "note": format!(
             "Paths are relative to the {t} models_dir and are exactly what gguf_path / \
-             mmproj_path / draft_gguf_path (chat) or gguf_path (aux) take, or an image row's \
+             mmproj_path / draft_gguf_path (chat) or gguf_path / mmproj_path (aux) take, or an \
+             image row's \
              files values (image), together with target={t}. role_guess is from the \
              filename; for chat and aux lmgw__model_inspect reads the header and is \
              authoritative, and for image there is no header to read — the image roles \
@@ -825,7 +823,8 @@ pub async fn gguf_files(
              editor lets you override. target=image lists every kind sd-server loads \
              ({}), not only GGUF, because a pipeline's VAE and text encoders are \
              .safetensors. Each class has its own directory: pass target=chat, target=aux \
-             (embedding / rerank models), target=audio or target=image to list the others. \
+             (embedding / rerank / decision models), target=audio or target=image to list the \
+             others. \
              lmgw cannot see files outside these directories — download into the right one \
              with lmgw__hf_add target=…, or change the directory in the dashboard \
              (Settings → {}).",
@@ -835,337 +834,12 @@ pub async fn gguf_files(
     }))
 }
 
-/// Ask llama-server whether it recognises a GGUF's architecture, in a
-/// throwaway container (§3.6, "probe / help").
-///
-/// The probe loads the model with a minimal context and watches for the
-/// architecture check. The classification rests on llama.cpp's ordering:
-/// `llama_model_load` validates `general.architecture` against its built-in
-/// table *before* reading any tensor data, and rejects an unknown one within
-/// about a second. So "the timeout elapsed without an architecture error"
-/// reliably means the architecture was accepted — we do not have to wait for a
-/// 16GB file to finish loading to learn what we came for.
-///
-/// It runs `podman run --rm` against the *image* rather than `podman exec`
-/// into a shared container, because there is no shared container any more:
-/// with per-model containers the normal state is that nothing is running, and
-/// a question about what an image supports must not depend on a model being
-/// up. The image is the one this GGUF's model would run (its per-model
-/// override, else the chat class default), so the answer describes the build
-/// that will actually load it.
-///
-/// `CommandRunner::run` waits for the child to exit, so the timeout below does
-/// not by itself stop anything: `tokio::time::timeout` abandons the future but
-/// the container keeps running. That is why the probe container is named and
-/// removed by name afterwards.
-async fn probe_runtime(state: &SharedState, rel: &str, class: Class) -> dto::RuntimeProbe {
-    /// How long to wait before concluding the architecture was accepted.
-    ///
-    /// Note which path this bounds. A *rejected* architecture returns as soon
-    /// as llama-server exits — measured at ~0.6s against a 16GB file, since
-    /// the check happens on the header. A *accepted* one never exits (it goes
-    /// on to serve), so success always costs the full budget. That makes this
-    /// the latency of the common case, not of the error case, and it has to
-    /// stay well inside the 30–60s timeout MCP clients typically impose.
-    /// Ten seconds is an order of magnitude above the observed check time.
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-    let snap = state.snapshot();
-    // Reading a file's metadata is a read; spawning a process that loads that
-    // file into memory is not. `lmgw__local_model_test` is gated as a
-    // mutation for exactly this reason, and the probe does a smaller version
-    // of the same thing — so at read_only it declines rather than doing it.
-    if !snap.settings.self_admin.allows_write() {
-        return dto::RuntimeProbe::unchecked(
-            "the runtime probe loads the model into a container, so it \
-             needs self-admin 'full'; the GGUF metadata above needs no probe",
-        );
-    }
-    // The owner switched the GPU hold on: the card is in use elsewhere, and
-    // nothing lmgw starts should compete with it — deferred, and said so. A
-    // benchmark run is the same (benchmark design §3.2): a probe container
-    // beside it would skew what it measures.
-    match snap.gpu_block() {
-        None => {}
-        Some(crate::bench::lease::GpuBlock::Hold) => {
-            return dto::RuntimeProbe::unchecked(
-                "the GPU hold is on, so the runtime probe (a container of the model's \
-                 image) is deferred until it is released; the GGUF metadata above \
-                 needs no probe",
-            )
-        }
-        Some(crate::bench::lease::GpuBlock::Benchmark(l)) => {
-            return dto::RuntimeProbe::unchecked(format!(
-                "benchmark run {} has the GPU to itself, so the runtime probe (a container \
-                 of the model's image) is deferred until it ends; the GGUF metadata above \
-                 needs no probe",
-                l.run_id
-            ))
-        }
-    }
-    let models_dir = models_dir_of(&snap, class);
-    if models_dir.trim().is_empty() {
-        return dto::RuntimeProbe::unchecked(format!(
-            "the {} models dir is not configured, so there is nothing to mount into the \
-             probe container (Settings → {})",
-            class.as_str(),
-            settings_page(class)
-        ));
-    }
-    let (image, class_run_args) = runtime_for_gguf(&snap, rel, class);
-    let name = format!(
-        "{}-probe-{}",
-        snap.settings.container_prefix,
-        crate::runtime::hash6(rel)
-    );
-    let run_args = probe_run_args(&class_run_args, &models_dir);
-    let args = probe_args(rel);
-    let registry = state.runtime();
-
-    let run = async {
-        // Where the binary is, the way the `--help` read finds it
-        // (`Registry::llama_server_candidates`): the image's own entrypoint
-        // first when it *is* llama-server — ik_llama.cpp's `/llama-server`,
-        // on no `PATH` — then the known places. An image that is not on the
-        // box has no facts; it gets the known places, and `--pull=never`
-        // fails fast on the first.
-        let entrypoint = registry
-            .image_facts(&image)
-            .await
-            .ok()
-            .and_then(|f| f.entrypoint);
-        for bin in crate::runtime::registry::llama_server_candidates(entrypoint.as_deref()) {
-            match registry
-                .run_throwaway(&name, &image, &bin, &run_args, &args)
-                .await
-            {
-                Ok(out) => {
-                    let text = format!("{}\n{}", out.stdout, out.stderr);
-                    // An immediate "no such binary" is worth retrying at the
-                    // next path; anything else is a real answer.
-                    if text.contains("executable file") && text.contains("not found") {
-                        continue;
-                    }
-                    return Some((text, out.status));
-                }
-                // podman itself could not be run: no other path does better.
-                Err(_) => return None,
-            }
-        }
-        None
-    };
-
-    let verdict = match tokio::time::timeout(PROBE_TIMEOUT, run).await {
-        // Timed out: the arch check would have fired by now, so it passed.
-        Err(_) => dto::RuntimeProbe::supported(Some(
-            "architecture accepted (loading was still in progress when \
-             the probe was cut short, which is past the check)"
-                .into(),
-        )),
-        Ok(None) => dto::RuntimeProbe::unchecked(format!(
-            "could not run llama-server from image '{image}' — is that image pulled? \
-             the probe never pulls one, since a read call must not turn into a \
-             multi-gigabyte download"
-        )),
-        Ok(Some((text, status))) => classify_exit(&text, status),
-    };
-
-    // Best-effort cleanup of a probe that outlived the timeout. `--rm` covers
-    // every run that exits on its own; this covers the one that did not.
-    if let Err(e) = registry.rm_force(&name).await {
-        tracing::warn!("could not clean up the arch probe container '{name}': {e}");
-    }
-    verdict
-}
-
-/// The image a probe of `rel` should run and the `podman run` args it runs
-/// with: the configured model that serves this GGUF decides (its per-model
-/// overrides, §3.1), and anything not yet configured falls back to the class
-/// defaults — which is what it would get the moment it is added.
-fn runtime_for_gguf(snap: &Snapshot, rel: &str, class: Class) -> (String, Vec<String>) {
-    let pick = |image: Option<&String>,
-                args: Option<&Vec<String>>,
-                class_image: &String,
-                class_args: &Vec<String>| {
-        (
-            image.unwrap_or(class_image).clone(),
-            args.unwrap_or(class_args).clone(),
-        )
-    };
-    match class {
-        Class::Aux => {
-            let m = snap.aux_models.iter().find(|m| m.gguf_path == rel);
-            let c = &snap.settings.aux_router;
-            pick(
-                m.and_then(|m| m.image.as_ref()),
-                m.and_then(|m| m.extra_run_args.as_ref()),
-                &c.image,
-                &c.extra_run_args,
-            )
-        }
-        Class::Image => {
-            let m = snap.image_models.iter().find(|m| {
-                m.files
-                    .values()
-                    .filter_map(|v| v.as_str())
-                    .any(|v| v.trim_start_matches('/') == rel)
-            });
-            let c = &snap.settings.image;
-            pick(
-                m.and_then(|m| m.image.as_ref()),
-                m.and_then(|m| m.extra_run_args.as_ref()),
-                &c.image,
-                &c.extra_run_args,
-            )
-        }
-        Class::Chat | Class::Audio => {
-            let m = snap.local_models.iter().find(|m| m.gguf_path == rel);
-            let c = &snap.settings.router;
-            pick(
-                m.and_then(|m| m.image.as_ref()),
-                m.and_then(|m| m.extra_run_args.as_ref()),
-                &c.image,
-                &c.extra_run_args,
-            )
-        }
-    }
-}
-
-/// The probe container's `podman run` args: the model's own resolved run
-/// args (its override, else the class's), the GPUs hidden, then the models
-/// dir.
-///
-/// The run args are not decoration. A build without `GGML_BACKEND_DL` —
-/// ik_llama.cpp's, any hand-built one — links `libcuda.so.1` directly and
-/// exits 127 before it reads a single flag unless the GPU device is attached,
-/// which is what those args do (they mount the GPU libraries); the probe
-/// would then report every model as unloadable. It is the same fix the
-/// `--help` read took (container-builds §2.2, WP1).
-///
-/// But no device is *visible* to it ([`HIDE_GPUS`]): `--n-gpu-layers 0`
-/// keeps the weights off the card, not the CUDA context loading a model
-/// creates with a device in sight — 390 MiB for the probe's whole run
-/// (measured 2026-09-26), unseen by the VRAM ledger and deaf to the GPU
-/// hold. With the device hidden the architecture check runs the same.
-/// `run_throwaway` also drops a `-d`/`--restart`/`--publish`/`--name` the
-/// class args might carry.
-///
-/// [`HIDE_GPUS`]: crate::runtime::registry::HIDE_GPUS
-fn probe_run_args(class_run_args: &[String], models_dir: &str) -> Vec<String> {
-    let mut out = crate::runtime::registry::without_gpus(class_run_args);
-    out.extend(probe_mounts(models_dir));
-    out
-}
-
-/// The probe container's mounts: the models dir read-only at `/models`, with
-/// the same SELinux posture the class defaults take (§6 — unlabeled mounts
-/// plus `label=disable`, never a relabeling `:Z` on a directory this size).
-fn probe_mounts(models_dir: &str) -> Vec<String> {
-    vec![
-        "-v".into(),
-        format!("{}:/models:ro", models_dir.trim_end_matches('/')),
-        "--security-opt".into(),
-        "label=disable".into(),
-    ]
-}
-
-/// llama-server's arguments for an architecture probe (pure, so the flags
-/// below are covered by a test rather than by running a container).
-///
-/// `--n-gpu-layers 0` keeps it on the CPU: the architecture check happens on
-/// the header, long before anything would be offloaded. (The container still
-/// gets the class's GPU run args — see [`probe_run_args`] — because some
-/// builds cannot even start without the device.)
-///
-/// `--host`/`--port` are load-bearing and easy to mistake for noise:
-/// llama-server binds the HTTP socket *before* loading the model, and a failure
-/// there would kill the probe in 0.2s — before the architecture check it exists
-/// to perform — reporting every model as unloadable. Port 0 lets the kernel
-/// choose, so there is nothing to collide with even if something else in the
-/// container is listening.
-fn probe_args(rel: &str) -> Vec<String> {
-    [
-        "--model",
-        &format!("/models/{rel}"),
-        "--ctx-size",
-        "8",
-        "--n-gpu-layers",
-        "0",
-        "--no-warmup",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "0",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-/// [`classify_probe`], for a probe that **exited** on its own with
-/// `status`. A crash (killed by a signal: 128+) says nothing by itself — ik's
-/// llama-server, with no GPU visible to it, segfaults after loading the model
-/// (measured 2026-09-26) — so it counts only when the output shows the
-/// architecture was already accepted (the model's metadata was printed, which
-/// happens after the check); a crash before that is no answer.
-fn classify_exit(text: &str, status: i32) -> dto::RuntimeProbe {
-    let verdict = classify_probe(text);
-    let crashed = status > 128;
-    if !crashed || verdict.supported == Some(false) {
-        return verdict;
-    }
-    let past_check = text.lines().any(|l| {
-        let l = l.trim_start();
-        (l.contains("print_meta") || l.contains("print_info")) && l.contains("arch")
-    });
-    if past_check {
-        return dto::RuntimeProbe::supported(Some(format!(
-            "architecture accepted (the probe printed the model's metadata, which comes \
-             after the check, then exited with status {status})"
-        )));
-    }
-    dto::RuntimeProbe::unchecked(format!(
-        "the probe exited with status {status} before the architecture check said anything"
-    ))
-}
-
-/// Turn probe output into a verdict. Split out so it is testable without a
-/// container.
-fn classify_probe(text: &str) -> dto::RuntimeProbe {
-    let line_with = |needle: &str| {
-        text.lines()
-            .find(|l| l.to_ascii_lowercase().contains(needle))
-            .map(|l| l.trim().to_string())
-    };
-    if let Some(l) = line_with("unknown model architecture") {
-        return dto::RuntimeProbe::unsupported(
-            l,
-            Some(
-                "the llama.cpp build in this container predates the model's \
-                 architecture — update the container image",
-            ),
-        );
-    }
-    if let Some(l) = line_with("failed to load clip model") {
-        return dto::RuntimeProbe::unsupported(
-            l,
-            Some("this build does not recognise the projector type"),
-        );
-    }
-    for needle in ["error loading model", "failed to load model"] {
-        if let Some(l) = line_with(needle) {
-            return dto::RuntimeProbe::unsupported(l, None);
-        }
-    }
-    dto::RuntimeProbe::supported(None)
-}
-
-/// What a GGUF is: architecture, shape, quantization, role, and whether the
-/// runtime can load it at all.
+/// What a GGUF is: architecture, shape, quantization and role, read from its
+/// header. It loads nothing: whether the image can load the file shows on the
+/// row's test (`local_model_test`).
 pub async fn model_inspect(
     state: &SharedState,
     gguf_path: &str,
-    probe: bool,
     target: Option<&str>,
 ) -> Result<dto::ModelInspect, String> {
     let class = class_of(target)?;
@@ -1182,15 +856,38 @@ pub async fn model_inspect(
     let (serve_as, aux_kind) = class_for(&s);
     // Cost the model's own trained context, at both cache precisions — the
     // caller's real question is "does this fit", and the honest answer needs
-    // the real context, not a smaller one chosen to look comfortable.
-    let kv = |bits: u32| {
-        s.context_length
-            .and_then(|c| gguf::kv_cache_bytes(&s, c, bits))
+    // the real context, not a smaller one chosen to look comfortable. A chat
+    // model is costed the way its row is charged (`vram::plan::chat`): one
+    // slot, the cache laid out as llama.cpp lays it out, and the weights
+    // less the input embeddings llama.cpp keeps in host memory.
+    let chat = class == Class::Chat;
+    let kv = |cache: &str, bits: u32| {
+        let c = s.context_length?;
+        if chat {
+            crate::vram::plan::chat::one_slot_kv(&s, c, cache)
+        } else {
+            gguf::kv_cache_bytes(&s, c, bits)
+        }
     };
-    let runtime = if probe {
-        probe_runtime(state, &rel, class).await
+    let weights_bytes = if chat {
+        s.file_size.saturating_sub(s.host_input_bytes)
     } else {
-        dto::RuntimeProbe::unchecked("probe not requested")
+        s.file_size
+    };
+    let kv_note = if chat {
+        "KV figures are for context_length tokens in one slot at llama-server's default ubatch, \
+         laid out as a chat row's footprint lays it out: q8_0 at its real 8.5 bits, \
+         sliding-window layers at window + ubatch cells, layers that reuse another's cache and \
+         an MLA model's V not counted, and a hybrid's recurrent layers at one state each (0 \
+         where the header has no ssm keys to size it). Weights leave out the input embeddings \
+         llama.cpp keeps in host memory. Compute buffers depend on the row's slots and batch \
+         sizes, so they are not in these figures; the plan's footprint has them."
+    } else {
+        "KV figures are for context_length tokens and exclude quantization scale overhead, so \
+         treat them as a lower bound. Sliding-window layers are counted at the window size, and \
+         on hybrid linear-attention models only every full_attention_interval-th layer holds a \
+         per-token cache (the rest charge their fixed recurrent state) — which is why either \
+         kind's KV is far below the naive layers x context product."
     };
 
     Ok(dto::ModelInspect {
@@ -1211,6 +908,7 @@ pub async fn model_inspect(
         architecture: s.architecture.clone(),
         name: s.general_name.clone(),
         size_label: s.size_label.clone(),
+        licence: s.licence.as_ref().map(dto::ModelLicence::from),
         quant: s.quant.clone(),
         context_length: s.context_length,
         block_count: s.block_count,
@@ -1236,20 +934,11 @@ pub async fn model_inspect(
         file_size_bytes: s.file_size,
         file_size: crate::hf::fmt_bytes(s.file_size),
         vram_estimate: dto::VramEstimate {
-            weights_bytes: s.file_size,
-            kv_cache_bytes_at_full_ctx_f16: kv(16),
-            kv_cache_bytes_at_full_ctx_q8_0: kv(8),
-            note: "KV figures are for context_length tokens and exclude \
-                   quantization scale overhead, so treat them as a lower \
-                   bound. Sliding-window layers are counted at the window \
-                   size, and on hybrid linear-attention models only every \
-                   full_attention_interval-th layer holds a per-token cache \
-                   (the rest charge their fixed recurrent state) — which is \
-                   why either kind's KV is far below the naive layers x \
-                   context product."
-                .to_string(),
+            weights_bytes,
+            kv_cache_bytes_at_full_ctx_f16: kv("f16", 16),
+            kv_cache_bytes_at_full_ctx_q8_0: kv("q8_0", 8),
+            note: kv_note.to_string(),
         },
-        runtime,
     })
 }
 
@@ -1600,7 +1289,6 @@ fn image_plan(models_dir: &str, rel: &str) -> Value {
 pub async fn local_model_plan(
     state: &SharedState,
     gguf_path: &str,
-    probe: bool,
     target: Option<&str>,
 ) -> Result<Value, String> {
     let class = class_of(target)?;
@@ -1623,7 +1311,7 @@ pub async fn local_model_plan(
     // get the aux plan, whose parameters are `lmgw__aux_model_set`'s.
     let (serve_as, aux_kind) = class_for(&s);
     if class == Class::Aux || serve_as == "aux" {
-        return aux_plan(state, &snap, class, &dir, &rel, &s, aux_kind, probe).await;
+        return aux_plan(state, &snap, class, &dir, &rel, &s, aux_kind).await;
     }
 
     let mut warnings: Vec<String> = Vec::new();
@@ -1732,52 +1420,7 @@ pub async fn local_model_plan(
     let image = mmproj
         .as_ref()
         .map(|(_, ms)| image_attention(Some(ms), s.embedding_length));
-    let lead = match &image {
-        Some(ImageAttention::NonCausal { ty, .. }) => Some(format!(
-            "llama.cpp decodes this {ty} projector's images with non-causal attention, so a \
-             whole image has to fit in one physical batch"
-        )),
-        Some(ImageAttention::Unknown(why)) => Some(format!(
-            "lmgw could not tell whether llama.cpp decodes this projector's images with \
-             non-causal attention ({why}), so this is a precaution: if it does, a whole image \
-             has to fit in one physical batch"
-        )),
-        Some(ImageAttention::Causal) | None => None,
-    };
-    let floor = image.as_ref().and_then(|a| projector_ubatch_floor(a, &[]));
-    // Only when the floor is above llama.cpp's default ubatch. A causal
-    // projector splits an image across physical batches, and Gemma 3's fixed
-    // 256 tokens fit the default; a larger ubatch would only cost VRAM.
-    if let (Some(lead), Some((need, basis))) = (lead, floor) {
-        if need > LLAMA_DEFAULT_UBATCH {
-            let batch_note = if need > LLAMA_DEFAULT_BATCH {
-                String::new()
-            } else {
-                format!(". The default batch_size ({LLAMA_DEFAULT_BATCH}) already covers it")
-            };
-            put(
-                "ubatch_size",
-                json!(need),
-                format!(
-                    "{lead}, and at llama.cpp's default of {LLAMA_DEFAULT_UBATCH} a larger image \
-                     aborts the server with GGML_ASSERT \"non-causal attention requires n_ubatch \
-                     >= n_tokens\". The projector's largest image sets the number: {basis}. No \
-                     higher, because every ubatch token costs compute buffer in VRAM{batch_note}"
-                ),
-            );
-            if need > LLAMA_DEFAULT_BATCH {
-                put(
-                    "batch_size",
-                    json!(need),
-                    format!(
-                        "at least ubatch_size: mtmd hands an image over in pieces of at most \
-                         batch_size tokens, and llama.cpp's default of {LLAMA_DEFAULT_BATCH} \
-                         would split this projector's largest image"
-                    ),
-                );
-            }
-        }
-    }
+    projector_floor::plan(image.as_ref(), (None, None), &mut put);
 
     match (&drafter, spec_type_for(&s)) {
         (Some((path, ds)), _) => {
@@ -1837,26 +1480,17 @@ pub async fn local_model_plan(
         );
     }
 
-    let runtime = if probe {
-        probe_runtime(state, &rel, class).await
-    } else {
-        dto::RuntimeProbe::unchecked("probe not requested")
-    };
-    if runtime.supported == Some(false) {
-        warnings.push(format!(
-            "the running llama.cpp build cannot load this model: {}",
-            runtime
-                .reason
-                .as_deref()
-                .unwrap_or("see lmgw__model_inspect")
-        ));
-    }
-    if mmproj.is_some() && !runtime.checked {
+    if mmproj.is_some() {
         warnings.push(
-            "projector support was not verified — run lmgw__local_model_test \
+            "projector support is not verified by the plan — run lmgw__local_model_test \
              after applying"
                 .into(),
         );
+    }
+    // Owner finding 3: a plan that cannot fit the card says so, with the
+    // largest context that does; the trained context stays the plan.
+    if let Some(w) = plan_fit::chat(state, &snap, &dir, &rel, &s, &params).await {
+        warnings.push(w);
     }
 
     // Is this file already configured? If so the caller is repairing a model,
@@ -1909,7 +1543,6 @@ pub async fn local_model_plan(
         "params": params,
         "rationale": why,
         "warnings": warnings,
-        "runtime": runtime,
         "configured_as": configured,
         "configured_note": "Models already serving this GGUF, and how they differ \
                             from the plan. Values the plan read out of the file \
@@ -1923,319 +1556,6 @@ pub async fn local_model_plan(
     }))
 }
 
-/// The aux-class plan: what `lmgw__aux_model_set action=create` takes for an
-/// embedding or rerank GGUF, read from its header.
-///
-/// `found_in` is the directory the file was resolved against. An aux row can
-/// only address the aux models dir, so a file found in the chat dir gets the
-/// parameters *and* a warning that says where the file has to be — the exact
-/// trap that had an agent hard-linking GGUFs between the two trees.
-#[allow(clippy::too_many_arguments)]
-async fn aux_plan(
-    state: &SharedState,
-    snap: &Snapshot,
-    found_in: Class,
-    dir: &str,
-    rel: &str,
-    s: &ModelSummary,
-    kind: Option<AuxKind>,
-    probe: bool,
-) -> Result<Value, String> {
-    let mut warnings: Vec<String> = Vec::new();
-    let kind = kind.unwrap_or_else(|| {
-        warnings.push(format!(
-            "{rel} looks like a chat model (no pooling_type or classifier head in its \
-             header{}) — served with --embeddings it pools its hidden states, which works \
-             but is not what a trained embedder produces; fine only if that is the intent",
-            if s.has_chat_template {
-                ", and a chat template"
-            } else {
-                ""
-            }
-        ));
-        AuxKind::Embed
-    });
-
-    let mut params = serde_json::Map::new();
-    let mut why = serde_json::Map::new();
-    let mut put = |k: &str, v: Value, reason: String| {
-        params.insert(k.to_string(), v);
-        why.insert(k.to_string(), Value::String(reason));
-    };
-    put(
-        "gguf_path",
-        json!(rel),
-        "the file this plan was made for".into(),
-    );
-    let pooling = s.pooling_type.and_then(gguf::pooling_name);
-    match kind {
-        AuxKind::Rerank => put(
-            "kind",
-            json!("rerank"),
-            if s.has_classifier_head {
-                "the header carries a classifier head (cls.output), a cross-encoder that \
-                 scores query/document pairs — served with --reranking on /v1/rerank"
-                    .into()
-            } else {
-                "the header declares pooling_type 'rank' — served with --reranking on \
-                 /v1/rerank; never set pooling on a rerank model"
-                    .into()
-            },
-        ),
-        AuxKind::Embed => {
-            put(
-                "kind",
-                json!("embed"),
-                match pooling {
-                    Some(p) => format!(
-                        "the header declares pooling_type '{p}': an encoder with no LM head, \
-                         served with --embeddings on /v1/embeddings"
-                    ),
-                    None => "an encoder architecture, served with --embeddings on \
-                             /v1/embeddings"
-                        .into(),
-                },
-            );
-            match pooling {
-                Some(p) if p != "none" => put(
-                    "pooling",
-                    json!(p),
-                    format!(
-                        "the pooling the converter recorded ('{p}'); the model card's vectors \
-                         assume it, and a different one retrieves noise while looking fine"
-                    ),
-                ),
-                Some(_) => warnings.push(
-                    "the header declares pooling 'none' — leave pooling unset and llama-server \
-                     picks the model's default"
-                        .into(),
-                ),
-                None => warnings.push(
-                    "the header declares no pooling_type — leave pooling unset unless the \
-                     model card names one (mean for most BERT-style encoders)"
-                        .into(),
-                ),
-            }
-        }
-    }
-    match s.context_length {
-        Some(c) => put(
-            "ctx_size",
-            json!(c),
-            format!(
-                "the model's trained context ({c}) — its real ceiling; inputs longer than \
-                 this are truncated, not rejected, so do not size it down"
-            ),
-        ),
-        None => warnings.push(
-            "the GGUF declares no context length; leave ctx_size unset to take llama.cpp's \
-             default"
-                .into(),
-        ),
-    }
-
-    // A sibling projector (multimodal embedders such as Qwen3-VL-Embedding):
-    // aux rows have no mmproj field, it rides in the extra args as the
-    // absolute in-container path the argv renderer would otherwise write.
-    let parent = rel
-        .rsplit_once('/')
-        .map(|(d, _)| d.to_string())
-        .unwrap_or_default();
-    let siblings = {
-        let dir = dir.to_string();
-        tokio::task::spawn_blocking(move || crate::hf::scan_gguf_files(&dir))
-            .await
-            .map_err(|e| format!("scan panicked: {e}"))?
-    };
-    for cand in siblings {
-        if cand == rel || cand.rsplit_once('/').map(|(d, _)| d).unwrap_or("") != parent {
-            continue;
-        }
-        let Ok(cs) = summarize(std::path::Path::new(dir).join(&cand)).await else {
-            continue;
-        };
-        if role_of(&cs) == "mmproj" {
-            put(
-                "extra_args",
-                json!(format!("--mmproj /models/{cand}")),
-                format!(
-                    "sibling projector ({}), so the model can embed images; aux rows carry \
-                     it as an extra arg with the in-container /models/ path",
-                    cs.projector_type.as_deref().unwrap_or("vision")
-                ),
-            );
-            break;
-        }
-    }
-
-    // The location rule, said before anything else the caller might act on.
-    let mut apply_ready = true;
-    if found_in != Class::Aux {
-        apply_ready = false;
-        let aux_dir = models_dir_of(snap, Class::Aux);
-        let in_aux =
-            !aux_dir.trim().is_empty() && std::path::Path::new(&aux_dir).join(rel).is_file();
-        let downloads = store::list_hf_models(&state.db).await.unwrap_or_default();
-        let origin = downloads
-            .iter()
-            .find(|d| d.dest_path == rel && d.target == found_in.as_str());
-        let fetch = match origin {
-            Some(d) => format!(
-                "lmgw__hf_add repo={} file={} target=aux (tracked there and updatable by \
-                 lmgw__hf_set check_updates)",
-                d.repo, d.file
-            ),
-            None => "lmgw__hf_add … target=aux (tracked and updatable), or move the file into \
-                     the aux models dir"
-                .to_string(),
-        };
-        warnings.push(format!(
-            "{rel} is a {} model, which the aux class serves — but it was found in the {} \
-             models dir, and an aux row can only address files under the aux models dir \
-             ({}). {} Do not hard-link or copy it across, and do not create a chat-class \
-             row for it: a chat row cannot embed, and the file would fall out of the \
-             updater's view.",
-            kind.as_str(),
-            found_in.as_str(),
-            if aux_dir.trim().is_empty() {
-                "not configured — Settings → Runtimes → Aux".to_string()
-            } else {
-                aux_dir.clone()
-            },
-            if in_aux {
-                "The same path already exists there: plan again with target=aux and create \
-                 the row from that."
-                    .to_string()
-            } else {
-                format!("Get it there with {fetch}, then plan again with target=aux.")
-            }
-        ));
-    }
-
-    let runtime = if probe {
-        probe_runtime(state, rel, found_in).await
-    } else {
-        dto::RuntimeProbe::unchecked("probe not requested")
-    };
-    if runtime.supported == Some(false) {
-        warnings.push(format!(
-            "the running llama.cpp build cannot load this model: {}",
-            runtime
-                .reason
-                .as_deref()
-                .unwrap_or("see lmgw__model_inspect")
-        ));
-    }
-
-    // Already configured as an aux model? Then this is a repair, and the
-    // delta is what the caller needs — same contract as the chat plan.
-    let configured: Vec<Value> = if found_in == Class::Aux {
-        snap.aux_models
-            .iter()
-            .filter(|m| m.gguf_path == rel)
-            .map(|row| aux_plan_diff(row, &params, &why))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let repairs = configured
-        .iter()
-        .filter(|c| c["in_sync"] == Value::Bool(false))
-        .count();
-    let model_id = suggest_model_id(rel);
-    let next_step = if !apply_ready {
-        "get the file into the aux models dir (see warnings), then run lmgw__local_model_plan \
-         again with target=aux"
-            .to_string()
-    } else if configured.is_empty() {
-        format!(
-            "pass these to lmgw__aux_model_set action=create (adding model_id, e.g. \
-             '{model_id}'), then lmgw__local_model_test model_id=<id> target=aux — the test \
-             embeds (or reranks) a probe input, since this model cannot generate"
-        )
-    } else if repairs == 0 {
-        "every aux model already using this GGUF matches this plan; nothing to do".to_string()
-    } else {
-        format!(
-            "this GGUF is already configured — pass the ready-made configured_as[].apply \
-             object ({repairs} of them) to lmgw__aux_model_set, then lmgw__local_model_test \
-             with target=aux"
-        )
-    };
-
-    Ok(json!({
-        "class": "aux",
-        "target": found_in.as_str(),
-        "apply_ready": apply_ready,
-        "model_id": model_id,
-        "params": params,
-        "rationale": why,
-        "warnings": warnings,
-        "runtime": runtime,
-        "configured_as": configured,
-        "configured_note": "Aux models already serving this GGUF, and how they differ from \
-                            the plan. Placement flags (--n-gpu-layers 0 for a CPU-only \
-                            twin, --threads) live in extra_args and are never proposed \
-                            here, so a deliberate CPU variant is not a difference.",
-        "next_step": next_step,
-    }))
-}
-
-/// The delta between an aux plan and a configured aux row on the same GGUF,
-/// as a patch for `lmgw__aux_model_set`. Only the fields the plan proposes
-/// are compared; `extra_args` only when the plan found a projector the row
-/// does not name, since the row's args legitimately carry placement flags
-/// the plan knows nothing about.
-fn aux_plan_diff(
-    row: &crate::config::AuxModel,
-    params: &serde_json::Map<String, Value>,
-    why: &serde_json::Map<String, Value>,
-) -> Value {
-    let current = |field: &str| -> Value {
-        match field {
-            "gguf_path" => json!(row.gguf_path),
-            "kind" => json!(row.kind.as_str()),
-            "pooling" => json!(row.pooling),
-            "ctx_size" => json!(row.ctx_size),
-            "extra_args" => json!(crate::runtime::argv::args_to_lines(&row.args)),
-            _ => Value::Null,
-        }
-    };
-    let mut changes: Vec<Value> = Vec::new();
-    let mut patch = serde_json::Map::new();
-    for (field, planned) in params {
-        let cur = current(field);
-        let differs = match field.as_str() {
-            "extra_args" => !row.args.iter().any(|a| a.contains("mmproj")),
-            _ => &cur != planned,
-        };
-        if !differs {
-            continue;
-        }
-        changes.push(json!({
-            "field": field,
-            "current": cur,
-            "planned": planned,
-            "why": why.get(field).cloned().unwrap_or(Value::Null),
-        }));
-        patch.insert(field.clone(), planned.clone());
-    }
-    let in_sync = changes.is_empty();
-    let mut out = serde_json::Map::new();
-    out.insert("model_id".into(), json!(row.model_id));
-    out.insert("id".into(), json!(row.id));
-    out.insert("enabled".into(), json!(row.enabled));
-    out.insert("in_sync".into(), json!(in_sync));
-    out.insert("change".into(), json!(changes));
-    if !in_sync {
-        patch.insert("action".into(), json!("update"));
-        patch.insert("model_id".into(), json!(row.model_id));
-        patch.remove("gguf_path");
-        out.insert("apply".into(), Value::Object(patch));
-    }
-    Value::Object(out)
-}
-
 /// What a load test asks the model to do — the one thing its class can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
@@ -2245,6 +1565,9 @@ enum Probe {
     Embed,
     /// Scores for two documents from `/rerank`.
     Rerank,
+    /// One `choice` question from `/systemone` (decision-models design
+    /// §3.7, [`decision::probe_request`]).
+    Decide,
 }
 
 impl Probe {
@@ -2253,6 +1576,7 @@ impl Probe {
             Self::Generate => "generate",
             Self::Embed => "embed",
             Self::Rerank => "rerank",
+            Self::Decide => "decide",
         }
     }
 }
@@ -2306,7 +1630,7 @@ fn capitalize(s: &str) -> String {
 pub(crate) fn load_failure_hint(haystack: &str) -> Option<&'static str> {
     Some(if haystack.contains("unknown model architecture") {
         "the llama.cpp build in this container predates the model's architecture \
-         — update the container image; the model config itself is fine"
+         — update the container image (Backends page) or pick a newer one for this row; the model config itself is fine"
     } else if haystack.contains("mtp layers") {
         "spec_type is draft-mtp but this GGUF has no MTP layers — clear spec_type, \
          or point draft_gguf_path at a real drafter"
@@ -2403,6 +1727,7 @@ pub async fn local_model_test(
             let probe = match row.kind {
                 AuxKind::Embed => Probe::Embed,
                 AuxKind::Rerank => Probe::Rerank,
+                AuxKind::Decision => Probe::Decide,
             };
             (snap.aux_local_route(model_id), probe, row.enabled, None)
         }
@@ -2495,7 +1820,7 @@ pub async fn local_model_test(
             })?;
             lease
         }
-        Probe::Embed | Probe::Rerank => crate::gate::TurnLease::unguarded(),
+        Probe::Embed | Probe::Rerank | Probe::Decide => crate::gate::TurnLease::unguarded(),
     };
     // Deliberately long: this is the one call that pays the real cost of a
     // cold load, and a 16GB model coming off a spinning disk into VRAM can
@@ -2505,7 +1830,7 @@ pub async fn local_model_test(
     // like every other forward: a smoke test that reported "broken" for a
     // container that had died since it was acquired would be reporting on
     // lmgw, not on the model. Only the generation probe's lease can carry a
-    // ladder, so the embedding and rerank probes are plain sends.
+    // ladder, so the embedding, rerank and decision probes are plain sends.
     let sent = crate::gate::send_gated(
         state,
         Some(&hold),
@@ -2520,38 +1845,30 @@ pub async fn local_model_test(
         None,
         |r| {
             let base = r.upstream.base().to_string();
-            let (path, body) = match probe {
-                Probe::Generate => (
-                    "/chat/completions",
-                    json!({
-                        "model": model_id,
-                        "messages": [{ "role": "user", "content": "hi" }],
-                        "max_tokens": 1,
-                        "stream": false,
-                    }),
-                ),
-                Probe::Embed => (
-                    "/embeddings",
-                    json!({ "model": model_id, "input": "lmgw load test" }),
-                ),
-                Probe::Rerank => (
-                    "/rerank",
-                    json!({
-                        "model": model_id,
-                        "query": "what is lmgw?",
-                        "documents": [
-                            "lmgw is a self-hosted LLM API gateway.",
-                            "Bananas are yellow when ripe."
-                        ],
-                        "top_n": 2,
-                    }),
-                ),
+            let post = |path: &str| state.http.post(format!("{base}{path}"));
+            let rb = match probe {
+                Probe::Generate => post("/chat/completions").json(&json!({
+                    "model": model_id,
+                    "messages": [{ "role": "user", "content": "hi" }],
+                    "max_tokens": 1,
+                    "stream": false,
+                })),
+                Probe::Embed => post("/embeddings")
+                    .json(&json!({ "model": model_id, "input": "lmgw load test" })),
+                Probe::Rerank => post("/rerank").json(&json!({
+                    "model": model_id,
+                    "query": "what is lmgw?",
+                    "documents": [
+                        "lmgw is a self-hosted LLM API gateway.",
+                        "Bananas are yellow when ripe."
+                    ],
+                    "top_n": 2,
+                })),
+                // The typed request, not a `Value`, which would sort the
+                // question's options (decision-models design §2.1, §3.7).
+                Probe::Decide => post("/systemone").json(&decision::probe_request(model_id)),
             };
-            Ok(state
-                .http
-                .post(format!("{base}{path}"))
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(300)))
+            Ok(rb.timeout(std::time::Duration::from_secs(300)))
         },
     )
     .await;
@@ -2573,79 +1890,98 @@ pub async fn local_model_test(
     // the failure this probe exists to catch.
     let mut dimensions = None;
     let mut scored = None;
+    let mut decided: Option<decision::Decided> = None;
+    // The decision probe got an HTTP answer, so its container is there to
+    // read its facts from.
+    let mut answered = false;
     // Whether the probe's answer was read to its end — the generation probe's
     // lease is released at once then, and only once llama-server lets go of
     // the slot otherwise (`gate::pool`, second review, finding 6).
     let mut read_whole = false;
-    let (ok, detail) = match resp {
-        Ok(r) if r.status().is_success() => match probe {
-            Probe::Generate => {
-                read_whole = r.bytes().await.is_ok();
-                (true, String::new())
-            }
-            Probe::Embed => match r.json::<Value>().await {
-                Ok(body) => {
-                    let vec = body["data"][0]["embedding"].as_array().cloned();
-                    match vec {
-                        Some(v) if !v.is_empty() => {
-                            let nonzero = v.iter().any(|x| x.as_f64().is_some_and(|f| f != 0.0));
-                            dimensions = Some(v.len());
-                            if nonzero {
-                                (true, String::new())
-                            } else {
-                                (
-                                    false,
-                                    format!(
-                                        "the model answered with an all-zero {}-dimensional \
-                                         vector",
-                                        v.len()
-                                    ),
-                                )
-                            }
-                        }
-                        _ => (
-                            false,
-                            format!(
-                                "HTTP 200 but no embedding in the response: {}",
-                                body.to_string().chars().take(300).collect::<String>()
-                            ),
-                        ),
-                    }
-                }
-                Err(e) => (false, format!("HTTP 200 but the body is not JSON: {e}")),
-            },
-            Probe::Rerank => match r.json::<Value>().await {
-                Ok(body) => match body["results"].as_array() {
-                    Some(results)
-                        if !results.is_empty()
-                            && results.iter().all(|x| x["relevance_score"].is_number()) =>
-                    {
-                        scored = Some(results.len());
-                        (true, String::new())
-                    }
-                    _ => (
-                        false,
-                        format!(
-                            "HTTP 200 but no relevance scores in the response: {}",
-                            body.to_string().chars().take(300).collect::<String>()
-                        ),
-                    ),
-                },
-                Err(e) => (false, format!("HTTP 200 but the body is not JSON: {e}")),
-            },
-        },
-        Ok(r) => {
+    let (ok, detail) = match (probe, resp) {
+        (_, Err(e)) => (false, e.to_string()),
+        // Its own reader (decision-models design §3.6, §3.7), whatever the
+        // status: a 404 is an image without the route.
+        (Probe::Decide, Ok(r)) => {
+            answered = true;
+            let read = decision::read_answer(&snap, model_id, r).await;
+            read_whole = read.read_whole;
+            decided = read.decided;
+            (read.ok, read.detail)
+        }
+        (_, Ok(r)) if !r.status().is_success() => {
             let code = r.status().as_u16();
             let body = r.text().await;
             read_whole = body.is_ok();
             let body = body.unwrap_or_default();
             (false, format!("HTTP {code}: {}", body.trim()))
         }
-        Err(e) => (false, e.to_string()),
+        (Probe::Generate, Ok(r)) => {
+            read_whole = r.bytes().await.is_ok();
+            (true, String::new())
+        }
+        (Probe::Embed, Ok(r)) => match r.json::<Value>().await {
+            Ok(body) => {
+                let vec = body["data"][0]["embedding"].as_array().cloned();
+                match vec {
+                    Some(v) if !v.is_empty() => {
+                        let nonzero = v.iter().any(|x| x.as_f64().is_some_and(|f| f != 0.0));
+                        dimensions = Some(v.len());
+                        if nonzero {
+                            (true, String::new())
+                        } else {
+                            (
+                                false,
+                                format!(
+                                    "the model answered with an all-zero {}-dimensional \
+                                         vector",
+                                    v.len()
+                                ),
+                            )
+                        }
+                    }
+                    _ => (
+                        false,
+                        format!(
+                            "HTTP 200 but no embedding in the response: {}",
+                            body.to_string().chars().take(300).collect::<String>()
+                        ),
+                    ),
+                }
+            }
+            Err(e) => (false, format!("HTTP 200 but the body is not JSON: {e}")),
+        },
+        (Probe::Rerank, Ok(r)) => match r.json::<Value>().await {
+            Ok(body) => match body["results"].as_array() {
+                Some(results)
+                    if !results.is_empty()
+                        && results.iter().all(|x| x["relevance_score"].is_number()) =>
+                {
+                    scored = Some(results.len());
+                    (true, String::new())
+                }
+                _ => (
+                    false,
+                    format!(
+                        "HTTP 200 but no relevance scores in the response: {}",
+                        body.to_string().chars().take(300).collect::<String>()
+                    ),
+                ),
+            },
+            Err(e) => (false, format!("HTTP 200 but the body is not JSON: {e}")),
+        },
     };
     // The probe's answer is read (or failed): it no longer occupies the pool.
     lease.end(read_whole);
+    // A decision row's test refreshes what its entry says about the server
+    // (decision-models design §3.6, §3.7): `/props` and the route check, so a
+    // warning left by a start goes once the route answers, or stays named.
+    // Not after a transport error: there is no server to ask.
+    if answered {
+        decision::refresh_facts(state, &snap, &hold).await;
+    }
     if ok {
+        let decided = decided.map(|d| (d.input_tokens, d.answer));
         let passed = dto::ModelTestPassed {
             ok: true,
             loaded: true,
@@ -2655,6 +1991,8 @@ pub async fn local_model_test(
             latency_ms,
             dimensions,
             scored,
+            input_tokens: decided.as_ref().map(|(t, _)| *t),
+            answer: decided.map(|(_, a)| Box::new(a)),
         };
         // The running-build cross-check (design §3.1's live-verified gloss,
         // §8 item 9): only for the chat class, since `/props`'
@@ -2700,10 +2038,11 @@ pub async fn local_model_test(
         Err(_) => Vec::new(),
     };
 
-    // A chat row whose file is really an encoder: the classic misfiling, and
-    // worth naming over any generic hint, because no amount of parameter
-    // tuning makes an embedding model generate.
-    let misfiled_encoder = if class == Class::Chat && probe == Probe::Generate {
+    // A chat row whose file is really an aux model (an encoder, a reranker,
+    // a decision model): the classic misfiling, and worth naming over any
+    // generic hint, because no amount of parameter tuning makes it a chat
+    // model.
+    let misfiled = if class == Class::Chat && probe == Probe::Generate {
         let dir = models_dir_of(&snap, Class::Chat);
         let rel = snap
             .local_models
@@ -2711,19 +2050,17 @@ pub async fn local_model_test(
             .find(|m| m.model_id == model_id)
             .map(|m| m.gguf_path.clone())
             .unwrap_or_default();
-        match summarize(std::path::Path::new(&dir).join(&rel)).await {
-            Ok(s) => class_for(&s).0 == "aux",
-            Err(_) => false,
-        }
+        summarize(std::path::Path::new(&dir).join(&rel))
+            .await
+            .ok()
+            .and_then(|s| aux_file_on_chat_row("this GGUF", &s))
     } else {
-        false
+        None
     };
 
     let haystack = format!("{detail}\n{}", log_lines.join("\n")).to_ascii_lowercase();
-    let hint = if misfiled_encoder {
-        "this GGUF is an embedding/rerank model (its header declares a pooling_type or a \
-         classifier head) — it has no LM head to generate with. Serve it as an aux model \
-         instead: lmgw__local_model_plan with target=aux, then lmgw__aux_model_set"
+    let hint: &str = if let Some(misfiled) = misfiled.as_deref() {
+        misfiled
     } else if let Some(hint) = load_failure_hint(&haystack) {
         hint
     } else if probe == Probe::Embed && haystack.contains("all-zero") {
@@ -2736,7 +2073,7 @@ pub async fn local_model_test(
     } else if probe != Probe::Generate
         && (haystack.contains("not supported") || haystack.contains("only supported"))
     {
-        "the server refused this endpoint — the row's kind (embed / rerank) decides which \
+        "the server refused this endpoint — the row's kind (embed / rerank / decision) decides which \
          flag it starts with; check it with lmgw__local_model_get"
     } else {
         "see container_log below, and lmgw__local_model_get for the exact command \
@@ -3335,12 +2672,8 @@ async fn props_cross_check(
     let derived = capabilities::exposed::derived_for_local(state, model).await;
     let caps = derived.capabilities.as_ref();
     let static_caps = dto::StaticCaps {
-        reasoning: caps
-            .and_then(|c| c.reasoning.as_ref())
-            .and_then(|v| serde_json::to_value(v).ok()),
-        tool_calls: caps
-            .and_then(|c| c.tool_calls.as_ref())
-            .and_then(|v| serde_json::to_value(v).ok()),
+        reasoning: caps.and_then(|c| c.reasoning.clone()),
+        tool_calls: caps.and_then(|c| c.tool_calls.clone()),
         input_modalities: caps.and_then(|c| c.input_modalities.clone()),
     };
 
@@ -3583,195 +2916,6 @@ mod tests {
         proj.is_mmproj = true;
         assert_eq!(role_of(&proj), "mmproj");
         assert_eq!(role_of(&ModelSummary::default()), "unknown");
-    }
-
-    /// Verified against a live container: without `--port` the probe exits in
-    /// 0.2s with "couldn't bind HTTP server socket" — binding happens before
-    /// model loading — so every architecture would be reported unsupported.
-    #[test]
-    fn the_probe_binds_its_own_port_and_costs_nothing_to_load() {
-        let joined = probe_args("a/b.gguf").join(" ");
-        assert!(joined.contains("--port 0"), "{joined}");
-        assert!(joined.contains("--host 127.0.0.1"), "{joined}");
-        assert!(joined.contains("--model /models/a/b.gguf"), "{joined}");
-        // Costs nothing to load: no GPU offload, minimal context, no warmup.
-        assert!(joined.contains("--n-gpu-layers 0"), "{joined}");
-        assert!(joined.contains("--no-warmup"), "{joined}");
-    }
-
-    /// The probe container mounts the models dir the same way a model's own
-    /// container does (§6: unlabeled mount + `label=disable`), because a
-    /// probe that cannot read the GGUF reports every model as unloadable on
-    /// an SELinux-enforcing box.
-    #[test]
-    fn the_probe_mounts_the_models_dir_read_only() {
-        let mounts = probe_mounts("/srv/models/");
-        assert_eq!(
-            mounts,
-            vec![
-                "-v".to_string(),
-                "/srv/models:/models:ro".to_string(),
-                "--security-opt".to_string(),
-                "label=disable".to_string(),
-            ]
-        );
-    }
-
-    /// The model's run args come first, then the models dir — and a row's own
-    /// override replaces the class's rather than adding to it.
-    #[test]
-    fn the_probe_runs_with_the_resolved_run_args_and_the_models_dir() {
-        let gpu = vec!["--device".to_string(), "nvidia.com/gpu=all".to_string()];
-        assert_eq!(
-            probe_run_args(&gpu, "/srv/models"),
-            vec![
-                "--device".to_string(),
-                "nvidia.com/gpu=all".to_string(),
-                "-e".to_string(),
-                "CUDA_VISIBLE_DEVICES=".to_string(),
-                "-v".to_string(),
-                "/srv/models:/models:ro".to_string(),
-                "--security-opt".to_string(),
-                "label=disable".to_string(),
-            ]
-        );
-        let mut snap = Snapshot::default();
-        snap.settings.router.image = "class-image".into();
-        snap.settings.router.extra_run_args = gpu.clone();
-        assert_eq!(
-            runtime_for_gguf(&snap, "a.gguf", Class::Chat),
-            ("class-image".to_string(), gpu.clone())
-        );
-        let mut row = row_with(json!({}), &[]);
-        row.gguf_path = "a.gguf".into();
-        row.image = Some("row-image".into());
-        row.extra_run_args = Some(vec!["--cpus".into(), "4".into()]);
-        snap.local_models.push(row);
-        assert_eq!(
-            runtime_for_gguf(&snap, "a.gguf", Class::Chat),
-            (
-                "row-image".to_string(),
-                vec!["--cpus".to_string(), "4".to_string()]
-            )
-        );
-    }
-
-    /// ik_llama.cpp installs `/llama-server` (on no `PATH`) and links
-    /// `libcuda.so.1` directly, so the probe has to find the binary through
-    /// the image's entrypoint and hand the container the GPU device — the
-    /// probe used to try only the two official paths with no run args, and
-    /// failed for every ik image.
-    #[tokio::test]
-    async fn the_arch_probe_finds_ik_llama_server_and_passes_the_gpu_run_args() {
-        use crate::runtime::registry::{CmdOutput, CommandRunner, Registry};
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Default)]
-        struct Fake {
-            calls: Mutex<Vec<Vec<String>>>,
-        }
-        #[async_trait::async_trait]
-        impl CommandRunner for Fake {
-            async fn run(&self, _p: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-                self.calls.lock().unwrap().push(args.to_vec());
-                let out = |status: i32, stdout: String, stderr: &str| CmdOutput {
-                    status,
-                    stdout,
-                    stderr: stderr.to_string(),
-                };
-                Ok(match args[0].as_str() {
-                    "image" => out(0, format!("{} [\"/llama-server\"]\n", "a".repeat(64)), ""),
-                    "run" => out(
-                        1,
-                        String::new(),
-                        "llama_model_load: error loading model: unknown model architecture: \
-                         'muse-glimmer'",
-                    ),
-                    _ => out(0, String::new(), ""),
-                })
-            }
-        }
-
-        let state = crate::state::AppState::init_for_tests().await.unwrap();
-        let fake = Arc::new(Fake::default());
-        state.set_runtime_for_tests(Arc::new(Registry::new(
-            fake.clone(),
-            reqwest::Client::new(),
-        )));
-        let mut settings = crate::config::Settings {
-            self_admin: crate::config::SelfAdmin::Full,
-            ..Default::default()
-        };
-        settings.router.models_dir = "/srv/models".into();
-        settings.router.image = "localhost/llama-server-cuda:ik-latest".into();
-        settings.router.extra_run_args = vec!["--device".into(), "nvidia.com/gpu=all".into()];
-        crate::store::save_settings(&state.db, &settings)
-            .await
-            .unwrap();
-        state.reload_snapshot().await.unwrap();
-
-        let verdict = probe_runtime(&state, "x/w.gguf", Class::Chat).await;
-        assert!(verdict.checked, "{verdict:?}");
-        assert_eq!(verdict.supported, Some(false), "{verdict:?}");
-
-        let calls = fake.calls.lock().unwrap().clone();
-        let runs: Vec<&Vec<String>> = calls.iter().filter(|a| a[0] == "run").collect();
-        assert_eq!(runs.len(), 1, "the entrypoint answered first: {calls:?}");
-        let run = runs[0];
-        let pair = |a: &str, b: &str| run.windows(2).any(|w| w[0] == a && w[1] == b);
-        assert!(pair("--entrypoint", "/llama-server"), "{run:?}");
-        assert!(pair("--device", "nvidia.com/gpu=all"), "{run:?}");
-        assert!(pair("-v", "/srv/models:/models:ro"), "{run:?}");
-        assert!(
-            pair("-e", "CUDA_VISIBLE_DEVICES="),
-            "the device libraries, but no device: {run:?}"
-        );
-
-        // Under the GPU hold the probe is deferred: nothing is started.
-        let mut held = settings.clone();
-        held.hold.active = true;
-        crate::store::save_settings(&state.db, &held).await.unwrap();
-        state.reload_snapshot().await.unwrap();
-        fake.calls.lock().unwrap().clear();
-        let verdict = probe_runtime(&state, "x/w.gguf", Class::Chat).await;
-        assert!(!verdict.checked, "{verdict:?}");
-        assert!(verdict.reason.unwrap().contains("GPU hold"));
-        assert!(fake.calls.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn probe_output_is_classified_by_the_architecture_check() {
-        let unknown = classify_probe(
-            "0.00.712 E llama_model_load: error loading model: unknown model architecture: 'muse-glimmer'\n\
-             0.00.712 E llama_model_load_from_file_impl: failed to load model",
-        );
-        assert_eq!(unknown.supported, Some(false));
-        assert!(unknown.reason.unwrap().contains("muse-glimmer"));
-        assert!(unknown.hint.unwrap().contains("container image"));
-
-        let clip = classify_probe("E mtmd: Failed to load CLIP model from /models/mmproj.gguf");
-        assert_eq!(clip.supported, Some(false));
-
-        // Progress past the architecture check is a pass, even mid-load.
-        let fine = classify_probe(
-            "load_tensors: loading model tensors\nllama_context: constructing context",
-        );
-        assert_eq!(fine.supported, Some(true));
-
-        // A crash counts only past the check (ik without a visible GPU
-        // segfaults after printing the model's metadata).
-        let ik = "llm_load_print_meta: arch             = qwen35\nLayer 24: 198.93 MiB";
-        assert_eq!(classify_exit(ik, 139).supported, Some(true));
-        let early = classify_exit("ggml_cuda_init: failed to initialize CUDA", 139);
-        assert!(!early.checked, "{early:?}");
-        assert_eq!(
-            classify_exit("error loading model: unknown model architecture: 'x'", 1).supported,
-            Some(false)
-        );
-        assert_eq!(
-            classify_exit("load_tensors: loading", 0).supported,
-            Some(true)
-        );
     }
 
     // -- the batch a projector needs -----------------------------------------
@@ -4207,12 +3351,50 @@ mod tests {
     }
 
     fn changed_fields(d: &Value) -> Vec<&str> {
+        typed(d);
         d["change"]
             .as_array()
             .unwrap()
             .iter()
             .map(|c| c["field"].as_str().unwrap())
             .collect()
+    }
+
+    /// `d` read into the api-types `ConfiguredAs` the editors fill from,
+    /// which must hold it whole.
+    fn typed(d: &Value) -> dto::ConfiguredAs {
+        let t: dto::ConfiguredAs =
+            serde_json::from_value(d.clone()).unwrap_or_else(|e| panic!("{e}: {d}"));
+        assert_eq!(serde_json::to_value(&t).unwrap(), *d, "ConfiguredAs drifts");
+        t
+    }
+
+    /// A chat row's comparison, `unset` and `apply.clear` included, is the
+    /// typed `ConfiguredAs`: speculation its files cannot support is cleared.
+    #[test]
+    fn a_chat_row_s_comparison_reads_as_the_typed_configured_as() {
+        let none = serde_json::Map::new();
+        let row = row_with(
+            json!({ "spec_type": "draft-mtp", "spec_draft_n_max": 3 }),
+            &[],
+        );
+        let t = typed(&plan_diff(&row, &none, &none, false, None));
+        assert!(!t.in_sync);
+        let unset = t.unset.unwrap();
+        assert_eq!(
+            unset.iter().map(|u| u.field.as_str()).collect::<Vec<_>>(),
+            ["spec_type", "spec_draft_n_max"]
+        );
+        let clear = t.apply.unwrap()["clear"].as_str().unwrap().to_string();
+        assert_eq!(clear, "spec_type,spec_draft_n_max");
+        let synced = typed(&plan_diff(
+            &row_with(json!({}), &[]),
+            &none,
+            &none,
+            false,
+            None,
+        ));
+        assert!(synced.in_sync && synced.apply.is_none() && synced.change.is_empty());
     }
 
     #[test]

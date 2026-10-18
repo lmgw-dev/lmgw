@@ -236,6 +236,21 @@ pub enum ServerEvent {
     #[serde(rename = "rate_limits.updated")]
     RateLimitsUpdated { rate_limits: Vec<Value> },
 
+    // -- A WebRTC call's output buffer (calls design §6.2) ---------------
+    // OpenAI's own WebRTC events, on every call; never on a WebSocket,
+    // whose client owns its playback buffer.
+    /// The response's first audio frame was sent (the call's frame clock).
+    #[serde(rename = "output_audio_buffer.started")]
+    OutputAudioBufferStarted(lmgw_api_types::realtime::OutputAudioBuffer),
+    /// Right after the `response.done` of a response whose audio played to
+    /// its end (the writer).
+    #[serde(rename = "output_audio_buffer.stopped")]
+    OutputAudioBufferStopped(lmgw_api_types::realtime::OutputAudioBuffer),
+    /// Instead of `stopped`, after the `response.done` of a response whose
+    /// audio was cut: the barge-in verdict (C12).
+    #[serde(rename = "output_audio_buffer.cleared")]
+    OutputAudioBufferCleared(lmgw_api_types::realtime::OutputAudioBuffer),
+
     // -- lmgw's own (chat-voice design §8.7) ------------------------------
     // Sent by a session bound to a chat thread only: the binding is the
     // opt-in, so no stock client ever sees one.
@@ -253,7 +268,7 @@ pub enum ServerEvent {
     LmgwChatUser {
         message_id: i64,
         content: String,
-        voice: Value,
+        voice: Box<lmgw_api_types::chat_threads::MessageVoice>,
         /// The response whose turns it holds, when that response heard them
         /// as audio (voice-audio-input design §3.3): its row is written
         /// once they are transcribed, racing the reply's release, so the
@@ -276,11 +291,7 @@ pub enum ServerEvent {
     /// `{removed: true}` or `{skipped, voice}` (`voice` when the finalize
     /// wrote it).
     #[serde(rename = "lmgw.chat.reply")]
-    LmgwChatReply {
-        message_id: i64,
-        #[serde(flatten)]
-        reply: Map<String, Value>,
-    },
+    LmgwChatReply(Box<lmgw_api_types::chat_voice::ChatReply>),
     /// A model's state (§4.3): `{stage, alias, state, ms, …}`.
     #[serde(rename = "lmgw.model.state")]
     LmgwModelState {
@@ -289,10 +300,7 @@ pub enum ServerEvent {
     },
     /// A response's timing line as data (§8.7), its served models with it.
     #[serde(rename = "lmgw.response.timing")]
-    LmgwResponseTiming {
-        #[serde(flatten)]
-        timing: Map<String, Value>,
-    },
+    LmgwResponseTiming(Box<lmgw_api_types::chat_threads::VoiceTiming>),
     /// The thread as a response re-read it, when that differs from what the
     /// session said of it (`session.lmgw.resolved.chat_thread`, which it
     /// replaces): a title its first spoken turn named, or its admin tools
@@ -325,6 +333,22 @@ pub enum ServerEvent {
         #[serde(flatten)]
         done: lmgw_api_types::chat_feed::TaskDone,
     },
+
+    // Sent on a WebRTC call bound to a Chat thread only (realtime calls
+    // design §6.4); a WebSocket session closes with its close codes instead.
+    /// `takeover=ask`, and the thread is held when the call's channel opens
+    /// (calls §2.8): `{held_by}`, instead of `session.created`.
+    #[serde(rename = "lmgw.session.bind_pending")]
+    LmgwSessionBindPending(lmgw_api_types::realtime::BindPending),
+    /// The last event before lmgw ends a bound call (calls §8.2): `{kind,
+    /// by, message}`.
+    #[serde(rename = "lmgw.session.closed")]
+    LmgwSessionClosed(lmgw_api_types::realtime::SessionClosed),
+    /// A bound call's response ran dry and pads with silence, or its audio
+    /// came again (calls §5.1, C22): `{response_id, starved}`, sent by the
+    /// call's frame clock in order with the transcript deltas.
+    #[serde(rename = "lmgw.output_audio.starved")]
+    LmgwOutputAudioStarved(lmgw_api_types::realtime::OutputAudioStarved),
 }
 
 impl ServerEvent {

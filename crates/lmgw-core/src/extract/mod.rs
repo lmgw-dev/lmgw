@@ -24,7 +24,9 @@ use bytes::Bytes;
 
 pub use office::{OfficeError, OfficeFormat, OfficeText};
 pub use pdf::{PdfClass, PdfError, PdfText};
-pub use sniff::{sniff, sniff_async, Kind, SniffError, Sniffed, ACCEPTED};
+pub use sniff::{
+    sniff, sniff_artifact, sniff_artifact_async, sniff_async, Kind, SniffError, Sniffed, ACCEPTED,
+};
 
 /// The text of a file, in the shape its kind gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]

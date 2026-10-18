@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{UpstreamModelsResponse, UpstreamView, UpstreamsResponse};
+use lmgw_api_types::{
+    RowSaved, UpstreamModelsResponse, UpstreamTested, UpstreamView, UpstreamsResponse,
+};
 use serde_json::{json, Value};
 
 use super::models::ModelsData;
@@ -93,18 +95,14 @@ impl Ctx {
     /// Enable, disable or delete; what the gateway serves changes with it.
     fn set(self, action: &'static str, id: i64) {
         spawn_local(async move {
-            match crate::api::post::<Value, _>(
+            match crate::api::post::<RowSaved, _>(
                 "/api/op/upstream_set",
                 &json!({ "action": action, "id": id }),
             )
             .await
             {
                 Ok(v) => {
-                    self.toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("done")
-                        .to_string());
+                    self.toasts.ok(v.message);
                     self.refresh_catalog.try_run(());
                     self.load();
                 }
@@ -162,6 +160,7 @@ pub fn Upstreams() -> impl IntoView {
                                         enabled: true,
                                         protocol: "openai".into(),
                                         kind: "generic".into(),
+                                        catalog_all_modalities: true,
                                         ..Default::default()
                                     }),
                                 )
@@ -264,8 +263,11 @@ fn UpRow(u: UpstreamView, ctx: Ctx) -> impl IntoView {
         // Read now: the row can be re-rendered while the test is out.
         let name = name.get_value();
         spawn_local(async move {
-            let res =
-                crate::api::post::<Value, _>("/api/op/upstream_test", &json!({ "id": id })).await;
+            let res = crate::api::post::<UpstreamTested, _>(
+                "/api/op/upstream_test",
+                &json!({ "id": id }),
+            )
+            .await;
             testing.set(false);
             match res {
                 // The count comes with the OK: a connection that works but
@@ -477,12 +479,13 @@ fn UpstreamForm(
     let expose_all = RwSignal::new(u.expose_all);
     let expose_prefix = RwSignal::new(u.expose_prefix.clone());
     let supports_responses = RwSignal::new(u.supports_responses);
+    let catalog_all_modalities = RwSignal::new(u.catalog_all_modalities);
     let enabled = RwSignal::new(u.enabled);
     let saving = RwSignal::new(false);
 
     // The kind follows the protocol into and out of llama.cpp (design §5):
     // the form always posts `kind`, so without the reset a switch away from
-    // llama_cpp would come back as the old openai + llama_server spelling.
+    // llama_cpp would post openai + llama_server, which the server refuses.
     Effect::new(move |prev: Option<String>| {
         let p = protocol.get();
         if let Some(prev) = prev {
@@ -494,6 +497,7 @@ fn UpstreamForm(
         p
     });
     let llama_cpp = move || protocol.with(|p| p == LLAMA_CPP);
+    let openai = move || protocol.with(|p| p == "openai");
 
     let protocol_opts = Signal::derive(|| {
         [
@@ -561,19 +565,17 @@ fn UpstreamForm(
             // Never on for llama_cpp (decision 19); the checkbox is hidden there.
             "supports_responses": supports_responses.get_untracked()
                 && protocol.with_untracked(|p| p != LLAMA_CPP),
+            // Read on an openai row only; kept as set on the others.
+            "catalog_all_modalities": catalog_all_modalities.get_untracked(),
             "enabled": enabled.get_untracked(),
         });
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/upstream_set_full", &body).await;
+            let res = crate::api::post::<RowSaved, _>("/api/op/upstream_set_full", &body).await;
             saving.set(false);
             match res {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                Ok(saved) => {
+                    toasts.ok(saved.message);
                     open.set(false);
                     on_saved();
                 }
@@ -653,6 +655,22 @@ fn UpstreamForm(
                         }
                     })
             }}
+            // OpenRouter lists its non-text models (decisions, embeddings,
+            // speech, images…) only when asked; Gemini's OpenAI-compatible
+            // endpoint refuses the question (decision-models design §6.2).
+            {move || {
+                openai()
+                    .then(|| {
+                        view! {
+                            <label class="row dim" style="gap:5px"
+                                title="GET …/models?output_modalities=all · off for an endpoint that refuses it, such as Gemini's OpenAI-compatible one">
+                                <input type="checkbox" prop:checked=move || catalog_all_modalities.get()
+                                    on:change=move |ev| catalog_all_modalities.set(event_target_checked(&ev))/>
+                                "list every output modality"
+                            </label>
+                        }
+                    })
+            }}
             <label class="row dim" style="gap:5px">
                 <input type="checkbox" prop:checked=move || enabled.get()
                     on:change=move |ev| enabled.set(event_target_checked(&ev))/>
@@ -701,7 +719,7 @@ mod tests {
             kind_after_protocol("anthropic", "llama_cpp", "audio_cpp"),
             "llama_server"
         );
-        // Leaving llama_cpp: never the old openai + llama_server spelling.
+        // Leaving llama_cpp: never openai + llama_server, which the server refuses.
         assert_eq!(
             kind_after_protocol("llama_cpp", "openai", "llama_server"),
             "generic"

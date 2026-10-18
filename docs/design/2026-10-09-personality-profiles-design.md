@@ -562,7 +562,7 @@ fast-forward. "∥" marks packages that share no file and run in parallel worktr
 ## Rejected
 
 - **Examples as user/assistant turns** (D5).
-- **Layering the persona over the thread prompt** (D3). The alternative, if vetoed: the thread
+- **Layering the persona over the thread prompt** (D3). The alternative: the thread
   prompt follows the persona as "This conversation's own instructions", which keeps the
   explainer's Markdown lines for text turns.
 - **Profile CRUD as `/api/op` ops.** Devices cannot reach `/api/op`, and the editor must work
@@ -573,8 +573,7 @@ fast-forward. "∥" marks packages that share no file and run in parallel worktr
 ## As built / review fixes (2026-10-09)
 
 The whole-feature review after the build found the points below; each fix changed behaviour as
-stated. Decisions marked **draft** were taken in the fix, not by the owner, and stand open to
-the owner's veto; R1, the `null` profile in exports and the profile frames a `resync` repeats
+stated. Decisions marked **draft** were taken in the fix, not by the owner, and stand; R1, the `null` profile in exports and the profile frames a `resync` repeats
 were decided by the owner on 2026-10-09 and are no longer open.
 
 - **R1. A device cannot steer the owner's admin tools through a profile** (D13, D22). A profile

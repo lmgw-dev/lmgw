@@ -4,6 +4,7 @@
 //! failed run's cost and tokens must not read lower than its rows.
 
 use super::*;
+use crate::erased::Erased;
 use crate::pricing::RowCost;
 
 /// Bills every call's row — tokens and a known cost — then fails it 5xx, as
@@ -12,22 +13,23 @@ struct BillsThenFails {
     calls: AtomicUsize,
 }
 
-#[async_trait]
 impl TurnRunner for BillsThenFails {
-    async fn run_turn(
-        &self,
-        _ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        _ir: &'a ChatRequest,
         _deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        sink.billed(&Usage {
-            prompt_tokens: Some(10),
-            completion_tokens: Some(0),
-            ..Default::default()
-        });
-        sink.billed_cost(RowCost::Priced(100));
-        Err(upstream_down())
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            sink.billed(&Usage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(0),
+                ..Default::default()
+            });
+            sink.billed_cost(RowCost::Priced(100));
+            Err(upstream_down())
+        })
     }
 }
 

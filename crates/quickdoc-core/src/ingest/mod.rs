@@ -59,9 +59,8 @@ pub fn embed_text(
 /// to know the *actual* count, which for a local model means asking the model's
 /// own tokenizer. An estimate would put a guessed safety margin back into the
 /// one place this design refuses to have one.
-#[async_trait::async_trait]
 pub trait AsyncTokenCounter: Send + Sync {
-    async fn count(&self, text: &str) -> crate::Result<usize>;
+    fn count<'a>(&'a self, text: &'a str) -> crate::BoxFut<'a, crate::Result<usize>>;
 }
 
 /// Split a document into the windows one extraction call each can hold.
@@ -142,10 +141,9 @@ mod tests {
     /// tokenizer's behaviour that the density estimate is exercised.
     struct Words;
 
-    #[async_trait::async_trait]
     impl AsyncTokenCounter for Words {
-        async fn count(&self, text: &str) -> crate::Result<usize> {
-            Ok(words(text))
+        fn count<'a>(&'a self, text: &'a str) -> crate::BoxFut<'a, crate::Result<usize>> {
+            Box::pin(async move { Ok(words(text)) })
         }
     }
 

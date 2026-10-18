@@ -191,6 +191,14 @@ pub(super) async fn render(
                 by,
             })
         }
+        // Messages added, changed or deleted (§2.2, WP10): the messages as
+        // they are now, with the thread's title, or the ids that went.
+        kind::MESSAGE_ADDED | kind::MESSAGE_UPDATED | kind::MESSAGE_DELETED => {
+            match super::messages::render(state, r, admin).await? {
+                Some(data) => data,
+                None => return Ok(None),
+            }
+        }
         // A gated call and its decision (client-apps design §6.5), from the
         // reply's pending state now.
         kind::APPROVAL_REQUESTED | kind::APPROVAL_DECIDED => {

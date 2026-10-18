@@ -50,10 +50,12 @@ async fn file_world(policy: Value) -> (World, Device, tempfile::TempDir) {
     (w, d, dir)
 }
 
-/// A session bound to `tid` with `auth`, past its `session.created`.
-async fn bind_with(w: &World, auth: (&str, &str), tid: i64) -> Ws {
+/// A session bound to `tid` at `addr` with `headers`, past its
+/// `session.created`: the owner's at the gateway with its cookie, a
+/// device's at its proxy to the device listener.
+async fn bind_with(w: &World, addr: &str, headers: &[(&str, &str)], tid: i64) -> Ws {
     let mut ws = w
-        .connect(&format!("chat_thread={tid}"), &[auth])
+        .connect_at(addr, &format!("chat_thread={tid}"), headers)
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101 for thread {tid}, got {s}: {b}"));
     let created = next(&mut ws).await;
@@ -64,8 +66,7 @@ async fn bind_with(w: &World, auth: (&str, &str), tid: i64) -> Ws {
 /// A session bound to `tid` as device `d`, and the watch its end is known
 /// by ([`settle`]).
 async fn bind(w: &World, d: &Device, tid: i64) -> (Ws, Links) {
-    let bearer = format!("Bearer {}", d.key);
-    let ws = bind_with(w, ("authorization", bearer.as_str()), tid).await;
+    let ws = bind_with(w, &d.addr, &[], tid).await;
     // After its `session.created`: the link's opening stamp is behind.
     let links = Links {
         rx: w.state.telemetry.subscribe(),
@@ -555,7 +556,7 @@ async fn a_deleted_thread_ends_a_device_s_session_as_one_out_of_its_reach() {
     // The owner's session is left alone, as the delete always left it.
     let tid = chat_thread(&w, &owner, "chatty").await;
     let cookie = w.cookie();
-    let mut mine = bind_with(&w, ("cookie", cookie.as_str()), tid).await;
+    let mut mine = bind_with(&w, &w.addr(), &[("cookie", cookie.as_str())], tid).await;
     let (s, _) = post(
         &w,
         &owner,
@@ -576,16 +577,16 @@ async fn a_deleted_thread_ends_a_device_s_session_as_one_out_of_its_reach() {
 async fn a_turn_in_flight_hears_the_same_for_a_deleted_thread_as_for_a_hidden_one() {
     let w = crate::realtime_chat_thread::world(|_| {}).await;
     let d = pair(&w, "phone", json!({})).await;
-    let bearer = format!("Bearer {}", d.key);
     let cookie = w.cookie();
     let mut said = Vec::new();
-    for (how, auth) in [
-        ("hidden", ("authorization", bearer.as_str())),
-        ("deleted", ("authorization", bearer.as_str())),
-        ("deleted", ("cookie", cookie.as_str())),
+    let owner = [("cookie", cookie.as_str())];
+    for (how, addr, headers) in [
+        ("hidden", d.addr.clone(), &[][..]),
+        ("deleted", d.addr.clone(), &[][..]),
+        ("deleted", w.addr(), &owner[..]),
     ] {
         let tid = chat_thread(&w, &w.gw.client(), "chatty").await;
-        let mut ws = bind_with(&w, auth, tid).await;
+        let mut ws = bind_with(&w, &addr, headers, tid).await;
         send(
             &mut ws,
             json!({"type": "session.update", "session": {"type": "realtime",

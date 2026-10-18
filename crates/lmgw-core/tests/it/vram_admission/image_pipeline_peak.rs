@@ -535,7 +535,7 @@ async fn changing_the_pipeline_resets_its_learned_peak_and_says_so() {
     )
     .await
     .unwrap();
-    assert_eq!(out["peak_reset"], false, "{out}");
+    assert_eq!(out.peak_reset, Some(false), "{out:?}");
     assert_eq!(peak_of(&f, "z-image").await, Some(6 * GIB));
 
     // One flag, and the pipeline is a different one to the GPU.
@@ -545,8 +545,8 @@ async fn changing_the_pipeline_resets_its_learned_peak_and_says_so() {
     )
     .await
     .unwrap();
-    assert_eq!(out["peak_reset"], true, "{out}");
-    let msg = out["message"].as_str().unwrap_or_default();
+    assert_eq!(out.peak_reset, Some(true), "{out:?}");
+    let msg = out.message.as_str();
     assert!(
         msg.contains("learned peak reset"),
         "a promise admission has stopped making is not a silent change: {msg}"

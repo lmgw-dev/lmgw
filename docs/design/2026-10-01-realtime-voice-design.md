@@ -52,7 +52,7 @@ local or cloud, so "cloud brain, local voice" and "all local" are the same
 code path. Nothing here needs a new model class, a new container or a new
 upstream kind.
 
-Latency, measured through the gateway on the RTX 4090 dev box (§3.1): ASR
+Latency, measured through the gateway on a 24 GB GPU dev box (§3.1): ASR
 and TTS cost **tens of milliseconds** per utterance and per clause. The
 end-of-turn wait dominates, which is why turn detection is where this
 design spends its care (§6).
@@ -91,7 +91,11 @@ Read from OpenAI's GA docs and API reference, `openai-python`'s
   `client.beta.realtime.connect()`), whose shapes are not wire-compatible
   (§2.4).
 - **Not covered here.** Ephemeral keys, WebRTC, SIP and sideband connections
-  are separate surfaces (§19).
+  are separate surfaces (§19). *2026-10-14:* WebRTC is designed in
+  [WebRTC realtime calls](2026-10-14-realtime-calls-design.md). *Built
+  2026-10-15:* `POST /v1/realtime/calls` and its hangup run the same session
+  over WebRTC, checked against Chromium's libwebrtc and the Agents SDK by
+  `scripts/webrtc-interop.sh` (that record's §13.3).
 
 ### 2.2 The session object
 
@@ -281,7 +285,7 @@ The other open implementations are less complete:
 
 ## 3. What lmgw already has — facts
 
-### 3.1 Measured through the gateway (WP0, 2026-10-01, RTX 4090, warm, p50)
+### 3.1 Measured through the gateway (WP0, 2026-10-01, a 24 GB GPU, warm, p50)
 
 | Call | Time |
 |---|---|
@@ -887,13 +891,16 @@ nothing (no admission, no claim, no request row):
 
 with `x-lmgw-voices-source: config`. `?probe=engine` is the admitted read of
 the model's own server (it starts the container), `x-lmgw-voices-source:
-engine`; the audio lab's "load voices" (`start=1`) is that probe. A remote
-route is asked as before. A row whose `extra_run_args` mount another voice
-directory needs the probe to see its clips. Under the GPU hold (or a
-benchmark's lease) a local row without a fallback is still answered from
-config, with `lmgw.held: true` — the hold is a zero VRAM allowance, not a
-missing model, so a voice picker keeps working; with a fallback the list is
-the fallback's (AC2).
+engine`. The audio lab never uses it: its list is the same catalog, plus
+the names a container that is already up reports (no start, no claim). A
+remote route is asked as before. A row whose `extra_run_args` mount another
+voice directory needs the probe (or a running container) to see its clips.
+Under the GPU hold (or a benchmark's lease) a local row without a fallback is
+still answered from config, with `lmgw.held: true` — the hold is a zero VRAM
+allowance, not a missing model, so a voice picker keeps working; with a
+fallback the list is the fallback's (AC2). The audio lab differs there: it
+answers the row's own catalog with `held: true` and names the fallback
+(`fallback`), and never calls the fallback's provider for a list.
 
 **Shaping** (`audio/shape.rs`, `proxy/audio/speech.rs` and
 `Synthesis::speak`): `/v1/audio/speech` is resolve → preflight → admit →
@@ -2809,7 +2816,7 @@ the lazy rule); (c) that the three voice models learn about 1.48 / 0.97 /
 each learned figure above it. Every failure is listed at the end of the
 run.
 
-**Measured 2026-10-01, RTX 4090** (the live gate, passed; whole test
+**Measured 2026-10-01, a 24 GB GPU** (the live gate, passed; whole test
 11.5 s):
 
 | row | learned | = | at rest | on disk |
@@ -3356,7 +3363,11 @@ follow it; WP6 and WP7 are independent. Work happens on branch
 
 - **WebRTC** (`/v1/realtime/calls`, `oai-events`, Opus), **SIP**, sideband
   and **ephemeral client secrets**. Browsers use the subprotocol key or the
-  dashboard cookie.
+  dashboard cookie. *Designed 2026-10-14:* WebRTC, in
+  [WebRTC realtime calls](2026-10-14-realtime-calls-design.md); SIP, the
+  sideband and ephemeral client secrets stay on that record's Later list.
+  *Built 2026-10-15:* WebRTC is served (that record's WP1 to WP7, §13.3); the
+  rest stays on its Later list.
 - **The beta protocol.**
 - **G.711** input and output (`audio/pcmu`, `audio/pcma`).
 - **`transcription` sessions** (transcription-only, with live partials) and
@@ -4383,7 +4394,7 @@ stays only here:
 ## 23. First live acceptance (2026-10-01, HEAD b7b2d81)
 
 The setup:
-- A dev copy of the owner's gateway, with real models on the RTX 4090:
+- A dev copy of an existing gateway, with real models on a 24 GB GPU:
   `gemma4-e4b-voice`, `audio/nemotron-asr-q8-0`, and
   `audio/pocket-tts-english-q8-0` or `-german-q8-0`.
 - The stock clients unmodified: `openai-python` 3.22.1 and `@openai/agents`

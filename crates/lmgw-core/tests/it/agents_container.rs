@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use lmgw_core::agents::container::{self, Exit, Spawned, Spawner};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store;
@@ -299,18 +299,25 @@ fn mounted_files(argv: &[String]) -> Vec<(String, String)> {
 /// like the real thing does when it is happy.
 struct NoImage;
 
-#[async_trait]
 impl Spawner for NoImage {
-    async fn spawn(&self, _p: &str, _a: &[String]) -> std::io::Result<Spawned> {
-        panic!("Start must be refused before anything is spawned");
+    fn spawn<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            panic!("Start must be refused before anything is spawned");
+        })
     }
-    async fn run(&self, _p: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        // `podman image exists` answers with its exit code alone: 1 is "no".
-        let status = i32::from(args.first().map(String::as_str) == Some("image"));
-        Ok(CmdOutput {
-            status,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _p: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            // `podman image exists` answers with its exit code alone: 1 is "no".
+            let status = i32::from(args.first().map(String::as_str) == Some("image"));
+            Ok(CmdOutput {
+                status,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -343,74 +350,85 @@ async fn an_absent_image_with_pull_never_blocks_start_instead_of_downloading() {
     assert!(msg.contains("run.pull is 'never'"), "{msg}");
 }
 
-#[async_trait]
 impl Spawner for FakeSpawner {
-    async fn spawn(&self, program: &str, args: &[String]) -> std::io::Result<Spawned> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(Call {
-            argv: args.to_vec(),
-            mounted: mounted_files(args),
-        });
-        let (out_tx, stdout) = mpsc::channel(64);
-        let (err_tx, stderr) = mpsc::channel(64);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let (lines, errs) = (self.stdout.clone(), self.stderr.clone());
-        let (hold, wedged, stopped, exit) = (
-            self.hold,
-            self.wedged,
-            self.stopped.clone(),
-            self.exit.unwrap_or(Exit::Code(0)),
-        );
-        tokio::spawn(async move {
-            for l in lines {
-                let _ = out_tx.send(l).await;
-            }
-            for l in errs {
-                let _ = err_tx.send(l).await;
-            }
-            if hold {
-                stopped.notified().await;
-            }
-            drop(out_tx);
-            drop(err_tx);
-            if wedged {
-                // The pipes are shut and the process is not: the only way out
-                // is the caller dropping `status`, which this send never wins.
-                std::future::pending::<()>().await;
-            }
-            let _ = done_tx.send(exit);
-        });
-        Ok(Spawned {
-            stdout,
-            stderr,
-            // The agent runner stops containers by name, never by signal.
-            kill: container::KillHandle::detached(),
-            status: Box::pin(async move { Ok(done_rx.await.unwrap_or(Exit::Code(-1))) }),
+    fn spawn<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(Call {
+                argv: args.to_vec(),
+                mounted: mounted_files(args),
+            });
+            let (out_tx, stdout) = mpsc::channel(64);
+            let (err_tx, stderr) = mpsc::channel(64);
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let (lines, errs) = (self.stdout.clone(), self.stderr.clone());
+            let (hold, wedged, stopped, exit) = (
+                self.hold,
+                self.wedged,
+                self.stopped.clone(),
+                self.exit.unwrap_or(Exit::Code(0)),
+            );
+            tokio::spawn(async move {
+                for l in lines {
+                    let _ = out_tx.send(l).await;
+                }
+                for l in errs {
+                    let _ = err_tx.send(l).await;
+                }
+                if hold {
+                    stopped.notified().await;
+                }
+                drop(out_tx);
+                drop(err_tx);
+                if wedged {
+                    // The pipes are shut and the process is not: the only way out
+                    // is the caller dropping `status`, which this send never wins.
+                    std::future::pending::<()>().await;
+                }
+                let _ = done_tx.send(exit);
+            });
+            Ok(Spawned {
+                stdout,
+                stderr,
+                // The agent runner stops containers by name, never by signal.
+                kill: container::KillHandle::detached(),
+                status: Box::pin(async move { Ok(done_rx.await.unwrap_or(Exit::Code(-1))) }),
+            })
         })
     }
 
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(Call {
-            argv: args.to_vec(),
-            mounted: Vec::new(),
-        });
-        if args.first().map(String::as_str) == Some("stop") {
-            if self.wedged {
-                return Ok(CmdOutput {
-                    status: 125,
-                    stdout: String::new(),
-                    stderr: "no container with name or ID found".into(),
-                });
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(Call {
+                argv: args.to_vec(),
+                mounted: Vec::new(),
+            });
+            if args.first().map(String::as_str) == Some("stop") {
+                if self.wedged {
+                    return Ok(CmdOutput {
+                        status: 125,
+                        stdout: String::new(),
+                        stderr: "no container with name or ID found".into(),
+                    });
+                }
+                // `notify_one`, not `notify_waiters`: the stop may land before the
+                // replay task gets to the await, and a lost wake would hang the run.
+                self.stopped.notify_one();
             }
-            // `notify_one`, not `notify_waiters`: the stop may land before the
-            // replay task gets to the await, and a lost wake would hang the run.
-            self.stopped.notify_one();
-        }
-        Ok(CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+            Ok(CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -772,19 +790,22 @@ async fn a_container_with_no_image_blocks_start_with_the_warnings_code() {
 /// rather than from the Start gate.
 struct SpawnFails;
 
-#[async_trait]
 impl Spawner for SpawnFails {
-    async fn spawn(&self, _p: &str, _a: &[String]) -> std::io::Result<Spawned> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "cannot re-exec process",
-        ))
+    fn spawn<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot re-exec process",
+            ))
+        })
     }
-    async fn run(&self, _p: &str, _a: &[String]) -> std::io::Result<CmdOutput> {
-        Ok(CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            Ok(CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -1027,20 +1048,25 @@ struct FakePodman {
     seen: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
-#[async_trait]
 impl CommandRunner for FakePodman {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.seen.lock().unwrap().push(args.to_vec());
-        let stdout = if args.first().map(String::as_str) == Some("ps") {
-            self.ps.clone()
-        } else {
-            String::new()
-        };
-        Ok(CmdOutput {
-            status: 0,
-            stdout,
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.seen.lock().unwrap().push(args.to_vec());
+            let stdout = if args.first().map(String::as_str) == Some("ps") {
+                self.ps.clone()
+            } else {
+                String::new()
+            };
+            Ok(CmdOutput {
+                status: 0,
+                stdout,
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -2057,56 +2083,70 @@ fn backdate(path: &std::path::Path) {
 /// always named. What made it more than a documented hazard is where the text
 /// goes afterwards: the run log is stored in the job's `result` and rendered on
 /// the Run tab, which no credential should reach.
-struct EchoesItsSecrets;
+struct EchoesItsSecrets {
+    exit: i32,
+}
 
-#[async_trait]
 impl Spawner for EchoesItsSecrets {
-    async fn spawn(&self, program: &str, args: &[String]) -> std::io::Result<Spawned> {
-        assert_eq!(program, "podman");
-        // Exactly what `cat /lmgw/secrets.json` would put on the two pipes.
-        let secrets = mounted_files(args)
-            .into_iter()
-            .find(|(inside, _)| inside == "/lmgw/secrets.json")
-            .map(|(_, body)| body)
-            .expect("secrets.json is mounted");
-        let token: String = serde_json::from_str::<Value>(&secrets).unwrap()["token"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let (out_tx, stdout) = mpsc::channel(64);
-        let (err_tx, stderr) = mpsc::channel(64);
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            // Not JSON, so it lands in the run log verbatim — the worst case.
-            let _ = out_tx.send(secrets.replace('\n', " ")).await;
-            // And as a proper `log` event, which is the other way in.
-            let _ = out_tx
-                .send(json!({ "type": "log", "message": format!("using {token}") }).to_string())
-                .await;
-            let _ = out_tx
-                .send(r#"{"type":"row","id":"m1","columns":{"subject":"Invoice"}}"#.to_string())
-                .await;
-            let _ = err_tx
-                .send(format!("DEBUG Authorization: Bearer {token}"))
-                .await;
-            drop(out_tx);
-            drop(err_tx);
-            let _ = done_tx.send(Exit::Code(0));
-        });
-        Ok(Spawned {
-            stdout,
-            stderr,
-            // The agent runner stops containers by name, never by signal.
-            kill: container::KillHandle::detached(),
-            status: Box::pin(async move { Ok(done_rx.await.unwrap_or(Exit::Code(-1))) }),
+    fn spawn<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            // Exactly what `cat /lmgw/secrets.json` would put on the two pipes.
+            let secrets = mounted_files(args)
+                .into_iter()
+                .find(|(inside, _)| inside == "/lmgw/secrets.json")
+                .map(|(_, body)| body)
+                .expect("secrets.json is mounted");
+            let token: String = serde_json::from_str::<Value>(&secrets).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let exit = self.exit;
+            let (out_tx, stdout) = mpsc::channel(64);
+            let (err_tx, stderr) = mpsc::channel(64);
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                // Not JSON, so it lands in the run log verbatim — the worst case.
+                let _ = out_tx.send(secrets.replace('\n', " ")).await;
+                // And as a proper `log` event, which is the other way in.
+                let _ = out_tx
+                    .send(json!({ "type": "log", "message": format!("using {token}") }).to_string())
+                    .await;
+                let _ = out_tx
+                    .send(r#"{"type":"row","id":"m1","columns":{"subject":"Invoice"}}"#.to_string())
+                    .await;
+                let _ = err_tx
+                    .send(format!("DEBUG Authorization: Bearer {token}"))
+                    .await;
+                drop(out_tx);
+                drop(err_tx);
+                let _ = done_tx.send(Exit::Code(exit));
+            });
+            Ok(Spawned {
+                stdout,
+                stderr,
+                // The agent runner stops containers by name, never by signal.
+                kill: container::KillHandle::detached(),
+                status: Box::pin(async move { Ok(done_rx.await.unwrap_or(Exit::Code(-1))) }),
+            })
         })
     }
 
-    async fn run(&self, _p: &str, _args: &[String]) -> std::io::Result<CmdOutput> {
-        Ok(CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _p: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            Ok(CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -2114,7 +2154,7 @@ impl Spawner for EchoesItsSecrets {
 #[tokio::test]
 async fn a_container_that_prints_its_own_secrets_file_does_not_leak_the_token() {
     let (state, _prefix) = gateway().await;
-    state.set_agent_spawner_for_tests(Arc::new(EchoesItsSecrets));
+    state.set_agent_spawner_for_tests(Arc::new(EchoesItsSecrets { exit: 0 }));
     let base = serve(state.clone()).await;
     install(&base, &doc("localhost/labeler:1", 600, r#"["run"]"#, "")).await;
     // Mint it first, so the test knows the exact value the run will be handed.
@@ -2157,6 +2197,29 @@ async fn a_container_that_prints_its_own_secrets_file_does_not_leak_the_token() 
         .unwrap();
     let result = stored.result.unwrap_or_default();
     assert!(!result.contains(&token), "{result}");
+}
+
+/// The same container, failing: a failed run's `error` carries the stderr tail,
+/// and that is read back by `lmgw__agent_get` and the runs routes.
+#[tokio::test]
+async fn a_failed_run_whose_stderr_holds_the_token_keeps_it_out_of_the_error() {
+    let (state, _prefix) = gateway().await;
+    state.set_agent_spawner_for_tests(Arc::new(EchoesItsSecrets { exit: 1 }));
+    let base = serve(state.clone()).await;
+    install(&base, &doc("localhost/labeler:1", 600, r#"["run"]"#, "")).await;
+    let (_, got) = op(&base, "agent_token_get", json!({ "id": "labeler" })).await;
+    let token = got["token"].as_str().unwrap().to_string();
+
+    let job = start(&base, json!({ "id": "labeler", "phase": "run" })).await;
+    let d = wait_done(&base, job).await;
+    assert_eq!(d["job"]["status"], "failed", "{d}");
+    let err = d["job"]["error"].as_str().unwrap_or_default();
+    assert!(err.contains("<agent token>"), "{err}");
+    assert!(!err.contains(&token), "{err}");
+    let stored = store::get_job(&state.db, job).await.unwrap().unwrap();
+    assert!(!stored.error.unwrap_or_default().contains(&token));
+    let detail = get_json(&base, "/api/agents/labeler").await;
+    assert!(!detail.to_string().contains(&token), "{detail}");
 }
 
 /// A real `rw` mount, on real podman, with two containers on one folder

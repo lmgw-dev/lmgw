@@ -477,7 +477,7 @@ synthetic upstreams — §5).
 
 ## 10. Spike results (measured 2026-08-31)
 
-Host: the RTX 4090 machine; image `localhost/llama-server-cuda:official-latest`
+Host: a 24 GB GPU machine; image `localhost/llama-server-cuda:official-latest`
 (entrypoint is a bash script running **nginx in front of llama-server** —
 container port 8080 is nginx, llama-server sits on an internal port; this
 shapes the health-probe behavior below). All seven pre-implementation

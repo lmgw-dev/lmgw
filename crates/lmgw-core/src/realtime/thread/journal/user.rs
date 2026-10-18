@@ -1,13 +1,12 @@
 //! The journal's user entry (chat-voice design §8.3): one user message for
 //! a response's turns that have none yet, written as a send writes one.
 
-use serde_json::Value;
-
 use super::super::super::protocol::{ErrorObject, ServerEvent};
 use super::super::super::transcribe::Facts;
 use super::{Task, UserAnswer, UserTurn, Written};
 use crate::store::{MessageVoice, VIA_REALTIME};
 use crate::web::chat_voice::bound;
+use crate::web::chat_wire::message_voice;
 
 impl Task {
     /// The user entry (module doc).
@@ -70,7 +69,7 @@ impl Task {
         self.event(ServerEvent::LmgwChatUser {
             message_id: id,
             content,
-            voice: serde_json::to_value(&voice).unwrap_or(Value::Null),
+            voice: Box::new(message_voice(&voice)),
             response_id: None,
         });
         Ok(Some(Written { id, sent }))

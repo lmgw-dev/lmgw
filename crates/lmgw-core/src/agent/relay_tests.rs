@@ -48,20 +48,21 @@ struct SeenSink {
     cancel_at_text: Option<crate::proxy::StopHandle>,
 }
 
-#[async_trait]
 impl EventSink for SeenSink {
-    async fn emit(&mut self, ev: LoopEvent) -> bool {
-        let text = matches!(ev, LoopEvent::Text(_));
-        self.seen.events.lock().unwrap().push(ev);
-        if text {
-            *self.seen.texts.lock().unwrap() += 1;
-            self.seen.changed.notify_waiters();
-            if let Some(cancel) = &self.cancel_at_text {
-                cancel.stop();
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+        Box::pin(async move {
+            let text = matches!(ev, LoopEvent::Text(_));
+            self.seen.events.lock().unwrap().push(ev);
+            if text {
+                *self.seen.texts.lock().unwrap() += 1;
+                self.seen.changed.notify_waiters();
+                if let Some(cancel) = &self.cancel_at_text {
+                    cancel.stop();
+                }
+                return !self.quit_at_text;
             }
-            return !self.quit_at_text;
-        }
-        true
+            true
+        })
     }
 }
 
@@ -86,62 +87,62 @@ impl Drop for DropFlag {
     }
 }
 
-#[async_trait]
 impl TurnRunner for StepRunner {
-    async fn run_turn(
-        &self,
-        _ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        _ir: &'a ChatRequest,
         _deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        let steps = {
-            let mut turns = self.turns.lock().unwrap();
-            if turns.is_empty() {
-                return Err(GatewayError::Internal("the script is over".into()));
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            let steps = {
+                let mut turns = self.turns.lock().unwrap();
+                if turns.is_empty() {
+                    return Err(GatewayError::Internal("the script is over".into()));
+                }
+                turns.remove(0)
+            };
+            let _flag = DropFlag(self.dropped.clone());
+            let stop = if self.takes_stop { sink.stop() } else { None };
+            let stopped = || async {
+                match &stop {
+                    Some(s) => s.raised().await,
+                    None => std::future::pending().await,
+                }
+            };
+            for step in steps {
+                match step {
+                    Step::Delta(d) => sink.on_delta(&d),
+                    Step::AwaitTexts(n) => self.seen.texts_at_least(n).await,
+                    Step::Hang => stopped().await,
+                }
+                if stop
+                    .as_ref()
+                    .is_some_and(crate::proxy::StopSignal::is_raised)
+                {
+                    self.saw_stop.store(true, Ordering::SeqCst);
+                    return Err(crate::proxy::canceled("stopped by the caller mid-stream"));
+                }
             }
-            turns.remove(0)
-        };
-        let _flag = DropFlag(self.dropped.clone());
-        let stop = if self.takes_stop { sink.stop() } else { None };
-        let stopped = || async {
-            match &stop {
-                Some(s) => s.raised().await,
-                None => std::future::pending().await,
-            }
-        };
-        for step in steps {
-            match step {
-                Step::Delta(d) => sink.on_delta(&d),
-                Step::AwaitTexts(n) => self.seen.texts_at_least(n).await,
-                Step::Hang => stopped().await,
-            }
-            if stop
-                .as_ref()
-                .is_some_and(crate::proxy::StopSignal::is_raised)
-            {
-                self.saw_stop.store(true, Ordering::SeqCst);
-                return Err(crate::proxy::canceled("stopped by the caller mid-stream"));
-            }
-        }
-        // A streaming runner's completion only names the model; the loop
-        // folds the turn from its deltas.
-        Ok(Completion {
-            content: Vec::new(),
-            reasoning: String::new(),
-            finish_reason: FinishReason::Stop,
-            usage: Usage::default(),
-            model: "m".into(),
-            timings: None,
+            // A streaming runner's completion only names the model; the loop
+            // folds the turn from its deltas.
+            Ok(Completion {
+                content: Vec::new(),
+                reasoning: String::new(),
+                finish_reason: FinishReason::Stop,
+                usage: Usage::default(),
+                model: "m".into(),
+                timings: None,
+            })
         })
     }
 }
 
 struct EchoExec;
 
-#[async_trait]
 impl ToolExecutor for EchoExec {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        ToolOutcome::ok(ToolResultBlock::one(format!("{name}:{args}")))
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move { ToolOutcome::ok(ToolResultBlock::one(format!("{name}:{args}"))) })
     }
 }
 
@@ -420,14 +421,15 @@ async fn a_cancel_mid_turn_stops_the_turn_and_relays_nothing_after_it() {
 async fn a_cancel_lands_while_an_emit_waits_on_a_stalled_reader() {
     /// Takes the first `Text` and never returns from it.
     struct Stalled(Arc<Notify>);
-    #[async_trait]
     impl EventSink for Stalled {
-        async fn emit(&mut self, ev: LoopEvent) -> bool {
-            if matches!(ev, LoopEvent::Text(_)) {
-                self.0.notify_one();
-                std::future::pending::<()>().await;
-            }
-            true
+        fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+            Box::pin(async move {
+                if matches!(ev, LoopEvent::Text(_)) {
+                    self.0.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                true
+            })
         }
     }
     let seen = Arc::new(Seen::default());
@@ -451,16 +453,17 @@ async fn a_cancel_lands_while_an_emit_waits_on_a_stalled_reader() {
 #[tokio::test]
 async fn a_turn_failing_mid_stream_has_already_shown_its_tokens() {
     struct Failing;
-    #[async_trait]
     impl TurnRunner for Failing {
-        async fn run_turn(
-            &self,
-            _ir: &ChatRequest,
+        fn run_turn<'a>(
+            &'a self,
+            _ir: &'a ChatRequest,
             _deadline: Duration,
-            sink: &mut dyn DeltaSink,
-        ) -> Result<Completion, GatewayError> {
-            sink.on_delta(&StreamDelta::TextDelta("partial".into()));
-            Err(GatewayError::Internal("the stream broke".into()))
+            sink: &'a mut dyn DeltaSink,
+        ) -> Erased<'a, Result<Completion, GatewayError>> {
+            Box::pin(async move {
+                sink.on_delta(&StreamDelta::TextDelta("partial".into()));
+                Err(GatewayError::Internal("the stream broke".into()))
+            })
         }
     }
     let mut sink = CollectSink::default();
@@ -506,13 +509,14 @@ async fn a_turn_failing_after_tools_ran_keeps_their_record_in_the_error() {
 /// call was made when the cancel landed.
 struct Forever(Option<Arc<AtomicBool>>);
 
-#[async_trait]
 impl ToolExecutor for Forever {
-    async fn call(&self, _name: &str, _args: &Value) -> ToolOutcome {
-        if let Some(flag) = &self.0 {
-            flag.store(true, Ordering::SeqCst);
-        }
-        std::future::pending().await
+    fn call<'a>(&'a self, _name: &'a str, _args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            if let Some(flag) = &self.0 {
+                flag.store(true, Ordering::SeqCst);
+            }
+            std::future::pending().await
+        })
     }
 }
 
@@ -526,16 +530,17 @@ struct RaiseSink {
     quit_at_result: bool,
 }
 
-#[async_trait]
 impl EventSink for RaiseSink {
-    async fn emit(&mut self, ev: LoopEvent) -> bool {
-        let ready = matches!(ev, LoopEvent::CallReady { .. });
-        let result = matches!(ev, LoopEvent::CallResult { .. });
-        self.events.push(ev);
-        if ready && self.raise_at_ready {
-            self.flag.store(true, Ordering::SeqCst);
-        }
-        !(result && self.quit_at_result)
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+        Box::pin(async move {
+            let ready = matches!(ev, LoopEvent::CallReady { .. });
+            let result = matches!(ev, LoopEvent::CallResult { .. });
+            self.events.push(ev);
+            if ready && self.raise_at_ready {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+            !(result && self.quit_at_result)
+        })
     }
 }
 

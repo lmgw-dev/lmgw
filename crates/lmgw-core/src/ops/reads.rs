@@ -1,37 +1,44 @@
 //! Reads
 
-use serde_json::{json, Value};
+use lmgw_api_types::{self as dto, self_admin};
 
 use crate::candidates;
 use crate::capabilities::{self};
+use crate::mcp::McpStatusView;
 use crate::state::SharedState;
 use crate::store::{self, LogFilter};
 
 use super::*;
 
+/// `GET /api/status`'s answer with the gateway's own views of the runtime
+/// rows, the GPU ledger and the MCP connections: they serialize as the
+/// document's `RuntimeStatus`, `VramStatus` and `McpStatus`.
+pub type GatewayStatus =
+    dto::GatewayStatus<crate::runtime::registry::RuntimeView, crate::vram::VramView, McpStatusView>;
+
 /// Gateway health in one call: uptime, live request stats, the per-model
 /// container runtime, the GPU ledger, southbound MCP connections, and
 /// config-object counts.
-pub async fn status(state: &SharedState) -> Result<Value, String> {
+pub async fn status(state: &SharedState) -> Result<GatewayStatus, String> {
     let snap = state.snapshot();
     let stats = state.telemetry.stats();
     let vram = state.vram.view(state).await;
     let mcp = state.mcp.status_views(&snap).await;
 
-    let mut out = json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "uptime_seconds": state.started_at.elapsed().as_secs(),
-        "bind_addr": snap.settings.bind_addr,
-        "auth_enabled": snap.settings.auth_enabled,
-        "self_admin": lmgw_api_types::AdminLevel::from(snap.settings.self_admin),
-        "requests": {
-            "total": stats.total_requests,
-            "errors": stats.total_errors,
-            "active": stats.active_requests,
-            "last_minute": stats.req_last_minute,
-            "errors_last_minute": stats.err_last_minute,
-            "prompt_tokens": stats.prompt_tokens,
-            "completion_tokens": stats.completion_tokens,
+    Ok(dto::GatewayStatus {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        bind_addr: snap.settings.bind_addr.clone(),
+        auth_enabled: snap.settings.auth_enabled,
+        self_admin: dto::AdminLevel::from(snap.settings.self_admin),
+        requests: dto::RequestStats {
+            total: stats.total_requests,
+            errors: stats.total_errors,
+            active: stats.active_requests,
+            last_minute: stats.req_last_minute,
+            errors_last_minute: stats.err_last_minute,
+            prompt_tokens: stats.prompt_tokens,
+            completion_tokens: stats.completion_tokens,
         },
         // One row per model lmgw believes is running (per-model-containers
         // §3.2/§8) — replaces the old fixed three-container list now that a
@@ -41,51 +48,65 @@ pub async fn status(state: &SharedState) -> Result<Value, String> {
         // has claimed it since, and `draining_for_owner` while an owner
         // admission is waiting on it — both absent (the pre-phase-4 shape)
         // on every other entry.
-        "runtime": state.runtime().list(),
+        runtime: state.runtime().list(),
         // The GPU those containers share (§9b): what is resident, what it is
         // measured to cost, and anything queued behind it. Reported even when
         // admission is inactive — "inactive, and here is why" is the answer an
         // owner needs on a host where NVML did not load.
-        "vram": vram,
-        "mcp_servers": mcp,
-        "counts": {
-            "upstreams": snap.upstreams.len(),
-            "aliases": snap.aliases.len(),
-            "local_models": snap.local_models.len(),
-            "mcp_servers": snap.mcp_servers.len(),
-            "api_keys": snap.api_keys.len(),
+        vram,
+        mcp_servers: mcp,
+        counts: dto::ObjectCounts {
+            upstreams: snap.upstreams.len() as u64,
+            aliases: snap.aliases.len() as u64,
+            local_models: snap.local_models.len() as u64,
+            mcp_servers: snap.mcp_servers.len() as u64,
+            api_keys: snap.api_keys.len() as u64,
         },
-    });
+        candidate_aliases: candidate_alias_statuses(state, &snap).await?,
+        // The device link's trust (device link design §9.2): read from the
+        // files at most once, never the key, never the Secret Service; and
+        // the device listener, as it serves now.
+        devices: crate::devices::status(state),
+        // The calls' UDP socket groups (realtime calls design §9): the
+        // plain listener's and the device listener's, each with its rule
+        // and its addresses or its bind error.
+        webrtc: state.calls.status(),
+    })
+}
 
-    // Candidate aliases (§6): only when at least one is configured, so an
-    // install without any reads exactly as it did before this key existed —
-    // no empty array, no key at all.
-    if !snap.candidate_aliases.is_empty() {
-        let deferral_counts = candidates::deferrals::deferrals_24h(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut candidate_aliases: Vec<Value> = Vec::new();
-        for c in snap.candidate_aliases.values() {
-            let d = candidates::derive::derive(state, &snap, c).await;
-            candidate_aliases.push(json!({
-                "name": c.alias,
-                "mode": if c.background { "background" } else { "owner" },
-                "primary": c.primary(),
-                "alternates": c.candidates.iter().skip(1).collect::<Vec<_>>(),
-                "enabled_facets": d.enabled.names(),
-                "problems": d.problems,
-                "deferrals_24h": candidates::deferrals::for_alias(&deferral_counts, &c.alias),
-            }));
-        }
-        candidate_aliases.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        out["candidate_aliases"] = json!(candidate_aliases);
+/// Candidate aliases (§6), by name: `None` unless at least one is configured,
+/// so an install without any reads exactly as it did before this key existed —
+/// no empty array, no key at all.
+async fn candidate_alias_statuses(
+    state: &SharedState,
+    snap: &crate::config::Snapshot,
+) -> Result<Option<Vec<dto::CandidateAliasStatus>>, String> {
+    if snap.candidate_aliases.is_empty() {
+        return Ok(None);
     }
-
-    Ok(out)
+    let deferral_counts = candidates::deferrals::deferrals_24h(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<dto::CandidateAliasStatus> = Vec::new();
+    for c in snap.candidate_aliases.values() {
+        let d = candidates::derive::derive(state, snap, c).await;
+        out.push(dto::CandidateAliasStatus {
+            name: c.alias.clone(),
+            mode: if c.background { "background" } else { "owner" }.to_string(),
+            primary: c.primary().map(str::to_string),
+            alternates: c.candidates.iter().skip(1).cloned().collect(),
+            enabled_facets: d.enabled.names(),
+            problems: d.problems,
+            deferrals_24h: candidates::deferrals::for_alias(&deferral_counts, &c.alias)
+                .unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Some(out))
 }
 
 /// Model names the gateway can route, by source. `kind` is one of
-/// `all | alias | local | aux | audio` (`embed` is accepted for `aux`);
+/// `all | alias | local | aux | audio`;
 /// `search` is a case-insensitive substring filter over the client-facing name.
 ///
 /// Statically-known names only — passthrough catalogs (`expose_all` upstreams)
@@ -98,7 +119,7 @@ pub async fn models(
     state: &SharedState,
     kind: Option<&str>,
     search: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<self_admin::ModelList, String> {
     let snap = state.snapshot();
     // One pass over the same builder `/v1/models` renders from (design §8
     // item 9): every entry below is joined onto its capabilities by name
@@ -114,34 +135,18 @@ pub async fn models(
             .into_iter()
             .map(|e| (e.name.clone(), e))
             .collect();
-    let enrich = |mut v: Value| {
-        if let Some(name) = v["name"].as_str() {
-            if let Some(e) = exposed.get(name) {
-                let obj = v.as_object_mut().expect("model entry is an object");
-                if let Some(ctx) = e.context_length {
-                    obj.insert("context_length".to_string(), json!(ctx));
-                }
-                if let Some(n) = e.max_output_tokens {
-                    obj.insert("max_output_tokens".to_string(), json!(n));
-                }
-                if let Some(caps) = &e.capabilities {
-                    obj.insert(
-                        "capabilities".to_string(),
-                        serde_json::to_value(caps).unwrap_or(Value::Null),
-                    );
-                }
-                if !e.notes.is_empty() {
-                    obj.insert("notes".to_string(), json!(e.notes));
-                }
-            }
-        }
-        v
+    // What `/v1/models` knows about `name`: each key is left out when the
+    // entry does not state it.
+    let facts = |name: &str| match exposed.get(name) {
+        Some(e) => self_admin::ModelFacts {
+            context_length: e.context_length,
+            max_output_tokens: e.max_output_tokens,
+            capabilities: e.capabilities.clone(),
+            notes: e.notes.clone(),
+        },
+        None => self_admin::ModelFacts::default(),
     };
-    // `embed` is the pre-rename spelling of the aux container's kind.
-    let kind = match kind.unwrap_or("all") {
-        "embed" => "aux",
-        k => k,
-    };
+    let kind = kind.unwrap_or("all");
     if !matches!(kind, "all" | "alias" | "local" | "aux" | "audio" | "image") {
         return Err(format!(
             "unknown kind '{kind}' (expected all, alias, local, aux, audio or image)"
@@ -154,7 +159,7 @@ pub async fn models(
             .is_none_or(|n| name.to_lowercase().contains(n.as_str()))
     };
 
-    let mut out: Vec<Value> = Vec::new();
+    let mut out: Vec<self_admin::ModelEntry> = Vec::new();
 
     if kind == "all" || kind == "alias" {
         for a in snap.aliases.values() {
@@ -162,12 +167,12 @@ pub async fn models(
                 continue;
             }
             let upstream = snap.upstreams.get(&a.upstream_id);
-            out.push(json!({
-                "name": a.alias,
-                "kind": "alias",
-                "enabled": a.enabled,
-                "upstream": upstream.map(|u| u.name.clone()),
-                "upstream_model": a.upstream_model_id,
+            out.push(self_admin::ModelEntry::Alias(self_admin::AliasEntry {
+                name: a.alias.clone(),
+                enabled: a.enabled,
+                upstream: upstream.map(|u| u.name.clone()),
+                upstream_model: a.upstream_model_id.clone(),
+                facts: facts(&a.alias),
             }));
         }
         // Candidate aliases (candidate-aliases design §4.1) share the
@@ -192,23 +197,27 @@ pub async fn models(
                 continue;
             }
             let d = candidates::derive::derive(state, &snap, c).await;
-            out.push(json!({
-                "name": c.alias,
-                "kind": "candidate_alias",
-                "id": c.id,
-                "enabled": c.enabled,
-                "candidates": c.candidates,
-                "background": c.background,
-                "fallback_mode": c.fallback_mode.as_str(),
-                "fallback": c.fallback,
-                "enabled_facets": d.enabled.names(),
-                "common_facets": d.common.names(),
-                "routable": d.routable,
-                "problems": d.problems,
-                "advisories": d.advisories,
-                "fallback_usable": d.fallback_usable,
-                "deferrals_24h": candidates::deferrals::for_alias(&deferral_counts, &c.alias),
-            }));
+            out.push(self_admin::ModelEntry::CandidateAlias(
+                self_admin::CandidateAliasEntry {
+                    name: c.alias.clone(),
+                    id: c.id,
+                    enabled: c.enabled,
+                    candidates: c.candidates.clone(),
+                    background: c.background,
+                    fallback_mode: c.fallback_mode.as_str().to_string(),
+                    fallback: c.fallback.clone(),
+                    enabled_facets: d.enabled.names(),
+                    common_facets: d.common.names(),
+                    routable_candidates: d.routable,
+                    problems: d.problems,
+                    advisories: d.advisories,
+                    fallback_usable: d.fallback_usable,
+                    // `for_alias` always counts: a real zero is a number.
+                    deferrals_24h: candidates::deferrals::for_alias(&deferral_counts, &c.alias)
+                        .unwrap_or(0),
+                    facts: facts(&c.alias),
+                },
+            ));
         }
     }
     if kind == "all" || kind == "local" {
@@ -217,26 +226,30 @@ pub async fn models(
             if !matches(&name) {
                 continue;
             }
-            out.push(json!({
-                "name": name,
-                "kind": "local",
-                "enabled": m.enabled,
-                "public": m.public,
-                "gguf_path": m.gguf_path,
-                "id": m.id,
+            out.push(self_admin::ModelEntry::Local(self_admin::LocalEntry {
+                enabled: m.enabled,
+                public: m.public,
+                gguf_path: m.gguf_path.clone(),
+                id: m.id,
+                facts: facts(&name),
+                name,
             }));
         }
     }
     if kind == "all" || kind == "aux" {
         for m in &snap.aux_models {
-            let name = snap.aux_public_name(&m.model_id);
+            let name = snap.aux_public_name(m);
             if !matches(&name) {
                 continue;
             }
-            out.push(json!({
-                "name": name, "kind": "aux", "aux_kind": m.kind.as_str(),
-                "enabled": m.enabled, "id": m.id,
-                "gguf_path": m.gguf_path, "pooling": m.pooling,
+            out.push(self_admin::ModelEntry::Aux(self_admin::AuxEntry {
+                aux_kind: m.kind.as_str().to_string(),
+                enabled: m.enabled,
+                id: m.id,
+                gguf_path: m.gguf_path.clone(),
+                pooling: m.pooling.clone(),
+                facts: facts(&name),
+                name,
             }));
         }
     }
@@ -254,9 +267,13 @@ pub async fn models(
             if !matches(&name) {
                 continue;
             }
-            out.push(json!({
-                "name": name, "kind": "audio", "enabled": m.enabled,
-                "task": m.task, "family": m.family, "id": m.id,
+            out.push(self_admin::ModelEntry::Audio(self_admin::AudioEntry {
+                enabled: m.enabled,
+                task: m.task,
+                family: m.family,
+                id: m.id,
+                facts: facts(&name),
+                name,
             }));
         }
     }
@@ -270,75 +287,83 @@ pub async fn models(
             if !matches(&name) {
                 continue;
             }
-            out.push(json!({
-                "name": name, "kind": "image", "enabled": m.enabled, "id": m.id,
-                "modes": m.modes(), "edit": m.edit,
-                "loads": m.files.get("model").or_else(|| m.files.get("diffusion_model")),
+            out.push(self_admin::ModelEntry::Image(self_admin::ImageEntry {
+                enabled: m.enabled,
+                id: m.id,
+                modes: m.modes(),
+                edit: m.edit,
+                loads: m
+                    .files
+                    .get("model")
+                    .or_else(|| m.files.get("diffusion_model"))
+                    .cloned(),
+                facts: facts(&name),
+                name,
             }));
         }
     }
 
-    let mut out: Vec<Value> = out.into_iter().map(enrich).collect();
-    out.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["name"].as_str().unwrap_or(""))
-    });
+    out.sort_by(|a, b| a.name().cmp(b.name()));
 
     // Passthrough upstreams serve names we can't enumerate without calling them.
-    let passthrough: Vec<Value> = snap
+    let passthrough_upstreams = snap
         .upstreams
         .values()
         .filter(|u| u.enabled && u.expose_all)
-        .map(|u| {
-            json!({
-                "upstream": u.name,
-                "prefix": u.prefix(),
-                "note": "expose_all upstream — request <prefix>/<model>; \
-                         its full catalog is only known by calling the upstream",
-            })
+        .map(|u| self_admin::PassthroughNote {
+            upstream: u.name.clone(),
+            prefix: u.prefix().to_string(),
+            note: "expose_all upstream — request <prefix>/<model>; \
+                   its full catalog is only known by calling the upstream"
+                .to_string(),
         })
         .collect();
 
-    Ok(json!({ "models": out, "passthrough_upstreams": passthrough }))
+    Ok(self_admin::ModelList {
+        models: out,
+        passthrough_upstreams,
+    })
 }
 
-/// Configured upstreams. API keys are reported as set/unset, never returned.
-pub async fn upstreams(state: &SharedState) -> Result<Value, String> {
+/// Configured upstreams, as `GET /api/upstreams` answers them: a key is
+/// reported as set or unset and header values are redacted, never returned.
+pub async fn upstreams(state: &SharedState) -> Result<dto::UpstreamsResponse, String> {
     let rows = store::list_upstreams(&state.db)
         .await
         .map_err(|e| e.to_string())?;
-    let out: Vec<Value> = rows
-        .iter()
-        .map(|u| {
-            let mut row = json!({
-                "id": u.id,
-                "name": u.name,
-                "protocol": u.protocol.as_str(),
-                "kind": u.kind.as_str(),
-                "base_url": u.base_url,
-                "api_key": u.api_key.as_ref().map(|_| REDACTED),
-                "extra_headers": redact_pairs(&u.extra_headers, ": "),
-                "timeout_ms": u.timeout_ms,
-                "enabled": u.enabled,
-                "expose_all": u.expose_all,
-                "expose_prefix": u.expose_prefix,
-            });
+    let snap = state.snapshot();
+    let upstreams = rows
+        .into_iter()
+        .map(|u| dto::UpstreamView {
+            id: u.id,
+            name: u.name,
+            protocol: u.protocol.as_str().to_string(),
+            kind: u.kind.as_str().to_string(),
+            base_url: u.base_url,
+            has_api_key: u.api_key.is_some(),
+            extra_headers: u
+                .extra_headers
+                .into_iter()
+                .map(|(k, _)| (k, REDACTED.to_string()))
+                .collect(),
+            timeout_ms: u.timeout_ms,
+            enabled: u.enabled,
+            expose_all: u.expose_all,
+            expose_prefix: u.expose_prefix,
+            supports_responses: u.supports_responses,
+            catalog_all_modalities: !snap.catalog_bare.contains(&u.id),
             // What a llama.cpp row's server said in `GET /props`, and a
-            // router per model (llama egress design §4.2).
-            if u.protocol == crate::config::Protocol::LlamaCpp {
-                row["llama_facts"] = json!(state.llama_facts.view(u.id));
-            }
-            row
+            // router per model (llama egress design §4.2); empty on the
+            // other protocols.
+            llama_facts: state.llama_facts.view(u.id),
         })
         .collect();
-    Ok(json!({ "upstreams": out }))
+    Ok(dto::UpstreamsResponse { upstreams })
 }
 
 /// Registered MCP servers: their config (secrets redacted) joined with the live
 /// connection status and discovered tool count from the manager.
-pub async fn mcp_servers(state: &SharedState) -> Result<Value, String> {
+pub async fn mcp_servers(state: &SharedState) -> Result<dto::McpServersResponse, String> {
     let snap = state.snapshot();
     let views = state.mcp.status_views(&snap).await;
     let rows = store::list_mcp_servers(&state.db)
@@ -356,47 +381,49 @@ pub async fn mcp_servers(state: &SharedState) -> Result<Value, String> {
             tracing::warn!("mcp servers: counting the open tasks failed: {e}");
             Default::default()
         });
-    let out: Vec<Value> = rows
+    let mcp_servers = rows
         .iter()
         .map(|s| {
             let live = views.iter().find(|v| v.id == s.id);
-            json!({
-                "id": s.id,
-                "name": s.name,
-                "enabled": s.enabled,
-                "transport": s.transport.as_str(),
-                "command": s.command,
-                "args": s.args.join("\n"),
-                "env": redact_pairs(&s.env, "="),
-                "cwd": s.cwd,
-                "container_image": s.container_image,
-                "extra_run_args": s.extra_run_args.join("\n"),
-                "url": s.url,
-                "headers": redact_pairs(&s.headers, ": "),
-                "tool_prefix": s.tool_prefix,
-                "timeout_ms": s.timeout_ms,
-                "autostart": s.autostart,
-                "idle_seconds": s.idle_seconds,
-                "allow_sampling": s.allow_sampling,
-                "sampling_alias": s.sampling_alias,
+            dto::McpServerView {
+                id: s.id,
+                name: s.name.clone(),
+                enabled: s.enabled,
+                transport: s.transport.as_str().to_string(),
+                command: s.command.clone(),
+                args: s.args.join("\n"),
+                env: redact_pairs(&s.env, "="),
+                cwd: s.cwd.clone(),
+                container_image: s.container_image.clone(),
+                extra_run_args: s.extra_run_args.clone(),
+                url: s.url.clone(),
+                headers: redact_pairs(&s.headers, ": "),
+                tool_prefix: s.tool_prefix.clone(),
+                timeout_ms: s.timeout_ms,
+                autostart: s.autostart,
+                idle_seconds: s.idle_seconds,
+                allow_sampling: s.allow_sampling,
+                sampling_alias: s.sampling_alias.clone(),
                 // Set for an agent's own registration (container-runtime
                 // §3.3), so the MCP page can say who owns a row it must not
                 // offer to edit rather than leaving it looking hand-made.
-                "agent_id": s.agent_id,
+                agent_id: s.agent_id.clone(),
                 // A paired device's hosted tools (client-apps design §5.2):
                 // the page shows the row with its device and a "device"
                 // transport chip, and offers only what the grant leaves.
-                "device_key_id": s.device_key_id,
-                "device": s.device_key_id.map(|_| crate::devices::short_name(&s.name)),
-                "status": live.map(|v| v.status).unwrap_or("stopped"),
-                "tool_count": live.map(|v| v.tool_count).unwrap_or(0),
-                "open_tasks": open_tasks.get(&s.id).copied().unwrap_or(0),
+                device_key_id: s.device_key_id,
+                device: s
+                    .device_key_id
+                    .map(|_| crate::devices::short_name(&s.name).to_string()),
+                status: live.map(|v| v.status).unwrap_or("stopped").to_string(),
+                tool_count: live.map(|v| v.tool_count as i64).unwrap_or(0),
+                open_tasks: open_tasks.get(&s.id).copied().unwrap_or(0),
                 // An agent's row whose app container is not running is
                 // **sleeping**, not failed (container-runtime §3.3): the
                 // aggregate deliberately does not connect it, because
                 // connecting means `podman run`. Said here rather than left to
                 // read as a server that could not be reached.
-                "status_detail": match s.agent_id.as_deref() {
+                status_detail: match s.agent_id.as_deref() {
                     Some(agent) if dev.contains_key(agent) => Some(format!(
                         "served from a dev server at {} — this agent's app is overridden by a \
                          dev_url, so lmgw starts nothing for it and its tools are listed \
@@ -412,10 +439,10 @@ pub async fn mcp_servers(state: &SharedState) -> Result<Value, String> {
                     ),
                     _ => live.and_then(|v| v.detail.clone()),
                 },
-            })
+            }
         })
         .collect();
-    Ok(json!({ "mcp_servers": out }))
+    Ok(dto::McpServersResponse { mcp_servers })
 }
 
 /// One server's tools, in the **exposed** spelling a run resolves against.
@@ -426,10 +453,13 @@ pub async fn mcp_servers(state: &SharedState) -> Result<Value, String> {
 /// assembled from a second, staler place. Listing connects the server lazily,
 /// like any `tools/list` does; a server that cannot connect returns no tools
 /// and the caller shows its status.
-pub async fn mcp_server_tools(state: &SharedState, id: i64) -> Result<Value, String> {
+pub async fn mcp_server_tools(
+    state: &SharedState,
+    id: i64,
+) -> Result<dto::McpServerToolsResponse, String> {
     let snap = state.snapshot();
     let agg = state.mcp.list_tools(&snap).await;
-    let out: Vec<Value> = agg
+    let tools = agg
         .tools
         .iter()
         // A tool the owner switched off is not offered to anyone, so the picker
@@ -437,25 +467,22 @@ pub async fn mcp_server_tools(state: &SharedState, id: i64) -> Result<Value, Str
         .filter(|t| !agg.tool_disabled(&snap, t.name.as_ref()))
         .filter_map(|t| {
             let (server_id, upstream) = agg.reverse.get(t.name.as_ref())?;
-            (*server_id == id).then(|| {
-                json!({
-                    "name": t.name,
-                    "upstream_name": upstream,
-                    "description": t.description,
-                })
+            (*server_id == id).then(|| dto::McpToolView {
+                name: t.name.to_string(),
+                upstream_name: upstream.to_string(),
+                description: t.description.as_ref().map(|d| d.to_string()),
             })
         })
         .collect();
-    Ok(json!({ "tools": out }))
+    Ok(dto::McpServerToolsResponse { tools })
 }
 
 /// Everything this gateway can serve northbound, with its source and state.
 ///
 /// The MCP page lists *servers*; this is the tool-level view under it, and the
 /// only place the built-in `lmgw__*` / `docs__*` toolsets are visible at all.
-pub async fn tools(state: &SharedState) -> Result<Value, String> {
-    let inv = crate::mcp::inventory::list(state).await;
-    serde_json::to_value(inv).map_err(|e| e.to_string())
+pub async fn tools(state: &SharedState) -> Result<dto::ToolInventory, String> {
+    Ok(crate::mcp::inventory::list(state).await)
 }
 
 /// Flip the owner's per-tool switch.
@@ -464,7 +491,11 @@ pub async fn tools(state: &SharedState) -> Result<Value, String> {
 /// persist a switch for a name that does not exist, which is exactly the
 /// invisible state the inventory's stale rows exist to prevent. Enabling never
 /// checks — that is how a stale row is cleared.
-pub async fn tool_set(state: &SharedState, name: &str, enabled: bool) -> Result<Value, String> {
+pub async fn tool_set(
+    state: &SharedState,
+    name: &str,
+    enabled: bool,
+) -> Result<dto::MessageAck, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("pass the fully-qualified tool name".into());
@@ -480,21 +511,15 @@ pub async fn tool_set(state: &SharedState, name: &str, enabled: bool) -> Result<
         // it off: say which.
         let agg = state.mcp.aggregate(&snap).await;
         if let Some(by) = agg.disabled_by(&snap, name) {
-            return Ok(json!({
-                "ok": true,
-                "message": format!(
-                    "'{name}' is still off: it is switched off as '{by}', another name of the \
-                     same tool — switch '{by}' on to offer it"
-                ),
-            }));
+            return Ok(dto::MessageAck::new(format!(
+                "'{name}' is still off: it is switched off as '{by}', another name of the \
+                 same tool — switch '{by}' on to offer it"
+            )));
         }
-        return Ok(json!({
-            "ok": true,
-            "message": if cleared > 0 {
-                format!("'{name}' is offered again")
-            } else {
-                format!("'{name}' was not disabled")
-            },
+        return Ok(dto::MessageAck::new(if cleared > 0 {
+            format!("'{name}' is offered again")
+        } else {
+            format!("'{name}' was not disabled")
         }));
     }
     let inv = crate::mcp::inventory::list(state).await;
@@ -511,10 +536,9 @@ pub async fn tool_set(state: &SharedState, name: &str, enabled: bool) -> Result<
     // Northbound clients hold their own copy of `tools/list`; nudge them to
     // re-list rather than letting them keep offering a tool that now refuses.
     state.mcp.notify_tools_changed_now();
-    Ok(json!({
-        "ok": true,
-        "message": format!("'{name}' is disabled — it is no longer listed or callable"),
-    }))
+    Ok(dto::MessageAck::new(format!(
+        "'{name}' is disabled — it is no longer listed or callable"
+    )))
 }
 
 /// Tail the unified request log. `limit` is the caller's own bound — passed to
@@ -525,7 +549,7 @@ pub async fn logs(
     errors_only: Option<bool>,
     alias: Option<&str>,
     before_id: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<self_admin::LogTail, String> {
     let filter = LogFilter {
         alias: alias.map(str::to_string),
         upstream_name: None,
@@ -537,156 +561,156 @@ pub async fn logs(
     let rows = store::query_logs(&state.db, &filter)
         .await
         .map_err(|e| e.to_string())?;
-    let out: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.id,
-                "ts": r.ts,
-                "ingress": r.ingress_proto,
-                "alias": r.requested_alias,
-                "upstream": r.upstream_name,
-                "upstream_model": r.upstream_model,
-                "mcp_tool": r.mcp_tool,
-                "status": r.status,
-                "ttfb_ms": r.ttfb_ms,
-                "total_ms": r.total_ms,
-                "prompt_tokens": r.prompt_tokens,
-                "completion_tokens": r.completion_tokens,
-                "streamed": r.streamed,
-                "error_kind": r.error_kind,
-                "error_msg": r.error_msg,
-                "fallback_reason": r.fallback_reason,
-                "rung": r.rung,
-            })
+    let logs: Vec<self_admin::LogEntry> = rows
+        .into_iter()
+        .map(|r| self_admin::LogEntry {
+            log_id: r.id,
+            ts: r.ts,
+            ingress_proto: r.ingress_proto,
+            requested_alias: r.requested_alias,
+            upstream_name: r.upstream_name,
+            upstream_model: r.upstream_model,
+            mcp_tool: r.mcp_tool,
+            status: r.status as u16,
+            ttfb_ms: r.ttfb_ms,
+            total_ms: r.total_ms,
+            prompt_tokens: r.prompt_tokens,
+            completion_tokens: r.completion_tokens,
+            streamed: r.streamed,
+            error_kind: r.error_kind,
+            error_msg: r.error_msg,
+            fallback_reason: r.fallback_reason,
+            rung: r.rung,
         })
         .collect();
-    Ok(json!({ "logs": out, "count": out.len() }))
+    Ok(self_admin::LogTail { logs })
 }
 
 /// Current settings, with every secret redacted.
-pub async fn settings(state: &SharedState) -> Result<Value, String> {
+pub async fn settings(state: &SharedState) -> Result<self_admin::SettingsRead, String> {
     let s = &state.snapshot().settings;
     // One shape per class (§6): the image every model of the class inherits,
     // where its GGUFs live, the extra `podman run` flags, and the prefix its
     // models are exposed under. Container names are derived (§3.3) and ports
     // are dynamic (§3.5), so neither is a setting any more.
-    let class = |r: &crate::config::RouterSettings| {
-        json!({
-            "image": r.image,
-            "models_dir": r.models_dir,
-            "extra_run_args": r.extra_run_args.join("\n"),
-            "public_prefix": r.public_prefix,
-        })
+    let class = |r: &crate::config::RouterSettings| self_admin::ClassRead {
+        image: r.image.clone(),
+        models_dir: r.models_dir.clone(),
+        extra_run_args: r.extra_run_args.clone(),
+        public_prefix: r.public_prefix.clone(),
     };
-    let secret = |v: &str| if v.is_empty() { None } else { Some(REDACTED) };
-    let mut out = json!({
-        "bind_addr": s.bind_addr,
-        "auth_enabled": s.auth_enabled,
-        "retention_days": s.retention_days,
-        "retention_max_rows": s.retention_max_rows,
-        "jobs_retention_days": s.jobs_retention_days,
-        "jobs_max_rows": s.jobs_max_rows,
-        "max_body_mb": s.max_body_mb,
-        "chat_archive_days": s.chat_archive_days,
-        "chat_purge_days": s.chat_purge_days,
-        "docs_ingest_reply_tokens": s.docs_ingest_reply_tokens,
-        "docs_embed_batch": s.docs_embed_batch,
-        "docs_fetch_delay_ms": s.docs_fetch_delay_ms,
-        "docs_search": s.docs_search,
-        "docs_rerank_model": s.docs_rerank_model,
-        "sampling_alias": s.sampling_alias,
-        "self_admin": s.self_admin.as_str(),
-        "update_check_enabled": s.update_check_enabled,
-        "hf_token": secret(&s.hf_token),
-        "update_token": secret(&s.update_token),
-        "container_prefix": s.container_prefix,
-        "agent_origin_suffix": s.agent_origin_suffix,
-        "agent_script_image": s.agent_script_image,
+    let builds_dir = state.builds_dir();
+    Ok(self_admin::SettingsRead {
+        bind_addr: s.bind_addr.clone(),
+        auth_enabled: s.auth_enabled,
+        retention_days: s.retention_days,
+        retention_max_rows: s.retention_max_rows,
+        jobs_retention_days: s.jobs_retention_days,
+        jobs_max_rows: s.jobs_max_rows,
+        max_body_mb: s.max_body_mb,
+        chat_archive_days: s.chat_archive_days,
+        chat_purge_days: s.chat_purge_days,
+        docs_ingest_reply_tokens: s.docs_ingest_reply_tokens,
+        docs_embed_batch: s.docs_embed_batch,
+        docs_fetch_delay_ms: s.docs_fetch_delay_ms,
+        docs_search: (&s.docs_search).into(),
+        docs_rerank_model: s.docs_rerank_model.clone(),
+        sampling_alias: s.sampling_alias.clone(),
+        self_admin: s.self_admin.into(),
+        update_check_enabled: s.update_check_enabled,
+        has_hf_token: !s.hf_token.is_empty(),
+        has_update_token: !s.update_token.is_empty(),
+        container_prefix: s.container_prefix.clone(),
+        agent_origin_suffix: s.agent_origin_suffix.clone(),
+        agent_script_image: s.agent_script_image.clone(),
         // `active` is reported but never patchable here — see
         // `SettingsPatch::hold_fallback_alias` and `ops::hold_set` (gpu-hold
         // design §3.1): engaging the hold runs the sweep, a side effect a
         // generic settings save must not grow.
-        "hold": { "active": s.hold.active, "fallback_alias": s.hold.fallback_alias },
+        hold: dto::HoldSettingsDto {
+            active: s.hold.active,
+            fallback_alias: s.hold.fallback_alias.clone(),
+        },
         // Next to the hold: both decide when a fallback answers instead of
         // the local model. The rest of `VramSettings` is not exposed over
         // MCP yet — only the field a fallback decision reads (unified-KV
         // spec §12).
-        "vram": { "fallback_on_external": s.vram.fallback_on_external },
-        "router": class(&s.router),
-        "aux_router": class(&s.aux_router),
-        "audio": {
-            "image": s.audio.image,
-            "models_dir": s.audio.models_dir,
-            "backend": s.audio.backend,
-            "device": s.audio.device,
-            "threads": s.audio.threads,
-            "lazy_load": s.audio.lazy_load,
+        vram: self_admin::VramRead {
+            fallback_on_external: s.vram.fallback_on_external,
+        },
+        router: class(&s.router),
+        aux_router: self_admin::AuxClassRead {
+            base: class(&s.aux_router),
+            decision_prefix: s.aux_router.decision_prefix.clone(),
+        },
+        audio: self_admin::AudioRead {
+            image: s.audio.image.clone(),
+            models_dir: s.audio.models_dir.clone(),
+            backend: s.audio.backend.clone(),
+            device: s.audio.device,
+            threads: s.audio.threads,
+            lazy_load: s.audio.lazy_load,
             // The four bounds and the voice library go into every model's
             // `server.json`; 0 is "no bound" on each, and a reader that cannot
             // see them cannot explain a 503 server_busy or a reloaded model.
-            "busy_timeout_ms": s.audio.busy_timeout_ms,
-            "idle_unload_ms": s.audio.idle_unload_ms,
-            "min_free_memory_mb": s.audio.min_free_memory_mb,
-            "max_request_body_mb": s.audio.max_request_body_mb,
-            "voice_dir": s.audio.voice_dir,
-            "extra_run_args": s.audio.extra_run_args.join("\n"),
-            "public_prefix": s.audio.public_prefix,
+            busy_timeout_ms: s.audio.busy_timeout_ms,
+            idle_unload_ms: s.audio.idle_unload_ms,
+            min_free_memory_mb: s.audio.min_free_memory_mb,
+            max_request_body_mb: s.audio.max_request_body_mb,
+            voice_dir: s.audio.voice_dir.clone(),
+            extra_run_args: s.audio.extra_run_args.clone(),
+            public_prefix: s.audio.public_prefix.clone(),
             // Which local model writes voice-clip transcripts (empty: none).
-            "voice_transcribe_alias": s.audio.voice_transcribe_alias,
+            voice_transcribe_alias: s.audio.voice_transcribe_alias.clone(),
+            // What an audio catalog download takes (the spec's pin, or main) —
+            // what `lmgw__settings_set audio_catalog_revision` sets.
+            catalog_revision: s.audio.catalog_revision.as_str().to_string(),
         },
         // The image class has no engine fields at all (image-generation design
         // §4): sd-server has no config file, and everything per-process is a
         // flag in some row's `args`.
-        "image": {
-            "image": s.image.image,
-            "models_dir": s.image.models_dir,
-            "extra_run_args": s.image.extra_run_args.join("\n"),
-            "public_prefix": s.image.public_prefix,
+        image: self_admin::ClassRead {
+            image: s.image.image.clone(),
+            models_dir: s.image.models_dir.clone(),
+            extra_run_args: s.image.extra_run_args.clone(),
+            public_prefix: s.image.public_prefix.clone(),
         },
-    });
-    // Container builds (container-builds §5, §7, §8) — assigned after the
-    // macro, which is at rustc's recursion limit (as in
-    // `web::api_settings::settings_full`). The configured dir and the one
-    // builds actually use are both shown, since "unset" means a default that
-    // differs between prod and a dev instance.
-    // The default Chat prompt, after the macro for the same reason: the one
-    // in force, and whether it is the built-in one (which then shows it).
-    // The Chat change feed's limits (client-apps design §2.3), outside the
-    // macro above, which is at the recursion limit.
-    out["chat_feed_retention_days"] = json!(s.chat_feed_retention_days);
-    out["chat_feed_keepalive_s"] = json!(s.chat_feed_keepalive_s);
-    out["chat_feed_page_size"] = json!(s.chat_feed_page_size);
-    out["chat_feed_live_buffer"] = json!(s.chat_feed_live_buffer);
-    out["chat_system_prompt"] = json!(s.default_chat_prompt());
-    out["chat_system_prompt_is_builtin"] = json!(s.chat_system_prompt.is_none());
-    // The profile new threads start with, in the shape `lmgw__settings_set`
-    // takes back (a number, or null for none).
-    out["chat_profile"] = json!(s.chat_profile);
-    out["chat_pdf_mode"] = json!(s.chat_pdf_mode);
-    out["chat_stt_alias"] = json!(s.chat_stt_alias);
-    // The Chat's Voice group (chat-voice design §2.1), in the shape
-    // `lmgw__settings_set` takes back.
-    out["chat_tts_alias"] = json!(s.chat_tts_alias);
-    out["chat_voice"] = json!(s.chat_voice);
-    out["chat_speech_style"] = json!(s.chat_speech_style);
-    out["chat_voice_language"] = json!(s.chat_voice_language);
-    out["chat_voice_reply_language"] = json!(s.chat_voice_reply_language);
-    out["chat_read_aloud"] = json!(s.chat_read_aloud);
-    out["chat_turn_detection"] = json!(s.chat_turn_detection);
-    out["chat_voice_audio_input"] = json!(s.chat_voice_audio_input);
-    out["chat_kb_budget_tokens"] = json!(s.chat_kb_budget_tokens);
-    let builds_dir = state.builds_dir();
-    out["builds_dir"] = json!(s.builds_dir);
-    out["builds_dir_effective"] = json!(builds_dir.display().to_string());
-    out["builds_dir_warning"] = json!(crate::backends::paths::tmpfs_refusal(&builds_dir));
-    out["forge_tokens"] = redact_map(&s.forge_tokens);
-    out["build_update_check_hours"] = json!(s.build_update_check_hours);
-    // What an audio catalog download takes (the spec's pin, or main) — what
-    // `lmgw__settings_set audio_catalog_revision` sets. After the macro too.
-    out["audio"]["catalog_revision"] = json!(s.audio.catalog_revision.as_str());
-    // `GET /v1/realtime`'s section (realtime design §12), in the shape
-    // `lmgw__settings_set realtime` takes back.
-    out["realtime"] = json!(super::realtime_view(&s.realtime));
-    Ok(out)
+        // The Chat change feed's limits (client-apps design §2.3).
+        chat_feed_retention_days: s.chat_feed_retention_days,
+        chat_feed_keepalive_s: s.chat_feed_keepalive_s,
+        chat_feed_keepalive_max_s: s.chat_feed_keepalive_max_s,
+        chat_feed_page_size: s.chat_feed_page_size,
+        chat_feed_live_buffer: s.chat_feed_live_buffer,
+        // The default Chat prompt: the one in force, and whether it is the
+        // built-in one (which then shows it).
+        chat_system_prompt: s.default_chat_prompt().to_string(),
+        chat_system_prompt_is_builtin: s.chat_system_prompt.is_none(),
+        // The profile new threads start with, in the shape `lmgw__settings_set`
+        // takes back (a number, or null for none).
+        chat_profile: s.chat_profile,
+        chat_pdf_mode: s.chat_pdf_mode.clone(),
+        chat_stt_alias: s.chat_stt_alias.clone(),
+        // The Chat's Voice group (chat-voice design §2.1), in the shape
+        // `lmgw__settings_set` takes back.
+        chat_tts_alias: s.chat_tts_alias.clone(),
+        chat_voice: s.chat_voice.clone(),
+        chat_speech_style: s.chat_speech_style.clone(),
+        chat_voice_language: s.chat_voice_language.clone(),
+        chat_voice_reply_language: s.chat_voice_reply_language.clone(),
+        chat_read_aloud: s.chat_read_aloud,
+        chat_turn_detection: s.chat_turn_detection.clone(),
+        chat_voice_audio_input: s.chat_voice_audio_input.clone(),
+        chat_kb_budget_tokens: s.chat_kb_budget_tokens,
+        // Container builds (container-builds §5, §7, §8). The configured dir
+        // and the one builds actually use are both shown, since "unset" means a
+        // default that differs between prod and a dev instance.
+        builds_dir: s.builds_dir.clone(),
+        builds_dir_effective: builds_dir.display().to_string(),
+        builds_dir_warning: crate::backends::paths::tmpfs_refusal(&builds_dir),
+        forge_tokens: redact_map(&s.forge_tokens),
+        build_update_check_hours: s.build_update_check_hours,
+        // `GET /v1/realtime`'s section (realtime design §12), in the shape
+        // `lmgw__settings_set realtime` takes back.
+        realtime: super::realtime_view(&s.realtime),
+    })
 }

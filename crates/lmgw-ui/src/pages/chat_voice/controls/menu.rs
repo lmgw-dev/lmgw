@@ -10,12 +10,13 @@
 
 use leptos::html;
 use leptos::prelude::*;
-use serde_json::{json, Value};
+use lmgw_api_types::chat_threads::SettingsAck;
+use serde_json::json;
 
 use super::super::devices::{use_voice_devices, DevicesPanel};
 use super::super::page::{use_page_voice, PageVoice};
 use super::super::state::{blocker, problem_link, Note, NoteKind};
-use super::super::{source_label, ThreadVoice, VoiceDraft};
+use super::super::{source_label, ThreadVoice, VoiceDraft, VoiceSource};
 use super::ICON_SPEAKER;
 use crate::widgets::Popover;
 
@@ -122,7 +123,10 @@ fn ReadAloudRow(pv: PageVoice, draft: VoiceDraft, on_saved: Callback<()>) -> imp
         let Some((_, source, tts)) = resolved.get() else {
             return String::new();
         };
-        let mut t = format!("from {}", source_label(source.as_deref()));
+        let mut t = format!(
+            "from {}",
+            source_label(source.as_ref().map(VoiceSource::as_str))
+        );
         if let Some(a) = tts {
             t.push_str(&format!(" · text-to-speech: {a}"));
         }
@@ -156,7 +160,7 @@ fn ReadAloudRow(pv: PageVoice, draft: VoiceDraft, on_saved: Callback<()>) -> imp
         let id = t.id;
         busy.set(true);
         leptos::task::spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<SettingsAck, _>(
                 format!("/chat/api/threads/{id}/settings"),
                 &json!({ "voice": voice }),
             )
@@ -198,7 +202,7 @@ fn ReadAloudRow(pv: PageVoice, draft: VoiceDraft, on_saved: Callback<()>) -> imp
                     format!(
                         "Read replies aloud: {} ({}). Click to turn it {} for this conversation.",
                         if value { "on" } else { "off" },
-                        source_label(source.as_deref()),
+                        source_label(source.as_ref().map(VoiceSource::as_str)),
                         if value { "off" } else { "on" },
                     )
                 }

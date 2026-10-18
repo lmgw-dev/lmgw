@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::chat_threads::MessageVoice;
+
 /// A speech model its language does not reach as set — the ASR the spoken
 /// language, the TTS the reply language: a thread's `voice_resolved.language_notes`,
 /// and Settings' `chat_voice_language_notes` for the Chat's own models.
@@ -43,23 +45,47 @@ pub struct ModelState {
     pub ms: Option<u64>,
     /// `held`: `gpu_hold` or `benchmark`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub cause: Option<String>,
     /// `fallback`: the alias that answers in its place.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub answered_by: Option<String>,
     /// `skipped`: `full`, `does_not_fit` or `cannot_speak`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub reason: Option<String>,
     /// The sentence a client shows.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub message: Option<String>,
     /// `skipped` with `does_not_fit`: what the stage's group needs on the
     /// card, in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub needed_bytes: Option<u64>,
     /// `skipped` with `does_not_fit`: what the group could have together,
     /// in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub capacity_bytes: Option<u64>,
 }
 
@@ -184,6 +210,7 @@ pub struct Dictation {
     /// fallback); `null` when it answered itself.
     pub asr_answered_by: Option<String>,
     /// The transcription call, admission included.
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub asr_ms: Option<u64>,
     /// The recording's length, from its WAV header; `null` for any other
     /// container.
@@ -191,4 +218,48 @@ pub struct Dictation {
     /// What the model says it heard, in its own spelling, else the language
     /// the thread's user speaks; `null` when neither is known.
     pub language: Option<String>,
+}
+
+/// A bound realtime session's `lmgw.chat.reply` event: a spoken reply as
+/// finalized, or finalized again (a later one for the same `message_id`
+/// replaces the earlier). Three shapes, by which fields are set:
+/// `content` (with `unheard` when the reply was cut) and `voice`; `removed`
+/// alone; `skipped` (with `voice` when the finalize wrote it). Written flat
+/// beside the event's `type`; a field that is not set is absent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ChatReply {
+    pub message_id: i64,
+    /// The words heard (the reply's text from now on).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub content: Option<String>,
+    /// The words sent but not heard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub unheard: Option<String>,
+    /// The message's voice record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub voice: Option<MessageVoice>,
+    /// Heard by nobody, and no tool ran: the reply is gone from the thread.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
+    /// The reply was not cut to what was heard, and why: it stays whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub skipped: Option<String>,
 }

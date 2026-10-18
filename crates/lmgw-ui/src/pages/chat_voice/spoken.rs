@@ -3,6 +3,7 @@
 //! title on a spoken user turn, the speaker badge and timing line of a
 //! spoken reply (§9.5). Pure, so it is tested natively.
 
+use lmgw_api_types::chat_threads::VoiceModels;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
@@ -65,22 +66,44 @@ pub(crate) struct VoiceTiming {
     pub transcript_wait_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub(crate) struct VoiceModels {
-    pub asr: Option<Served>,
-    pub chat: Option<Served>,
-    pub tts: Option<Served>,
-}
-
-/// A model a spoken turn went through: the alias asked for and, when
-/// another answered, that one.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub(crate) struct Served {
-    pub alias: String,
-    pub answered_by: Option<String>,
-    pub voice: Option<String>,
+impl VoiceTiming {
+    /// The page's copy of a typed timing. Destructured without `..`: a field
+    /// the type gains fails to compile here until the page takes or drops it.
+    pub(crate) fn of_typed(t: &lmgw_api_types::chat_threads::VoiceTiming) -> VoiceTiming {
+        let lmgw_api_types::chat_threads::VoiceTiming {
+            response_id: _,
+            message_id: _,
+            end_of_turn_ms,
+            asr_ms,
+            first_token_ms,
+            reasoning_ms,
+            first_clause_ms,
+            first_audio_ms,
+            total_ms,
+            to_first_audio_ms,
+            cold,
+            first_clause: _,
+            models,
+            input,
+            input_why,
+            transcript_wait_ms,
+        } = t.clone();
+        VoiceTiming {
+            end_of_turn_ms,
+            asr_ms,
+            first_token_ms,
+            reasoning_ms,
+            first_clause_ms,
+            first_audio_ms,
+            total_ms,
+            to_first_audio_ms,
+            cold,
+            models,
+            input: input.map(|i| i.as_str().to_string()),
+            input_why,
+            transcript_wait_ms,
+        }
+    }
 }
 
 /// Voice turns the model hears, in words (voice-audio-input design §5).
@@ -132,12 +155,39 @@ impl MsgVoice {
         role == "assistant" && self.via == VIA_REALTIME
     }
 
-    /// A message's `voice` from an event's JSON (`lmgw.chat.user`, `lmgw.
-    /// chat.reply`), read as tolerantly as a listed one.
-    pub(crate) fn of_value(v: &Value) -> Option<MsgVoice> {
-        serde_json::from_value::<MsgVoice>(v.clone())
-            .ok()
-            .filter(|m| !m.via.is_empty())
+    /// The page's copy of a typed message voice, `None` for an empty `via`
+    /// (a typed turn). Destructured without `..`, as [`VoiceTiming::of_typed`].
+    pub(crate) fn of_typed(v: &lmgw_api_types::chat_threads::MessageVoice) -> Option<MsgVoice> {
+        let lmgw_api_types::chat_threads::MessageVoice {
+            via,
+            asr,
+            asr_answered_by,
+            asr_ms,
+            audio_ms,
+            tts,
+            tts_answered_by,
+            voice,
+            unheard,
+            input,
+            transcript_error,
+            timing,
+        } = v.clone();
+        Some(MsgVoice {
+            via,
+            asr,
+            asr_answered_by,
+            asr_ms,
+            audio_ms,
+            tts,
+            tts_answered_by,
+            voice,
+            unheard,
+            timing: timing.as_ref().map(VoiceTiming::of_typed),
+            input: input.map(|i| i.as_str().to_string()),
+            transcript_error,
+            note: None,
+        })
+        .filter(|m| !m.via.is_empty())
     }
 
     /// What a reply streaming in voice mode carries until its stored row's
@@ -289,15 +339,16 @@ impl VoiceTiming {
 }
 
 /// The answer of `POST …/transcribe` (§5).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub(crate) struct Transcript {
-    pub text: String,
-    pub alias: Option<String>,
-    pub asr_answered_by: Option<String>,
-    pub asr_ms: Option<u64>,
-    pub audio_ms: Option<u64>,
-    pub language: Option<String>,
+pub(crate) use lmgw_api_types::chat_voice::Dictation as Transcript;
+
+/// The speech-to-text model a transcription names, or the phrase for one
+/// that names none.
+pub(crate) fn asr_name(t: &Transcript) -> &str {
+    if t.alias.is_empty() {
+        "the speech-to-text model"
+    } else {
+        &t.alias
+    }
 }
 
 /// The composer holds dictated text (§5): what the send says about it.
@@ -322,7 +373,7 @@ impl DictationMark {
             _ => None,
         };
         DictationMark {
-            asr: t.alias.clone().or(m.asr),
+            asr: Some(t.alias.clone()).filter(|a| !a.is_empty()).or(m.asr),
             // A fallback that had any part of the audio stays named.
             asr_answered_by: t.asr_answered_by.clone().or(m.asr_answered_by),
             asr_ms: if first {
@@ -519,7 +570,7 @@ mod tests {
     fn dictations_into_one_message_add_up() {
         let t = |ms, audio, by: Option<&str>| Transcript {
             text: "x".into(),
-            alias: Some("asr".into()),
+            alias: "asr".into(),
             asr_answered_by: by.map(str::to_string),
             asr_ms: Some(ms),
             audio_ms: audio,

@@ -21,17 +21,10 @@
 use std::cmp::Ordering;
 
 use leptos::prelude::*;
-use serde::Deserialize;
+use lmgw_api_types::chat::ThreadRows;
 
 use super::super::chat::ChatThread;
 use super::ListRead;
-
-/// `GET /chat/api/threads/rows`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct Rows {
-    threads: Vec<ChatThread>,
-}
 
 /// The list's order, the server's: the archived list by `archived_at`,
 /// newest first; the active one pinned first, then by `updated_at`, newest
@@ -101,16 +94,18 @@ pub(super) async fn read(list: ListRead, named: Vec<i64>) {
         .map(i64::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let got = crate::api::get::<Rows>(format!("/chat/api/threads/rows?ids={ids}")).await;
+    let got = crate::api::get::<ThreadRows>(format!("/chat/api/threads/rows?ids={ids}")).await;
     // A newer read went out meanwhile (the whole list, or the toolbar's
     // other one): it is the list.
     if !list.latest.is(ticket) {
         return;
     }
     let merged = match got {
-        Ok(r) => list
-            .threads
-            .with_untracked(|shown| merge(shown, &named, &r.threads, archived)),
+        Ok(r) => {
+            let rows: Vec<ChatThread> = r.threads.into_iter().map(ChatThread::from).collect();
+            list.threads
+                .with_untracked(|shown| merge(shown, &named, &rows, archived))
+        }
         Err(e) => {
             leptos::logging::warn!("reading the changed conversations' rows failed: {e}");
             Merge::Whole
@@ -126,6 +121,7 @@ pub(super) async fn read(list: ListRead, named: Vec<i64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lmgw_api_types::chat::ThreadRow;
 
     fn t(id: i64, at: &str) -> ChatThread {
         ChatThread {
@@ -167,6 +163,28 @@ mod tests {
     fn a_row_read_again_as_it_was_changes_nothing() {
         let shown = vec![t(4, "30"), t(3, "20")];
         assert_eq!(merge(&shown, &[3], &[t(3, "20")], false), Merge::Same);
+    }
+
+    /// The list holds rows without `created_at` and `last_message_at`
+    /// (`ChatThread::from(ThreadRow)`): a row read again that differs in
+    /// those alone is the row shown, so the list is not set again.
+    #[test]
+    fn a_row_that_differs_only_in_the_times_the_page_leaves_out_changes_nothing() {
+        let row = |last: i64, created: &str| {
+            ChatThread::from(ThreadRow {
+                id: 3,
+                title: "t3".into(),
+                updated_at: "2026-10-08 10:00:20".into(),
+                created_at: created.into(),
+                last_message_at: Some(last),
+                ..Default::default()
+            })
+        };
+        let shown = vec![t(4, "30"), row(100, "2026-10-01 00:00:00")];
+        assert_eq!(
+            merge(&shown, &[3], &[row(200, "2026-09-01 00:00:00")], false),
+            Merge::Same
+        );
     }
 
     #[test]

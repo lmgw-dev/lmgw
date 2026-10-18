@@ -35,8 +35,6 @@ pub(crate) enum OpArgs {
     /// Schema by hand (table D, [`super::args`]).
     Hand(fn() -> serde_json::Value),
     NoArgs,
-    /// A deprecated alias of another op (`embed_model_set` → `aux_model_set`).
-    AliasOf(&'static str),
 }
 
 /// One documented op (§4.7).

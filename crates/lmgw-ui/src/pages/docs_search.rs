@@ -15,9 +15,10 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use lmgw_api_types::{
-    DocsSearchResponse, SearchHit, SearchParamsView, SearchTraceView, SettingsFull, StageHitView,
+    DocsSearchResponse, MessageAck, SearchHit, SearchParamsView, SearchTraceView, SettingsFull,
+    StageHitView,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::fmt::human_bytes;
 use crate::widgets::{use_toasts, Explain, Select};
@@ -203,7 +204,7 @@ pub fn Playground() -> impl IntoView {
             }
         });
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/settings_set_full", &patch).await {
+            match crate::api::post::<MessageAck, _>("/api/op/settings_set_full", &patch).await {
                 Ok(_) => toasts.ok("these are the new stage defaults"),
                 Err(e) => toasts.err(e.to_string()),
             }

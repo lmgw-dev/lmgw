@@ -31,6 +31,9 @@ use crate::runtime::Class;
 use crate::state::SharedState;
 use crate::store;
 
+mod gpu;
+pub(crate) use gpu::image_gpu;
+
 // ---------------------------------------------------------------------------
 // podman's views
 // ---------------------------------------------------------------------------

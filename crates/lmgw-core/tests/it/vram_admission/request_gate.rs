@@ -220,7 +220,7 @@ async fn a_request_that_would_overflow_the_pool_waits_for_the_one_in_flight() {
     assert!(queue[0]["waiting_ms"].as_u64().unwrap_or(0) > 0);
 
     // lmgw__status reads the same view.
-    let status = lmgw_core::ops::status(&f.state).await.unwrap();
+    let status = lmgw_core::ops::backends::to_json(lmgw_core::ops::status(&f.state).await).unwrap();
     assert_eq!(
         status["vram"]["kv_pools"][0]["queue"][0]["needs_tokens"], 40,
         "{status}"

@@ -36,6 +36,13 @@ impl Core {
             .get("type")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // A bound call's own client events (calls design §6.4): no events of
+        // OpenAI's protocol, served by the call's side (`call`), refused
+        // anywhere else.
+        if let Some(k) = kind.as_deref().filter(|k| super::call::is_call_event(k)) {
+            let k = k.to_string();
+            return self.call_event(&k, value, event_id.as_deref(), arrived);
+        }
         // An item type a client may not create, refused by name rather than
         // as a shape error (realtime-server-tools §2.6).
         let refused = super::super::conversation::mcp_item_refusal(&value);
@@ -117,6 +124,16 @@ impl Core {
                 event_id,
                 response_id,
             } => self.response_cancel(event_id.as_deref(), response_id.as_deref()),
+            // A call's audio is on RTP (calls design §6.1).
+            ClientEvent::InputAudioBufferAppend { event_id, .. } if self.on_call => self.error(
+                ErrorObject::invalid(
+                    "invalid_event",
+                    "input_audio_buffer.append does not apply to a WebRTC call: this call's \
+                     audio arrives on its RTP track",
+                )
+                .with_param("type")
+                .for_event(event_id.as_deref()),
+            ),
             ClientEvent::InputAudioBufferAppend { event_id, audio } => {
                 self.input_append(event_id.as_deref(), &audio, arrived)
                     .await
@@ -125,14 +142,17 @@ impl Core {
                 self.input_commit(event_id.as_deref())
             }
             ClientEvent::InputAudioBufferClear { .. } => self.input_clear(),
+            // A call's output buffer is lmgw's (calls design §6.2).
+            ClientEvent::OutputAudioBufferClear { .. } if self.on_call => self.output_clear(),
             // WebRTC only in OpenAI's API (§2.3). Answered rather than
             // ignored, so a client never waits on an event this build drops.
             other @ ClientEvent::OutputAudioBufferClear { .. } => self.error(
                 ErrorObject::invalid(
                     "not_implemented_yet",
                     format!(
-                        "{} is not implemented yet in this lmgw build (realtime work in \
-                         progress: audio arrives after text conversations)",
+                        "{} applies to WebRTC calls (POST /v1/realtime/calls); on a WebSocket \
+                         the client owns its playback buffer: flush it and send \
+                         conversation.item.truncate",
                         other.type_name()
                     ),
                 )
@@ -156,10 +176,21 @@ impl Core {
     /// it was.
     async fn session_update(&mut self, event_id: Option<&str>, update: &Map<String, Value>) {
         let snap = self.state.snapshot();
+        // A bound session's turn mode and its turn detection follow each
+        // other; an unbound session refuses the mode (calls design §2.2).
+        let rule = self.bound.as_ref().map(|b| b.turn_rule);
+        let patched = match super::super::thread::turn_mode::update(rule, &self.session, update) {
+            Ok(p) => p,
+            Err(e) => return self.error(e.for_event(event_id)),
+        };
+        let update = patched.as_ref().unwrap_or(update);
         let mut next = match merge::apply_update(&self.session, update, &snap.settings.realtime) {
             Ok(s) => s,
             Err(e) => return self.error(e.for_event(event_id)),
         };
+        if self.on_call {
+            super::call::lead_none(&mut next);
+        }
         // What a bound session's thread owns stays the thread's (§8.1).
         if self.bound.is_some() {
             if let Err(e) = super::super::thread::check_update(&self.session, &next, update) {

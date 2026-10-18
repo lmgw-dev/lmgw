@@ -248,6 +248,24 @@ impl Core {
         }
     }
 
+    /// A bound client's stop (`stop`, calls design §6.2): the owed response
+    /// and a held `response.create` are dropped, so nothing starts speaking
+    /// after the tap; the turns stay in the conversation, unanswered, and no
+    /// response is timed from them. What was dropped, for the log; `None`
+    /// when nothing was owed or held.
+    pub(super) fn pending_stop(&mut self) -> Option<String> {
+        let p = self.pending.take()?;
+        self.timing_unanswered(&p.owed);
+        let mut dropped = Vec::new();
+        if !p.owed.is_empty() {
+            dropped.push(format!("the response owed to {:?}", p.owed));
+        }
+        if p.carried.is_some() {
+            dropped.push("the held response.create".to_string());
+        }
+        (!dropped.is_empty()).then(|| dropped.join(" and "))
+    }
+
     /// Whether an automatic response is owed to `item_id`.
     pub(super) fn pending_owes(&self, item_id: &str) -> bool {
         self.pending

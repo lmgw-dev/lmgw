@@ -4,13 +4,22 @@
 use serde::{Deserialize, Serialize};
 
 /// Uniform error body for every non-2xx `/api` response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApiError {
     /// Stable machine-readable code, e.g. `not_found`, `invalid_input`.
     pub code: String,
     /// Human-readable description, shown verbatim in the UI.
     pub message: String,
+    /// Who holds the Chat thread a realtime bind asked for, named as the
+    /// Chat feed's `voice.bound.by` names a client ("device 'desktop'", "the
+    /// dashboard"): what `lmgw-client`'s `read_refusal` reads from the
+    /// realtime handshake's `error.held_by` ([`OpenAiErrorBody::held_by`])
+    /// on its 409 `chat_thread_bound`. No `/api` route sends it, so the
+    /// dashboard plane's schema leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub held_by: Option<String>,
 }
 
 /// The OpenAI-shaped error envelope `/v1` answers failures in (and the lab
@@ -32,6 +41,12 @@ pub struct OpenAiErrorBody {
     pub param: Option<String>,
     /// lmgw's own machine-readable code, not the HTTP status.
     pub code: String,
+    /// Who holds the Chat thread a realtime bind asked for, named as the
+    /// Chat feed's `voice.bound.by` names a client ("device 'desktop'",
+    /// "the dashboard"): on the realtime handshake's 409
+    /// `chat_thread_bound` only, and absent everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
 }
 
 impl OpenAiError {
@@ -42,6 +57,7 @@ impl OpenAiError {
                 kind: kind.into(),
                 param: None,
                 code: code.into(),
+                held_by: None,
             },
         }
     }
@@ -54,10 +70,17 @@ pub struct VersionInfo {
     pub version: String,
 }
 
-/// `GET /api/status` — everything the Overview needs in one call.
+/// `GET /api/status` and the `lmgw__status` tool — everything the Overview
+/// needs in one call.
+///
+/// `R`, `V` and `M` are the shapes of a runtime row, of the GPU ledger and of
+/// a southbound MCP server's connection: the gateway fills in its own views,
+/// a reader (and the API document) uses [`RuntimeStatus`], [`VramStatus`] and
+/// [`McpStatus`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct GatewayStatus {
+#[cfg_attr(feature = "schema", schemars(rename = "GatewayStatus"))]
+pub struct GatewayStatus<R = RuntimeStatus, V = VramStatus, M = McpStatus> {
     pub version: String,
     pub uptime_seconds: u64,
     pub bind_addr: String,
@@ -67,10 +90,31 @@ pub struct GatewayStatus {
     pub requests: RequestStats,
     /// One row per model lmgw believes is running (a container is per model, not per class).
     #[serde(default)]
-    pub runtime: Vec<RuntimeStatus>,
+    pub runtime: Vec<R>,
+    /// The GPU those containers share: what is resident, what it is measured
+    /// to cost, and anything queued behind it. Reported even when admission
+    /// is inactive; `inactive_reason` says why.
+    pub vram: V,
     #[serde(default)]
-    pub mcp_servers: Vec<McpStatus>,
+    pub mcp_servers: Vec<M>,
     pub counts: ObjectCounts,
+    /// One entry per candidate alias, by name. Absent while none is
+    /// configured, so an install without any reads as it did before the key
+    /// existed: no empty array, no key at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
+    pub candidate_aliases: Option<Vec<crate::CandidateAliasStatus>>,
+    /// The device link: lmgw's device CA and the server certificates issued
+    /// from it (device link design §9.2).
+    #[serde(default)]
+    pub devices: crate::device_link::DevicesStatus,
+    /// The UDP listener for WebRTC calls: its socket groups, one per HTTP
+    /// listener (realtime calls design §9).
+    #[serde(default)]
+    pub webrtc: crate::realtime::WebRtcStatus,
 }
 
 /// One model container's runtime state.
@@ -98,19 +142,35 @@ pub struct RuntimeStatus {
     /// every other class, and for an image container whose capabilities route
     /// answered anything but a 200.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub image_capabilities: Option<ImageCapabilities>,
     /// What a llama-server container said about itself in `GET /props`.
     /// `None` for every other engine, and when the
     /// read failed — `warnings` then says why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub llama_props: Option<LlamaProps>,
     /// The rung this container runs. `None` for a row
     /// without a ladder, and `#[serde(default)]` so a frame from before this
     /// field existed still decodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub rung: Option<RungStatus>,
     /// A climb in progress: to which rung, why, and what it is doing now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub climbing: Option<ClimbStatus>,
     /// Sends in flight as the ladder gate counts them — what a climb drains.
     /// Only ladder sends are counted, so this is zero on every other row.
@@ -124,6 +184,10 @@ pub struct RuntimeStatus {
     /// callers. That is every container of an install without background
     /// traffic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub owner: Option<String>,
     /// A foreground admission is waiting for room, and background traffic takes
     /// no new work on this model until it is over. Absent = false.
@@ -133,6 +197,10 @@ pub struct RuntimeStatus {
     /// switch): no VRAM, not stopped by the GPU hold. `None` — absent from
     /// the frame — is the GPU, every other container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(transform = crate::openapi_ext::non_null)
+    )]
     pub placement: Option<String>,
 }
 
@@ -446,14 +514,13 @@ pub struct VramWaiter {
 /// `ready` | `stopped` | `error`, `tool_count` the tools it offers, and
 /// `detail` says why on an error, or that a stopped server was idle-reaped
 /// and reconnects on next use.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct McpStatus {
     pub id: i64,
     pub name: String,
     pub status: String,
-    #[serde(default)]
-    pub tool_count: Option<i64>,
+    pub tool_count: i64,
     #[serde(default)]
     pub detail: Option<String>,
 }
@@ -629,4 +696,76 @@ pub struct RowPricing {
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn status(candidate_aliases: Option<Vec<crate::CandidateAliasStatus>>) -> GatewayStatus {
+        GatewayStatus {
+            version: "1".into(),
+            uptime_seconds: 2,
+            bind_addr: "127.0.0.1:8787".into(),
+            auth_enabled: false,
+            self_admin: crate::AdminLevel::ReadOnly,
+            requests: RequestStats {
+                total: 1,
+                errors: 0,
+                active: -1,
+                last_minute: 1,
+                errors_last_minute: 0,
+                prompt_tokens: 3,
+                completion_tokens: 4,
+            },
+            runtime: vec![],
+            vram: VramStatus::default(),
+            mcp_servers: vec![],
+            counts: ObjectCounts {
+                upstreams: 0,
+                aliases: 0,
+                local_models: 0,
+                mcp_servers: 0,
+                api_keys: 1,
+            },
+            candidate_aliases,
+            devices: Default::default(),
+            webrtc: Default::default(),
+        }
+    }
+
+    /// The key is absent while no candidate alias is configured, and an empty
+    /// list is never sent in its place.
+    #[test]
+    fn candidate_aliases_are_absent_until_one_is_configured() {
+        let none = serde_json::to_value(status(None)).unwrap();
+        assert!(none.get("candidate_aliases").is_none(), "{none}");
+        // The ledger and the lists are always there.
+        assert_eq!(none["runtime"], json!([]));
+        assert_eq!(none["mcp_servers"], json!([]));
+        assert!(none["vram"].is_object());
+
+        let one = serde_json::to_value(status(Some(vec![crate::CandidateAliasStatus {
+            name: "job".into(),
+            mode: "background".into(),
+            primary: None,
+            ..Default::default()
+        }])))
+        .unwrap();
+        assert_eq!(
+            one["candidate_aliases"],
+            json!([{
+                "name": "job",
+                "mode": "background",
+                "primary": null,
+                "alternates": [],
+                "enabled_facets": [],
+                "problems": [],
+                "deferrals_24h": 0,
+            }])
+        );
+        let back: GatewayStatus = serde_json::from_value(one).unwrap();
+        assert_eq!(back.candidate_aliases.map(|a| a.len()), Some(1));
+    }
 }

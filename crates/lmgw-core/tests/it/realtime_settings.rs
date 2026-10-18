@@ -30,6 +30,7 @@ async fn setup() -> (SharedState, Gw) {
         expose_all: false,
         expose_prefix: String::new(),
         supports_responses: false,
+        catalog_all_modalities: true,
     };
     let audio = store::insert_upstream(&state.db, &upstream("voice", UpstreamKind::AudioCpp))
         .await
@@ -236,17 +237,14 @@ async fn the_tool_plane_saves_the_same_patch() {
     }))
     .unwrap();
     let out = lmgw_core::ops::settings_set(&state, p).await.unwrap();
-    assert_eq!(
-        out["changed"],
-        json!(["realtime.tts_alias", "realtime.echo_tail_ms"])
-    );
+    assert_eq!(out.changed, ["realtime.tts_alias", "realtime.echo_tail_ms"]);
     assert_eq!(realtime(&gw).await.echo_tail_ms, 400);
     let p: lmgw_core::ops::SettingsPatch =
         serde_json::from_value(json!({"realtime": {"tts_alias": "my-asr"}})).unwrap();
     let e = lmgw_core::ops::settings_set(&state, p).await.unwrap_err();
     assert!(e.contains("realtime.tts_alias"), "{e}");
     // The read the tool plane has carries the section too.
-    let read = lmgw_core::ops::settings(&state).await.unwrap();
+    let read = lmgw_core::ops::backends::to_json(lmgw_core::ops::settings(&state).await).unwrap();
     assert_eq!(read["realtime"]["tts_alias"], "my-tts");
     assert_eq!(
         read["realtime"]["semantic_vad"]["medium"]["max_wait_ms"],
@@ -428,6 +426,7 @@ async fn the_budget_sizes_each_stage_with_the_figures_admission_charges() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

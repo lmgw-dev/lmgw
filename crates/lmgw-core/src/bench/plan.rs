@@ -177,7 +177,7 @@ pub async fn prepare(
     let id = args.model_id.trim();
     let Some(row) = snap.local_models.iter().find(|m| m.model_id == id).cloned() else {
         let other = if snap.aux_models.iter().any(|m| m.model_id == id) {
-            Some("an aux (embedding/rerank) model")
+            Some("an aux (embedding, rerank or decision) model")
         } else if snap.audio_models.iter().any(|m| m.model_id == id) {
             Some("an audio model")
         } else if snap.image_models.iter().any(|m| m.model_id == id) {

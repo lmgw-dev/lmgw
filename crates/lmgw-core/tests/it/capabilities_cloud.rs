@@ -8,11 +8,12 @@
 //! covers the whole path from provider JSON to the published object rather
 //! than a hand-made `ModelInfo` that could drift from what the parsers emit.
 
-use lmgw_core::capabilities::{self, ModelCapabilities, StructuredOutputCaps};
+use lmgw_core::capabilities::{self, ModelCapabilities, ProjectorStatus, StructuredOutputCaps};
 use lmgw_core::catalog::{
     parse_anthropic_entry, parse_gemini_entry, parse_openai_entry, ModelInfo,
 };
 use lmgw_core::config::{AudioModel, AuxKind, AuxModel, ImageModel, Protocol};
+use lmgw_core::gguf::ModelSummary;
 use serde_json::{json, Value};
 
 fn fixture(name: &str) -> Value {
@@ -303,6 +304,11 @@ fn aux(model_id: &str, kind: AuxKind, args: &[&str]) -> AuxModel {
         kind,
         pooling: None,
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: args.iter().map(|s| s.to_string()).collect(),
         idle_seconds: 0,
         enabled: true,
@@ -317,7 +323,7 @@ fn aux(model_id: &str, kind: AuxKind, args: &[&str]) -> AuxModel {
 #[test]
 fn aux_embedder() {
     let model = aux("qwen3-embedding-4b", AuxKind::Embed, &[]);
-    let d = capabilities::for_aux(&model, None);
+    let d = capabilities::for_aux(&model, None, ProjectorStatus::None, None);
     let caps = d.capabilities.expect("capabilities");
     assert_eq!(caps.task, "embedding");
     assert_eq!(caps.endpoints, ["/v1/embeddings"]);
@@ -339,7 +345,7 @@ fn aux_embedder() {
 #[test]
 fn aux_reranker() {
     let model = aux("bge-reranker", AuxKind::Rerank, &[]);
-    let caps = capabilities::for_aux(&model, None)
+    let caps = capabilities::for_aux(&model, None, ProjectorStatus::None, None)
         .capabilities
         .expect("capabilities");
     assert_eq!(caps.task, "rerank");
@@ -350,24 +356,157 @@ fn aux_reranker() {
     );
 }
 
-/// A multimodal embedder's extra input modalities live in a projector this
-/// builder does not read, so the list is withheld rather than published as
-/// text-only.
+/// A projector lmgw could not read leaves the input side unknown: it is the
+/// very file that would add `image`, so the list is withheld rather than
+/// published as text-only.
 #[test]
-fn multimodal_embedder_withholds_its_modalities() {
+fn multimodal_embedder_withholds_what_its_unread_projector_would_say() {
     let model = aux(
         "jina-clip",
         AuxKind::Embed,
         &["--mmproj", "jina/mmproj.gguf"],
     );
-    let d = capabilities::for_aux(&model, None);
+    assert_eq!(
+        capabilities::aux_projector(&model).map(|p| p.rel),
+        Some(None),
+        "a path outside /models is not one lmgw can read"
+    );
+    let d = capabilities::for_aux(
+        &model,
+        None,
+        ProjectorStatus::Unreadable {
+            path: "jina/mmproj.gguf",
+            err: "not under /models",
+        },
+        None,
+    );
     let caps = d.capabilities.expect("capabilities");
     assert_eq!(caps.input_modalities, None);
     assert_eq!(caps.vision, None);
+    assert_eq!(caps.source, "config");
     assert!(d
         .notes
         .iter()
         .any(|n| n.contains("jina/mmproj.gguf") && n.contains("image_url")));
+}
+
+/// `-mm` is the projector flag's short spelling: the renderer passes it
+/// through while `mmproj_path` is unset, so `/v1/models` names that
+/// projector as it would a `--mmproj`.
+#[test]
+fn an_aux_projector_in_the_short_spelling_is_the_row_s_projector() {
+    let model = aux(
+        "clef",
+        AuxKind::Decision,
+        &["-mm", "/models/clef/mmproj.gguf"],
+    );
+    let p = capabilities::aux_projector(&model).expect("a projector");
+    assert_eq!(
+        (p.shown.as_str(), p.rel.as_deref()),
+        ("/models/clef/mmproj.gguf", Some("clef/mmproj.gguf"))
+    );
+    let inline = aux("clef-2", AuxKind::Decision, &["-mm=/models/c2/p.gguf"]);
+    assert_eq!(
+        capabilities::aux_projector(&inline).and_then(|p| p.rel),
+        Some("c2/p.gguf".into())
+    );
+}
+
+/// A projector that was read speaks for the input side, as on a chat row
+/// (decision-models design §2.9): a vision encoder adds `image`.
+#[test]
+fn a_read_projector_publishes_its_input_modalities() {
+    let mut model = aux("qwen3-vl-embedding", AuxKind::Embed, &[]);
+    model.mmproj_path = Some("vl/mmproj.gguf".into());
+    let p = capabilities::aux_projector(&model).expect("a projector");
+    assert_eq!(
+        (p.shown.as_str(), p.rel.as_deref()),
+        ("/models/vl/mmproj.gguf", Some("vl/mmproj.gguf"))
+    );
+    let projector = ModelSummary {
+        has_vision_encoder: Some(true),
+        ..Default::default()
+    };
+    let d = capabilities::for_aux(
+        &model,
+        Some(&ModelSummary::default()),
+        ProjectorStatus::Configured { path: &p.shown },
+        Some(&projector),
+    );
+    let caps = d.capabilities.expect("capabilities");
+    assert_eq!(caps.input_modalities, Some(strings(&["text", "image"])));
+    assert_eq!(caps.vision, Some(true));
+    assert_eq!(caps.source, "gguf+config");
+    assert!(
+        d.notes.iter().any(|n| n.contains("/models/vl/mmproj.gguf")),
+        "{:?}",
+        d.notes
+    );
+}
+
+/// A decision row (decision-models design §2.9): task `decision`, its one
+/// route, and llama.cpp's and OpenRouter's output word.
+#[test]
+fn aux_decision_model() {
+    let model = aux("laya", AuxKind::Decision, &[]);
+    let caps = capabilities::for_aux(&model, None, ProjectorStatus::None, None)
+        .capabilities
+        .expect("capabilities");
+    assert_eq!(caps.task, "decision");
+    assert_eq!(caps.endpoints, ["/v1/systemone"]);
+    assert_eq!(caps.input_modalities, Some(strings(&["text"])));
+    assert_eq!(caps.output_modalities, Some(strings(&["decisions"])));
+    assert_eq!(caps.vision, Some(false));
+}
+
+/// A catalog that states `decisions` publishes a decision model on its
+/// route (OpenRouter's Jev entry, Appendix B.3), and OpenRouter's plural
+/// `embeddings` an embedder.
+#[test]
+fn a_catalog_decision_model_and_an_openrouter_embedder() {
+    let jev = parse_openai_entry(&json!({
+        "id": "typesafe/jev-1.13", "context_length": 64000,
+        "architecture": {"modality": "text->decisions", "input_modalities": ["text"],
+                         "output_modalities": ["decisions"], "tokenizer": "Other",
+                         "instruct_type": null},
+        "pricing": {"prompt": "0.000000042", "completion": "0"},
+    }))
+    .expect("an entry");
+    assert_eq!(jev.task.as_deref(), Some("decision"));
+    let caps = capabilities::for_catalog(&jev, Protocol::Openai, "openrouter")
+        .capabilities
+        .expect("capabilities");
+    assert_eq!(caps.task, "decision");
+    assert_eq!(caps.endpoints, ["/v1/systemone"]);
+    assert_eq!(caps.output_modalities, Some(strings(&["decisions"])));
+    assert_eq!(
+        capabilities::task::endpoints("decision", Protocol::Anthropic),
+        Vec::<String>::new(),
+        "only openai and llama_cpp upstreams serve the route"
+    );
+
+    let embedder = parse_openai_entry(&json!({
+        "id": "openai/text-embedding-3-small",
+        "architecture": {"input_modalities": ["text"], "output_modalities": ["embeddings"]},
+    }))
+    .expect("an entry");
+    assert_eq!(embedder.task.as_deref(), Some("embedding"));
+}
+
+/// An owner's override may state the decision task and output, as §4.3's
+/// TypeSafe alias needs, and the route follows the task.
+#[test]
+fn an_override_may_declare_a_decision_model() {
+    let derived = capabilities::Derived::default();
+    let d = capabilities::apply_owner_override(
+        derived,
+        &json!({"capabilities": {"task": "decision", "output_modalities": ["decisions"]}}),
+        Protocol::Openai,
+    )
+    .expect("decision and decisions are in the vocabulary");
+    let caps = d.capabilities.expect("capabilities");
+    assert_eq!(caps.task, "decision");
+    assert_eq!(caps.endpoints, ["/v1/systemone"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,38 +793,44 @@ fn an_image_rows_override_merges_over_the_derived_object() {
         .any(|n| n.contains("renders 512x512 in half a second")));
 }
 
-/// A cloud entry whose catalog says its output is an image gets the image task
-/// and the generations route — and the edits route only when the catalog also
-/// says it takes an image in.
+/// A cloud entry whose catalog says its output is an image (or a video) gets
+/// the image task and publishes no route, with a note saying why
+/// (decision-models design §6.2, revising image-generation §5): lmgw's image
+/// routes post to the upstream's `/images/generations` and `/images/edits`,
+/// which OpenRouter, whose catalog shape this is, does not document. An
+/// owner's override states the routes of a provider that serves them.
 #[test]
-fn a_cloud_catalog_image_model_gets_the_image_routes() {
-    let entry = json!({
-        "id": "black-forest-labs/flux-1.1-pro",
-        "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]},
-    });
-    let info = parse_openai_entry(&entry).expect("parses");
-    assert_eq!(info.task.as_deref(), Some("image_generation"));
-    let caps = capabilities::for_catalog(&info, Protocol::Openai, "kilo")
-        .capabilities
-        .expect("capabilities");
-    assert_eq!(caps.task, "image_generation");
-    assert_eq!(caps.endpoints, ["/v1/images/generations"]);
-    assert_eq!(caps.output_modalities, Some(strings(&["image"])));
-    assert_eq!(caps.source, "catalog");
+fn a_cloud_catalog_image_model_publishes_no_route_until_the_owner_states_one() {
+    for (outputs, task) in [("image", "image_generation"), ("video", "video_generation")] {
+        let entry = json!({
+            "id": "black-forest-labs/flux-1.1-pro",
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": [outputs]},
+        });
+        let info = parse_openai_entry(&entry).expect("parses");
+        assert_eq!(info.task.as_deref(), Some(task));
+        let d = capabilities::for_catalog(&info, Protocol::Openai, "bfl");
+        let caps = d.capabilities.clone().expect("capabilities");
+        assert_eq!(caps.task, task);
+        assert!(caps.endpoints.is_empty(), "{task}: {:?}", caps.endpoints);
+        assert_eq!(caps.output_modalities, Some(strings(&[outputs])));
+        assert_eq!(caps.vision, Some(true));
+        assert_eq!(caps.source, "catalog");
+        assert!(
+            d.notes[0].contains("No lmgw route is verified") && d.notes[0].contains("POST /images"),
+            "{:?}",
+            d.notes
+        );
 
-    let edit = json!({
-        "id": "black-forest-labs/flux-kontext-pro",
-        "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["image"]},
-    });
-    let info = parse_openai_entry(&edit).expect("parses");
-    let caps = capabilities::for_catalog(&info, Protocol::Openai, "kilo")
-        .capabilities
-        .expect("capabilities");
-    assert_eq!(
-        caps.endpoints,
-        ["/v1/images/generations", "/v1/images/edits"]
-    );
-    assert_eq!(caps.vision, Some(true));
+        let owned = capabilities::apply_owner_override(
+            d,
+            &json!({"capabilities": {"endpoints": ["/v1/images/generations"]}}),
+            Protocol::Openai,
+        )
+        .expect("an override may state the routes");
+        let caps = owned.capabilities.expect("capabilities");
+        assert_eq!(caps.endpoints, ["/v1/images/generations"]);
+        assert_eq!(caps.source, "owner");
+    }
 }
 
 /// A chat model that can *also* draw (`[text, image]` out, which is how the

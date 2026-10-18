@@ -7,8 +7,8 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::ContainerAnswer;
-use serde_json::{json, Value};
+use lmgw_api_types::{ContainerAnswer, HoldSet};
+use serde_json::json;
 
 use crate::ops_state::{model_key, use_ops, OpsState};
 use crate::widgets::{use_toasts, Modal, ModalSize, Toasts};
@@ -25,18 +25,10 @@ pub fn hold_set(toasts: Toasts, busy: RwSignal<bool>, active: bool) {
     busy.set(true);
     spawn_local(async move {
         let res =
-            crate::api::post::<Value, _>("/api/op/hold_set", &json!({ "active": active })).await;
+            crate::api::post::<HoldSet, _>("/api/op/hold_set", &json!({ "active": active })).await;
         busy.set(false);
         match res {
-            Ok(v) => toasts.ok(v
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or(if active {
-                    "GPU hold engaged"
-                } else {
-                    "GPU hold released"
-                })
-                .to_string()),
+            Ok(v) => toasts.ok(v.message),
             Err(e) => toasts.err(e.to_string()),
         }
     });

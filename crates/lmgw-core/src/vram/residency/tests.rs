@@ -60,6 +60,7 @@ fn files(on_disk: u64) -> Footprint {
     Footprint {
         weights_bytes: on_disk,
         kv_cache_bytes: 0,
+        compute_bytes: 0,
         total_bytes: on_disk,
         ctx_tokens: None,
         note: Some("the on-disk size".into()),

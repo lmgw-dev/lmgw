@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use super::super::asr::{AsrResolution, AsrVia};
 use super::super::handshake::Limits;
 use super::super::ids::Ids;
+use super::super::link::Transport;
 use super::super::protocol::Modality;
 use super::super::resolve::{ChatResolution, Via};
 use super::super::responder::{self, Msg};
@@ -50,6 +51,7 @@ impl Rig {
             .unwrap();
         let init = SessionInit {
             running: None,
+            call: None,
             state,
             ctx: Default::default(),
             requested_model: Some("chatty".into()),
@@ -64,7 +66,7 @@ impl Rig {
             },
             speech,
             slot: None,
-            limits: Limits::from_settings(&Default::default()),
+            transport: Transport::WebSocket(Limits::from_settings(&Default::default())),
             bound: None,
         };
         let mut core = Core::new(init, ids, out, responder_tx, asr_tx, score_tx);
@@ -501,5 +503,6 @@ mod hearing;
 mod held;
 mod hold;
 mod results;
+mod stop;
 mod window;
 mod words;

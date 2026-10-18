@@ -1,5 +1,5 @@
 //! Where a model's container computes: on the GPU, or on the CPU (the audio
-//! class's per-row CPU switch).
+//! and aux classes' per-row CPU switch).
 //!
 //! One predicate that every VRAM and GPU-hold decision reads. A `Cpu`
 //! container charges nothing, is never an eviction victim and never evicts,
@@ -20,7 +20,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum Placement {
     /// Every class and row but an audio row whose backend in effect is
-    /// `cpu`.
+    /// `cpu` and an aux row whose `backend` is `cpu`.
     #[default]
     Gpu,
     Cpu,

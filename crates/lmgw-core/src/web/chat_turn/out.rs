@@ -115,6 +115,7 @@ impl TurnFrame {
                 &frames::ErrorFrame {
                     message: e.to_string(),
                     code: Some(e.code().to_string()),
+                    ..Default::default()
                 },
             )
         }

@@ -57,16 +57,14 @@ fn llama_cpp_with_any_other_kind_is_refused_by_name() {
 }
 
 #[test]
-fn openai_with_llama_server_is_the_old_spelling_of_llama_cpp_and_says_so() {
+fn openai_with_llama_server_is_refused_by_name() {
     for current in [
         row(Openai, Generic),
         row(LlamaCpp, LlamaServer),
         UpstreamShape::NEW_ROW,
     ] {
-        let s = settle(Some(Openai), Some(LlamaServer), None, current).unwrap();
-        assert_eq!((s.shape.protocol, s.shape.kind), (LlamaCpp, LlamaServer));
-        assert!(s.notes[0].contains("old spelling"), "{s:?}");
-        assert!(s.message("upstream 'x' created").contains("old spelling"));
+        let e = refused(Some(Openai), Some(LlamaServer), current);
+        assert!(e.contains("use protocol llama_cpp"), "{e}");
     }
 }
 
@@ -117,15 +115,13 @@ fn another_kind_alone_on_a_llama_cpp_row_is_refused() {
 
 #[test]
 fn llama_server_alone_reads_the_rows_protocol() {
-    // openai: the old spelling.
-    let s = settle(None, Some(LlamaServer), None, row(Openai, Generic)).unwrap();
-    assert_eq!((s.shape.protocol, s.shape.kind), (LlamaCpp, LlamaServer));
-    assert!(s.notes[0].contains("old spelling"), "{s:?}");
+    // openai: the old spelling, refused.
+    let e = refused(None, Some(LlamaServer), row(Openai, Generic));
+    assert!(e.contains("use protocol llama_cpp"), "{e}");
     // gemini: refused.
     refused(None, Some(LlamaServer), row(Gemini, Generic));
     // A create without a protocol is an openai one.
-    let (p, k, _) = settled(None, Some(LlamaServer), UpstreamShape::NEW_ROW);
-    assert_eq!((p, k), (LlamaCpp, LlamaServer));
+    refused(None, Some(LlamaServer), UpstreamShape::NEW_ROW);
     // anthropic and llama_cpp: as sent.
     assert_eq!(
         settled(None, Some(LlamaServer), row(Anthropic, Generic)),
@@ -208,7 +204,7 @@ fn supports_responses_is_never_on_for_llama_cpp() {
     // Sent on: refused by name.
     let e = settle(Some(LlamaCpp), None, Some(true), on).unwrap_err();
     assert!(e.contains("supports_responses"), "{e}");
-    let e = settle(Some(Openai), Some(LlamaServer), Some(true), on).unwrap_err();
+    let e = settle(Some(LlamaCpp), Some(LlamaServer), Some(true), on).unwrap_err();
     assert!(e.contains("supports_responses"), "{e}");
     // Carried over from the row: switched off and said.
     let s = settle(Some(LlamaCpp), None, None, on).unwrap();

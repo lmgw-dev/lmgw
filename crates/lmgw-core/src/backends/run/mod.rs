@@ -84,6 +84,7 @@ use super::presets::{self, DockerfileChoice, DockerfileInfo, SourceFacts};
 use super::updates::UpdateStore;
 use super::{paths, tags, validate, ForgeLookup, NoForgeLookup};
 use crate::agents::container::{terminate, Exit};
+use crate::erased::Erased;
 use crate::jobs::{self, JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::state::{AppState, SharedState};
 use crate::store;
@@ -468,35 +469,40 @@ pub async fn start_run(
 
 pub struct BuildRunExecutor;
 
-#[async_trait::async_trait]
 impl JobExecutor for BuildRunExecutor {
     fn kind(&self) -> JobKind {
         JobKind::BuildRun
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("build_run input: {e}"))?;
-        let state = ctx.state.clone();
-        let run = store::get_build_run(&state.db, input.run_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("build run {} no longer exists", input.run_id))?;
-        let run_id = run.id;
-        let mut exec = match Execution::open(ctx, run, input.build_id, input.rebuild) {
-            Ok(x) => x,
-            Err(e) => {
-                let _ =
-                    store::finish_build_run(&state.db, run_id, BuildRunStatus::Failed, Some(&e))
-                        .await;
-                return Err(e);
-            }
-        };
-        let (status, error) = exec.go().await;
-        let outcome = exec.finish(status, error).await;
-        // A finished run can clear (or start) an update badge (§8).
-        super::updates::publish(&state).await;
-        outcome
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("build_run input: {e}"))?;
+            let state = ctx.state.clone();
+            let run = store::get_build_run(&state.db, input.run_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("build run {} no longer exists", input.run_id))?;
+            let run_id = run.id;
+            let mut exec = match Execution::open(ctx, run, input.build_id, input.rebuild) {
+                Ok(x) => x,
+                Err(e) => {
+                    let _ = store::finish_build_run(
+                        &state.db,
+                        run_id,
+                        BuildRunStatus::Failed,
+                        Some(&e),
+                    )
+                    .await;
+                    return Err(e);
+                }
+            };
+            let (status, error) = exec.go().await;
+            let outcome = exec.finish(status, error).await;
+            // A finished run can clear (or start) an update badge (§8).
+            super::updates::publish(&state).await;
+            outcome
+        })
     }
 }
 

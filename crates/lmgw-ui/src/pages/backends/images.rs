@@ -605,12 +605,8 @@ fn set_default(bk: Bk, class: &'static str, tag: String) {
     spawn_local(async move {
         match api::set_class_default(class, &tag).await {
             Ok(v) => {
-                let note = v
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|m| format!(" — {m}"))
-                    .unwrap_or_default();
-                bk.toasts.ok(format!("{class} default is now {tag}{note}"));
+                bk.toasts
+                    .ok(format!("{class} default is now {tag} — {}", v.message));
                 bk.load_builds();
                 bk.load_images();
             }

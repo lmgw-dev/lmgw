@@ -23,7 +23,7 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::chat::{matches_query_in, ChatThread, ListItem, Opener, SettingsDraft};
+use super::chat::{matches_query_in, post_thread, ChatThread, ListItem, Opener, SettingsDraft};
 use super::chat_settings::{draft_patch, DraftErrors, SettingsFields};
 use super::chat_sync::own_folder_delete;
 use crate::scope::Scope;
@@ -31,7 +31,7 @@ use crate::widgets::{
     use_toasts, ConfirmButton, MenuItem, Modal, ModalFooter, ModelPicker, RowMenu, Toasts,
 };
 use lmgw_api_types::chat::{Ack, Thread};
-use lmgw_api_types::chat_folders::{FolderOngoing, FolderPatched};
+use lmgw_api_types::chat_folders::{CurrentThread, FolderOngoing, FolderPatched};
 use ongoing::{ApplyToCurrent, OngoingDraft, OngoingFields};
 
 /// One folder as the thread list carries it.
@@ -262,15 +262,19 @@ pub(super) const CONTINUING: &str = "the current conversation has no message yet
 /// thread to open, and whether it rolled over (a new current thread) or
 /// kept the current one, which had no message yet.
 pub(super) async fn start_conversation(folder: i64) -> Result<(i64, bool), crate::api::Error> {
-    let v = crate::api::post::<Value, _>(
+    let current = crate::api::post::<CurrentThread, _>(
         format!("/chat/api/folders/{folder}/current"),
         &json!({ "new": true }),
     )
     .await?;
-    let id = v["thread"]["id"].as_i64().ok_or_else(|| {
-        crate::api::Error::Transport("the folder's current thread came back without an id".into())
-    })?;
-    Ok((id, v["rolled_over"] != json!(false)))
+    // A thread's id is never 0 (a stored one is positive, a temporary one
+    // negative): 0 is what a thread read without its id holds.
+    if current.thread.row.id == 0 {
+        return Err(crate::api::Error::Transport(
+            "the folder's current thread came back without an id".into(),
+        ));
+    }
+    Ok((current.thread.row.id, current.rolled_over))
 }
 
 /// "New chat here": a chat in `folder`, on `alias` unless the folder's
@@ -280,7 +284,7 @@ pub(super) async fn start_chat_in(
     alias: &str,
 ) -> Result<ChatThread, crate::api::Error> {
     let body = json!({ "model_alias": alias, "kind": "chat", "folder_id": folder });
-    crate::api::post::<ChatThread, _>("/chat/api/threads", &body).await
+    post_thread("/chat/api/threads", &body).await
 }
 
 /// Everything the folder UI shares with the page.

@@ -550,6 +550,17 @@ impl<'a> Relay<'a> {
                 sink.on_delta(&StreamDelta::Usage(u));
             }
             "stop" => self.stop = data["reason"].as_str().map(finish_reason),
+            // A label the thread or its folder attached that offers the
+            // turn no tools (client-apps design §5.3, 2026-10-15): relayed
+            // above as every frame is, and the turn goes on without it —
+            // a desktop that is off, or one the device is not granted, ends
+            // no voice response. A turn it leaves with nothing says so in a
+            // frame of its own.
+            "error"
+                if data["code"]
+                    .as_str()
+                    .and_then(lmgw_api_types::chat_frames::LabelCode::parse)
+                    .is_some() => {}
             "error" => {
                 let code = data["code"].as_str().map(str::to_string);
                 // Another turn took the thread, or the reply cannot be

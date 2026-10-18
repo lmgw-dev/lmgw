@@ -43,7 +43,7 @@ pub(crate) use speech::{local_speech, remote_rules, rules_on, shape_on};
 mod task;
 pub(super) mod usage;
 mod voices;
-pub use voices::{handle_audio_voices, VoicesProbe, VOICES_SOURCE_HEADER};
+pub use voices::{handle_audio_voices, lab_voices, VoicesProbe, VOICES_SOURCE_HEADER};
 
 /// The route check of `/v1/audio/*` and `/v1/tasks/*`
 /// ([`crate::gate::RouteCheck::Audio`]).
@@ -58,6 +58,11 @@ pub use voices::{handle_audio_voices, VoicesProbe, VOICES_SOURCE_HEADER};
 /// Run by the gate on the route it settled on, so under a GPU hold it judges
 /// the fallback's upstream, which is the only order that keeps it honest
 /// (gpu-hold design §4).
+///
+/// A local **aux** row — an embedder, a reranker or a decision model — is
+/// refused by name too: it speaks llama_cpp, so the protocol check passes it,
+/// and none of its kinds has an audio route. Refused here so its container is
+/// not started for a request it cannot answer (decision-models design §2.2).
 pub(crate) fn require_openai_audio(route: &Route, alias: &str) -> Result<(), GatewayError> {
     // llama-server serves /v1/audio/transcriptions on the same surface.
     if !route.upstream.protocol.speaks_openai_http() {
@@ -66,6 +71,16 @@ pub(crate) fn require_openai_audio(route: &Route, alias: &str) -> Result<(), Gat
              '{}' ({})",
             route.upstream.name,
             route.upstream.protocol.as_str(),
+        )));
+    }
+    if let Some(target) =
+        crate::vram::classify(route).filter(|t| t.class == crate::runtime::Class::Aux)
+    {
+        return Err(GatewayError::Unsupported(format!(
+            "model '{alias}' is the aux model '{}' (an embedding, rerank or decision model), \
+             and /v1/audio/* and /v1/tasks/* serve audio models. (Refused here so its \
+             container is not started for a request llama-server cannot answer.)",
+            target.model_id
         )));
     }
     Ok(())
@@ -500,13 +515,14 @@ pub async fn handle_task_stream(state: SharedState, ctx: RequestCtx, body: Value
     resp
 }
 
-/// [`handle_audio_voices`] for a reader that must not start anything — the
-/// dashboard's Audio lab, where opening the page is not asking for the model.
-/// `None` when the alias lands on a local model with no live container: none
-/// in the registry as `ready`, or one that is `ready` there and does not
-/// answer. The second case is real: a container that dies outside lmgw (an
-/// OOM kill, audio.cpp crashing, a `podman stop` from a shell) stays `ready`
-/// until something tries to start it, because nothing sweeps ready entries.
+/// The model's own server's voice list, for a reader that must not start
+/// anything — the Audio lab ([`lab_voices`]), where opening the page is not
+/// asking for the model. `None` when the alias lands on a local model with no
+/// live container: none in the registry as `ready`, or one that is `ready`
+/// there and does not answer. The second case is real: a container that dies
+/// outside lmgw (an OOM kill, audio.cpp crashing, a `podman stop` from a
+/// shell) stays `ready` until something tries to start it, because nothing
+/// sweeps ready entries.
 ///
 /// So this bypasses admission entirely rather than going through it with a
 /// flag: an admitted read takes a claim (which stamps `last_used`, so a look
@@ -514,20 +530,7 @@ pub async fn handle_task_stream(state: SharedState, ctx: RequestCtx, body: Value
 /// behind the claim triggers the recovery that stops it and admits it afresh
 /// — a `podman run`, possibly evicting other residents to fit it. Here it is
 /// one GET to the entry's port, and a refused connection is the answer "not
-/// running". A remote route has no container and is read as usual.
-pub async fn audio_voices_if_running(state: SharedState, alias: &str) -> Option<Response> {
-    const PROTO: ClientProto = ClientProto::OpenaiChat;
-    let (headers, read) = voices_if_running(&state, alias).await?;
-    let resp = match read {
-        Ok(bytes) => voices_response(bytes),
-        Err(e) => error_response(PROTO, &e),
-    };
-    Some(headers.stamp(resp))
-}
-
-/// [`audio_voices_if_running`]'s read, as the upstream's body: `None` when
-/// the alias lands on a local model with no live container, otherwise the
-/// gate's headers and the body or why there is none.
+/// running". Otherwise the gate's headers and the body or why there is none.
 pub(crate) async fn voices_if_running(
     state: &SharedState,
     alias: &str,
@@ -564,7 +567,7 @@ pub(crate) async fn voices_if_running(
 pub(crate) fn refuse_non_audio_voices(route: &Route, alias: &str) -> Result<(), GatewayError> {
     use crate::config::UpstreamKind;
     let what = match route.upstream.kind {
-        UpstreamKind::LlamaServer => "a llama-server (chat, embedding or rerank)",
+        UpstreamKind::LlamaServer => "a llama-server (chat, embedding, rerank or decision)",
         UpstreamKind::SdCpp => "an image",
         UpstreamKind::AudioCpp | UpstreamKind::Generic => return Ok(()),
     };

@@ -163,6 +163,7 @@ impl ModelPicks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lmgw_api_types::chat::ThreadRow;
 
     fn thread(model: &str) -> ChatThread {
         ChatThread {
@@ -183,6 +184,37 @@ mod tests {
         };
         assert_eq!(
             row_take(&held, &later, false, "a", false),
+            RowTake::OnlyWhen
+        );
+    }
+
+    /// The page holds a stored row without its `created_at` and
+    /// `last_message_at` (`ChatThread::from(ThreadRow)`), so a row that
+    /// differs in those alone is the row held, and a moved `updated_at`
+    /// alone is only the time.
+    #[test]
+    fn a_stored_row_differing_only_in_the_times_the_page_leaves_out_is_the_row_held() {
+        let row = ThreadRow {
+            id: 7,
+            model_alias: "a".into(),
+            created_at: "2026-10-01 08:00:00".into(),
+            updated_at: "2026-10-08 10:00:00".into(),
+            last_message_at: Some(1_790_000_000),
+            ..Default::default()
+        };
+        let held = ChatThread::from(row.clone());
+        let stored = ChatThread::from(ThreadRow {
+            created_at: "2026-09-01 00:00:00".into(),
+            last_message_at: Some(1_790_000_500),
+            ..row.clone()
+        });
+        assert_eq!(row_take(&held, &stored, false, "a", false), RowTake::Same);
+        let stored = ChatThread::from(ThreadRow {
+            updated_at: "2026-10-08 10:00:05".into(),
+            ..row
+        });
+        assert_eq!(
+            row_take(&held, &stored, false, "a", false),
             RowTake::OnlyWhen
         );
     }

@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use quickdoc_core::golden;
 use quickdoc_core::store::{self as qstore, Chunk, Corpus, NewGoldenCandidate};
 use serde::{Deserialize, Serialize};
@@ -42,6 +41,7 @@ use crate::agent::{
     ToolOutcome, TurnRunner,
 };
 use crate::config::Route;
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ir::{ChatRequest, Completion, Message, Params, Role, ToolDef, ToolResultBlock};
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
@@ -117,20 +117,21 @@ pub async fn start(
 
 pub struct GoldenGenExecutor;
 
-#[async_trait]
 impl JobExecutor for GoldenGenExecutor {
     fn kind(&self) -> JobKind {
         JobKind::GoldenGen
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("golden_gen input: {e}"))?;
-        let corpus = qstore::get_corpus(&ctx.state.corpus, input.corpus_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("corpus {} no longer exists", input.corpus_id))?;
-        run_generation(&ctx, &corpus, input).await
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("golden_gen input: {e}"))?;
+            let corpus = qstore::get_corpus(&ctx.state.corpus, input.corpus_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("corpus {} no longer exists", input.corpus_id))?;
+            run_generation(&ctx, &corpus, input).await
+        })
     }
 }
 
@@ -459,27 +460,28 @@ struct GoldenRunner {
     _admission: Option<crate::vram::LocalHold>,
 }
 
-#[async_trait]
 impl TurnRunner for GoldenRunner {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        _sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        proxy::sample_once(
-            &self.state,
-            self._admission.as_ref(),
-            &self.route,
-            // A batch runner is admitted by plain `vram::admit`: never a
-            // fallback (gpu-hold design §2).
-            None,
-            ir,
-            GOLDEN_PROTO,
-            None,
-            deadline,
-        )
-        .await
+        _sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            proxy::sample_once(
+                &self.state,
+                self._admission.as_ref(),
+                &self.route,
+                // A batch runner is admitted by plain `vram::admit`: never a
+                // fallback (gpu-hold design §2).
+                None,
+                ir,
+                GOLDEN_PROTO,
+                None,
+                deadline,
+            )
+            .await
+        })
     }
 }
 
@@ -496,55 +498,56 @@ struct EmitExecutor<'a> {
     duplicates: AtomicU64,
 }
 
-#[async_trait]
 impl ToolExecutor for EmitExecutor<'_> {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        if name != golden::EMIT_TOOL {
-            return ToolOutcome::error(format!(
-                "there is no tool named '{name}' here — only {}",
-                golden::EMIT_TOOL
-            ));
-        }
-        let proposal: golden::Proposal = match serde_json::from_value(args.clone()) {
-            Ok(p) => p,
-            Err(e) => {
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            if name != golden::EMIT_TOOL {
                 return ToolOutcome::error(format!(
-                    "those arguments do not match the schema: {e}. Every entry needs a \
+                    "there is no tool named '{name}' here — only {}",
+                    golden::EMIT_TOOL
+                ));
+            }
+            let proposal: golden::Proposal = match serde_json::from_value(args.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return ToolOutcome::error(format!(
+                        "those arguments do not match the schema: {e}. Every entry needs a \
                      'query'."
-                ))
-            }
-        };
-        self.proposed
-            .fetch_add(proposal.queries.len() as u64, Ordering::Relaxed);
-
-        // Validated and claimed under one lock: two chunks running in sequence
-        // must not both file the same question, and the dedup set is the only
-        // thing that knows.
-        let verdict = {
-            let mut taken = match self.taken.lock() {
-                Ok(t) => t,
-                Err(e) => return ToolOutcome::error(format!("the dedup set is poisoned: {e}")),
+                    ))
+                }
             };
-            let verdict = golden::validate(self.payload, &taken, &proposal);
-            for a in &verdict.accepted {
-                taken.insert(golden::normalize(&a.query));
+            self.proposed
+                .fetch_add(proposal.queries.len() as u64, Ordering::Relaxed);
+
+            // Validated and claimed under one lock: two chunks running in sequence
+            // must not both file the same question, and the dedup set is the only
+            // thing that knows.
+            let verdict = {
+                let mut taken = match self.taken.lock() {
+                    Ok(t) => t,
+                    Err(e) => return ToolOutcome::error(format!("the dedup set is poisoned: {e}")),
+                };
+                let verdict = golden::validate(self.payload, &taken, &proposal);
+                for a in &verdict.accepted {
+                    taken.insert(golden::normalize(&a.query));
+                }
+                verdict
+            };
+            self.rejected
+                .fetch_add(verdict.rejected.len() as u64, Ordering::Relaxed);
+            self.duplicates
+                .fetch_add(verdict.duplicates as u64, Ordering::Relaxed);
+            let report = golden::verdict_report(&verdict);
+            if let Ok(mut acc) = self.accepted.lock() {
+                acc.extend(verdict.accepted);
             }
-            verdict
-        };
-        self.rejected
-            .fetch_add(verdict.rejected.len() as u64, Ordering::Relaxed);
-        self.duplicates
-            .fetch_add(verdict.duplicates as u64, Ordering::Relaxed);
-        let report = golden::verdict_report(&verdict);
-        if let Ok(mut acc) = self.accepted.lock() {
-            acc.extend(verdict.accepted);
-        }
-        // A refusal is the model's to fix: it comes back as a failed tool result
-        // so the loop keeps going and the next turn can replace that question.
-        if verdict.rejected.is_empty() {
-            ToolOutcome::ok(ToolResultBlock::one(report))
-        } else {
-            ToolOutcome::error(report)
-        }
+            // A refusal is the model's to fix: it comes back as a failed tool result
+            // so the loop keeps going and the next turn can replace that question.
+            if verdict.rejected.is_empty() {
+                ToolOutcome::ok(ToolResultBlock::one(report))
+            } else {
+                ToolOutcome::error(report)
+            }
+        })
     }
 }

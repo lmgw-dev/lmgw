@@ -195,7 +195,7 @@ async fn an_audio_row_is_created_read_updated_and_deleted_through_the_tools() {
             "load_options": "{\"language\": \"de\"}",
             "voice_presets": "{\"alba\": {\"voice_id\": \"alba\"}}",
             "default_voice_preset": "alba",
-            "extra_run_args": "--cpus 2 --memory 4g",
+            "extra_run_args": ["--cpus", "2", "--memory", "4g"],
         }),
     )
     .await;
@@ -222,7 +222,10 @@ async fn an_audio_row_is_created_read_updated_and_deleted_through_the_tools() {
     assert_eq!(got["path_present"], true);
     assert_eq!(got["load_options"]["language"], "de");
     assert_eq!(got["voice_presets"]["alba"]["voice_id"], "alba");
-    assert_eq!(got["extra_run_args"], "--cpus 2\n--memory 4g");
+    assert_eq!(
+        got["extra_run_args"],
+        json!(["--cpus", "2", "--memory", "4g"])
+    );
     assert_eq!(got["server_json"]["models"][0]["id"], "tts-de", "{got}");
     assert!(got["residency_note"]
         .as_str()
@@ -274,7 +277,7 @@ async fn an_audio_row_is_created_read_updated_and_deleted_through_the_tools() {
         "lmgw__audio_model_set",
         json!({"action": "create", "model_id": "asr", "family": "qwen3_asr",
                "path": "pocket/german", "task": "asr",
-               "extra_run_args": "--cpus 2", "clear": "extra_run_args"}),
+               "extra_run_args": ["--cpus", "2"], "clear": "extra_run_args"}),
     )
     .await;
     let asr = state
@@ -374,6 +377,8 @@ async fn the_catalog_is_listed_refreshed_and_downloaded_through_the_tool() {
     )
     .await;
     assert_eq!(empty["families"], json!([]));
+    assert!(empty.get("fetched_at").is_none(), "{empty}");
+    assert!(empty.get("warnings").is_none(), "{empty}");
     assert!(empty["message"]
         .as_str()
         .unwrap()
@@ -398,7 +403,11 @@ async fn the_catalog_is_listed_refreshed_and_downloaded_through_the_tool() {
     let fam = &all["families"][0];
     assert_eq!(fam["family"], "pocket_tts");
     assert!(
-        fam["options"]
+        fam.get("options").is_none(),
+        "no options in the full listing: {fam}"
+    );
+    assert!(
+        fam["options_summary"]
             .as_str()
             .unwrap()
             .contains("family=pocket_tts"),
@@ -417,6 +426,7 @@ async fn the_catalog_is_listed_refreshed_and_downloaded_through_the_tool() {
     )
     .await;
     assert_eq!(one["families"][0]["options"]["load"][0]["name"], "language");
+    assert!(one["families"][0].get("options_summary").is_none(), "{one}");
     let none = ok(
         &base,
         &sid,
@@ -448,6 +458,17 @@ async fn the_catalog_is_listed_refreshed_and_downloaded_through_the_tool() {
         .as_str()
         .unwrap()
         .contains("lmgw__audio_model_set"));
+    // A padded family is trimmed before use: the next step names it bare.
+    let padded = ok(
+        &base,
+        &sid,
+        "lmgw__audio_catalog",
+        json!({"action": "download", "family": "  pocket_tts ",
+               "package": "pocket_tts_german_q8_0"}),
+    )
+    .await;
+    let step = padded["next_step"].as_str().unwrap();
+    assert!(step.contains("family=pocket_tts shows them"), "{step}");
     let file = models
         .path()
         .join("audio-cpp/PocketTTS-GGUF/german/model.gguf");
@@ -496,7 +517,7 @@ async fn an_audio_row_is_switched_to_the_cpu_and_back_through_the_tools() {
         got["server_json"]["threads"], host.physical_cores as u64,
         "{got}"
     );
-    let args = got["effective_extra_run_args"].as_str().unwrap();
+    let args = got["effective_extra_run_args"].to_string();
     assert!(!args.contains("nvidia.com/gpu"), "{args}");
     assert!(args.contains("label=disable"), "{args}");
     assert!(args.contains("NVIDIA_VISIBLE_DEVICES=void"), "{args}");
@@ -540,7 +561,7 @@ async fn an_audio_row_is_switched_to_the_cpu_and_back_through_the_tools() {
         &sid,
         "lmgw__audio_model_set",
         json!({"action": "update", "id": id,
-               "extra_run_args": "--device nvidia.com/gpu=all\n--security-opt label=disable"}),
+               "extra_run_args": ["--device", "nvidia.com/gpu=all", "--security-opt", "label=disable"]}),
     )
     .await;
     let got = ok(
@@ -551,8 +572,7 @@ async fn an_audio_row_is_switched_to_the_cpu_and_back_through_the_tools() {
     )
     .await;
     assert!(got["effective_extra_run_args"]
-        .as_str()
-        .unwrap()
+        .to_string()
         .contains("nvidia.com/gpu=all"));
     let problems = got["problems"].to_string();
     assert!(problems.contains("still pass the GPU"), "{problems}");
@@ -599,8 +619,7 @@ async fn an_audio_row_is_switched_to_the_cpu_and_back_through_the_tools() {
         (&json!("gpu"), &json!("class"))
     );
     assert!(got["effective_extra_run_args"]
-        .as_str()
-        .unwrap()
+        .to_string()
         .contains("nvidia.com/gpu=all"));
 }
 
@@ -730,5 +749,41 @@ async fn a_row_directory_linked_out_of_the_models_dir_is_named() {
     assert_eq!(
         got["server_json"]["models"][0]["path"],
         "/models/pocket/away"
+    );
+}
+
+/// `extra_run_args` as a list of strings, one argument per entry, is stored as
+/// given.
+#[tokio::test]
+async fn a_list_of_run_args_is_stored_as_given_on_the_audio_input() {
+    let (state, base, _dir) = gateway(SelfAdmin::Full).await;
+    let sid = session(&base).await;
+    let created = ok(
+        &base,
+        &sid,
+        "lmgw__audio_model_set",
+        json!({
+            "action": "create", "model_id": "tts-list", "family": "pocket_tts",
+            "path": "pocket/german", "task": "tts",
+            "extra_run_args": ["--cpus", "2", "--memory", "4g"],
+        }),
+    )
+    .await;
+    assert_eq!(created["ok"], true, "{created}");
+    let row = state
+        .snapshot()
+        .audio_models
+        .iter()
+        .find(|m| m.model_id == "tts-list")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        row.extra_run_args,
+        Some(vec![
+            "--cpus".into(),
+            "2".into(),
+            "--memory".into(),
+            "4g".into()
+        ])
     );
 }

@@ -80,9 +80,8 @@ async fn the_access_settings_are_refused_on_v1_responses() {
 #[tokio::test]
 async fn the_access_settings_are_refused_in_an_unbound_realtime_session() {
     let (w, desk) = full_device_world().await;
-    let bearer = format!("Bearer {}", desk.key);
     let mut ws = w
-        .connect("model=chatty", &[("authorization", bearer.as_str())])
+        .connect_as(&desk, "model=chatty")
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");
@@ -118,12 +117,8 @@ async fn the_access_settings_are_refused_in_an_unbound_realtime_session() {
 async fn the_access_settings_are_refused_in_a_bound_realtime_session() {
     let (w, desk) = full_device_world().await;
     let tid = toolset_thread(&w, &desk.client).await;
-    let bearer = format!("Bearer {}", desk.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");
@@ -271,12 +266,8 @@ async fn a_level_save_whose_reload_fails_still_applies() {
     let w = world(|_| {}).await;
     let desk = pair(&w, "desktop", json!({ "self_admin": "read_only" })).await;
     let tools = self_admin_thread(&w).await;
-    let bearer = format!("Bearer {}", desk.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={}", tools.id),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={}", tools.id))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");

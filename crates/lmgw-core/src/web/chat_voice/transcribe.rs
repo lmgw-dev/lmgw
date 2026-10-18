@@ -9,8 +9,8 @@
 //! (`audio/x-flac`). It goes up under that type with a matching file name
 //! (`dictation.webm`, …): OpenAI's Whisper reads the format from the
 //! extension. Any other type is `415 unsupported_media_type`, naming those.
-//! The answer is `{text, alias, asr_answered_by, asr_ms, audio_ms,
-//! language}`:
+//! The answer is a [`Dictation`], `{text, alias, asr_answered_by, asr_ms,
+//! audio_ms, language}`:
 //! - `alias` — the ASR alias the thread resolves to (thread → Settings →
 //!   Chat → Voice → realtime's);
 //! - `asr_answered_by` — the alias that answered in its place (the GPU
@@ -41,10 +41,10 @@
 //! Errors: `404` for a thread that is not there, `400 empty_audio`, `422
 //! asr_not_configured` (the message names Settings → Chat → Voice), and the
 //! transcription's own — `503 gpu_hold` for a GPU row with no usable
-//! fallback under the hold — as `{code, message, asr_answered_by}`: a
-//! fallback that had the audio is named even when it failed, since the
-//! audio may have left this machine. Every answer carries the gate's
-//! `x-lmgw-fallback` headers when a fallback answered.
+//! fallback under the hold — as the Chat's flat `{code, message}`: a fallback
+//! that had the audio is named even when it failed (in `x-lmgw-fallback`,
+//! the only place), since the audio may have left this machine. Every answer
+//! carries the gate's `x-lmgw-fallback` headers when a fallback answered.
 
 use std::time::Instant;
 
@@ -53,7 +53,8 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use lmgw_api_types::chat_voice::Dictation;
+use lmgw_api_types::ApiError;
 
 use crate::proxy::stop_pair;
 use crate::state::SharedState;
@@ -62,6 +63,7 @@ use super::super::chat::{err_json, read_upload_body};
 use super::super::chat_caller::Caller;
 use super::super::chat_extract::ChatPath;
 use super::super::chat_repo::ChatRepo;
+use super::super::chat_wire::wire;
 use super::resolve::resolve;
 
 /// `POST /chat/api/threads/{id}/transcribe` (module doc).
@@ -117,7 +119,11 @@ pub(crate) async fn transcribe(
         .check(&state, proto, &alias, crate::telemetry::RequestClass::Audio)
         .await
     {
-        let answer = Json(json!({ "code": e.kind(), "message": e.to_string() }));
+        let answer = Json(ApiError {
+            code: e.kind().into(),
+            message: e.to_string(),
+            ..Default::default()
+        });
         return (e.http_status(), answer).into_response();
     }
     let ctx = caller.ctx();
@@ -148,25 +154,25 @@ pub(crate) async fn transcribe(
     };
     match transcribed {
         Ok(t) => {
-            let answer = Json(json!({
-                "text": t.text,
-                "alias": alias,
-                "asr_answered_by": t.answered_by(),
-                "asr_ms": started.elapsed().as_millis() as u64,
-                "audio_ms": audio_ms,
-                "language": t.language.clone().or(language),
+            let answer = Json(wire(&Dictation {
+                text: t.text.clone(),
+                alias,
+                asr_answered_by: t.answered_by().map(str::to_string),
+                asr_ms: Some(started.elapsed().as_millis() as u64),
+                audio_ms,
+                language: t.language.clone().or(language),
             }));
             t.headers.stamp(answer.into_response())
         }
-        // The fallback that had the audio is named even when it failed: the
-        // audio may have left this machine (§4.4).
+        // The fallback that had the audio is named even when it failed, in
+        // `x-lmgw-fallback`: the audio may have left this machine (§4.4).
         Err(u) => {
             let e = &u.error;
-            let answer = Json(json!({
-                "code": e.kind(),
-                "message": e.to_string(),
-                "asr_answered_by": u.answered_by(),
-            }));
+            let answer = Json(ApiError {
+                code: e.kind().into(),
+                message: e.to_string(),
+                ..Default::default()
+            });
             u.headers.stamp((e.http_status(), answer).into_response())
         }
     }

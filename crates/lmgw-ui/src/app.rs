@@ -59,6 +59,8 @@ pub fn App() -> impl IntoView {
                                     <Route path=path!("chat/profiles") view=pages::ChatProfiles/>
                                     <Route path=path!("audio-lab") view=pages::AudioLab/>
                                     <Route path=path!("image-lab") view=pages::ImageLab/>
+                                    <Route path=path!("decision-lab") view=pages::DecisionLab/>
+                                    <Route path=path!("decision-lab/batches/:id") view=pages::DecisionBatch/>
                                     <Route path=path!("agents") view=pages::Agents/>
                                     <Route path=path!("agents/:id/:tab?") view=pages::AgentDetailPage/>
                                     // The Workflows surface became the agent catalog

@@ -67,10 +67,13 @@ pub struct AliasView {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReasoningControl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub budget_tokens: Option<i64>,
 }
 
@@ -85,16 +88,26 @@ pub struct Params {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub top_k: Option<u32>,
+    /// llama.cpp `min_p`; only the OpenAI egress emits it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    /// llama.cpp `repeat_penalty`; only the OpenAI egress emits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub seed: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub reasoning: Option<ReasoningControl>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
@@ -107,6 +120,10 @@ pub struct Params {
 pub struct LocalModelView {
     pub public_name: String,
     pub model: LocalModel,
+    /// The licence the row's GGUF header states; null when it states none
+    /// or the file cannot be read.
+    #[serde(default)]
+    pub licence: Option<crate::ModelLicence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -228,9 +245,21 @@ fn default_aux_kind() -> String {
 pub struct AuxModelView {
     pub public_name: String,
     pub model: AuxModel,
+    /// The licence the row's GGUF header states; null when it states none
+    /// or the file cannot be read.
+    #[serde(default)]
+    pub licence: Option<crate::ModelLicence>,
+    /// The thread count its container starts with: the row's `threads`, else
+    /// a count its extra args name, else on the CPU this machine's cores.
+    /// Null when nothing names one (a GPU row: llama-server picks) or the
+    /// args' value is not a number.
+    pub threads_in_effect: Option<i64>,
+    /// Where `threads_in_effect` comes from.
+    pub threads_source: crate::aux_engine::AuxThreadsSource,
 }
 
-/// An aux container model row — embedders and rerankers alike.
+/// An aux container model row — embedders, rerankers and decision models
+/// alike.
 // Mirror of `config::AuxModel`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -238,13 +267,31 @@ pub struct AuxModel {
     pub id: i64,
     pub model_id: String,
     pub gguf_path: String,
-    /// `embed` | `rerank`.
+    /// `embed` | `rerank` | `decision`.
     #[serde(default = "default_aux_kind")]
     pub kind: String,
     #[serde(default)]
     pub pooling: Option<String>,
     #[serde(default)]
     pub ctx_size: Option<i64>,
+    /// `--ubatch-size`; null takes llama-server's default.
+    #[serde(default)]
+    pub ubatch_size: Option<i64>,
+    /// `--batch-size`; null takes llama-server's default.
+    #[serde(default)]
+    pub batch_size: Option<i64>,
+    /// A projector (`--mmproj`), relative to the aux models dir.
+    #[serde(default)]
+    pub mmproj_path: Option<String>,
+    /// `cpu` runs the row on the CPU (no VRAM charged, served under the GPU
+    /// hold); null runs it on the GPU.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// `--threads`; null renders none on the GPU, and on the CPU this
+    /// machine's physical cores (the logical CPU count where the core
+    /// topology cannot be read) unless the row's extra args name a count.
+    #[serde(default)]
+    pub threads: Option<i64>,
     #[serde(default)]
     pub args: Vec<String>,
     pub idle_seconds: i64,
@@ -281,6 +328,7 @@ pub struct AudioModelView {
     /// at instead — not learned yet, learned for a previous configuration, or
     /// not learnable on this host (and why).
     #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub residency_note: Option<String>,
     /// The learned residency admission charges this row: `model.residency`'s
     /// figure while it belongs to the row's current configuration, `None`
@@ -458,9 +506,10 @@ pub struct ImageModel {
     pub peak_learned_at: Option<String>,
 }
 
-/// Result of a mutating `/api/op/{name}` call when it succeeds without a
-/// domain-specific body: `{ ok, message?, id? }` — matches the ops plane's
-/// habit of returning these keys.
+/// The dashboard's generic reader of a mutating `/api/op/{name}` answer: the
+/// `{ ok, message?, id? }` keys most ops share, whatever else they send. No op
+/// is documented with it: each answers a type of its own (`MessageAck`,
+/// `RowSaved`, …), and a page that only toasts the sentence reads this instead.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

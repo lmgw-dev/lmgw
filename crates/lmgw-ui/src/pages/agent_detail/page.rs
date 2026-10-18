@@ -68,9 +68,6 @@ pub fn AgentDetailPage() -> impl IntoView {
     });
 
     let detail = RwSignal::new(None::<AgentDetail>);
-    // The service's bound mounts, kept beside the typed detail because they are
-    // read out of the same document by hand (see [`service_mounts`]).
-    let mounts = RwSignal::new(Vec::<ServiceMount>::new());
     let error = RwSignal::new(None::<String>);
     let draft = Draft::new();
     // The Definition tab's editor and its inline report live here, not inside
@@ -99,40 +96,28 @@ pub fn AgentDetailPage() -> impl IntoView {
             return;
         }
         run.scope.spawn(async move {
-            // As a document first, then as the DTO: the App tab's mount list
-            // is read from the raw JSON (mounts §5.7), and taking both out of
-            // one read keeps the page to a single request for one agent.
-            match crate::api::get::<Value>(&format!("/api/agents/{id}")).await {
-                Ok(doc) => {
-                    mounts.set(service_mounts(&doc));
-                    match serde_json::from_value::<AgentDetail>(doc) {
-                        Ok(d) => {
-                            let fresh = reseed.get_value();
-                            reseed.set_value(false);
-                            if fresh {
-                                draft.load(&d.fields, &d.config);
-                            } else {
-                                draft.reload(&d.fields, &d.config);
-                            }
-                            // The stored manifest is canonicalized on the way
-                            // in, so what is on screen after a save is what is
-                            // actually stored — unless the editor holds edits
-                            // of its own, which a re-read for anything else
-                            // (a config save, the service) must not wipe.
-                            let clean = manifest
-                                .with_untracked(|m| manifest_base.with_untracked(|b| m == b));
-                            if fresh || clean {
-                                manifest.set(d.manifest.clone());
-                            }
-                            manifest_base.set(d.manifest.clone());
-                            error.set(None);
-                            detail.set(Some(d));
-                        }
-                        Err(e) => {
-                            detail.set(None);
-                            error.set(Some(format!("bad response body: {e}")));
-                        }
+            match crate::api::get::<AgentDetail>(&format!("/api/agents/{id}")).await {
+                Ok(d) => {
+                    let fresh = reseed.get_value();
+                    reseed.set_value(false);
+                    if fresh {
+                        draft.load(&d.fields, &d.config);
+                    } else {
+                        draft.reload(&d.fields, &d.config);
                     }
+                    // The stored manifest is canonicalized on the way
+                    // in, so what is on screen after a save is what is
+                    // actually stored — unless the editor holds edits
+                    // of its own, which a re-read for anything else
+                    // (a config save, the service) must not wipe.
+                    let clean =
+                        manifest.with_untracked(|m| manifest_base.with_untracked(|b| m == b));
+                    if fresh || clean {
+                        manifest.set(d.manifest.clone());
+                    }
+                    manifest_base.set(d.manifest.clone());
+                    error.set(None);
+                    detail.set(Some(d));
                 }
                 Err(e) => {
                     detail.set(None);
@@ -403,7 +388,7 @@ pub fn AgentDetailPage() -> impl IntoView {
                                         .into_any()
                                 }
                                 "ui" => {
-                                    view! { <AppTab d=d.clone() mounts=mounts reload=reload/> }
+                                    view! { <AppTab d=d.clone() reload=reload/> }
                                         .into_any()
                                 }
                                 "definition" => {

@@ -1,8 +1,8 @@
 //! One realtime session: the reader loop and the session core (realtime
 //! design §4.1).
 //!
-//! The socket's reader (`inbox`) stamps each frame with when it came off the
-//! socket; the session loop parses each text frame into a [`ClientEvent`]
+//! The link's reader (`link`) stamps each frame with when it came off the
+//! link; the session loop parses each event's text into a [`ClientEvent`]
 //! and hands it to the [`Core`] (`events`), which owns the session object, the conversation
 //! and the response state, and is the only writer of all three. A response's
 //! model call runs on its own task (`responder`) and reports back over a
@@ -15,7 +15,9 @@
 //!
 //! The session pings its client and ends when a ping goes unanswered for a
 //! whole `realtime.ping_interval_s`, even while the core is stuck waiting
-//! for a writer the client stopped reading from (`liveness`).
+//! for a writer the client stopped reading from (`liveness`). A call's
+//! session is never pinged: it reads the client's traffic and its
+//! acknowledgements instead, on the same interval (`liveness::call`).
 //!
 //! **Scope today (WP4): text and spoken conversations.** `session.update`,
 //! the `conversation.item.*` events and `response.create` / `.cancel` are
@@ -30,19 +32,17 @@
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket};
-use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use super::asr::{self, AsrResolution};
 use super::audio_in::AudioIn;
 use super::conversation::Conversation;
-use super::handshake::{Limits, CLOSE_TOO_BIG};
 use super::ids::Ids;
-use super::inbox::Inbox;
 use super::input::{barge_params, detector_params, log_turn_detection, OpenTurn};
 use super::lifecycle::{Active, Pending, TurnTiming};
-use super::liveness::{Answer, Beat, Liveness};
+use super::link::{self, Close, End, Inbox, Incoming, Transport};
+use super::liveness::call::Watch;
+use super::liveness::{Answer, Beat, Liveness, RoundTrip};
 use super::mcp_tools::McpSession;
 use super::merge;
 use super::protocol::{ErrorObject, ServerEvent, Session};
@@ -56,6 +56,7 @@ use crate::policy::ConcurrencyGuard;
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
 
+pub(crate) mod call;
 mod events;
 pub(crate) mod speech;
 mod stop;
@@ -78,7 +79,8 @@ pub(crate) struct SessionInit {
     /// The key's concurrency slot, taken from the gate (§10.3): held for the
     /// session's whole life, released when this task ends.
     pub slot: Option<ConcurrencyGuard>,
-    pub limits: Limits,
+    /// What carries the session, with its bounds (calls design §7.1).
+    pub transport: Transport,
     /// The Chat thread the session is bound to (chat-voice design §8), when
     /// the handshake named one.
     pub bound: Option<super::thread::Binding>,
@@ -86,29 +88,41 @@ pub(crate) struct SessionInit {
     /// Taken in the handshake, before the 101, so a stop that comes while
     /// the upgrade completes still counts it (review F-3).
     pub running: Option<crate::server::Running>,
+    /// A WebRTC call's side (calls design §2.6, §8.2); `None` on a
+    /// WebSocket.
+    pub call: Option<call::CallSide>,
 }
 
-/// Run one session until the client closes, the socket fails, a size limit
-/// is tripped, or the client stops answering pings.
-pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
+/// Run one session on its link until the client closes, the link fails, a
+/// size limit is tripped, or the client stops answering pings.
+///
+/// The link comes as its sending half, which the writer drives, and its
+/// reader, started once the writer runs: a WebSocket's reader completes the
+/// round trips of the pings the writer sends (`link::ws::split`).
+pub(crate) async fn run<S: link::Sink>(
+    sink: S,
+    reader: impl FnOnce(Arc<RoundTrip>) -> Inbox,
+    mut init: SessionInit,
+) {
     // Held to the session's last line (`SessionInit::running`).
     let _running = init.running.take();
     // A device's session is one of its connections (client-apps design
     // §1.6): online while it lives, `last_seen_at` at both ends, and closed
     // with 4003 when the device is revoked. `None` for every other caller.
-    let mut device = crate::devices::connect(
+    // A call's link names the call, so the Devices card can tell it from a
+    // WebSocket session (calls design §9).
+    let mut device = crate::devices::connect_voice(
         &init.state,
-        &init.ctx.principal,
-        init.ctx.revocation_mark,
-        crate::devices::LinkKind::Voice,
+        &init.ctx,
+        init.call.as_ref().map(|c| c.id.clone()),
     )
     .await;
-    let (sink, stream) = socket.split();
     let ids = Arc::new(Ids::new());
     let (out, mut drained, mut writer_task) = writer::spawn(sink, ids.clone());
-    let limits = init.limits;
-    // Reads ahead at most the largest frame a client may send (`inbox`).
-    let mut inbox = Inbox::spawn(stream, limits.max_frame, out.round_trip());
+    let transport = init.transport;
+    // A WebSocket's reader reads ahead at most the largest frame a client may send
+    // (`link::inbox`).
+    let mut inbox = reader(out.round_trip());
     let ping_interval_s = init.state.snapshot().settings.realtime.ping_interval_s;
     // The server this session's upgrade came in on stopping closes it
     // (1001): the drain does not wait for an upgraded connection, so
@@ -124,7 +138,14 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     // (review P-8).
     let mut reach_moves = init.state.devices.reach_moves.watch();
     let mut stopping = false;
-    let mut live = Liveness::new(ping_interval_s);
+    // A call's evidence is its traffic, not pings (calls design §8.1).
+    let mut live = match &init.call {
+        Some(c) => Liveness::for_call(
+            ping_interval_s,
+            Watch::new(init.state.calls.clone(), c.id.clone()),
+        ),
+        None => Liveness::new(ping_interval_s),
+    };
     // A "round trip" as long as the ping interval answered no ping of its
     // own (E3). With pings off there are none to bound.
     if ping_interval_s > 0 {
@@ -134,7 +155,25 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     let (responder_tx, mut from_responder) = mpsc::unbounded_channel();
     let (asr_tx, mut from_asr) = mpsc::unbounded_channel();
     let (score_tx, mut from_scorer) = mpsc::unbounded_channel();
+    let mut call = init.call.take();
     let mut core = Core::new(init, ids, out.clone(), responder_tx, asr_tx, score_tx);
+    if let Some(c) = &call {
+        let thread = core.bound.as_ref().map(|b| b.thread_id);
+        let calls = &core.state.calls;
+        calls.note_running(&c.id, core.id().to_string(), thread);
+        // The transport, the candidate and the remote address (§9's logs).
+        let (candidate, remote) = calls
+            .get(&c.id)
+            .map(|i| (Some(i.candidate), i.remote))
+            .unwrap_or_default();
+        tracing::info!(
+            "realtime {}: on WebRTC call {}, its candidate {}, the client at {}",
+            core.id(),
+            c.id,
+            candidate.map_or_else(|| "?".into(), |a| a.to_string()),
+            remote.map_or_else(|| "?".into(), |a| a.to_string())
+        );
+    }
     // The session's MCP listings report here (realtime-server-tools §1.2).
     let (mcp_tx, mut from_mcp) = mpsc::unbounded_channel();
     core.mcp.listen(mcp_tx);
@@ -149,8 +188,9 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     // One ping on the client's first frame, not after a whole interval: the
     // barge-in window's margin wants the round trip before the first answer
     // plays (§6.4). A pong to it lifts nothing — no verdict is pending — and
-    // a client that never says anything is never probed.
-    let mut probed = !live.on();
+    // a client that never says anything is never probed. A WebSocket's only:
+    // a call is never pinged (calls design §8.1).
+    let mut probed = !live.pings();
     // Another window binding the session's thread takes it over (§8.1).
     let taken = core.bound.as_ref().map(|b| b.taken.clone());
     // Its thread's approvals decided elsewhere (client-apps design §6.4);
@@ -170,8 +210,9 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     let mut taken_over = false;
     let mut out_of_reach = false;
     let mut revoked = None;
+    let mut asked = None;
 
-    let mut stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+    let mut stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
         .await
         .err();
     while stop.is_none() {
@@ -240,8 +281,13 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
                 }
                 break;
             }
+            // A call's hangup, or a stop of its listener (calls design §2.6).
+            why = call::asked(call.as_mut()) => {
+                asked = Some(why);
+                break;
+            }
             beat = live.beat() => match beat {
-                Beat::Ping => ping(&out, core.id()),
+                Beat::Ping => ping(&out, core.id(), &transport),
                 Beat::Dead(reason) => {
                     stop = verdict(&mut live, &mut inbox, reason);
                     if stop.is_some() {
@@ -249,32 +295,38 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
                     }
                 }
             },
-            read = inbox.next() => match read.frame {
-                // When it came off the socket: the detector places appended
+            read = inbox.next() => match read.what {
+                // When it came off the link: the detector places appended
                 // audio on the wall clock by it (§6.4).
-                Some(Ok(Message::Text(text))) => {
-                    if !std::mem::replace(&mut probed, true) {
-                        out.ping();
+                Incoming::Event(text) => {
+                    if !call::stray_take_over(&core, &transport, text.as_str()) {
+                        if !std::mem::replace(&mut probed, true) {
+                            out.ping();
+                        }
+                        core.on_text(text.as_str(), read.at).await
                     }
-                    core.on_text(text.as_str(), read.at).await
                 }
-                Some(Ok(Message::Binary(_))) => core.error(ErrorObject::invalid(
+                Incoming::Audio { pcm, captured } => core.on_audio(pcm, captured).await,
+                Incoming::Binary => core.error(ErrorObject::invalid(
                     "invalid_event",
                     "binary frames are not part of the Realtime protocol; send each event as a \
                      JSON text frame",
                 )),
-                Some(Ok(Message::Close(_))) | None => break,
-                // tungstenite answers pings itself.
-                Some(Ok(Message::Ping(_))) => {}
-                Some(Ok(Message::Pong(_))) => live.pong(),
-                Some(Err(e)) => {
-                    match limits.close_reason(e) {
+                // What the link refused before the session saw it (a call's
+                // broken part set, calls design §6.3).
+                Incoming::Refused(e) => core.error(e),
+                Incoming::Pong => live.pong(),
+                Incoming::End(End::Closed) => break,
+                Incoming::End(End::Failed(e)) => {
+                    match transport.too_big(e) {
                         Some(reason) => {
                             tracing::info!("realtime {}: closed — {reason}", core.id());
-                            stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+                            let close = Close::TooBig(reason);
+                            core.say_closed(&transport, &close);
+                            stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
                                 .await
                                 .err();
-                            out.close(CLOSE_TOO_BIG, reason);
+                            out.close(close);
                         }
                         None => tracing::debug!("realtime {}: read failed, closing", core.id()),
                     }
@@ -282,7 +334,7 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
                 }
             },
         }
-        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
             .await
             .err();
     }
@@ -292,54 +344,79 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     if let Some(b) = core.bound.as_ref() {
         b.closing();
     }
+    // Each close below: a bound call's last event first (`call`), flushed
+    // behind what the session said before it, then the close.
     if taken_over {
-        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+        let by = core.taken_by();
+        let reason = super::thread::taken_over_reason(by.as_deref());
+        let close = Close::TakenOver { by };
+        core.say_closed(&transport, &close);
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
             .await
             .err();
         if stop.is_none() {
-            let reason = super::thread::taken_over_reason(core.taken_by().as_deref());
             tracing::info!("realtime {id}: closed — {reason}");
-            out.close(super::thread::CLOSE_TAKEN_OVER, reason);
+            out.close(close);
         }
     }
     if out_of_reach {
-        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+        let why =
+            super::thread::out_of_reach_reason(core.bound.as_ref().map_or(0, |b| b.thread_id));
+        let close = Close::OutOfReach(why.clone());
+        core.say_closed(&transport, &close);
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
             .await
             .err();
         if stop.is_none() {
-            let why =
-                super::thread::out_of_reach_reason(core.bound.as_ref().map_or(0, |b| b.thread_id));
             tracing::info!("realtime {id}: closed — {why}");
-            out.close(super::thread::CLOSE_OUT_OF_REACH, why);
+            out.close(close);
         }
     }
     if stopping {
-        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+        core.say_closed(&transport, &Close::GoingAway);
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
             .await
             .err();
         if stop.is_none() {
             tracing::info!("realtime {id}: closed — {}", crate::server::STOPPING);
-            out.close(
-                crate::server::CLOSE_GOING_AWAY,
-                crate::server::STOPPING.to_string(),
-            );
+            out.close(Close::GoingAway);
         }
     }
     if let (Some(reason), Some(conn)) = (revoked, device.as_ref()) {
-        stop = flush_alive(&mut core, &out, &mut live, &mut inbox)
+        let why = crate::devices::close_reason(reason, conn.name(), conn.is_device());
+        let close = Close::Revoked(why.clone());
+        core.say_closed(&transport, &close);
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
             .await
             .err();
         if stop.is_none() {
-            let why = crate::devices::close_reason(reason, conn.name(), conn.is_device());
             tracing::info!("realtime {id}: closed — {why}");
-            out.close(crate::devices::CLOSE_REVOKED, why);
+            out.close(close);
+        }
+    }
+    if let Some(why) = asked {
+        let close = call::close_for(why);
+        core.say_closed(&transport, &close);
+        stop = flush_alive(&mut core, &out, &mut live, &mut inbox, &transport)
+            .await
+            .err();
+        if stop.is_none() {
+            let said = match &close {
+                Close::HungUp { by } => super::calls::link::hung_up(by.as_deref()),
+                _ => crate::server::STOPPING.to_string(),
+            };
+            tracing::info!("realtime {id}: closed — {said}");
+            out.close(close);
         }
     }
     if let Some(stop) = stop {
-        let (close, log) = stop.close(&limits);
+        let (close, log) = stop.close(&transport);
         tracing::info!("realtime {id}: {log}");
-        if let Some((code, reason)) = close {
-            out.close(code, reason);
+        if let Some(close) = close {
+            // A bound call's last event, if the writer takes it now: the
+            // output is what waits (calls design §8.2).
+            core.say_closed_now(&transport, &close);
+            out.close(close);
         }
     }
 
@@ -352,6 +429,12 @@ pub(crate) async fn run(socket: WebSocket, mut init: SessionInit) {
     // still writes its row (§4.3) — the moment the client is gone, not when
     // the writer has finished.
     drop(core);
+    // A call lets go here, its slot back as a WebSocket's goes with the
+    // core and its hangup answered, while the writer still delivers the
+    // last events (calls design §8.2).
+    if let Some(c) = &call {
+        c.let_go.now();
+    }
     // The reader goes with it: a client that never closes keeps no socket.
     drop(inbox);
     drop(out);
@@ -388,6 +471,7 @@ async fn flush_alive(
     out: &WriterHandle,
     live: &mut Liveness,
     inbox: &mut Inbox,
+    transport: &Transport,
 ) -> Result<(), Stop> {
     let id = core.id().to_string();
     let flush = core.flush();
@@ -396,7 +480,7 @@ async fn flush_alive(
         tokio::select! {
             () = &mut flush => return Ok(()),
             beat = live.beat() => match beat {
-                Beat::Ping => ping(out, &id),
+                Beat::Ping => ping(out, &id, transport),
                 Beat::Dead(reason) => {
                     if let Some(stop) = verdict(live, inbox, reason) {
                         return Err(stop);
@@ -420,8 +504,14 @@ async fn wake(
 
 /// The interval's ping — and, once, that no round trip was measured on
 /// the pings so far (`liveness::round_trip`, fix package B6).
-fn ping(out: &WriterHandle, session_id: &str) {
-    if let Some(n) = out.round_trip().unmeasured_once() {
+fn ping(out: &WriterHandle, session_id: &str, transport: &Transport) {
+    // Not on a call, which is never pinged (§8.1): its round trip is the
+    // receiver reports'.
+    let unmeasured = match transport {
+        Transport::WebSocket(_) => out.round_trip().unmeasured_once(),
+        Transport::WebRtc(_) => None,
+    };
+    if let Some(n) = unmeasured {
         tracing::info!(
             "realtime {session_id}: {n} pings went out and no pong echoed one's payload (RFC \
              6455 has a client echo it), so no round trip is measured — the barge-in window's \
@@ -500,6 +590,9 @@ pub(super) struct Core {
     /// The Chat thread this session is bound to (chat-voice design §8);
     /// `None` for every other session.
     pub(super) bound: Option<super::thread::Bound>,
+    /// The session runs on a WebRTC call (calls design §6.1): its audio is
+    /// on RTP both ways, and its output buffer is lmgw's (`call`).
+    pub(super) on_call: bool,
     /// The stages the bound session's connect warm loads (§4.1), until it
     /// starts.
     connect_warm: Vec<super::warm::Warm>,
@@ -524,6 +617,10 @@ impl Core {
             .clone()
             .or_else(|| init.chat.alias.clone());
         let mut session = merge::initial_session(&snap.settings.realtime, id, model);
+        let on_call = matches!(init.transport, Transport::WebRtc(_));
+        if on_call {
+            call::lead_none(&mut session);
+        }
         let mut binding = init.bound;
         if let Some(b) = &binding {
             // What the thread chose, as the session's own (§8.1).
@@ -614,6 +711,7 @@ impl Core {
                 .map(|b| std::mem::take(&mut b.warm))
                 .unwrap_or_default(),
             bound: binding.as_mut().map(super::thread::Bound::new),
+            on_call,
             _slot: init.slot,
         }
     }

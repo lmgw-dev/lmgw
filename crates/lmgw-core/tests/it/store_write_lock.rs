@@ -29,7 +29,9 @@ async fn read_then_write_transactions_side_by_side_never_fail_as_locked() {
         writers.push(tokio::spawn(async move {
             let mut failed = Vec::new();
             for _ in 0..ROUNDS {
-                match store::continue_chat_reply(&db, thread, id, &reply.content, &reply).await {
+                match store::continue_chat_reply(&db, thread, id, &reply.content, &reply, None)
+                    .await
+                {
                     Ok(store::ContinueSave::Saved) => {}
                     Ok(other) => failed.push(format!("{other:?}")),
                     Err(e) => failed.push(e.to_string()),

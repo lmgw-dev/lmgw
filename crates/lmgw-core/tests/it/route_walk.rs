@@ -217,8 +217,10 @@ enum Who {
     AnonClosed,
     Client,
     Agent,
-    /// A paired client app (client-apps design §1.2): a client key that also
-    /// holds `Chat`.
+    /// A device's bearer key from a pairing before TLS, on the plain
+    /// listener: it opens nothing any more (device link design D12, §4.8).
+    /// A paired device authenticates by its certificate on the device
+    /// listener, whose face `device_face.rs` walks.
     Device,
     Owner,
     /// The same owner key in the **session cookie**: what the dashboard is,
@@ -251,16 +253,19 @@ fn expected(cap: Cap, who: Who) -> Expect {
     use Who::*;
     match cap {
         Cap::Public => Admitted,
+        // `device_key_unknown`, said by every gate but a `Public` one.
+        _ if who == Device => Unauthorized,
         Cap::Inference => match who {
             AnonClosed => Unauthorized,
             _ => Admitted,
         },
         // The Chat API (client-apps design §1.2): the owner and a paired
-        // device, and nobody else — an agent included (R16).
+        // device (on the device listener), and nobody else — an agent
+        // included (R16).
         Cap::Chat => match who {
-            AnonOpen | AnonClosed => Unauthorized,
+            AnonOpen | AnonClosed | Device => Unauthorized,
             Client | Agent => Forbidden,
-            Device | Owner | OwnerCookie => Admitted,
+            Owner | OwnerCookie => Admitted,
         },
         Cap::Ledger => match who {
             AnonOpen | AnonClosed => Unauthorized,
@@ -324,8 +329,13 @@ async fn walk_gateway(auth_enabled: bool) -> Walk {
     let agent = "lmgw-agent-route-walk".to_string();
     insert_key(&state, "walk-client", &client, "key", None).await;
     insert_key(&state, "agent:walker", &agent, "agent", Some("walker")).await;
+    // Marked as the migration marks a row paired before TLS (§12).
     let device = "lmgw-device-route-walk".to_string();
     insert_key(&state, "device:walker", &device, "device", None).await;
+    sqlx::query("UPDATE api_keys SET key_hash = 'v1:' || key_hash WHERE kind = 'device'")
+        .execute(&state.db)
+        .await
+        .unwrap();
     state.reload_snapshot().await.unwrap();
 
     // No redirect following: `/ui/*` answers with one, and what is being

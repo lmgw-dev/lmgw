@@ -15,6 +15,7 @@
 
 mod apply;
 mod current;
+pub(crate) mod pick;
 pub(super) use current::thread_start;
 pub(crate) mod retention;
 
@@ -715,7 +716,6 @@ pub async fn delete_folder(
                 state.chat_live.delete_failed(held);
             }
         }
-        state.chat_feed.threads_deleted(&taken);
         if !taken.is_empty() {
             super::chat_tasks::threads_gone(&state);
         }

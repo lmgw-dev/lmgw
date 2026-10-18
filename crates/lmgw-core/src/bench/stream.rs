@@ -195,7 +195,7 @@ mod tests {
         assert_eq!((f.tokens, f.stop), (0, true));
         let t = f.timings.unwrap();
         assert_eq!((t.prompt_n, t.cache_n), (10, None), "ik sends no cache_n");
-        assert!((t.predicted_per_second - 96.88).abs() < 1e-9);
+        assert!((t.predicted_per_second.unwrap() - 96.88).abs() < 1e-9);
     }
 
     #[test]

@@ -39,6 +39,17 @@
   "repeat": 2,
   "steps": [
    {
+    "go": "/decision-lab"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 2,
+  "steps": [
+   {
     "go": "/agents"
    },
    {
@@ -198,6 +209,17 @@
   "steps": [
    {
     "go": "/image-lab"
+   },
+   {
+    "go": "/"
+   }
+  ]
+ },
+ {
+  "repeat": 3,
+  "steps": [
+   {
+    "go": "/decision-lab"
    },
    {
     "go": "/"

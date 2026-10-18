@@ -191,3 +191,49 @@ fn a_split_component_serves_one_side_each() {
         assert!(!read.contains(name), "{name} is reached by a request");
     }
 }
+
+/// A probe both a request and a 200 reach, whose two views differ in nothing
+/// but the reader's `default`: it still splits, the answer's `DefaultsProbe`
+/// without the keyword, the request's `DefaultsProbeInput` with it.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct DefaultsProbe {
+    #[serde(default)]
+    n: u32,
+}
+
+#[test]
+fn a_component_both_sides_reach_splits_on_its_defaults_alone() {
+    use super::schemas::{self, Sent};
+
+    let f: super::registry::SchemaFn = |g| g.subschema_for::<DefaultsProbe>();
+    let mut g = schemas::generator();
+    let mut sent = Sent::new();
+    let request = schemas::embed(&mut g, f);
+    let answer = sent.embed(&mut g, f);
+    let mut paths = serde_json::Map::new();
+    paths.insert(
+        "/probe".into(),
+        serde_json::json!({ "post": {
+            "requestBody": { "content": { "application/json": { "schema": request } } },
+            "responses": { "200": { "content": { "application/json": { "schema": answer } } } },
+        } }),
+    );
+    let reads: BTreeSet<String> = ["DefaultsProbe".to_string()].into();
+    let split = schemas::apply_sent_required(&mut g, sent, &reads, &mut paths);
+
+    assert!(split.contains("DefaultsProbe"), "{split:?}");
+    let defs = g.definitions();
+    assert_eq!(defs["DefaultsProbeInput"]["properties"]["n"]["default"], 0);
+    assert!(
+        defs["DefaultsProbe"]["properties"]["n"]
+            .get("default")
+            .is_none(),
+        "{}",
+        defs["DefaultsProbe"]
+    );
+    let op = &paths["/probe"]["post"];
+    let req = op["requestBody"]["content"]["application/json"]["schema"].to_string();
+    assert!(req.contains("DefaultsProbeInput"), "{req}");
+    let res = op["responses"]["200"]["content"]["application/json"]["schema"].to_string();
+    assert!(!res.contains("DefaultsProbeInput"), "{res}");
+}

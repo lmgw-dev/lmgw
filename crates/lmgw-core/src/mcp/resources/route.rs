@@ -126,11 +126,11 @@ pub(crate) fn reaches(
 /// The refusal of a resource of `server` to `scope`'s caller.
 fn out_of_reach(uri: &str, server: &McpServer, scope: &ToolScope) -> ResourceError {
     let label = super::super::exec::server_label(server);
-    ResourceError::OutOfReach(if server.is_device() {
+    ResourceError::OutOfReach(if scope.holds_back(server) {
         format!(
             "resource '{uri}' — '{label}' is a paired device's hosted label: only the owner, \
-             that device, and a key, device or agent whose tool scope names '{label}__' \
-             explicitly reach it; {} does not",
+             that device, a key or device whose policy grants '{label}' (Device tools), and \
+             an agent whose manifest names it reach it; {} is not granted it",
             scope.describe()
         )
     } else {

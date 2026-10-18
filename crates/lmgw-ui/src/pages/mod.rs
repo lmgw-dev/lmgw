@@ -58,6 +58,8 @@ mod chat_turn;
 /// section of its settings.
 mod chat_voice;
 mod conversations;
+/// The Decision lab: decision models through `/v1/systemone`, kept in the lab store.
+mod decision_lab;
 pub mod docs;
 mod docs_eval;
 mod docs_requests;
@@ -74,6 +76,10 @@ mod knowledge_search;
 mod knowledge_settings;
 mod knowledge_source;
 mod lab_frame;
+/// The lab store's client: a lab's kept history, its usage and export.
+mod lab_history;
+/// A lab's named form parts (the Image lab's prompts, the Audio lab's settings).
+mod lab_presets;
 mod local_edit;
 /// The local model editor's Test: the load test on the saved row, its answer kept on the page.
 mod local_test;
@@ -97,6 +103,7 @@ pub use benchmarks::Benchmarks;
 pub use chat::Chat;
 pub use chat_profiles::ChatProfiles;
 pub use conversations::TrafficConversations;
+pub use decision_lab::{DecisionBatch, DecisionLab};
 pub use docs::Docs;
 pub use downloads::Downloads;
 pub use image_lab::ImageLab;

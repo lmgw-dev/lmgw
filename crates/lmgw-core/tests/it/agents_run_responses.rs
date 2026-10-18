@@ -34,6 +34,7 @@ async fn priced_alias(state: &SharedState, alias: &str, upstream: &MockServer, n
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: native,
+            catalog_all_modalities: true,
         },
     )
     .await

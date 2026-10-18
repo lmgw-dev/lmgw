@@ -18,10 +18,17 @@
 //!   thread ([`crate::realtime`]), taking it over from another session or
 //!   not (`&takeover=never`);
 //! - `GET /mcp/host`: the device's MCP host link ([`crate::mcp_host`]);
+//! - `POST /v1/realtime/calls` and its `hangup`: a voice session over
+//!   WebRTC, bound to a thread or an ongoing folder's current thread
+//!   ([`calls`](mod@calls));
+//! - `POST /devices/enrol`: a device's enrolment over the device link, and
+//!   the [`Credentials`] it keeps ([`enrol`](mod@enrol));
 //! - `POST /chat/api/threads/{id}/approvals` and
 //!   `POST /chat/api/threads/{id}/transcribe`: deciding a turn's waiting
 //!   calls, and a voice answer kept out of the conversation
 //!   ([`approvals`](mod@approvals));
+//! - `POST /chat/api/threads/{id}/send`: a message and the reply it starts,
+//!   streamed ([`send`](mod@send));
 //! - `GET /chat/api/threads/{id}/tasks`, `POST /chat/api/threads/{id}/answer` and
 //!   `POST /chat/api/threads/{id}/tasks/{task}/cancel`: answering a
 //!   thread's MCP task results, and cancelling a task
@@ -64,22 +71,55 @@ impl Method {
     }
 }
 
-/// One request header.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One request header. Its `Debug` redacts an `Authorization` value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Header {
     pub name: String,
     pub value: String,
 }
 
+impl std::fmt::Debug for Header {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value: &dyn std::fmt::Debug = if self.name.eq_ignore_ascii_case("authorization") {
+            &"<redacted>"
+        } else {
+            &self.value
+        };
+        f.debug_struct("Header")
+            .field("name", &self.name)
+            .field("value", value)
+            .finish()
+    }
+}
+
 /// A request to send: its method, its path with the query, its headers
-/// and its JSON body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// and its JSON body. Its `Debug` shows the body's size only (an
+/// enrolment's carries the pairing token) and no `Authorization` value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Request {
     pub method: Method,
     /// From the gateway's root: `/chat/api/feed`.
     pub path: String,
     pub headers: Vec<Header>,
     pub body: Option<String>,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        /// A body by its size.
+        struct Size(usize);
+        impl std::fmt::Debug for Size {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "<{} bytes>", self.0)
+            }
+        }
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("headers", &self.headers)
+            .field("body", &self.body.as_ref().map(|b| Size(b.len())))
+            .finish()
+    }
 }
 
 impl Request {
@@ -138,6 +178,7 @@ impl Request {
                     "the gateway's address must start with http:// or https:// (got '{}')",
                     base_url.trim()
                 ),
+                ..Default::default()
             })
         }
     }
@@ -256,14 +297,25 @@ pub fn profile_named(list: &ProfileList, name: &str) -> Result<Option<i64>, ApiE
             name.trim(),
             names.join(", ")
         ),
+        ..Default::default()
     })
 }
 
 /// `GET /chat/api/feed`, resumed from `cursor` with `Last-Event-ID` when
-/// there is one.
-pub fn feed(cursor: Option<&str>) -> Request {
-    let r =
-        Request::new(Method::Get, "/chat/api/feed".into()).header("Accept", "text/event-stream");
+/// there is one, with a keep-alive comment every `keepalive_s` seconds when
+/// given (`?keepalive_s=`; device link design §7.1), else at the gateway's
+/// interval. lmgw takes 1 to its `chat_feed_keepalive_max_s` (default 900)
+/// and refuses more with a 400 `bad_request` naming that setting;
+/// `hello.keepalive_s` says what the stream keeps. Only the comments
+/// follow it: stored events are not held back by a long one, so a phone
+/// holding its feed in the background asks a long one (about 120 s) to
+/// wake its radio less, and takes a link silent for two of them as dead.
+pub fn feed(cursor: Option<&str>, keepalive_s: Option<u32>) -> Request {
+    let path = match keepalive_s {
+        Some(k) => format!("/chat/api/feed?keepalive_s={k}"),
+        None => "/chat/api/feed".into(),
+    };
+    let r = Request::new(Method::Get, path).header("Accept", "text/event-stream");
     match cursor.filter(|c| !c.is_empty()) {
         Some(c) => r.header("Last-Event-ID", c),
         None => r,
@@ -318,6 +370,13 @@ pub fn realtime_page_url(protocol: &str, host: &str, thread_id: i64) -> String {
 /// realtime handshake's `{"error": {code, message, …}}` (its `type` when it
 /// has no `code`). A body that is neither is `http_<status>` with the body
 /// as the message.
+///
+/// A realtime bind's 409 `chat_thread_bound` ([`code::CHAT_THREAD_BOUND`],
+/// under `takeover=never`, on the WebSocket upgrade or a call) names who
+/// holds the thread in `error.held_by`, which reads into
+/// [`ApiError::held_by`] as the Chat feed's `voice.bound.by` names a client
+/// ("device 'desktop'", "the dashboard"), to show as it is (realtime calls
+/// design §2.8). `None` on every other refusal.
 pub fn read_refusal(status: u16, body: &str) -> ApiError {
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let text = |v: &serde_json::Value| {
@@ -339,6 +398,7 @@ pub fn read_refusal(status: u16, body: &str) -> ApiError {
         Some(code) => ApiError {
             message: message.unwrap_or_else(|| code.clone()),
             code,
+            held_by: text(&nested["held_by"]),
         },
         None => {
             let body = body.trim();
@@ -349,6 +409,7 @@ pub fn read_refusal(status: u16, body: &str) -> ApiError {
                 } else {
                     body.to_string()
                 },
+                held_by: None,
             }
         }
     }
@@ -382,24 +443,52 @@ pub fn idle_rollover_at(folder: &Folder, thread: &ThreadRow) -> Option<i64> {
 
 /// What a refusal says about the client's own key, when it says the key
 /// opens nothing now ([`key_refused`]): the client stops retrying and tells
-/// the user what to do.
+/// the user what to do, except while it waits for the owner's confirmation
+/// ([`KeyRefused::Unconfirmed`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeyRefused {
-    /// `device_key_unknown`: the device key matches no device any more (it
-    /// was rotated or deleted). The device must be paired again.
+    /// `device_key_unknown`: the device's key matches no device any more
+    /// (it was rotated, re-paired or deleted, or paired with a v1 link). The
+    /// device must be paired again.
     PairAgain,
     /// `device_disabled`: the device is disabled on the gateway; the same
     /// key works once it is enabled again.
     Disabled,
     /// `key_expired`: the key is past its expiry date.
     Expired,
+    /// `client_certificate_required`: the device listener got no client
+    /// certificate, which only enrolment goes without. A device that has
+    /// none must pair; one that has one sent it to no avail (its client was
+    /// not built from the pinned configuration).
+    CertificateRequired,
+    /// `credential_on_device_listener`: a bearer, `x-api-key`, cookie or key
+    /// subprotocol reached the device listener, which authenticates by the
+    /// client certificate alone. The client must send none.
+    CredentialOnDeviceListener,
+    /// `device_unconfirmed`: enrolled, and waiting for the owner to confirm
+    /// the device's code on lmgw's Devices card (device link §3.5). The
+    /// client shows "Confirm `<code>` on lmgw's Devices card" with its own
+    /// [`Credentials::confirm_code`], derived from its own key (the refusal's
+    /// message is for people, not parsed), and asks again on its own
+    /// backoff.
+    Unconfirmed,
+    /// `device_certificate_expired`: the device's certificate lapsed; pair
+    /// the device again.
+    CertificateExpired,
+    /// `pairing_token_used` (enrolment's 410): another key used this pairing
+    /// link's token, and lmgw marked the device contested. Someone else used
+    /// this code: delete the device on lmgw.
+    TokenUsedElsewhere,
 }
 
-/// Refusal codes a client acts on: the three [`key_refused`] reads, and
-/// the bind's when another session holds the thread
-/// ([`realtime_unless_bound`]).
+/// Refusal codes a client acts on: the ones [`key_refused`] reads, the
+/// bind's when another session holds the thread ([`realtime_unless_bound`]),
+/// the device link's (device link §3.4, §4.7), and the ones
+/// [`read_enrolment`] answers by itself.
 pub mod code {
+    use lmgw_api_types::device_link::code as link;
+
     pub const DEVICE_KEY_UNKNOWN: &str = "device_key_unknown";
     pub const DEVICE_DISABLED: &str = "device_disabled";
     pub const KEY_EXPIRED: &str = "key_expired";
@@ -407,6 +496,31 @@ pub mod code {
     pub const CHAT_TOOLSET_NEEDS_FULL: &str = "chat_toolset_needs_full";
     pub const HOST_NOT_GRANTED: &str = lmgw_api_types::mcp_host::HOST_NOT_GRANTED;
     pub const CROSS_ORIGIN_REFUSED: &str = lmgw_api_types::mcp_host::CROSS_ORIGIN_REFUSED;
+
+    // The device listener's.
+    pub const CLIENT_CERTIFICATE_REQUIRED: &str = link::CLIENT_CERTIFICATE_REQUIRED;
+    pub const CREDENTIAL_ON_DEVICE_LISTENER: &str = link::CREDENTIAL_ON_DEVICE_LISTENER;
+    pub const DEVICE_UNCONFIRMED: &str = link::DEVICE_UNCONFIRMED;
+    pub const DEVICE_CERTIFICATE_EXPIRED: &str = link::DEVICE_CERTIFICATE_EXPIRED;
+
+    // Enrolment's.
+    pub const PUBLIC_KEY_UNSUPPORTED: &str = link::PUBLIC_KEY_UNSUPPORTED;
+    pub const PAIRING_TOKEN_UNKNOWN: &str = link::PAIRING_TOKEN_UNKNOWN;
+    pub const PUBLIC_KEY_IN_USE: &str = link::PUBLIC_KEY_IN_USE;
+    pub const PAIRING_TOKEN_USED: &str = link::PAIRING_TOKEN_USED;
+    pub const PAIRING_TOKEN_EXPIRED: &str = link::PAIRING_TOKEN_EXPIRED;
+    pub const BODY_TOO_LARGE: &str = link::BODY_TOO_LARGE;
+    pub const PAIRING_RATE_LIMITED: &str = link::PAIRING_RATE_LIMITED;
+    pub const DEVICES_CA_UNAVAILABLE: &str = link::DEVICES_CA_UNAVAILABLE;
+
+    // The client's own, from [`read_enrolment`](super::read_enrolment): an
+    // answer that does not hold together, of which nothing is stored.
+    /// The answer's CA is not the one the link's `fp` pins.
+    pub const CA_NOT_PINNED: &str = "ca_not_pinned";
+    /// The answer's certificate is not for the key the device sent.
+    pub const CERTIFICATE_NOT_FOR_KEY: &str = "certificate_not_for_key";
+    /// The answer's confirmation code is not the sent key's.
+    pub const CONFIRM_CODE_MISMATCH: &str = "confirm_code_mismatch";
 }
 
 /// Whether refusal `e` says the client's key opens nothing now, and why;
@@ -416,6 +530,11 @@ pub fn key_refused(e: &ApiError) -> Option<KeyRefused> {
         code::DEVICE_KEY_UNKNOWN => Some(KeyRefused::PairAgain),
         code::DEVICE_DISABLED => Some(KeyRefused::Disabled),
         code::KEY_EXPIRED => Some(KeyRefused::Expired),
+        code::CLIENT_CERTIFICATE_REQUIRED => Some(KeyRefused::CertificateRequired),
+        code::CREDENTIAL_ON_DEVICE_LISTENER => Some(KeyRefused::CredentialOnDeviceListener),
+        code::DEVICE_UNCONFIRMED => Some(KeyRefused::Unconfirmed),
+        code::DEVICE_CERTIFICATE_EXPIRED => Some(KeyRefused::CertificateExpired),
+        code::PAIRING_TOKEN_USED => Some(KeyRefused::TokenUsedElsewhere),
         _ => None,
     }
 }
@@ -433,6 +552,7 @@ macro_rules! reader {
                     "the answer does not read as {}: {e}",
                     stringify!($ty)
                 ),
+                ..Default::default()
             })
         }
     };
@@ -481,9 +601,21 @@ reader!(
 pub mod approvals;
 pub use approvals::{approvals, read_transcription, transcribe};
 
+/// A chat turn's send.
+pub mod send;
+pub use send::{send, ErrorFrame, LabelCode, SendRequest, TurnEvent};
+
 /// A thread's MCP tasks: `answer` and the cancel (MCP Tasks design §5.1).
 pub mod tasks;
 pub use tasks::{answer, cancel_task, read_task_cancelled, read_thread_tasks, thread_tasks};
+
+/// Enrolment over the device link (device link design §3.4, §6.3).
+pub mod enrol;
+pub use enrol::{confirm_code, enrol, read_enrolment, CertDates, CredentialState, Credentials};
+
+/// A voice session over WebRTC, and its hangup (realtime calls design §2).
+pub mod calls;
+pub use calls::{call, hangup, read_call, read_hangup, CallAnswer, CallBind, HungUp, Takeover};
 
 #[cfg(test)]
 mod tests {
@@ -642,17 +774,28 @@ mod tests {
 
     #[test]
     fn the_feed_resumes_with_last_event_id() {
-        assert!(feed(None).headers.iter().all(|h| h.name != "Last-Event-ID"));
-        assert!(feed(Some(""))
+        assert!(feed(None, None)
             .headers
             .iter()
             .all(|h| h.name != "Last-Event-ID"));
-        let r = feed(Some("ab12:40"));
-        assert_eq!(r.method, Method::Get);
+        assert!(feed(Some(""), None)
+            .headers
+            .iter()
+            .all(|h| h.name != "Last-Event-ID"));
+        let r = feed(Some("ab12:40"), None);
+        assert_eq!((r.method, r.path.as_str()), (Method::Get, "/chat/api/feed"));
         assert!(r
             .headers
             .iter()
             .any(|h| h.name == "Last-Event-ID" && h.value == "ab12:40"));
+    }
+
+    /// Device link §7.1: the stream's own keep-alive, asked in the query.
+    #[test]
+    fn the_feed_asks_for_its_keepalive() {
+        let r = feed(Some("ab12:40"), Some(120));
+        assert_eq!(r.path, "/chat/api/feed?keepalive_s=120");
+        assert!(r.headers.iter().any(|h| h.name == "Last-Event-ID"));
     }
 
     #[test]
@@ -688,6 +831,59 @@ mod tests {
             realtime_page_url("http:", "127.0.0.1:8001", 7),
             "ws://127.0.0.1:8001/v1/realtime?chat_thread=7"
         );
+    }
+
+    #[test]
+    fn the_device_link_s_refusals_read_as_what_the_key_needs() {
+        let read = |status: u16, code: &str, message: &str| {
+            let body = serde_json::json!({"code": code, "message": message}).to_string();
+            key_refused(&read_refusal(status, &body))
+        };
+        assert_eq!(
+            read(401, "client_certificate_required", "pair the device"),
+            Some(KeyRefused::CertificateRequired)
+        );
+        assert_eq!(
+            read(400, "credential_on_device_listener", "send no key"),
+            Some(KeyRefused::CredentialOnDeviceListener)
+        );
+        assert_eq!(
+            read(401, "device_certificate_expired", "pair the device again"),
+            Some(KeyRefused::CertificateExpired)
+        );
+        assert_eq!(
+            read(410, "pairing_token_used", "used by another key"),
+            Some(KeyRefused::TokenUsedElsewhere)
+        );
+        // In either refusal shape, whatever the message says: the device
+        // shows the code of its own key.
+        let message = lmgw_api_types::device_link::unconfirmed_message("7F3A-91C2");
+        assert_eq!(
+            read(403, "device_unconfirmed", &message),
+            Some(KeyRefused::Unconfirmed)
+        );
+        let openai = serde_json::json!({"error": {"message": message, "type": "permission_error",
+                                                  "param": null, "code": "device_unconfirmed"}});
+        assert_eq!(
+            key_refused(&read_refusal(403, &openai.to_string())),
+            Some(KeyRefused::Unconfirmed)
+        );
+    }
+
+    #[test]
+    fn a_request_s_debug_shows_no_token_body_or_key() {
+        let token = "lmgw-enrol-4b1d0123456789abcdef0123456789ab";
+        let r = enrol(
+            &crate::pairing::PairingToken::parse(token).unwrap(),
+            &[0x30, 0x59],
+            Some("Kai mobile"),
+        )
+        .bearer("lmgw-device-secret");
+        let shown = format!("{r:?}");
+        assert!(!shown.contains(&token[11..]), "{shown}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("bytes>") && shown.contains("/devices/enrol"));
+        assert!(shown.contains("Content-Type"), "other headers stay");
     }
 
     #[test]

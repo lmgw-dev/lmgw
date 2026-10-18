@@ -1,6 +1,6 @@
 //! GPU hold
 
-use serde_json::{json, Value};
+use lmgw_api_types as dto;
 
 use crate::runtime::lifecycle;
 use crate::state::SharedState;
@@ -24,22 +24,24 @@ use crate::store::{self};
 /// all toggle this, and two of them arriving at the same answer within a tick
 /// of each other is normal. The response still reports the current state so a
 /// caller never has to guess.
-pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String> {
+pub async fn hold_set(state: &SharedState, active: bool) -> Result<dto::HoldSet, String> {
     let snap = state.snapshot();
     if snap.settings.hold.active == active {
-        return Ok(json!({
-            "ok": true,
-            "active": active,
-            "fallback_alias": snap.settings.hold.fallback_alias,
-            "stopped": Vec::<String>::new(),
-            "draining": draining_now(state, active),
-            "failed": Vec::<String>::new(),
-            "kept_on_cpu": on_cpu_now(state, active),
-            "message": format!(
+        // Nothing changed, so no run was aborted.
+        return Ok(dto::HoldSet {
+            ok: true,
+            active,
+            fallback_alias: snap.settings.hold.fallback_alias.clone(),
+            stopped: Vec::new(),
+            draining: draining_now(state, active),
+            failed: Vec::new(),
+            kept_on_cpu: on_cpu_now(state, active),
+            benchmark_aborted: None,
+            message: format!(
                 "the GPU hold was already {} — nothing to do",
                 if active { "on" } else { "off" }
             ),
-        }));
+        });
     }
 
     let (sweep, bench_aborted) = {
@@ -106,7 +108,7 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
         );
         if !sweep.kept_on_cpu.is_empty() {
             m.push_str(&format!(
-                "; audio models that run on the CPU keep serving ({})",
+                "; models that run on the CPU keep serving ({})",
                 sweep.kept_on_cpu.join(", ")
             ));
         }
@@ -128,17 +130,18 @@ pub async fn hold_set(state: &SharedState, active: bool) -> Result<Value, String
     } else {
         "GPU hold released — local models start on demand again".to_string()
     };
-    Ok(json!({
-        "ok": true,
-        "active": active,
-        "fallback_alias": snap.settings.hold.fallback_alias,
-        "stopped": sweep.stopped,
-        "draining": sweep.draining,
-        "failed": sweep.failed,
-        "kept_on_cpu": sweep.kept_on_cpu,
-        "benchmark_aborted": bench_aborted,
-        "message": message,
-    }))
+    Ok(dto::HoldSet {
+        ok: true,
+        active,
+        fallback_alias: snap.settings.hold.fallback_alias.clone(),
+        stopped: sweep.stopped,
+        draining: sweep.draining,
+        failed: sweep.failed,
+        kept_on_cpu: sweep.kept_on_cpu,
+        // Absent unless this call aborted a run (never, on a release).
+        benchmark_aborted: bench_aborted,
+        message,
+    })
 }
 
 /// What the registry currently believes is still working, for the no-op arm of

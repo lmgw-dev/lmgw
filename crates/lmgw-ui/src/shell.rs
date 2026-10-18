@@ -620,6 +620,18 @@ pub fn Sidebar() -> impl IntoView {
                             .into_any()
                     />
                     <NavItem
+                        href="/decision-lab"
+                        label="Decision lab"
+                        icon=view! {
+                            <path d="M8 2.5v4"/>
+                            <path d="M8 6.5L4 10.5M8 6.5l4 4"/>
+                            <circle cx="4" cy="12" r="1.5"/>
+                            <circle cx="12" cy="12" r="1.5"/>
+                            <circle cx="8" cy="2.5" r="1"/>
+                        }
+                            .into_any()
+                    />
+                    <NavItem
                         href="/agents"
                         label="Agents"
                         icon=view! {

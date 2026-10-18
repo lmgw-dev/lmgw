@@ -34,6 +34,7 @@ use quickdoc_core::embed::Embedder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::erased::Erased;
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::quickdoc::embed::refuse_if_held;
 use crate::quickdoc::InProcessEmbedder;
@@ -101,20 +102,21 @@ pub(crate) async fn spawn(
 
 pub struct KbReembedExecutor;
 
-#[async_trait::async_trait]
 impl JobExecutor for KbReembedExecutor {
     fn kind(&self) -> JobKind {
         JobKind::KbReembed
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("kb_reembed input: {e}"))?;
-        let outcome = run(&ctx, input.clone()).await?;
-        if matches!(outcome, JobOutcome::Done(_)) {
-            super::ingest::hand_on(ctx.state.clone(), input.kb_id, ctx.id);
-        }
-        Ok(outcome)
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("kb_reembed input: {e}"))?;
+            let outcome = run(&ctx, input.clone()).await?;
+            if matches!(outcome, JobOutcome::Done(_)) {
+                super::ingest::hand_on(ctx.state.clone(), input.kb_id, ctx.id);
+            }
+            Ok(outcome)
+        })
     }
 }
 

@@ -12,7 +12,6 @@ description = "quickdoc: versioned documentation corpora with hybrid BM25 + exac
 http = ["dep:reqwest"]
 
 [dependencies]
-async-trait = "0.1.89"
 # f16 embeddings from day one (§5): the KNN scan is memory-bandwidth-bound, so
 # halving the resident matrix is the whole win.
 half = "2.7.1"

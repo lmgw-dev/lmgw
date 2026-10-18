@@ -126,6 +126,15 @@ fn harness() -> &'static SlowTimeout {
     READ.get_or_init(|| SlowTimeout::read(NEXTEST_TOML))
 }
 
+/// How long the harness lets one test run (`None`: it ends none), for a bound
+/// a test sets on the system under test that has to outlast the test: a
+/// fixture that holds a call "until the test says so" must not have the
+/// gateway's own timeout end the call first, which a test that is slower than
+/// a guessed figure would see as the call failing.
+pub fn budget() -> Option<Duration> {
+    harness().budget()
+}
+
 /// One wait for a condition (module doc), for a loop the helpers below do
 /// not fit: it says what it waits for once per period, and how long it may
 /// go on.

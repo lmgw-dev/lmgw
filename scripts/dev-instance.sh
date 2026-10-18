@@ -19,6 +19,15 @@
 # defaults the builds dir to ~/.cache/lmgw-dev/builds instead of
 # <data_dir>/builds. Each scratch data dir gets its own build instance id, so
 # dev instances sharing that builds dir never mix up their runs' files.
+#
+# A dev instance never reaches the desktop's Secret Service or KWallet: the
+# headless runner installs no wrapping-key store (state::wrap_key_store), so a
+# device CA it makes keeps its key plain (0600) in its data dir. That is the
+# start's rule, not the environment's, and the session bus is left as it is:
+# unsetting DBUS_SESSION_BUS_ADDRESS would not cut it off (zbus falls back to
+# $XDG_RUNTIME_DIR/bus, the desktop's bus), and pointing it at a dead path
+# would move every podman call the instance makes off systemd's cgroup manager
+# onto cgroupfs, with a warning each time.
 set -euo pipefail
 
 ADDR="${1:-127.0.0.1:8899}"

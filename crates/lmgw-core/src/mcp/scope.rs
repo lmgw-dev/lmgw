@@ -27,19 +27,21 @@
 //! means; the scope binds a key that is presented, and switching auth on is
 //! what makes presenting one mandatory.
 //!
-//! **Except a device-hosted label** (client-apps design §5.6, L16): only the
-//! owner, the gateway's own runs, the device that hosts it, and a key, device
-//! or agent whose list names the label explicitly reach it — never an
-//! anonymous caller, an `all` or a `deny` scope ([`hosted`]).
+//! **Except a device-hosted label** (client-apps design §5.6, L16 as changed
+//! 2026-10-15): only the owner, the gateway's own runs, the device that hosts
+//! it, a key or device whose device-tools grant names the label, and an agent
+//! whose manifest names it reach it — never an anonymous caller, and never a
+//! key through its tool scope alone. The grant decides reach; the tool scope
+//! then filters a granted label's tools as any server's ([`hosted`]).
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent::{ToolExecutor, ToolOutcome};
 use crate::config::{ApiKeyKind, KeyPolicy, McpServer, ScopeMode, SelfAdmin, Snapshot};
+use crate::erased::Erased;
 use crate::principal::{Cap, Principal};
 use crate::proxy::RequestCtx;
 use crate::state::SharedState;
@@ -150,7 +152,7 @@ impl ToolScope {
             _ => Default::default(),
         };
         let hosted = match &ctx.agent {
-            Some(_) => Hosted::of(&snap, None, routes),
+            Some(_) => Hosted::of(&snap, None, &[], routes),
             None => hosted_of(&ctx.principal, &snap, routes),
         };
         Self {
@@ -222,23 +224,26 @@ impl ToolScope {
                     _ => true,
                 };
         }
-        // A device-hosted label (L16): reached whole by the owner, the
-        // gateway and the hosting device; otherwise only through a list
-        // that names it.
+        // A device-hosted label (L16 as changed 2026-10-15): reached whole
+        // by the owner, the gateway and the hosting device; by a key whose
+        // device-tools grant names it, its list filtering the tools below
+        // as any server's; by an agent whose manifest names it; by nobody
+        // else.
         if let Some(h) = self.hosted.of_name(name) {
             if self.hosted.whole(h) {
                 return true;
             }
-            return match &self.list {
-                List::Key { policy, .. } => hosted::admits_named(policy, h, name),
-                List::Agent {
-                    labels, allowed, ..
-                } => {
-                    labels.iter().any(|l| l.eq_ignore_ascii_case(&h.label))
-                        && allowed.iter().any(|a| a == name)
-                }
-                List::All | List::Nothing { .. } => false,
-            };
+            if !self.hosted.granted(h) {
+                return match &self.list {
+                    List::Agent {
+                        labels, allowed, ..
+                    } => {
+                        labels.iter().any(|l| l.eq_ignore_ascii_case(&h.label))
+                            && allowed.iter().any(|a| a == name)
+                    }
+                    List::All | List::Key { .. } | List::Nothing { .. } => false,
+                };
+            }
         }
         match &self.list {
             List::All => true,
@@ -266,13 +271,10 @@ impl ToolScope {
             if self.hosted.whole(h) {
                 return true;
             }
-            return match &self.list {
-                List::Key { policy, .. } => hosted::names_label(policy, h),
-                List::Agent { labels, .. } => labels
-                    .iter()
-                    .any(|l| l.eq_ignore_ascii_case(&h.label) || *l == server.name),
-                List::All | List::Nothing { .. } => false,
-            };
+            // A granted row is asked about as any server is, below.
+            if !self.hosted.granted(h) {
+                return self.manifest_names(server);
+            }
         }
         match &self.list {
             List::All => true,
@@ -298,10 +300,9 @@ impl ToolScope {
             if self.hosted.whole(h) {
                 return true;
             }
-            return match &self.list {
-                List::Key { policy, .. } => hosted::admits_whole(policy, h),
-                _ => false,
-            };
+            if !self.hosted.granted(h) {
+                return false;
+            }
         }
         match &self.list {
             List::All => true,
@@ -334,15 +335,35 @@ impl ToolScope {
 
     /// Does this caller's reach into `server` need checking, tool by tool?
     /// When its list narrows, or `server` is a device row it does not reach
-    /// whole (L16, review W3-9): an `All` holds another device's label back
-    /// and nothing else, so its other servers — a bare one not connected
-    /// included — stay as an `All` has them.
+    /// (L16, review W3-9): an `All` holds back another device's label it is
+    /// not granted and nothing else, so its other servers — a bare one not
+    /// connected included — stay as an `All` has them.
     pub fn narrows_for(&self, server: &McpServer) -> bool {
         self.narrows()
             || self
                 .hosted
                 .of_server(server)
-                .is_some_and(|h| !self.hosted.whole(h))
+                .is_some_and(|h| !self.hosted.reaches(h))
+    }
+
+    /// Is `server` a device row this caller may not use at all (L16 as
+    /// changed 2026-10-15) — not the owner's, the gateway's or the hosting
+    /// device's, not in its key's device-tools grant, not named by an
+    /// agent's manifest? What a thread's attached label is refused for in
+    /// so many words ([`super::exec::resolve_attached`]); a granted row its
+    /// tool scope keeps out is not held back, only out of scope.
+    pub fn holds_back(&self, server: &McpServer) -> bool {
+        self.hosted
+            .of_server(server)
+            .is_some_and(|h| !self.hosted.reaches(h) && !self.manifest_names(server))
+    }
+
+    /// Whether this caller is an agent whose manifest names `server`'s
+    /// label (or its name).
+    fn manifest_names(&self, server: &McpServer) -> bool {
+        let label = super::exec::server_label(server);
+        matches!(&self.list, List::Agent { labels, .. }
+            if labels.iter().any(|l| l.eq_ignore_ascii_case(&label) || *l == server.name))
     }
 
     /// The server `name` routed to when this scope was read, when there are
@@ -389,14 +410,18 @@ impl ToolScope {
 
     /// Why `name` is refused, for a caller [`admits`](Self::admits) said no to.
     pub fn refusal(&self, name: &str) -> String {
-        if let Some(h) = self.hosted.of_name(name).filter(|h| !self.hosted.whole(h)) {
-            let named = matches!(&self.list, List::Key { policy, .. }
-                if hosted::names_label(policy, h));
+        if let Some(h) = self
+            .hosted
+            .of_name(name)
+            .filter(|h| !self.hosted.reaches(h))
+        {
+            let named = matches!(&self.list, List::Agent { labels, .. }
+                if labels.iter().any(|l| l.eq_ignore_ascii_case(&h.label)));
             if !named {
                 return format!(
                     "{name} — '{}' is a paired device's hosted tools: only the owner, that \
-                     device, and a key, device or agent whose tool scope names '{}__' \
-                     explicitly reach them; {} does not",
+                     device, a key or device whose policy grants '{}' (Device tools), and an \
+                     agent whose manifest names it reach them; {} is not granted them",
                     h.label,
                     h.label,
                     self.describe()
@@ -461,14 +486,22 @@ async fn agent_list(state: &SharedState, agent_id: &str) -> List {
     }
 }
 
-/// How far `principal` reaches into the device-hosted labels (L16): every
-/// one for an owner credential, its own for a device, otherwise none but
-/// what its list names.
+/// How far `principal` reaches into the device-hosted labels (L16 as
+/// changed 2026-10-15): every one for an owner credential; for a device its
+/// own and those its key's device-tools grant names; for a client key those
+/// its grant names; none for anyone else.
 fn hosted_of(
     principal: &Principal,
     snap: &Snapshot,
     routes: std::collections::HashMap<String, i64>,
 ) -> Hosted {
+    let grant = |id: &i64| {
+        snap.api_keys
+            .iter()
+            .find(|k| k.id == *id)
+            .map(|k| k.policy.device_tools.as_slice())
+            .unwrap_or_default()
+    };
     match principal {
         Principal::Key {
             kind: ApiKeyKind::Owner,
@@ -478,8 +511,13 @@ fn hosted_of(
             id,
             kind: ApiKeyKind::Device,
             ..
-        } => Hosted::of(snap, Some(*id), routes),
-        _ => Hosted::of(snap, None, routes),
+        } => Hosted::of(snap, Some(*id), grant(id), routes),
+        Principal::Key {
+            id,
+            kind: ApiKeyKind::Key,
+            ..
+        } => Hosted::of(snap, None, grant(id), routes),
+        _ => Hosted::of(snap, None, &[], routes),
     }
 }
 
@@ -711,37 +749,38 @@ impl<E> ScopedExecutor<E> {
     }
 }
 
-#[async_trait]
 impl<E: ToolExecutor> ToolExecutor for ScopedExecutor<E> {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        let started = Instant::now();
-        let scope = ToolScope::of_request(&self.state, &self.ctx).await;
-        let why = if !scope.admits(name) {
-            scope.refusal(name)
-        } else if let Some(why) = self.device_row_refuses(name).await {
-            why
-        } else {
-            let outcome = self.inner.call(name, args).await;
-            // A call made for a request stamped `X-Lmgw-Run` (a container's
-            // `/v1/responses` or realtime turn) is one of that run's tool
-            // calls, as its `tools/call` on `/mcp` would be (§3.1). A name
-            // refused above never reached a tool, so it is none.
-            if let Some(run) = self.ctx.run {
-                self.state.agent_meters.note_tool_call(run);
-            }
-            return outcome;
-        };
-        super::ingress::record_tool_call(
-            &self.state,
-            &self.ctx,
-            self.proto,
-            name,
-            None,
-            started,
-            Some(why.clone()),
-        )
-        .await;
-        ToolOutcome::error(why)
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            let started = Instant::now();
+            let scope = ToolScope::of_request(&self.state, &self.ctx).await;
+            let why = if !scope.admits(name) {
+                scope.refusal(name)
+            } else if let Some(why) = self.device_row_refuses(name).await {
+                why
+            } else {
+                let outcome = self.inner.call(name, args).await;
+                // A call made for a request stamped `X-Lmgw-Run` (a container's
+                // `/v1/responses` or realtime turn) is one of that run's tool
+                // calls, as its `tools/call` on `/mcp` would be (§3.1). A name
+                // refused above never reached a tool, so it is none.
+                if let Some(run) = self.ctx.run {
+                    self.state.agent_meters.note_tool_call(run);
+                }
+                return outcome;
+            };
+            super::ingress::record_tool_call(
+                &self.state,
+                &self.ctx,
+                self.proto,
+                name,
+                None,
+                started,
+                Some(why.clone()),
+            )
+            .await;
+            ToolOutcome::error(why)
+        })
     }
 }
 
@@ -768,6 +807,7 @@ mod tests {
             note: String::new(),
             hosts_label: None,
             self_admin: crate::config::DeviceAdmin::Off,
+            link: Default::default(),
         });
         snap
     }

@@ -159,6 +159,7 @@ async fn a_fallback_to_a_passthrough_name_takes_its_upstream_model_price() {
             expose_all: true,
             expose_prefix: "pt".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

@@ -24,6 +24,9 @@
 //! clips. `x-lmgw-voices-source: engine`. A remote route is always asked
 //! (it has no container to start), and says `engine` too.
 
+mod lab;
+pub use lab::lab_voices;
+
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

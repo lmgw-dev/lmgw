@@ -19,12 +19,18 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 mod approval_floor;
+mod aux_decision_fields;
 mod billable_units;
 mod chat_message_task;
 mod chat_profiles;
 mod device_keys;
+mod device_link_pairing;
 mod device_rows;
+mod key_device_tools;
+mod lab_sets;
+mod lab_store;
 mod llama_cpp;
+mod upstream_catalog_all_modalities;
 
 /// An in-memory database migrated up to `version` and no further — the state an
 /// install that has not taken the aux-router upgrade yet is sitting in.

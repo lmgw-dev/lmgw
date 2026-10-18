@@ -36,7 +36,7 @@ pub struct CatalogEntry {
     pub group_label: String,
     /// The model's maker where the id names one (`kilo/google/gemma-…`).
     pub vendor: Option<String>,
-    /// `capabilities.task`: chat, embedding, rerank, tts, asr,
+    /// `capabilities.task`: chat, embedding, rerank, decision, tts, asr,
     /// image_generation, image_edit.
     pub task: Option<String>,
     pub ctx: Option<u64>,
@@ -57,6 +57,12 @@ pub struct CatalogEntry {
     /// reasoning overrides offer and say about the model.
     pub reasoning_facts: Option<ReasoningFacts>,
     pub local: bool,
+    /// Some lmgw route serves it: `capabilities.endpoints` is absent
+    /// (unknown) or lists one. A cloud image or video model, an OpenAI
+    /// Realtime model and a decision model on an Anthropic upstream list
+    /// none, and a picker scoped to tasks does not offer them as one of its
+    /// own (decision-models design §6.2).
+    pub routable: bool,
 }
 
 /// What a model's `capabilities.reasoning` states: how a request controls
@@ -166,6 +172,9 @@ impl CatalogEntry {
             tools,
             reasoning,
             reasoning_facts: cap("reasoning").map(ReasoningFacts::from_v1),
+            routable: cap("endpoints")
+                .and_then(Value::as_array)
+                .is_none_or(|a| !a.is_empty()),
             source,
             id,
         })
@@ -210,6 +219,9 @@ impl CatalogEntry {
             reasoning,
             reasoning_facts: None,
             local: false,
+            // An upstream's own list, for the alias form: the alias it
+            // becomes decides the routes.
+            routable: true,
         }
     }
 
@@ -382,6 +394,24 @@ mod tests {
         assert!(local.local && !local.tools && !local.reasoning);
         assert_eq!(local.group_label, "Local llama.cpp");
         assert_eq!(local.split_name(), ("", "gemma4-12b"));
+    }
+
+    /// A model whose published endpoints are empty is served by no lmgw
+    /// route; one that publishes none is unknown, and offered.
+    #[test]
+    fn an_entry_with_no_route_is_not_routable() {
+        let list = parse_catalog(&json!({"data": [
+            {"id": "openrouter/tencent/hy-image", "owned_by": "openrouter",
+             "capabilities": {"task": "image_generation", "endpoints": [],
+                              "output_modalities": ["image"]}},
+            {"id": "openrouter/typesafe/jev-1.13", "owned_by": "openrouter",
+             "capabilities": {"task": "decision", "endpoints": ["/v1/systemone"]}},
+            {"id": "plain", "owned_by": "up"}
+        ]}));
+        let routable = |id: &str| list.iter().find(|e| e.id == id).unwrap().routable;
+        assert!(!routable("openrouter/tencent/hy-image"));
+        assert!(routable("openrouter/typesafe/jev-1.13"));
+        assert!(routable("plain"));
     }
 
     #[test]

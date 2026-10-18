@@ -12,11 +12,11 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use quickdoc_core::embed::Reranker;
 use quickdoc_core::error::{QuickdocError, Result as QResult};
 
 use crate::config::{AuxKind, Snapshot};
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
@@ -94,55 +94,60 @@ impl InProcessReranker {
     }
 }
 
-#[async_trait]
 impl Reranker for InProcessReranker {
     fn model(&self) -> String {
         self.resolved.clone()
     }
 
-    async fn rerank(&self, query: &str, documents: &[String]) -> QResult<Vec<f32>> {
-        if documents.is_empty() {
-            return Ok(Vec::new());
-        }
-        // No `top_n`: the pipeline needs a score for every candidate it sent,
-        // because it maps the scores back onto its own fused order. Asking the
-        // upstream to truncate would silently drop the tail instead.
-        // A GPU hold re-routes `self.alias` to its row's fallback and answers
-        // with that model's scores (gpu-hold design §2/§4). Accepting them
-        // would reorder a corpus's answers with a cross-encoder the trace does
-        // not name and the corpus never agreed to — the same silent-reordering
-        // failure the embed/rerank kind gate exists to prevent, arriving
-        // through a different door. Refused before the call and again on what
-        // the call returned, exactly as the embedder does it.
-        super::embed::refuse_if_held(&self.state, &self.alias, TRACE_PIN)
-            .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
-        let key = super::embed::charge(&self.state, self.caller.as_ref(), &self.alias)
+    fn rerank<'a>(
+        &'a self,
+        query: &'a str,
+        documents: &'a [String],
+    ) -> Erased<'a, QResult<Vec<f32>>> {
+        Box::pin(async move {
+            if documents.is_empty() {
+                return Ok(Vec::new());
+            }
+            // No `top_n`: the pipeline needs a score for every candidate it sent,
+            // because it maps the scores back onto its own fused order. Asking the
+            // upstream to truncate would silently drop the tail instead.
+            // A GPU hold re-routes `self.alias` to its row's fallback and answers
+            // with that model's scores (gpu-hold design §2/§4). Accepting them
+            // would reorder a corpus's answers with a cross-encoder the trace does
+            // not name and the corpus never agreed to — the same silent-reordering
+            // failure the embed/rerank kind gate exists to prevent, arriving
+            // through a different door. Refused before the call and again on what
+            // the call returned, exactly as the embedder does it.
+            super::embed::refuse_if_held(&self.state, &self.alias, TRACE_PIN)
+                .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
+            let key = super::embed::charge(&self.state, self.caller.as_ref(), &self.alias)
+                .await
+                .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
+            let (_, headers, resp) = proxy::rerank_once(
+                &self.state,
+                &self.alias,
+                query,
+                documents.to_vec(),
+                None,
+                telemetry::RERANK_PROTO,
+                key,
+            )
             .await
-            .map_err(|e| QuickdocError::Reranker(e.to_string()))?;
-        let (_, headers, resp) = proxy::rerank_once(
-            &self.state,
-            &self.alias,
-            query,
-            documents.to_vec(),
-            None,
-            telemetry::RERANK_PROTO,
-            key,
-        )
-        .await
-        .map_err(|(_, _, e)| QuickdocError::Reranker(format!("{}: {e}", self.alias)))?;
-        if let Some(fb) = headers.fallback() {
-            return Err(QuickdocError::Reranker(format!(
+            .map_err(|(_, _, e)| QuickdocError::Reranker(format!("{}: {e}", self.alias)))?;
+            if let Some(fb) = headers.fallback() {
+                return Err(QuickdocError::Reranker(format!(
                 "'{}' was answered by the GPU-hold fallback '{fb}' — quickdoc will not rank with \
                  a model other than the {} its trace names. Release the hold, or clear the docs \
                  rerank model to run retrieval without the stage.",
                 self.alias, self.resolved
             )));
-        }
-        resp.in_request_order(documents.len())
-            .ok_or(QuickdocError::RerankCount {
-                want: documents.len(),
-                got: resp.results.len(),
-            })
+            }
+            resp.in_request_order(documents.len())
+                .ok_or(QuickdocError::RerankCount {
+                    want: documents.len(),
+                    got: resp.results.len(),
+                })
+        })
     }
 }
 
@@ -172,13 +177,13 @@ pub fn rerank_alias(snap: &Snapshot) -> Result<String, String> {
     enabled.sort_by(|a, b| a.model_id.cmp(&b.model_id));
     match enabled.as_slice() {
         [] => Err("no rerank model is enabled on the aux router".into()),
-        [m] => Ok(snap.aux_public_name(&m.model_id)),
+        [m] => Ok(snap.aux_public_name(m)),
         many => Err(format!(
             "{} rerank models are enabled ({}) — pick one as the rerank model under Settings → \
              Docs",
             many.len(),
             many.iter()
-                .map(|m| snap.aux_public_name(&m.model_id))
+                .map(|m| snap.aux_public_name(m))
                 .collect::<Vec<_>>()
                 .join(", ")
         )),

@@ -28,13 +28,12 @@
 //! one store write); a row that names an untitled thread says the new title
 //! (`lmgw.chat.thread`, through the session's compare).
 
-use serde_json::Value;
-
 use super::super::super::protocol::ServerEvent;
 use super::user::user_voice;
 use super::{RowTx, Task, UserTurn};
 use crate::store::InputPath;
 use crate::web::chat_voice::bound::{self, UserRow};
+use crate::web::chat_wire::message_voice;
 
 #[cfg(test)]
 mod tests;
@@ -229,7 +228,7 @@ impl Task {
         self.event(ServerEvent::LmgwChatUser {
             message_id: id,
             content: content.clone(),
-            voice: serde_json::to_value(&voice).unwrap_or(Value::Null),
+            voice: Box::new(message_voice(&voice)),
             response_id: Some(response_id.to_string()),
         });
         if untitled && !content.is_empty() {

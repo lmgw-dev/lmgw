@@ -109,7 +109,7 @@ protocol already has the feature (Rejected).
    always used; every SQLite write through `begin_write`; new logic in new child modules; every
    new route, op or `x-lmgw` header gets its API-docs entry.
 
-*Taken in this draft (open to the owner's veto), each with its reason:*
+*Taken in this draft, each with its reason:*
 - **T1. Tasks of MCP 2025-11-25, on every southbound link** (device rows and registered servers
   alike). *Why:* it is the revision lmgw negotiates and its rmcp 2.0.0 implements (the move to 2026-07-28 needs
   the rmcp 2 → 3 upgrade and a host-link redesign, Later); SEP-2663 itself says the
@@ -839,8 +839,7 @@ and the cancel `mcp/tasks/cancel.rs` (both out of `follow.rs`).
 - **`pollInterval: 0`** reads as not given, so the setting's interval applies; and while there is
   no session to ask (a device offline, a registered server that does not connect, a row gone)
   the next look is `mcp.task_poll_interval_s` away, whatever the task's own. A positive
-  `pollInterval` is honoured as given, with no floor. *Taken in this draft, open to the owner's
-  veto.* *Why:* 0 is no interval, and polling it means a busy loop; a server's interval is how
+  `pollInterval` is honoured as given, with no floor. *Taken in this draft.* *Why:* 0 is no interval, and polling it means a busy loop; a server's interval is how
   often to ask it, and with nobody to ask it only spun a core.
 - **A refused cancel goes on being followed.** `cancel_task` returns `CancelRefusal::Server(msg)`
   when the server answers `tasks/cancel` with a JSON-RPC error, and
@@ -848,7 +847,7 @@ and the cancel `mcp/tasks/cancel.rs` (both out of `follow.rs`).
   result does not declare `capabilities.tasks.cancel`; only a cancel that got no answer (no
   session, or none within `timeout_ms`) is owed. An owed cancel whose server, once connected,
   does not declare `tasks.cancel` is dropped unsent (the row then goes as if sent), and the
-  bridge sends none to such a server either. *Taken in this draft, open to the owner's veto.*
+  bridge sends none to such a server either. *Taken in this draft.*
   *Why:* a server that said no, or cannot cancel, was reachable: booking its task "not
   connected, owed" told the thread a falsehood and ended a task that still runs; and the spec
   gives `tasks/cancel` only to receivers that declare it. A row cancelled while offline still
@@ -861,15 +860,14 @@ and the cancel `mcp/tasks/cancel.rs` (both out of `follow.rs`).
   task is followed under a fresh row and never cancelled for it. The table's `UNIQUE (server_id,
   task_id)` became a unique index over the rows not yet `ended` (migration 0073 edited in place,
   as it has not landed), `store::mcp_tasks::insert_reusing` ends and inserts in one transaction,
-  `reused` does the same for a bridged task. *Taken in this draft, open to the owner's veto.*
+  `reused` does the same for a bridged task. *Taken in this draft.*
   *Why:* the old constraint made such an insert fail, and the K26 rule then cancelled the new
   task; and before that, two followers of one id would have read each other's results.
 - **Status notifications coalesce** per followed task (latest wins), so a server that floods
-  them queues nothing. *Taken in this draft, open to the owner's veto.* *Why:* only the newest
+  them queues nothing. *Taken in this draft.* *Why:* only the newest
   status means anything; polling reads the same.
 - **A bridged result loses `_meta["io.modelcontextprotocol/related-task"]`** (other `_meta` keys
-  stay): `/mcp` and `/v1/responses` callers made a normal call. *Taken in this draft, open to the
-  owner's veto.*
+  stay): `/mcp` and `/v1/responses` callers made a normal call. *Taken in this draft.*
 - **Fixes without a decision:** a follower or bridged wait that goes stops its held
   `tasks/result` (`Drop` for `Follow`); the bridge claims its key like any new task, so it no
   longer ended at once ("the gateway is shutting down") when the key was taken, and a late row
@@ -888,12 +886,11 @@ taken), `lmgw-api-types::chat`'s task types (`chat/tasks.rs`), `lmgw-client::req
   message's own write instead, before the message, and their turn's start delivers nothing).
   Only a fresh turn delivers at its start: a continue and a resumed turn extend the last reply, which
   must stay last, so what waits enters when they end. The end's delivery runs after the turn's
-  worker let its ticket go, for the plain and the tool path alike. *Taken in this draft, open to
-  the owner's veto.*
+  worker let its ticket go, for the plain and the tool path alike. *Taken in this draft.*
 - **A reply waiting for approvals holds results off** (the thread's task list says
   `waiting_for` the decision): a result written after it would make the decision `409
   approval_moved_on`, declining the calls for the user. They enter once the decided turn ended,
-  or a new message declined the calls. *Taken in this draft, open to the owner's veto.* (The
+  or a new message declined the calls. *Taken in this draft.* (The
   review fixes below widen "waiting" to the turn that runs the decided calls.)
 - **Thread deletes**: `ON DELETE SET NULL` clears a deleted thread's task rows during the
   `DELETE`, so `store::mcp_tasks::threads_gone(conn)` runs after it in the same transaction, on
@@ -961,8 +958,7 @@ taken), `lmgw-api-types::chat`'s task types (`chat/tasks.rs`), `lmgw-client::req
   while a turn of the thread runs, and its start (`TurnMode::Answer`) takes the thread only while
   no turn is live (`LiveTurns::begin_idle_as`, decided under the start's lock, so it cancels
   nothing) and, after delivering what waits, refuses `nothing_to_answer` when no result is
-  unanswered any more (a turn that ended in between answered it). *Taken in this draft, open to
-  the owner's veto:* the new code `turn_running`.
+  unanswered any more (a turn that ended in between answered it). *Taken in this draft:* the new code `turn_running`.
 - **Gemini's synthetic call** carries `thoughtSignature: "skip_thought_signature_validator"`,
   the value Google documents for a `functionCall` the model did not generate (Gemini API
   "Thought signatures", read 2026-10-09: Gemini 3 refuses with a 400 a current-turn call whose
@@ -992,13 +988,13 @@ this record was silent:
   `response.done {failed}`); a start that finds every result answered after delivering what
   waits (a turn of another window answered them since the session last read the thread) fails
   `empty_turn`, after `response.created`. Every other refusal of a bound turn's start stays
-  `internal`. *Taken in this draft, open to the owner's veto.* *Why:* the route and the session
+  `internal`. *Taken in this draft.* *Why:* the route and the session
   then run one continuation with one set of refusals, and a voice continuation cannot cut a
   text turn that is answering.
 - **Only the client's own `response.create` continues.** The automatic response turn
   detection creates for a committed turn answers that turn; one without words (a cough) stays
   `empty_turn` whatever is owed. Words before the create make it an ordinary turn, whose reply
-  answers the words and the results alike. *Taken in this draft, open to the owner's veto.*
+  answers the words and the results alike. *Taken in this draft.*
   *Why:* K26, the client picks the moment; a cough must not speak a job's result.
 - **Whether a response may continue is decided when the client's create comes**
   (`Create::continuation`, review fix), not from the turns it answers by the time it starts: a

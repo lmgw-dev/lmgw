@@ -61,6 +61,7 @@ async fn openai_upstream(state: &SharedState) -> MockServer {
             expose_all: true,
             expose_prefix: "openai".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

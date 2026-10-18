@@ -1,5 +1,7 @@
 //! `ops-responses`: stored `/v1/responses` chains (api-docs design §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 use crate::openapi::ops::args;
 
@@ -13,7 +15,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: Some("Delete every stored response sharing one chain_id."),
         tool: None,
         args: OpArgs::Hand(args::response_chain_delete),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -31,7 +33,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Hand(args::responses_gc),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,

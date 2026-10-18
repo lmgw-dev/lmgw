@@ -92,6 +92,18 @@ async fn refusal(resp: gloo_net::http::Response) -> Error {
     Error::Api(error)
 }
 
+/// A response to a request the caller built itself (one a Stop button can
+/// abort, which the JSON helpers here cannot): itself when it is a 2xx,
+/// else its refusal as every helper here reads it, the `401
+/// session_required` hook included.
+pub async fn checked(resp: gloo_net::http::Response) -> Result<gloo_net::http::Response> {
+    if (200..300).contains(&resp.status()) {
+        Ok(resp)
+    } else {
+        Err(refusal(resp).await)
+    }
+}
+
 /// Best-effort parse of a non-2xx body into the house [`ApiError`] shape.
 /// The `/api` admin plane always answers with the flat `{code, message}`
 /// object, but the chat routes (`/chat/api/...`) are not all on the admin plane
@@ -105,6 +117,7 @@ pub fn parse_error_body(status: u16, text: &str) -> ApiError {
         return ApiError {
             code: "http_error".into(),
             message: format!("HTTP {status}"),
+            ..Default::default()
         };
     }
     if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
@@ -121,6 +134,7 @@ pub fn parse_error_body(status: u16, text: &str) -> ApiError {
     ApiError {
         code: "http_error".into(),
         message: trimmed.to_string(),
+        ..Default::default()
     }
 }
 

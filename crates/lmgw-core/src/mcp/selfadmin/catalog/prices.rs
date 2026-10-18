@@ -118,7 +118,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 "Delete one price row by id (from lmgw__prices). Deleting a catalog row is \
                  harmless — the next lmgw__prices_sync recreates it if the upstream still \
                  advertises a price. Deleting the only manual row for a scope lets that \
-                 scope's catalog row, if any, show through again.",
+                 scope's catalog row, if any, show through again. An id no row has is refused.",
             props: vec![("id", int_p("Price row id, from lmgw__prices."))],
             required: &["id"],
         },

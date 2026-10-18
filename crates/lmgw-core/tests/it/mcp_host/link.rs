@@ -105,7 +105,7 @@ async fn the_row_is_the_grant_s_and_never_samples() {
         "mcp_server_set",
         json!({"action": "update", "id": id, "name": row["name"], "transport": "device",
                "tool_prefix": "desktop", "url": "", "command": "", "headers": "", "env": "",
-               "args": "", "extra_run_args": "", "idle_seconds": 0, "autostart": false,
+               "args": "", "extra_run_args": [], "idle_seconds": 0, "autostart": false,
                "allow_sampling": false, "timeout_ms": 1234}),
     )
     .await;
@@ -285,7 +285,7 @@ async fn a_call_carries_meta() {
 async fn a_second_link_takes_over() {
     let (w, d) = host_world().await;
     let mut first = linked(&w, &d, &["echo"]).await;
-    let _second = FakeDevice::connect(&w.addr(), &d.key, vec![tool("echo"), tool("other")]).await;
+    let _second = FakeDevice::connect(&d, vec![tool("echo"), tool("other")]).await;
     let (code, reason) = first.closed().await;
     assert_eq!(
         (code, reason.as_str()),
@@ -304,12 +304,7 @@ async fn a_second_link_takes_over() {
 #[tokio::test]
 async fn the_refusals_come_before_the_upgrade() {
     let (w, d) = host_world().await;
-    let auth = format!("Bearer {}", d.key);
-    let (s, v) = super::device::refused(
-        &w.addr(),
-        &[("authorization", &auth), ("origin", "http://evil.example")],
-    )
-    .await;
+    let (s, v) = super::device::refused(&d.addr, &[("origin", "http://evil.example")]).await;
     assert_eq!(
         (s, v["code"].as_str()),
         (403, Some("cross_origin_refused")),
@@ -317,8 +312,7 @@ async fn the_refusals_come_before_the_upgrade() {
     );
 
     let plain = pair(&w, "phone", json!({})).await;
-    let auth = format!("Bearer {}", plain.key);
-    let (s, v) = super::device::refused(&w.addr(), &[("authorization", &auth)]).await;
+    let (s, v) = super::device::refused(&plain.addr, &[]).await;
     assert_eq!(
         (s, v["code"].as_str()),
         (403, Some("host_not_granted")),

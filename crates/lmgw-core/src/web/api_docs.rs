@@ -9,8 +9,10 @@
 //! re-embeds, evaluates, imports or deletes one lives here and nowhere else.
 //!
 //! Two conventions from `api.rs` carry over unchanged: every mutation returns
-//! `Result<Value, String>` through [`ops_result`] so failures have one shape,
-//! and long work is a job rather than a long request.
+//! a `Result` through [`ops_result`] so failures have one shape, and long work
+//! is a job rather than a long request. Every answer is built from its
+//! `lmgw-api-types` type (`docs`), the rows of the corpus store through
+//! [`wire`].
 //!
 //! The `_inner` halves are `pub(crate)` so [`crate::ops`] — and through it the
 //! `lmgw__docs_*` self-admin tools (§20) — drives *these* paths rather than a
@@ -26,7 +28,7 @@ use axum::Router;
 use quickdoc_core::embed::EmbedIdentity;
 use quickdoc_core::store::{self as qstore, Corpus, NewCorpus};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::quickdoc::{
     eval as eval_job, golden, ingest, portability, query, reembed, InProcessEmbedder,
@@ -36,7 +38,12 @@ use crate::state::SharedState;
 use lmgw_api_types as dto;
 
 use super::api::ops_result;
+use crate::jobs::Spawn;
+use crate::knowledge::wire::chunk as chunk_row;
 use crate::ops::backends::to_json;
+use crate::principal::Refusal;
+
+mod wire;
 
 pub fn routes(state: &SharedState) -> Router<SharedState> {
     Router::new()
@@ -80,11 +87,31 @@ pub fn routes(state: &SharedState) -> Router<SharedState> {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn corpus_or_err(st: &SharedState, id: i64) -> Result<Corpus, String> {
+/// The corpus with this id, or the `404 not_found` an unknown one is. The
+/// tool path keeps the message only (see [`corpus_by_selector`]).
+pub(crate) async fn corpus_or_err(st: &SharedState, id: i64) -> Result<Corpus, Refusal> {
     qstore::get_corpus(&st.corpus, id)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no corpus {id}"))
+        .ok_or_else(|| Refusal::not_found(format!("no corpus {id}")))
+}
+
+/// A `Result` that can refuse with a [`Refusal`] as the one response every
+/// docs route answers with: the value, or the refusal's own status and code.
+fn answer<T: serde::Serialize>(res: Result<T, Refusal>) -> Response {
+    match res {
+        Ok(v) => ops_result(to_json(Ok(v))),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+/// For the routes that read no single corpus row themselves (the lists, the
+/// export): a corpus that does not exist is a `404 not_found`, not an empty
+/// answer. Every other failure stays the flat `400 op_failed`.
+async fn known_corpus(st: &SharedState, id: i64) -> Result<Corpus, Response> {
+    corpus_or_err(st, id)
+        .await
+        .map_err(IntoResponse::into_response)
 }
 
 /// Resolve what a caller *names* a corpus by. The dashboard always holds the
@@ -94,7 +121,7 @@ pub(crate) async fn corpus_or_err(st: &SharedState, id: i64) -> Result<Corpus, S
 pub(crate) async fn corpus_by_selector(st: &SharedState, sel: &str) -> Result<Corpus, String> {
     let sel = sel.trim();
     if let Ok(id) = sel.parse::<i64>() {
-        return corpus_or_err(st, id).await;
+        return corpus_or_err(st, id).await.map_err(|r| r.message);
     }
     qstore::get_corpus_by_id(&st.corpus, sel)
         .await
@@ -105,7 +132,7 @@ pub(crate) async fn corpus_by_selector(st: &SharedState, sel: &str) -> Result<Co
 }
 
 /// One corpus as the Docs tab lists it: the row, its badges, and its sources.
-pub(crate) async fn corpus_view(st: &SharedState, c: &Corpus) -> Result<Value, String> {
+pub(crate) async fn corpus_view(st: &SharedState, c: &Corpus) -> Result<dto::CorpusView, String> {
     let snap = st.snapshot();
     let status = query::corpus_status(&snap, c);
     let sources = qstore::list_sources(&st.corpus, c.id)
@@ -114,38 +141,7 @@ pub(crate) async fn corpus_view(st: &SharedState, c: &Corpus) -> Result<Value, S
     let unembedded = qstore::count_unembedded(&st.corpus, c.id)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({
-        "id": c.id,
-        "corpus_id": c.corpus_id(),
-        "library": c.library,
-        "version": c.version,
-        "status": c.status,
-        "chunk_count": c.chunk_count,
-        "unembedded_chunks": unembedded,
-        // What this corpus costs to serve once loaded (§5): dims × 2 bytes per
-        // embedded chunk. The visible price of the exact-KNN scan.
-        "resident_bytes": (c.chunk_count - unembedded).max(0) * c.embed_dims * 2,
-        "embed_upstream": c.embed_upstream,
-        "embed_model": c.embed_model,
-        "embed_dims": c.embed_dims,
-        "embed_identity": c.embed_identity().to_string(),
-        "ingest_model": c.ingest_model,
-        "ingest_prompt_version": c.ingest_prompt_version,
-        "crawl_date": c.crawl_date,
-        "source_kind": c.source_kind,
-        "eval_score": c.eval_score,
-        "eval_best": c.eval_best,
-        "eval_k": c.eval_k,
-        "eval_at": c.eval_at,
-        "eval_regression": c.eval_regression,
-        "embed_status": status.embed_status,
-        "eval_status": status.eval_status,
-        "flags": status.flags,
-        "warnings": status.warnings,
-        "sources": sources,
-        "created_at": c.created_at,
-        "updated_at": c.updated_at,
-    }))
+    Ok(wire::corpus(c, unembedded, status, sources))
 }
 
 // ---------------------------------------------------------------------------
@@ -153,10 +149,10 @@ pub(crate) async fn corpus_view(st: &SharedState, c: &Corpus) -> Result<Value, S
 // ---------------------------------------------------------------------------
 
 async fn list_corpora(State(st): State<SharedState>) -> Response {
-    ops_result(list_corpora_inner(&st).await)
+    ops_result(to_json(list_corpora_inner(&st).await))
 }
 
-pub(crate) async fn list_corpora_inner(st: &SharedState) -> Result<Value, String> {
+pub(crate) async fn list_corpora_inner(st: &SharedState) -> Result<dto::DocsOverview, String> {
     let rows = qstore::list_corpora(&st.corpus)
         .await
         .map_err(|e| e.to_string())?;
@@ -168,12 +164,12 @@ pub(crate) async fn list_corpora_inner(st: &SharedState) -> Result<Value, String
         .await
         .map_err(|e| e.to_string())?
         .len();
-    Ok(json!({
-        "corpora": corpora,
-        "pending_requests": pending,
-        "rerank_model": crate::quickdoc::rerank::rerank_alias(&st.snapshot()).ok(),
-        "schema_version": qstore::schema_version(),
-    }))
+    Ok(dto::DocsOverview {
+        corpora,
+        pending_requests: pending as u64,
+        rerank_model: crate::quickdoc::rerank::rerank_alias(&st.snapshot()).ok(),
+        schema_version: qstore::schema_version(),
+    })
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -205,13 +201,13 @@ pub(crate) struct CreateCorpus {
 }
 
 async fn create_corpus(State(st): State<SharedState>, Json(p): Json<CreateCorpus>) -> Response {
-    ops_result(create_corpus_inner(&st, p).await)
+    ops_result(to_json(create_corpus_inner(&st, p).await))
 }
 
 pub(crate) async fn create_corpus_inner(
     st: &SharedState,
     p: CreateCorpus,
-) -> Result<Value, String> {
+) -> Result<dto::CorpusCreated, String> {
     let library = p.library.trim();
     let version = p.version.trim();
     if library.is_empty() || version.is_empty() {
@@ -275,13 +271,17 @@ pub(crate) async fn create_corpus_inner(
             .map_err(|e| e.to_string())?;
     }
 
-    let corpus = corpus_or_err(st, id).await?;
+    let corpus = corpus_or_err(st, id).await.map_err(|r| r.message)?;
     let job = if p.start {
         Some(ingest::start(st, &corpus).await?.id())
     } else {
         None
     };
-    Ok(json!({ "ok": true, "corpus": corpus_view(st, &corpus).await?, "job_id": job }))
+    Ok(dto::CorpusCreated {
+        ok: true,
+        corpus: corpus_view(st, &corpus).await?,
+        job_id: job,
+    })
 }
 
 /// `?limit=` on the detail view. Absent — and `0` — mean the **whole** eval
@@ -299,10 +299,14 @@ async fn corpus_detail(
     Path(id): Path<i64>,
     Query(q): Query<DetailQuery>,
 ) -> Response {
-    ops_result(corpus_detail_inner(&st, id, q.limit.unwrap_or(0)).await)
+    answer(corpus_detail_inner(&st, id, q.limit.unwrap_or(0)).await)
 }
 
-async fn corpus_detail_inner(st: &SharedState, id: i64, limit: i64) -> Result<Value, String> {
+async fn corpus_detail_inner(
+    st: &SharedState,
+    id: i64,
+    limit: i64,
+) -> Result<dto::CorpusDetail, Refusal> {
     let c = corpus_or_err(st, id).await?;
     let documents = qstore::list_documents(&st.corpus, id)
         .await
@@ -313,22 +317,22 @@ async fn corpus_detail_inner(st: &SharedState, id: i64, limit: i64) -> Result<Va
     let runs = qstore::list_eval_runs(&st.corpus, id, limit)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({
-        "corpus": corpus_view(st, &c).await?,
-        "documents": documents,
-        "golden_queries": golden,
-        "eval_runs": runs,
-    }))
+    Ok(dto::CorpusDetail {
+        corpus: corpus_view(st, &c).await?,
+        documents: documents.into_iter().map(wire::document).collect(),
+        golden_queries: golden.into_iter().map(wire::golden_query).collect(),
+        eval_runs: runs.into_iter().map(wire::eval_run).collect(),
+    })
 }
 
 async fn delete_corpus(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(to_json(delete_corpus_inner(&st, id).await))
+    answer(delete_corpus_inner(&st, id).await)
 }
 
 pub(crate) async fn delete_corpus_inner(
     st: &SharedState,
     id: i64,
-) -> Result<dto::MessageAck, String> {
+) -> Result<dto::MessageAck, Refusal> {
     let c = corpus_or_err(st, id).await?;
     qstore::delete_corpus(&st.corpus, id)
         .await
@@ -336,16 +340,23 @@ pub(crate) async fn delete_corpus_inner(
     Ok(dto::MessageAck::new(format!("deleted {}", c.corpus_id())))
 }
 
+/// The answer of a route that queues a job: its id, and whether it was
+/// already in flight.
+fn job_started(spawn: Spawn) -> dto::DocsJobStarted {
+    dto::DocsJobStarted {
+        ok: true,
+        job_id: spawn.id(),
+        already_running: matches!(spawn, Spawn::AlreadyRunning(_)),
+    }
+}
+
 async fn start_ingest(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(
-        async {
-            let c = corpus_or_err(&st, id).await?;
-            let spawn = ingest::start(&st, &c).await?;
-            Ok(json!({ "ok": true, "job_id": spawn.id(),
-                       "already_running": matches!(spawn, crate::jobs::Spawn::AlreadyRunning(_)) }))
-        }
-        .await,
-    )
+    answer(start_ingest_inner(&st, id).await)
+}
+
+async fn start_ingest_inner(st: &SharedState, id: i64) -> Result<dto::DocsJobStarted, Refusal> {
+    let c = corpus_or_err(st, id).await?;
+    Ok(job_started(ingest::start(st, &c).await?))
 }
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
@@ -361,24 +372,30 @@ async fn start_re_embed(
     body: Option<Json<ReEmbedBody>>,
 ) -> Response {
     let p = body.map(|Json(b)| b).unwrap_or_default();
-    ops_result(
-        async {
-            let c = corpus_or_err(&st, id).await?;
-            let spawn = reembed::start(&st, &c, p.embed_model).await?;
-            Ok(json!({ "ok": true, "job_id": spawn.id(),
-                       "already_running": matches!(spawn, crate::jobs::Spawn::AlreadyRunning(_)) }))
-        }
-        .await,
-    )
+    answer(start_re_embed_inner(&st, id, p).await)
+}
+
+async fn start_re_embed_inner(
+    st: &SharedState,
+    id: i64,
+    p: ReEmbedBody,
+) -> Result<dto::DocsJobStarted, Refusal> {
+    let c = corpus_or_err(st, id).await?;
+    Ok(job_started(reembed::start(st, &c, p.embed_model).await?))
 }
 
 async fn list_documents(State(st): State<SharedState>, Path(id): Path<i64>) -> Response {
-    ops_result(
+    if let Err(r) = known_corpus(&st, id).await {
+        return r;
+    }
+    ops_result(to_json(
         qstore::list_documents(&st.corpus, id)
             .await
-            .map(|d| json!({ "documents": d }))
+            .map(|d| dto::DocumentsResponse {
+                documents: d.into_iter().map(wire::document).collect(),
+            })
             .map_err(|e| e.to_string()),
-    )
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -389,12 +406,14 @@ pub(crate) struct ChunksQuery {
 /// The corpus browser's leaf (§11): a document's chunks, verbatim payload
 /// included, with the derived fields alongside rather than mixed into it.
 async fn list_chunks(State(st): State<SharedState>, Query(q): Query<ChunksQuery>) -> Response {
-    ops_result(
+    ops_result(to_json(
         qstore::list_chunks(&st.corpus, q.document_id)
             .await
-            .map(|c| json!({ "chunks": c }))
+            .map(|c| dto::ChunksResponse {
+                chunks: c.iter().map(chunk_row).collect(),
+            })
             .map_err(|e| e.to_string()),
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -419,17 +438,17 @@ pub(crate) struct SearchBody {
 }
 
 async fn search(State(st): State<SharedState>, Json(p): Json<SearchBody>) -> Response {
-    ops_result(search_inner(&st, p).await)
+    answer(search_inner(&st, p).await)
 }
 
-async fn search_inner(st: &SharedState, p: SearchBody) -> Result<Value, String> {
+async fn search_inner(st: &SharedState, p: SearchBody) -> Result<Value, Refusal> {
     let corpus = match (p.corpus_id, p.corpus.as_deref()) {
         (Some(id), _) => corpus_or_err(st, id).await?,
         (None, Some(label)) => qstore::get_corpus_by_id(&st.corpus, label)
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no corpus '{label}'"))?,
-        (None, None) => return Err("corpus_id or corpus is required".into()),
+            .ok_or_else(|| Refusal::not_found(format!("no corpus '{label}'")))?,
+        (None, None) => return Err("corpus_id or corpus is required".to_string().into()),
     };
 
     let snap = st.snapshot();
@@ -464,7 +483,7 @@ async fn search_inner(st: &SharedState, p: SearchBody) -> Result<Value, String> 
         flags,
         warnings,
     } = status;
-    to_json(Ok(dto::DocsSearchResponse {
+    Ok(to_json(Ok(dto::DocsSearchResponse {
         corpus_id: result.corpus_id,
         hits: result
             .hits
@@ -481,7 +500,7 @@ async fn search_inner(st: &SharedState, p: SearchBody) -> Result<Value, String> 
             warnings,
         },
         markdown,
-    }))
+    }))?)
 }
 
 // ---------------------------------------------------------------------------
@@ -496,12 +515,17 @@ pub(crate) struct CorpusQuery {
 }
 
 async fn list_golden(State(st): State<SharedState>, Query(q): Query<CorpusQuery>) -> Response {
-    ops_result(
+    if let Err(r) = known_corpus(&st, q.corpus_id).await {
+        return r;
+    }
+    ops_result(to_json(
         qstore::list_golden_queries(&st.corpus, q.corpus_id)
             .await
-            .map(|g| json!({ "golden_queries": g }))
+            .map(|g| dto::GoldenResponse {
+                golden_queries: g.into_iter().map(wire::golden_query).collect(),
+            })
             .map_err(|e| e.to_string()),
-    )
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -521,17 +545,17 @@ pub(crate) struct GoldenBody {
 }
 
 async fn set_golden(State(st): State<SharedState>, Json(p): Json<GoldenBody>) -> Response {
-    ops_result(to_json(set_golden_inner(&st, p).await))
+    answer(set_golden_inner(&st, p).await)
 }
 
-async fn set_golden_inner(st: &SharedState, p: GoldenBody) -> Result<dto::GoldenSaved, String> {
+async fn set_golden_inner(st: &SharedState, p: GoldenBody) -> Result<dto::GoldenSaved, Refusal> {
     let query = p.query.trim();
     if query.is_empty() {
-        return Err("a golden query needs a query".into());
+        return Err("a golden query needs a query".to_string().into());
     }
     let origin = p.origin.as_deref().unwrap_or("manual").trim().to_string();
     if !matches!(origin.as_str(), "manual" | "synthetic") {
-        return Err(format!("unknown origin '{origin}' (manual|synthetic)"));
+        return Err(format!("unknown origin '{origin}' (manual|synthetic)").into());
     }
     // Expected ids that are not in the corpus would score as permanent misses
     // and read as a retrieval regression, so they are rejected on the way in
@@ -551,7 +575,7 @@ async fn set_golden_inner(st: &SharedState, p: GoldenBody) -> Result<dto::Golden
         None => {
             let corpus_id = p
                 .corpus_id
-                .ok_or("corpus_id is required when creating a golden query")?;
+                .ok_or_else(|| "corpus_id is required when creating a golden query".to_string())?;
             corpus_or_err(st, corpus_id).await?;
             check_expected(st, corpus_id, &p.expected_chunk_ids).await?;
             qstore::insert_golden_query(
@@ -622,22 +646,24 @@ pub(crate) struct GenerateBody {
 /// it. The model is the corpus's pinned ingest model (§4) and is deliberately
 /// not overridable here.
 async fn generate_golden(State(st): State<SharedState>, Json(p): Json<GenerateBody>) -> Response {
-    ops_result(
-        async {
-            let corpus = corpus_or_err(&st, p.corpus_id).await?;
-            let spawn = golden::start(&st, &corpus, p.sample, p.per_chunk).await?;
-            Ok(json!({ "ok": true, "job_id": spawn.id(),
-                       "already_running": matches!(spawn, crate::jobs::Spawn::AlreadyRunning(_)) }))
-        }
-        .await,
-    )
+    answer(generate_golden_inner(&st, p).await)
 }
 
-#[derive(Deserialize, Default, schemars::JsonSchema)]
-#[serde(default)]
+async fn generate_golden_inner(
+    st: &SharedState,
+    p: GenerateBody,
+) -> Result<dto::DocsJobStarted, Refusal> {
+    let corpus = corpus_or_err(st, p.corpus_id).await?;
+    Ok(job_started(
+        golden::start(st, &corpus, p.sample, p.per_chunk).await?,
+    ))
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub(crate) struct CandidatesQuery {
     corpus_id: i64,
     /// `pending` | `accepted` | `rejected`; empty lists every one of them.
+    #[serde(default)]
     status: Option<String>,
 }
 
@@ -649,11 +675,22 @@ async fn list_candidates(
     State(st): State<SharedState>,
     Query(q): Query<CandidatesQuery>,
 ) -> Response {
-    ops_result(list_candidates_inner(&st, q).await)
+    if let Err(r) = known_corpus(&st, q.corpus_id).await {
+        return r;
+    }
+    ops_result(to_json(list_candidates_inner(&st, q).await))
 }
 
-async fn list_candidates_inner(st: &SharedState, q: CandidatesQuery) -> Result<Value, String> {
-    let status = q.status.as_deref().unwrap_or("pending");
+async fn list_candidates_inner(
+    st: &SharedState,
+    q: CandidatesQuery,
+) -> Result<dto::GoldenCandidatesResponse, String> {
+    let status = q.status.as_deref().map(str::trim).unwrap_or("pending");
+    if !matches!(status, "" | "pending" | "accepted" | "rejected") {
+        return Err(format!(
+            "unknown status '{status}' (pending|accepted|rejected, or empty for all)"
+        ));
+    }
     let candidates = qstore::list_golden_candidates(&st.corpus, q.corpus_id, status)
         .await
         .map_err(|e| e.to_string())?;
@@ -664,7 +701,13 @@ async fn list_candidates_inner(st: &SharedState, q: CandidatesQuery) -> Result<V
     let chunks = qstore::get_chunks(&st.corpus, &ids)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(json!({ "candidates": candidates, "chunks": chunks }))
+    Ok(dto::GoldenCandidatesResponse {
+        candidates: candidates.into_iter().map(wire::golden_candidate).collect(),
+        chunks: chunks
+            .iter()
+            .map(|(id, c)| (id.clone(), chunk_row(c)))
+            .collect(),
+    })
 }
 
 #[derive(Deserialize, Default, schemars::JsonSchema)]
@@ -752,12 +795,17 @@ async fn candidate_or_err(st: &SharedState, id: i64) -> Result<qstore::GoldenCan
 }
 
 async fn eval_history(State(st): State<SharedState>, Query(q): Query<CorpusQuery>) -> Response {
-    ops_result(
+    if let Err(r) = known_corpus(&st, q.corpus_id).await {
+        return r;
+    }
+    ops_result(to_json(
         qstore::list_eval_runs(&st.corpus, q.corpus_id, q.limit.unwrap_or(0))
             .await
-            .map(|runs| json!({ "eval_runs": runs }))
+            .map(|runs| dto::EvalHistory {
+                eval_runs: runs.into_iter().map(wire::eval_run).collect(),
+            })
             .map_err(|e| e.to_string()),
-    )
+    ))
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -773,10 +821,10 @@ pub(crate) struct EvalBody {
 }
 
 async fn start_eval(State(st): State<SharedState>, Json(p): Json<EvalBody>) -> Response {
-    ops_result(start_eval_inner(&st, p).await)
+    answer(start_eval_inner(&st, p).await)
 }
 
-async fn start_eval_inner(st: &SharedState, p: EvalBody) -> Result<Value, String> {
+async fn start_eval_inner(st: &SharedState, p: EvalBody) -> Result<dto::DocsJobStarted, Refusal> {
     let corpus = corpus_or_err(st, p.corpus_id).await?;
     let params = match p.params.filter(|v| !v.is_null()) {
         Some(over) => Some(query::apply_params(
@@ -785,12 +833,9 @@ async fn start_eval_inner(st: &SharedState, p: EvalBody) -> Result<Value, String
         )?),
         None => None,
     };
-    let spawn = eval_job::start(st, &corpus, p.k, params).await?;
-    Ok(json!({
-        "ok": true,
-        "job_id": spawn.id(),
-        "already_running": matches!(spawn, crate::jobs::Spawn::AlreadyRunning(_)),
-    }))
+    Ok(job_started(
+        eval_job::start(st, &corpus, p.k, params).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -805,14 +850,27 @@ pub(crate) struct RequestsQuery {
 }
 
 async fn list_requests(State(st): State<SharedState>, Query(q): Query<RequestsQuery>) -> Response {
-    ops_result(list_requests_inner(&st, q.status.as_deref().unwrap_or_default()).await)
+    ops_result(to_json(
+        list_requests_inner(&st, q.status.as_deref().unwrap_or_default()).await,
+    ))
 }
 
 /// `status` empty means every request, whatever its state.
-pub(crate) async fn list_requests_inner(st: &SharedState, status: &str) -> Result<Value, String> {
+pub(crate) async fn list_requests_inner(
+    st: &SharedState,
+    status: &str,
+) -> Result<dto::DocRequestsResponse, String> {
+    let status = status.trim();
+    if !matches!(status, "" | "pending" | "fulfilled" | "dismissed") {
+        return Err(format!(
+            "unknown status '{status}' (pending|fulfilled|dismissed, or omit for all)"
+        ));
+    }
     qstore::list_doc_requests(&st.corpus, status)
         .await
-        .map(|r| json!({ "requests": r }))
+        .map(|r| dto::DocRequestsResponse {
+            requests: r.into_iter().map(wire::doc_request).collect(),
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -864,6 +922,11 @@ pub(crate) struct ExportQuery {
 /// §3's promise is that one file *is* the backup, and wrapping it would break
 /// "rsync it and you are done".
 async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> Response {
+    if let Some(id) = q.corpus_id {
+        if let Err(r) = known_corpus(&st, id).await {
+            return r;
+        }
+    }
     let staged = match portability::export(&st, q.corpus_id).await {
         Ok(s) => s,
         Err(e) => return api_error(e),
@@ -894,6 +957,11 @@ async fn export(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> 
 /// before committing to the transfer, and the half an import re-derives to
 /// check against.
 async fn export_manifest(State(st): State<SharedState>, Query(q): Query<ExportQuery>) -> Response {
+    if let Some(id) = q.corpus_id {
+        if let Err(r) = known_corpus(&st, id).await {
+            return r;
+        }
+    }
     ops_result(
         portability::manifest(&st, q.corpus_id)
             .await
@@ -935,6 +1003,7 @@ fn api_error(message: String) -> Response {
         Json(lmgw_api_types::ApiError {
             code: "op_failed".into(),
             message,
+            ..Default::default()
         }),
     )
         .into_response()

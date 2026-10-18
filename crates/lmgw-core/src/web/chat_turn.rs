@@ -357,6 +357,7 @@ impl Turn {
                 let error = frames::ErrorFrame {
                     message: msg.into(),
                     code: Some("superseded".into()),
+                    ..Default::default()
                 };
                 let _ = tx.send(TurnFrame::of("error", &error)).await;
             }

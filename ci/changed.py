@@ -10,7 +10,7 @@ plan as shell assignments on stdout, which ci/check.sh evals:
   CHANGED_ALL      1 when a workspace-wide file changed (Cargo.lock, ...)
   RUN_TRUNK        1 when the dashboard bundle has to be rebuilt
   RUN_CLIENT_WASM  1 when lmgw-client (or the types it builds on) has to be
-                   checked for wasm32 on its own
+                   checked on its own (for wasm32, and with its tls feature)
   RUN_WORKLET      1 when the audio worklets changed
   RUN_PUBLISH      1 when scripts/publish-github.sh or its helpers changed
   NEXTEST_FILTER   the nextest filterset for the selected tests
@@ -298,7 +298,7 @@ def main():
     say(f"\ntrunk build: {'yes' if trunk else 'skipped'} ({why})")
     client = [f for f in files if f.startswith((CLIENT_DIR, "crates/lmgw-api-types/"))]
     client_wasm = bool(wide or client)
-    say(f"lmgw-client wasm32 check: {'yes (' + (wide or client)[0] + ' changed)' if client_wasm else 'skipped (no lmgw-client / lmgw-api-types change)'}")
+    say(f"lmgw-client wasm32 and tls checks: {'yes (' + (wide or client)[0] + ' changed)' if client_wasm else 'skipped (no lmgw-client / lmgw-api-types change)'}")
     voice = [f for f in files if f.startswith(UI_DIR + "assets/voice/")
              or f == "scripts/worklet-check.mjs"]
     say(f"worklet check: {'yes (' + voice[0] + ' changed)' if voice else 'skipped (no change under crates/lmgw-ui/assets/voice/)'}")

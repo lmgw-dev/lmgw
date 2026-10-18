@@ -4,7 +4,8 @@
 
 use leptos::html;
 use leptos::prelude::*;
-use serde_json::{json, Value};
+use lmgw_api_types::chat_threads::SettingsAck;
+use serde_json::json;
 
 use super::super::apply_answer;
 use super::super::state::{Note, NoteKind};
@@ -53,7 +54,7 @@ pub(super) fn ProfileChip(rt: Realtime) -> impl IntoView {
         busy.set(true);
         let (draft, status, refresh) = (rt.parts.profile, rt.status, rt.parts.refresh);
         leptos::task::spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<SettingsAck, _>(
                 format!("/chat/api/threads/{tid}/settings"),
                 &json!({ "profile_id": want }),
             )

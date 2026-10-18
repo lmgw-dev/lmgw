@@ -151,9 +151,10 @@ pub(super) struct ModelChecks {
     /// Configuration that stops the model loading. These are what make a row
     /// "broken" in `lmgw__local_model_check`.
     pub(super) problems: Vec<String>,
-    /// Configuration that loads and serves, but misbehaves under some input.
-    /// Reported next to the problems and labelled as advisories; they never
-    /// mark a row broken.
+    /// Configuration that loads and serves, but misbehaves under some input,
+    /// or serves from the wrong class (an aux GGUF on a chat row that still
+    /// loads). Reported next to the problems and labelled as advisories; they
+    /// never mark a row broken.
     pub(super) advisories: Vec<String>,
 }
 
@@ -164,7 +165,11 @@ pub(super) struct ModelChecks {
 /// llama-server error minutes later:
 ///
 /// - **The wrong file as `gguf_path`.** A projector or a drafter passed as
-///   weights passes every path check, because it *is* a real file.
+///   weights passes every path check, because it *is* a real file. So does
+///   an embedding, rerank or decision model, whose header names the aux kind
+///   that serves it ([`crate::modelinfo::aux_file_on_chat_row`]) — an
+///   advisory instead while the row still loads and serves
+///   ([`crate::modelinfo::chat_row_still_serves`]).
 /// - **Speculation the model cannot do.** `spec-type = draft-mtp` with no
 ///   `model-draft` requires MTP heads inside the weights themselves; the other
 ///   `draft-*` types require an actual drafter file. Neither is checked by
@@ -271,6 +276,19 @@ pub(super) async fn model_warnings(models_dir: &str, m: &NewLocalModel) -> Model
             m.gguf_path
         )),
         _ => {}
+    }
+    // An embedding, rerank or decision GGUF on a chat row: the header says
+    // which aux kind serves it (decision-models design §3.2). An advisory
+    // while the row still loads and serves (the old --embedding workaround, a
+    // label-logit decision type), a problem when it cannot.
+    if let Some(finding) =
+        crate::modelinfo::aux_file_on_chat_row(&format!("gguf_path '{}'", m.gguf_path), &summary)
+    {
+        if crate::modelinfo::chat_row_still_serves(&summary, &m.args) {
+            out.advisories.push(finding);
+        } else {
+            out.problems.push(finding);
+        }
     }
 
     if spec == "draft-mtp" && m.params.draft_gguf_path.is_none() && !summary.has_mtp_layers {

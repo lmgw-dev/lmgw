@@ -1,18 +1,25 @@
-//! Every message write of a stored thread goes through the Chat's
-//! repository seam (`web::chat_repo`), which marks the thread for the
-//! dashboard's `chat` frame: that mark is how a Chat page open on the thread
-//! hears that another writer changed its messages (client-apps design §3.6,
-//! the owner's finding of 2026-10-08, review CL-6). A write that calls the
-//! store past the seam changes the messages with no page hearing of it.
+//! Every message write of a stored thread records its `message.*` change in
+//! the change feed's table, in its own transaction (client-apps design
+//! §2.2, WP10): that record is how a paired device's feed carries the
+//! messages and how a Chat page open on the thread hears that another
+//! writer changed them (§3.6, the owner's finding of 2026-10-08, review
+//! CL-6). And every such write goes through the Chat's repository seam
+//! (`web::chat_repo`), which wakes the open feeds once it went through and
+//! keeps a temporary thread out of the table.
 //!
-//! This scan refuses it in every crate of the workspace:
+//! This scan refuses what would break either, in every crate of the
+//! workspace:
 //! - **The store's message writes** are derived, not listed: every function
 //!   of `lmgw-core`'s store that writes `chat_messages` in its own SQL, or
 //!   calls one that does. Outside the store (`src/store.rs`, `src/store/`)
 //!   only `web/chat_repo.rs` and test code may name them.
-//! - **Inside the seam**, each call of one sits inside a `marked(` call, so
-//!   a new `ChatRepo` method cannot write without marking (review CL-17).
-//!   The one exception, [`NEW_THREAD_WRITES`], makes a new thread.
+//! - **Each function whose own SQL writes `chat_messages` records** in its
+//!   own body (`feed::record_messages` or one of its `record_added`,
+//!   `record_updated`, `record_deleted`), so a new write cannot leave the
+//!   feed out. The one exception, [`NEW_THREAD_WRITES`], makes a new thread.
+//! - **Inside the seam**, each call of one sits inside a `recorded(` call,
+//!   so a new `ChatRepo` method cannot write without waking the feeds
+//!   (review CL-17). [`NEW_THREAD_WRITES`] again excepted.
 //! - **No SQL of its own** that writes `chat_messages` anywhere outside the
 //!   store, the seam included (CL-17).
 //!
@@ -21,8 +28,8 @@
 //! item under `#[cfg(test)]`, wherever in a file it stands, to its end;
 //! the production code after it is scanned (CL-17). Comments are never
 //! read as code, nor string literals as calls.
-//! `web/chat_repo/marks_tests.rs` is the other half: each of the seam's
-//! writes marks its thread.
+//! `web/chat_repo/records_tests.rs` is the other half: each of the seam's
+//! writes records the messages it wrote, by its author.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -31,17 +38,63 @@ use regex::Regex;
 
 use crate::support::rust_source::{collect_rs, fn_header, line_of, production};
 
-/// The store's message writes the seam calls outside `marked(`, with why.
+/// The store's message writes that record no `message.*` change, and that
+/// the seam calls outside `recorded(`, with why.
 const NEW_THREAD_WRITES: &[(&str, &str)] = &[(
     "insert_kept_chat_thread",
     "a kept temporary chat becomes a new stored thread: its thread.created record names it, \
      and a page reads a new thread whole",
 )];
 
-/// SQL that writes `chat_messages`.
+/// SQL that writes `chat_messages`, in Rust source with its string literals:
+/// `INSERT [OR x] INTO`, `UPDATE [OR x]`, `DELETE FROM` and `REPLACE INTO`,
+/// in any case and spacing, with the table bare, quoted (`"…"`, `[…]`,
+/// `` `…` ``, a Rust `\"` escape included) or schema-qualified
+/// (`main.chat_messages`), and the words split across the literals of a
+/// `concat!` (`"UPDATE ", "chat_messages SET …"`, raw strings too).
+///
+/// What a regex over source cannot see, and this does not: SQL built at
+/// run time (`format!`, a `const` or a variable holding the table's name, a
+/// `concat!` of a `const`), a comment between the words (`UPDATE /* … */
+/// chat_messages`), a write through a CTE or a view, and a trigger in a
+/// migration (`.sql`, not Rust). Those need a reviewer; none exists today.
 fn writes_messages() -> Regex {
-    Regex::new(r"(?i)\b(INSERT\s+(OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+chat_messages\b")
-        .unwrap()
+    // Between two words: whitespace, or the end of one string literal and
+    // the start of the next.
+    const SEP: &str = r##"(?:\s|"#*\s*,\s*(?:r#*)?")+"##;
+    // The table: bare or quoted, optionally behind a schema.
+    const NAME: &str = r##"(?:(?:\\?"\w+\\?"|\[\w+\]|`\w+`|\w+)\s*\.\s*)?(?:\\?"chat_messages\\?"|\[chat_messages\]|`chat_messages`|chat_messages\b)"##;
+    let verb = format!(
+        r"(?:INSERT{SEP}(?:OR{SEP}\w+{SEP})?INTO|UPDATE(?:{SEP}OR{SEP}\w+)?|DELETE{SEP}FROM|REPLACE{SEP}INTO)"
+    );
+    Regex::new(&format!(r"(?i)\b{verb}{SEP}{NAME}")).unwrap()
+}
+
+/// Review of WP10: the forms the regex reads, and what it leaves alone.
+#[test]
+fn the_write_regex_reads_quoting_schemas_or_clauses_and_split_literals() {
+    let re = writes_messages();
+    for sql in [
+        r#""UPDATE chat_messages SET content = ?1""#,
+        r#""update or replace chat_messages set x = 1""#,
+        r#""INSERT OR IGNORE INTO chat_messages (id) VALUES (1)""#,
+        r#""DELETE FROM main.chat_messages WHERE id = 1""#,
+        r#""DELETE FROM \"main\".\"chat_messages\" WHERE id = 1""#,
+        r#"r"UPDATE [chat_messages] SET x = 1""#,
+        r#""REPLACE INTO `chat_messages` (id) VALUES (1)""#,
+        "concat!(\"UPDATE \", \"chat_messages SET x = 1\")",
+        "concat!(\n    \"DELETE FROM\",\n    r#\"chat_messages WHERE id = 1\"#\n)",
+    ] {
+        assert!(re.is_match(sql), "not read as a message write: {sql}");
+    }
+    for sql in [
+        r#""SELECT * FROM chat_messages""#,
+        r#""UPDATE chat_messages_fts SET x = 1""#,
+        r#""DELETE FROM chat_attachments WHERE message_id = 1""#,
+        r#""UPDATE chat_threads SET updated_at = 1""#,
+    ] {
+        assert!(!re.is_match(sql), "read as a message write: {sql}");
+    }
 }
 
 /// The files of the out-of-line modules `file` declares under
@@ -142,6 +195,22 @@ fn message_writers(fns: &[(String, bool, String)]) -> BTreeMap<String, bool> {
     }
 }
 
+/// The functions among `fns` whose own SQL writes `chat_messages` and whose
+/// body records no `message.*` change (`record_messages`, `record_added`,
+/// `record_updated`, `record_deleted`), [`NEW_THREAD_WRITES`] left out.
+fn unrecorded(fns: &[(String, bool, String)]) -> Vec<String> {
+    let sql = writes_messages();
+    let records = Regex::new(r"\brecord_(messages|added|updated|deleted)\s*\(").unwrap();
+    fns.iter()
+        .filter(|(name, _, body)| {
+            sql.is_match(body)
+                && !records.is_match(body)
+                && !NEW_THREAD_WRITES.iter().any(|(n, _)| n == name)
+        })
+        .map(|(name, _, _)| name.clone())
+        .collect()
+}
+
 /// The calls whose parentheses enclose byte `at` of `code` (comments and
 /// literals blanked), innermost last, each by the name before its `(`.
 fn enclosing_calls(code: &str, at: usize) -> Vec<String> {
@@ -168,7 +237,7 @@ fn enclosing_calls(code: &str, at: usize) -> Vec<String> {
 
 /// What a non-store file does past the seam: each refusal as
 /// `line: what`. `seam` is `web/chat_repo.rs`, which may call `writers`
-/// inside `marked(` (or one of [`NEW_THREAD_WRITES`]); any other file may
+/// inside `recorded(` (or one of [`NEW_THREAD_WRITES`]); any other file may
 /// not name them at all; no file may write `chat_messages` in SQL of its
 /// own.
 fn past_the_seam(text: &str, writers: &BTreeSet<&str>, seam: bool) -> Vec<String> {
@@ -193,9 +262,9 @@ fn past_the_seam(text: &str, writers: &BTreeSet<&str>, seam: bool) -> Vec<String
             if !exempt
                 && !enclosing_calls(&prod.code, m.start())
                     .iter()
-                    .any(|c| c == "marked")
+                    .any(|c| c == "recorded")
             {
-                refused.push(format!("{line}: store::{name} outside `marked(`"));
+                refused.push(format!("{line}: store::{name} outside `recorded(`"));
             }
         }
     }
@@ -306,11 +375,11 @@ fn c() {}
             "9: store::append_chat_reply".to_string(),
         ]
     );
-    // Inside the seam: only a call outside `marked(` is refused.
+    // Inside the seam: only a call outside `recorded(` is refused.
     let seam = r#"
-fn ok(s: &S) -> R { match x { Db => marked(s, id, store::append_chat_reply(&s.db).await) } }
-fn nested(s: &S) -> R { marked(s, id, f(g(store::append_chat_reply(&s.db)))) }
-fn bad(s: &S) -> R { let r = store::append_chat_reply(&s.db).await; marked(s, id, r) }
+fn ok(s: &S) -> R { match x { Db => recorded(s, store::append_chat_reply(&s.db).await) } }
+fn nested(s: &S) -> R { recorded(s, f(g(store::append_chat_reply(&s.db)))) }
+fn bad(s: &S) -> R { let r = store::append_chat_reply(&s.db).await; recorded(s, r) }
 fn kept(s: &S) -> R { store::insert_kept_chat_thread(&s.db).await }
 fn sql(s: &S) { sqlx::query("UPDATE chat_messages SET content = ''") }
 "#;
@@ -318,7 +387,7 @@ fn sql(s: &S) { sqlx::query("UPDATE chat_messages SET content = ''") }
         past_the_seam(seam, &writers, true),
         vec![
             "6: SQL of its own: UPDATE chat_messages".to_string(),
-            "4: store::append_chat_reply outside `marked(`".to_string(),
+            "4: store::append_chat_reply outside `recorded(`".to_string(),
         ]
     );
 }
@@ -419,9 +488,69 @@ fn no_message_write_bypasses_the_chat_repository() {
     );
     assert!(
         refused.is_empty(),
-        "a message write past the Chat's repository seam: no Chat page open on the thread \
-         hears of it. Write through web::chat_repo::ChatRepo, whose message writes mark the \
-         thread (`marked`):\n{}",
+        "a message write past the Chat's repository seam: no open feed is woken for it, and a \
+         temporary thread's would reach the store. Write through web::chat_repo::ChatRepo, \
+         whose message writes wake the feeds (`recorded`):\n{}",
         refused.join("\n")
     );
+}
+
+/// Every store function whose own SQL writes `chat_messages` records its
+/// `message.*` change in its body, inside its own transaction (WP10): a new
+/// message write that forgets it fails here, before a device's feed misses
+/// its messages.
+#[test]
+fn every_store_message_write_records_its_change() {
+    let core = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut store_files = vec![core.join("src/store.rs")];
+    collect_rs(&core.join("src/store"), &mut store_files);
+    let mut fns = Vec::new();
+    for f in &store_files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let mods = test_modules_of(f, &text.lines().collect::<Vec<_>>());
+        if is_test_file(f, &mods) {
+            continue;
+        }
+        fns.extend(functions(&text));
+    }
+    let sql = writes_messages();
+    let writing = fns.iter().filter(|(_, _, b)| sql.is_match(b)).count();
+    assert!(
+        writing >= 15,
+        "the scan saw {writing} store functions with SQL that writes chat_messages, which \
+         means it stopped reading them"
+    );
+    let missing = unrecorded(&fns);
+    assert!(
+        missing.is_empty(),
+        "store functions that write chat_messages and record no message.* change in the \
+         same transaction (store::feed::record_messages and its record_added, \
+         record_updated, record_deleted): a device's feed would miss these messages:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// What [`unrecorded`] reads: the SQL in a function's own body, a record
+/// call beside it, and the new thread's exemption.
+#[test]
+fn the_record_rule_reads_a_function_s_own_body() {
+    let text = r#"
+pub async fn good(pool: &SqlitePool) {
+    sqlx::query("UPDATE chat_messages SET content = ?1");
+    feed::record_updated(&mut tx, thread_id, id, by).await?;
+}
+
+pub async fn forgot(pool: &SqlitePool) {
+    sqlx::query("DELETE FROM chat_messages WHERE id = ?1");
+}
+
+pub async fn insert_kept_chat_thread(pool: &SqlitePool) {
+    sqlx::query("INSERT INTO chat_messages (thread_id) VALUES (?1)");
+}
+
+pub async fn reads(pool: &SqlitePool) {
+    sqlx::query("SELECT * FROM chat_messages");
+}
+"#;
+    assert_eq!(unrecorded(&functions(text)), vec!["forgot".to_string()]);
 }

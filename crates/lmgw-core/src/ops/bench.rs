@@ -13,7 +13,6 @@ use lmgw_api_types::bench_ops::{
     BenchRunDetail, BenchRunSetArgs, BenchRunSummary, BenchRunsArgs, BenchRunsResponse,
     BenchStarted, BenchStatus, JOB_KEY,
 };
-use serde_json::json;
 
 use crate::bench::compare::{self, headline};
 use crate::bench::identity::build_identity;
@@ -322,6 +321,10 @@ pub async fn bench_run_set(
     state: &SharedState,
     args: BenchRunSetArgs,
 ) -> Result<BenchDone, String> {
+    let model_id = store::bench_run_model_id(&state.db, args.id)
+        .await
+        .map_err(db)?
+        .ok_or_else(|| format!("no benchmark run {}", args.id))?;
     if !store::set_bench_run_notes(&state.db, args.id, args.notes.trim())
         .await
         .map_err(db)?
@@ -331,7 +334,7 @@ pub async fn bench_run_set(
     Ok(BenchDone {
         ok: true,
         run_id: args.id,
-        message: format!("notes of benchmark run {} saved", args.id),
+        message: format!("notes of benchmark run {} of '{model_id}' saved", args.id),
     })
 }
 
@@ -353,15 +356,18 @@ pub async fn bench_delete(state: &SharedState, args: BenchDeleteArgs) -> Result<
     Ok(BenchDone {
         ok: true,
         run_id: args.id,
-        message: format!("benchmark run {} deleted", args.id),
+        message: format!(
+            "benchmark run {} of '{}' deleted",
+            args.id, run.model.model_id
+        ),
     })
 }
 
 /// The tools' `next_step` after a start: where to watch it.
-pub fn start_next_step(started: &BenchStarted) -> serde_json::Value {
-    json!(format!(
+pub fn start_next_step(started: &BenchStarted) -> String {
+    format!(
         "follow it with lmgw__bench_run id={} (status, and the comparison once done); \
          lmgw__bench_cancel ends it early",
         started.run_id
-    ))
+    )
 }

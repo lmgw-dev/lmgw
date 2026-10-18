@@ -1,11 +1,11 @@
 //! The requests of MCP approvals (client-apps design §6) and of a voice
 //! answer kept out of the conversation.
 //!
-//! - [`approvals`]: `POST /chat/api/threads/{id}/approvals` with a verdict
+//! - [`approvals`](fn@approvals): `POST /chat/api/threads/{id}/approvals` with a verdict
 //!   for every call the thread's last reply waits on. The answer is the
 //!   resumed turn's frames, as a send streams them (`text/event-stream`;
 //!   read it with [`crate::feed::SseDecoder`]); a refusal reads with
-//!   [`super::read_refusal`]: `approval_missing`, `approval_not_found`,
+//!   [`read_refusal`](crate::requests::read_refusal): `approval_missing`, `approval_not_found`,
 //!   `approval_decided` (naming who decided first),
 //!   `approval_starter_unavailable`, `approval_moved_on`,
 //!   `approval_out_of_scope` (a device approving beyond its own reach).

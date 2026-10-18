@@ -600,12 +600,7 @@ fn AfterRun(
         spawn_local(async move {
             match api::set_class_default(class, &tag).await {
                 Ok(v) => {
-                    let note = v
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|m| format!(" — {m}"))
-                        .unwrap_or_default();
-                    toasts.ok(format!("{class} default is now {tag}{note}"));
+                    toasts.ok(format!("{class} default is now {tag} — {}", v.message));
                     reload.try_run(());
                 }
                 Err(e) => toasts.err(format!("{class} default: {e}")),

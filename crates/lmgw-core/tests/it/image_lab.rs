@@ -7,12 +7,15 @@
 //! into (including when sd.cpp's prompt extension is appended and when it is
 //! not), the multipart an upload becomes, the one `class = image` log row a lab
 //! call leaves — the lab is not a second client that logs differently — and the
-//! error envelope, which must arrive at the page exactly as a client would have
-//! received it.
+//! error envelope, which must be kept exactly as a client would have received
+//! it. Every dispatch is kept in the lab store (labs-store design §5): the
+//! group and its run, each picture an output artifact served back, an edit's
+//! picture and mask its input artifacts (`image_lab/kept.rs`).
 
 use std::sync::Arc;
 
 use lmgw_core::config::Settings;
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::Registry;
 use lmgw_core::server::build_router;
 use lmgw_core::state::{AppState, SharedState};
@@ -23,6 +26,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::common;
 use common::Gw;
+
+/// A group while its run is out: in flight, its delete refused, a clear or
+/// a client gone meanwhile; kept picture refs.
+mod in_flight;
 
 // ---------------------------------------------------------------------------
 // Fixtures — the image_backend.rs set, kept deliberately identical so the two
@@ -57,17 +64,18 @@ pub(crate) fn image_row(model_id: &str, edit: bool) -> NewImageModel {
 
 struct FakePodman;
 
-#[async_trait::async_trait]
 impl lmgw_core::runtime::registry::CommandRunner for FakePodman {
-    async fn run(
-        &self,
-        _program: &str,
-        _args: &[String],
-    ) -> std::io::Result<lmgw_core::runtime::registry::CmdOutput> {
-        Ok(lmgw_core::runtime::registry::CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<lmgw_core::runtime::registry::CmdOutput>> {
+        Box::pin(async move {
+            Ok(lmgw_core::runtime::registry::CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -170,14 +178,27 @@ pub(crate) async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
     .unwrap();
-    for (alias, model) in [
-        ("my-image", "flux-1.1-pro"),
-        ("my-edit", "flux-kontext"),
-        ("my-chat", "gpt-5"),
+    // A catalog's image model publishes no route of its own (decision-models
+    // design §6.2): this provider serves OpenAI's image routes, and the owner
+    // says so on the alias.
+    let routes = |r: &[&str]| Some(json!({"capabilities": {"endpoints": r}}));
+    for (alias, model, capabilities_override) in [
+        (
+            "my-image",
+            "flux-1.1-pro",
+            routes(&["/v1/images/generations"]),
+        ),
+        (
+            "my-edit",
+            "flux-kontext",
+            routes(&["/v1/images/generations", "/v1/images/edits"]),
+        ),
+        ("my-chat", "gpt-5", None),
     ] {
         store::insert_alias(
             &state.db,
@@ -187,7 +208,7 @@ pub(crate) async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
                 upstream_model_id: model.into(),
                 param_overrides: Default::default(),
                 enabled: true,
-                capabilities_override: None,
+                capabilities_override,
             },
         )
         .await
@@ -198,8 +219,22 @@ pub(crate) async fn setup_cloud(mock: &MockServer) -> (SharedState, Gw) {
     (state, base)
 }
 
+/// A real 1x1 PNG, base64: the bytes a kept picture must come back as.
+pub(crate) const PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
 pub(crate) fn one_png() -> Value {
-    json!({"created": 1, "output_format": "png", "data": [{"b64_json": "aVZCT1J3MEs="}]})
+    json!({"created": 1, "output_format": "png", "data": [{"b64_json": PNG_B64}]})
+}
+
+/// The answer's one run.
+pub(crate) fn run_of(v: &Value) -> &Value {
+    &v["group"]["runs"][0]
+}
+
+/// A stored text (a run's `request` or `response`) read as JSON.
+pub(crate) fn text_json(v: &Value) -> Value {
+    serde_json::from_str(v.as_str().expect("a text")).expect("the text is JSON")
 }
 
 async fn logs(state: &SharedState) -> Vec<store::RequestLogRow> {
@@ -208,17 +243,51 @@ async fn logs(state: &SharedState) -> Vec<store::RequestLogRow> {
         .unwrap()
 }
 
-/// `POST /image-lab/api/generate` with the page's form → (status, body).
-async fn generate(base: &Gw, form: Value) -> (u16, Value) {
+/// `POST /image-lab/api/groups/{id}/run`: the group's one cell, its answer.
+pub(crate) async fn run_group(base: &Gw, id: i64) -> reqwest::Response {
+    base.client()
+        .post(format!("{base}/image-lab/api/groups/{id}/run"))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// `POST /image-lab/api/groups` with the page's form, then its run →
+/// (status, body): the run's answer, or the group route's refusal.
+pub(crate) async fn generate(base: &Gw, form: Value) -> (u16, Value) {
     let resp = base
         .client()
-        .post(format!("{base}/image-lab/api/generate"))
+        .post(format!("{base}/image-lab/api/groups"))
         .json(&form)
         .send()
         .await
         .unwrap();
+    let resp = if resp.status() == 200 {
+        let g: Value = resp.json().await.unwrap();
+        assert!(g["runs"].as_array().unwrap().is_empty(), "no run yet: {g}");
+        run_group(base, g["id"].as_i64().unwrap()).await
+    } else {
+        resp
+    };
     let status = resp.status().as_u16();
     (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// `POST /image-lab/api/groups/edit` with `upload`, then its run: the run's
+/// answer, or the group route's refusal.
+pub(crate) async fn edit(base: &Gw, upload: reqwest::multipart::Form) -> reqwest::Response {
+    let resp = base
+        .client()
+        .post(format!("{base}/image-lab/api/groups/edit"))
+        .multipart(upload)
+        .send()
+        .await
+        .unwrap();
+    if resp.status() != 200 {
+        return resp;
+    }
+    let g: Value = resp.json().await.unwrap();
+    run_group(base, g["id"].as_i64().unwrap()).await
 }
 
 /// The body one generation actually reached the upstream with.
@@ -405,12 +474,20 @@ async fn the_block_is_appended_only_when_an_extra_is_set() {
     )
     .await;
     assert_eq!(status, 200, "{v}");
-    assert_eq!(v["endpoint"], "/v1/images/generations");
-    assert_eq!(v["response"]["data"][0]["b64_json"], "aVZCT1J3MEs=");
-    // The lab echoes the request it dispatched, so the page's panel and the
+    let run = run_of(&v);
+    assert_eq!(run["endpoint"], "/v1/images/generations");
+    assert_eq!(run["http_status"], 200);
+    // The picture is kept: its place in the answer names the artifact.
+    let id = run["artifacts"][0]["id"].as_i64().unwrap();
+    assert_eq!(
+        text_json(&run["response"])["data"][0]["b64_json"],
+        format!("lab-artifact:{id}")
+    );
+    // The lab keeps the request it dispatched, so the page's panel and the
     // wire cannot disagree.
-    assert_eq!(v["request"]["prompt"], "a lovely cat");
-    assert_eq!(v["request"]["size"], "512x512");
+    let request = text_json(&run["request"]);
+    assert_eq!(request["prompt"], "a lovely cat");
+    assert_eq!(request["size"], "512x512");
 
     let body = sent_body(&mock, 0).await;
     assert_eq!(body["prompt"], "a lovely cat");
@@ -502,14 +579,27 @@ async fn a_form_that_is_not_a_request_is_named_not_guessed() {
     assert!(v["error"]["message"].as_str().unwrap().contains("steps"));
 
     // Nothing was dispatched, so nothing is in the log and no container was
-    // started for a request that was never going to be made.
+    // started for a request that was never going to be made; nor is
+    // anything kept.
     assert!(logs(&state).await.is_empty());
+    let page: Value = base
+        .client()
+        .get(format!("{base}/labs/api/image/groups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["total"], 0, "{page}");
 }
 
-/// The lab must show the gateway's own error, not its own rendering of one:
+/// The lab must keep the gateway's own error, not its own rendering of one:
 /// same status, same envelope, byte for byte what a client would have read.
+/// A failure is part of the record, so the lab answers 200 with it inside
+/// (labs-store Decision 20).
 #[tokio::test]
-async fn a_gateway_error_reaches_the_lab_unchanged() {
+async fn a_gateway_error_is_kept_as_the_route_said_it() {
     let mock = MockServer::start().await;
     mount_ready(&mock).await;
     Mock::given(method("POST"))
@@ -533,13 +623,20 @@ async fn a_gateway_error_reaches_the_lab_unchanged() {
     let route_status = resp.status().as_u16();
     let route_body: Value = resp.json().await.unwrap();
 
-    assert_eq!(lab_status, route_status);
-    assert_eq!(lab_body, route_body, "the lab re-wrapped the envelope");
-    assert_eq!(lab_body["error"]["code"], "upstream");
-    assert!(lab_body["error"]["message"]
+    assert_eq!(lab_status, 200, "{lab_body}");
+    let run = run_of(&lab_body);
+    assert_eq!(run["http_status"], route_status);
+    assert_eq!(
+        text_json(&run["response"]),
+        route_body,
+        "the lab re-wrapped the envelope"
+    );
+    assert_eq!(run["error_code"], "upstream");
+    assert!(run["error_message"]
         .as_str()
         .unwrap()
         .contains("prompt required"));
+    assert!(run["artifacts"].as_array().unwrap().is_empty());
 
     let l = logs(&state).await;
     assert_eq!(l.len(), 2);
@@ -557,9 +654,11 @@ async fn a_chat_alias_is_refused_by_the_route_the_lab_dispatches_to() {
     let (_state, base) = setup_cloud(&mock).await;
 
     let (status, v) = generate(&base, json!({"model": "my-chat", "prompt": "a cat"})).await;
-    assert_eq!(status, 400, "{v}");
+    assert_eq!(status, 200, "{v}");
+    let run = run_of(&v);
+    assert_eq!(run["http_status"], 400, "{v}");
     assert!(
-        v["error"]["message"]
+        run["error_message"]
             .as_str()
             .unwrap()
             .contains("outputs text"),
@@ -618,19 +717,19 @@ async fn an_edit_relays_the_multipart_with_the_model_rewritten() {
                 .mime_str("image/png")
                 .unwrap(),
         );
-    let resp = base
-        .client()
-        .post(format!("{base}/image-lab/api/edit"))
-        .multipart(upload)
-        .send()
-        .await
-        .unwrap();
+    let resp = edit(&base, upload).await;
     assert_eq!(resp.status().as_u16(), 200);
     let v: Value = resp.json().await.unwrap();
-    assert_eq!(v["endpoint"], "/v1/images/edits");
-    assert_eq!(v["response"]["data"][0]["b64_json"], "aVZCT1J3MEs=");
+    let run = run_of(&v);
+    assert_eq!(run["endpoint"], "/v1/images/edits");
+    assert_eq!(run["http_status"], 200);
+    assert!(text_json(&run["response"])["data"][0]["b64_json"]
+        .as_str()
+        .unwrap()
+        .starts_with("lab-artifact:"));
     // The panel's field summary describes the request that was made.
-    let fields = v["request"]["fields"].as_array().unwrap();
+    let request = text_json(&run["request"]);
+    let fields = request["fields"].as_array().unwrap();
     let field = |name: &str| {
         fields
             .iter()
@@ -639,8 +738,8 @@ async fn an_edit_relays_the_multipart_with_the_model_rewritten() {
     };
     assert_eq!(field("size").as_deref(), Some("512x512"));
     assert!(field("prompt").unwrap().contains("\"negative_prompt\""));
-    assert_eq!(v["request"]["files"][0]["name"], "image");
-    assert_eq!(v["request"]["files"][1]["bytes"], 8);
+    assert_eq!(request["files"][0]["name"], "image");
+    assert_eq!(request["files"][1]["bytes"], 8);
 
     // The upstream saw the real thing: the extension block rode along in the
     // prompt field, and `model` is the concrete id.
@@ -688,17 +787,12 @@ async fn an_upload_whose_filename_will_not_parse_is_still_the_image() {
             "image",
             reqwest::multipart::Part::bytes(b"\x89PNGfake".to_vec()).file_name("shot\\"),
         );
-    let resp = base
-        .client()
-        .post(format!("{base}/image-lab/api/edit"))
-        .multipart(upload)
-        .send()
-        .await
-        .unwrap();
+    let resp = edit(&base, upload).await;
     assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
     let v: Value = resp.json().await.unwrap();
-    assert_eq!(v["request"]["files"][0]["name"], "image");
-    assert_eq!(v["request"]["files"][0]["bytes"], 8);
+    let request = text_json(&run_of(&v)["request"]);
+    assert_eq!(request["files"][0]["name"], "image");
+    assert_eq!(request["files"][0]["bytes"], 8);
 
     // And the part that reached the upstream carries a filename that cannot
     // break out of its own header.
@@ -732,13 +826,7 @@ async fn an_edit_without_an_image_never_leaves_the_gateway() {
         "form",
         json!({"model": "my-edit", "prompt": "make it night"}).to_string(),
     );
-    let resp = base
-        .client()
-        .post(format!("{base}/image-lab/api/edit"))
-        .multipart(upload)
-        .send()
-        .await
-        .unwrap();
+    let resp = edit(&base, upload).await;
     assert_eq!(resp.status().as_u16(), 400);
     let v: Value = resp.json().await.unwrap();
     assert!(v["error"]["message"]
@@ -746,4 +834,286 @@ async fn an_edit_without_an_image_never_leaves_the_gateway() {
         .unwrap()
         .contains("needs an image"));
     assert!(logs(&state).await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The lab store
+// ---------------------------------------------------------------------------
+
+/// A generation's picture is an output artifact: the stored answer names it
+/// where its base64 was, the artifact route serves the bytes back as PNG,
+/// the history lists the group, and the JSONL export is a zip with the file.
+#[tokio::test]
+async fn a_generations_picture_is_kept_and_served_back() {
+    use base64::Engine as _;
+    let mock = MockServer::start().await;
+    mount_ready(&mock).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(one_png()))
+        .mount(&mock)
+        .await;
+    let (_state, base) = setup_local(&mock, &[image_row("z-image-turbo", false)]).await;
+
+    let (status, v) = generate(
+        &base,
+        json!({"model": "image/z-image-turbo", "prompt": "a cat\non a mat", "seed": "7"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    assert!(v["store_error"].is_null(), "{v}");
+    let g = &v["group"];
+    assert_eq!(g["lab"], "image");
+    assert_eq!(g["title"], "a cat");
+    assert_eq!(
+        g["plan"],
+        json!([{"model": "image/z-image-turbo", "variant": "generate"}])
+    );
+    assert_eq!(g["form"]["seed"], "7", "the form as the page held it");
+    let run = run_of(&v);
+    let art = &run["artifacts"][0];
+    assert_eq!(art["role"], "output");
+    assert_eq!(art["mime"], "image/png");
+    assert_eq!(art["name"], "image-z-image-turbo-0.png");
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(PNG_B64)
+        .unwrap();
+    assert_eq!(art["size"], png.len());
+    assert!(
+        !run["response"].as_str().unwrap().contains(PNG_B64),
+        "the base64 is not kept as text"
+    );
+
+    // Served back as the bytes the route answered with.
+    let href = art["href"].as_str().unwrap();
+    let resp = base
+        .client()
+        .get(format!("{base}{href}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    assert_eq!(resp.bytes().await.unwrap().to_vec(), png);
+
+    // The history has it, and the usage counts the file.
+    let page: Value = base
+        .client()
+        .get(format!("{base}/labs/api/image/groups"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["groups"][0]["runs"][0]["artifacts"][0]["href"], href);
+    let usage: Value = base
+        .client()
+        .get(format!("{base}/labs/api/image/usage"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["artifact_files"], 1, "{usage}");
+    assert_eq!(usage["artifact_bytes"], png.len(), "{usage}");
+
+    // The export is a zip of the JSONL and the file.
+    let resp = base
+        .client()
+        .get(format!("{base}/labs/api/image/export"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/zip");
+    let bytes = resp.bytes().await.unwrap().to_vec();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let sha = art["sha256"].as_str().unwrap();
+    let inside = format!("artifacts/{sha}.png");
+    let mut file = zip.by_name(&inside).expect("the picture is in the zip");
+    let mut back = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut back).unwrap();
+    assert_eq!(back, png);
+
+    // And the CSV names it by id.
+    let csv = base
+        .client()
+        .get(format!("{base}/labs/api/image/export?format=csv"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let mut rows = csv::Reader::from_reader(csv.as_bytes());
+    let head = rows.headers().unwrap().clone();
+    let row = rows.records().next().expect("one row").unwrap();
+    let col = |name: &str| {
+        let at = head.iter().position(|h| h == name).expect(name);
+        row.get(at).unwrap().to_string()
+    };
+    assert_eq!(col("prompt"), "a cat\non a mat");
+    assert_eq!(col("seed"), "7");
+    assert_eq!(col("images"), "1");
+    assert_eq!(col("image_bytes"), png.len().to_string());
+    assert_eq!(col("artifact_ids"), art["id"].to_string());
+    assert_eq!(col("http_status"), "200");
+}
+
+/// An edit's picture and mask are the group's input artifacts, the stored
+/// request names them, and a re-opened edit names its kept picture instead
+/// of uploading it: the route gets the same bytes, the new group a row of
+/// its own for the same file.
+#[tokio::test]
+async fn an_edits_inputs_are_kept_and_sent_again_without_an_upload() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/edits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(one_png()))
+        .expect(2)
+        .mount(&mock)
+        .await;
+    let (_state, base) = setup_cloud(&mock).await;
+
+    let form = json!({"model": "my-edit", "prompt": "make it night"});
+    let upload = reqwest::multipart::Form::new()
+        .text("form", form.to_string())
+        .part(
+            "image",
+            reqwest::multipart::Part::bytes(b"\x89PNG\r\n\x1a\nimage".to_vec())
+                .file_name("in.png")
+                .mime_str("image/png")
+                .unwrap(),
+        )
+        .part(
+            "mask",
+            reqwest::multipart::Part::bytes(b"\x89PNG\r\n\x1a\nmask".to_vec())
+                .file_name("mask.png")
+                .mime_str("image/png")
+                .unwrap(),
+        );
+    let v: Value = edit(&base, upload).await.json().await.unwrap();
+    let g = &v["group"];
+    assert_eq!(g["plan"][0]["variant"], "edit", "{v}");
+    let inputs = g["artifacts"].as_array().unwrap();
+    assert_eq!(inputs.len(), 2, "{v}");
+    assert_eq!(inputs[0]["role"], "input");
+    assert_eq!(inputs[0]["name"], "in.png");
+    assert_eq!(inputs[1]["name"], "mask.png");
+    assert_eq!(inputs[0]["mime"], "image/png");
+    let image_id = inputs[0]["id"].as_i64().unwrap();
+    // The stored form names them by id.
+    assert_eq!(
+        g["form"]["image"],
+        json!({"id": image_id, "name": "in.png"})
+    );
+    assert_eq!(g["form"]["mask"]["id"], inputs[1]["id"]);
+    // The stored request is the multipart's summary, its files as refs.
+    let request = text_json(&run_of(&v)["request"]);
+    assert_eq!(
+        request["files"][0]["artifact"],
+        format!("lab-artifact:{image_id}")
+    );
+    assert_eq!(request["files"][1]["name"], "mask");
+
+    // Again from the kept picture: no file part at all.
+    let again = json!({"model": "my-edit", "prompt": "make it dawn",
+                       "image": {"id": image_id, "name": "in.png"}});
+    let resp = edit(
+        &base,
+        reqwest::multipart::Form::new().text("form", again.to_string()),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let v2: Value = resp.json().await.unwrap();
+    let inputs2 = v2["group"]["artifacts"].as_array().unwrap();
+    assert_eq!(inputs2.len(), 1, "no mask this time: {v2}");
+    assert_ne!(inputs2[0]["id"], image_id, "a row of its own");
+    assert_eq!(inputs2[0]["sha256"], inputs[0]["sha256"], "the same file");
+    let reqs = mock.received_requests().await.unwrap();
+    let second = reqs
+        .iter()
+        .filter(|r| r.url.path() == "/v1/images/edits")
+        .nth(1)
+        .unwrap();
+    let sent = b"\x89PNG\r\n\x1a\nimage";
+    assert!(
+        second.body.windows(sent.len()).any(|w| w == sent),
+        "the kept picture's bytes went out"
+    );
+    let body = String::from_utf8_lossy(&second.body);
+    assert!(body.contains("filename=\"in.png\""), "{body}");
+    assert!(!body.contains("name=\"mask\""), "{body}");
+
+    // A ref the store does not keep is the lab's 400, sending nothing.
+    let gone = json!({"model": "my-edit", "prompt": "x", "image": {"id": 9999, "name": "a"}});
+    let resp = edit(
+        &base,
+        reqwest::multipart::Form::new().text("form", gone.to_string()),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let e: Value = resp.json().await.unwrap();
+    assert!(
+        e["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("lab-artifact:9999"),
+        "{e}"
+    );
+}
+
+/// A picture is as large as it is: an edit of a 3 MB upload, and the same
+/// picture again from the store, reach the route whole. The lab's own
+/// in-process request carries the route's "no body limit", as the HTTP
+/// route does (axum's multipart reader would stop at 2 MB without it).
+#[tokio::test]
+async fn an_edit_of_a_picture_over_two_megabytes_goes_out_whole() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/edits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(one_png()))
+        .expect(2)
+        .mount(&mock)
+        .await;
+    let (_state, base) = setup_cloud(&mock).await;
+    let mut big = b"\x89PNG\r\n\x1a\n".to_vec();
+    big.resize(3 * 1024 * 1024, 7);
+
+    let upload = reqwest::multipart::Form::new()
+        .text(
+            "form",
+            json!({"model": "my-edit", "prompt": "make it night"}).to_string(),
+        )
+        .part(
+            "image",
+            reqwest::multipart::Part::bytes(big.clone())
+                .file_name("big.png")
+                .mime_str("image/png")
+                .unwrap(),
+        );
+    let resp = edit(&base, upload).await;
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(run_of(&v)["http_status"], 200, "{}", run_of(&v));
+    let kept = v["group"]["artifacts"][0]["id"].as_i64().unwrap();
+    assert_eq!(v["group"]["artifacts"][0]["size"], big.len());
+
+    // Again from the store.
+    let again = json!({"model": "my-edit", "prompt": "make it dawn",
+                       "image": {"id": kept, "name": "big.png"}});
+    let resp = edit(
+        &base,
+        reqwest::multipart::Form::new().text("form", again.to_string()),
+    )
+    .await;
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(run_of(&v)["http_status"], 200, "{}", run_of(&v));
+    let reqs = mock.received_requests().await.unwrap();
+    for r in reqs.iter().filter(|r| r.url.path() == "/v1/images/edits") {
+        assert!(r.body.len() > big.len(), "the picture went out whole");
+    }
 }

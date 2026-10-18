@@ -1,7 +1,13 @@
 //! The "Add from Hugging Face" wizard — the primary way models enter lmgw.
 //! Repo → pick weights (+companions) → download with live progress →
-//! auto-plan + auto-create (chat) / auto-create (aux). Apply stays a
-//! separate, deliberate step.
+//! auto-plan + auto-create (chat and aux). Apply stays a separate,
+//! deliberate step.
+//!
+//! An aux download is planned like a chat one (`local_model_plan
+//! target=aux`): the header decides the kind (embed, rerank or decision) and
+//! the five fields (decision-models design §3.3, §3.4), the row is created
+//! from the plan's params, and the plan's card — each value with its reason,
+//! and its warnings — is shown as the aux editor shows it.
 //!
 //! Downloads run server-side; if the modal (or the whole window) closes
 //! mid-download, the Downloads page can finish the job with its
@@ -9,9 +15,12 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{DownloadsView, HfAddResult, PlanResult, RepoFile, RepoFiles};
+use lmgw_api_types::{
+    AuxModelSaved, DownloadsView, HfAddResult, LocalModelSaved, PlanResult, RepoFile, RepoFiles,
+};
 use serde_json::{json, Value};
 
+use super::model_editors::aux_plan::{self, Filling, PlanCard, ShownPlan};
 use crate::scope::Scope;
 use crate::widgets::{use_toasts, ModalFooter};
 
@@ -19,18 +28,76 @@ fn urlenc(s: &str) -> String {
     js_sys::encode_uri_component(s).into()
 }
 
-/// Suggested aux model id from a weights filename (chat models get theirs
-/// from the server-side plan).
-fn aux_model_id(file: &str) -> String {
-    let stem = file.rsplit('/').next().unwrap_or(file);
-    let stem = stem.strip_suffix(".gguf").unwrap_or(stem);
-    stem.to_lowercase()
+/// What finishing a chat or aux download does with the file's plan — here
+/// and on the Downloads page, whose "Plan & create" finishes a download the
+/// wizard was closed on.
+#[derive(Debug, PartialEq)]
+pub(super) enum Planned {
+    /// A row of the class already serves this GGUF: nothing is created.
+    AlreadyServed,
+    /// The create body: every planned parameter (for aux: the kind, the
+    /// pooling, the context and the five fields), the plan's model id, and
+    /// the downloaded file.
+    Create(Value),
+}
+
+pub(super) fn planned(plan: &PlanResult, gguf: &str) -> Planned {
+    if !plan.configured_as.is_empty() {
+        return Planned::AlreadyServed;
+    }
+    let mut args = plan.params.clone();
+    args.insert("action".into(), json!("create"));
+    args.insert("model_id".into(), json!(plan.model_id));
+    args.insert("gguf_path".into(), json!(gguf));
+    Planned::Create(Value::Object(args))
+}
+
+/// The plan route for a downloaded GGUF of `target` (chat or aux), with the
+/// file's path already URI-encoded: an aux file is planned with
+/// `target=aux`, which reads the kind and the five fields from its header.
+/// It reads the header only: a download never triggers a model load, and
+/// whether the image can load the file is the row's Test button's job.
+pub(super) fn plan_url(target: &str, gguf_encoded: &str) -> String {
+    let aux = if target == "aux" { "target=aux&" } else { "" };
+    format!("/api/local-model-plan?{aux}path={gguf_encoded}")
+}
+
+/// How a row created from `plan` for `target` is named: an aux row with its
+/// kind.
+pub(super) fn created_name(plan: &PlanResult, target: &str) -> String {
+    match plan.params.get("kind").and_then(Value::as_str) {
+        Some(kind) if target == "aux" => format!("{kind} model '{}'", plan.model_id),
+        _ => format!("'{}'", plan.model_id),
+    }
+}
+
+/// Post a plan's create body ([`Planned::Create`]) to `target`'s set op,
+/// and the created row's id.
+pub(super) async fn post_create(target: &str, body: &Value) -> crate::api::Result<i64> {
+    if target == "aux" {
+        crate::api::post::<AuxModelSaved, _>("/api/op/aux_model_set", body)
+            .await
+            .map(|v| v.id)
+    } else {
+        crate::api::post::<LocalModelSaved, _>("/api/op/local_model_set", body)
+            .await
+            .map(|v| v.id)
+    }
+}
+
+/// The companions an `hf_add` for `target` asks for, with the box ticked:
+/// chat takes a projector and a drafter, aux a projector (an aux row has no
+/// drafter); audio and image take none.
+fn wants_companions(target: &str, ticked: bool) -> bool {
+    ticked && matches!(target, "chat" | "aux")
 }
 
 #[derive(Clone, PartialEq)]
 enum Step {
     Pick,
     Downloading,
+    /// Every file is down; the plan is being read from the header.
+    Planning,
     Done {
         summary: String,
         edit_id: Option<i64>,
@@ -48,12 +115,14 @@ pub fn HfWizard() -> impl IntoView {
     let step = RwSignal::new(Step::Pick);
     let repo = RwSignal::new(String::new());
     let target = RwSignal::new("chat".to_string());
-    // Which class an aux download becomes. Rerankers come down the same HF
-    // path as everything else (all three classes are llama.cpp GGUFs), so the
-    // only thing the wizard has to ask is which flag the preset section gets.
-    let aux_kind = RwSignal::new("embed".to_string());
+    // The aux plan an aux row was created from, as the aux editor's plan
+    // card shows it. The kind is the header's, not a question: an embedder,
+    // a reranker and a decision model all come down the same HF path.
+    let aux_shown = RwSignal::new(None::<ShownPlan>);
     let fetching = RwSignal::new(false);
     let files = RwSignal::new(None::<Vec<RepoFile>>);
+    // The server's note on the listing: what it says when nothing matched.
+    let files_note = RwSignal::new(String::new());
     let fetch_err = RwSignal::new(None::<String>);
     let selected = RwSignal::new(None::<String>);
     // What the downloads list already has from this repo, by file: `done`
@@ -103,6 +172,7 @@ pub fn HfWizard() -> impl IntoView {
                     // 17 GB BF16 as the quant anyone wants. The vocabulary is
                     // per target (image-generation §7.1): `weights` for
                     // chat/aux/audio, `diffusion`/`checkpoint` for image.
+                    files_note.set(rf.note);
                     let mut fs = rf.files;
                     fs.sort_by(|a, b| {
                         let key = |f: &RepoFile| {
@@ -137,12 +207,10 @@ pub fn HfWizard() -> impl IntoView {
         let tgt = target.get_untracked();
         let gguf = gguf_path.get_untracked();
         scope.spawn(async move {
-            if tgt == "chat" {
-                let plan = match crate::api::get::<PlanResult>(format!(
-                    "/api/local-model-plan?path={}",
-                    urlenc(&gguf)
-                ))
-                .await
+            if tgt == "chat" || tgt == "aux" {
+                let aux = tgt == "aux";
+                step.set(Step::Planning);
+                let plan = match crate::api::get::<PlanResult>(plan_url(&tgt, &urlenc(&gguf))).await
                 {
                     Ok(p) => p,
                     Err(e) => {
@@ -152,66 +220,46 @@ pub fn HfWizard() -> impl IntoView {
                         return;
                     }
                 };
-                if !plan.configured_as.is_empty() {
-                    step.set(Step::Done {
-                        summary: format!(
-                            "'{}' downloaded — a model already serves this GGUF, nothing created",
-                            plan.model_id
-                        ),
-                        edit_id: None,
-                    });
-                    return;
-                }
-                let mut args = plan.params.clone();
-                args.insert("action".into(), json!("create"));
-                args.insert("model_id".into(), json!(plan.model_id));
-                args.insert("gguf_path".into(), json!(gguf));
-                match crate::api::post::<Value, _>("/api/op/local_model_set", &Value::Object(args))
-                    .await
-                {
-                    Ok(v) => {
-                        super::models::bump(reload);
-                        let id = v.get("id").and_then(Value::as_i64);
-                        let warn = if plan.warnings.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " · {} planner warning(s) — see the editor",
-                                plan.warnings.len()
-                            )
-                        };
+                let body = match planned(&plan, &gguf) {
+                    Planned::AlreadyServed => {
                         step.set(Step::Done {
                             summary: format!(
-                                "'{}' created from the planned parameters{warn}. Start it from \
-                                 Models when ready.",
+                                "'{}' downloaded — a model already serves this GGUF, nothing \
+                                 created",
                                 plan.model_id
                             ),
-                            edit_id: id,
+                            edit_id: None,
                         });
+                        return;
                     }
-                    Err(e) => step.set(Step::Failed {
-                        error: format!("download finished but create failed: {e}"),
-                    }),
+                    Planned::Create(body) => body,
+                };
+                // Shown whether the create lands or not: its warnings are
+                // what explain a refusal.
+                if aux {
+                    aux_shown.set(Some(aux_plan::shown(&plan, Filling::New)));
                 }
-            } else if tgt == "aux" {
-                let model_id = aux_model_id(&gguf);
-                let kind = aux_kind.get_untracked();
-                match crate::api::post::<Value, _>(
-                    "/api/op/aux_model_set",
-                    &json!({
-                        "action": "create", "model_id": model_id,
-                        "gguf_path": gguf, "kind": kind,
-                    }),
-                )
-                .await
-                {
-                    Ok(_) => {
+                match post_create(&tgt, &body).await {
+                    Ok(id) => {
                         super::models::bump(reload);
+                        // The warnings' own words: the reason a warning
+                        // gives is what the owner needs.
+                        let warn = match (plan.warnings.len(), aux) {
+                            (0, _) => String::new(),
+                            (n, false) => {
+                                format!(" · {n} planner warning(s): {}", plan.warnings.join("; "))
+                            }
+                            (n, true) => format!(" · {n} planner warning(s), below"),
+                        };
+                        let what = created_name(&plan, &tgt);
                         step.set(Step::Done {
                             summary: format!(
-                                "{kind} model '{model_id}' created. Start it from Models when ready."
+                                "{what} created from the planned parameters{warn}. Start it \
+                                 from Models when ready."
                             ),
-                            edit_id: None,
+                            // The aux editor is a modal on the Models page,
+                            // not a page of its own to link to.
+                            edit_id: (!aux).then_some(id),
                         });
                     }
                     Err(e) => step.set(Step::Failed {
@@ -299,7 +347,7 @@ pub fn HfWizard() -> impl IntoView {
         starting.set(true);
         let r = repo.get_untracked().trim().to_string();
         let tgt = target.get_untracked();
-        let comp = companions.get_untracked() && tgt == "chat";
+        let comp = wants_companions(&tgt, companions.get_untracked());
         spawn_local(async move {
             let res = crate::api::post::<HfAddResult, _>(
                 "/api/op/hf_add",
@@ -335,6 +383,7 @@ pub fn HfWizard() -> impl IntoView {
         selected.set(None);
         queued_ids.set(Vec::new());
         progress.set(Vec::new());
+        aux_shown.set(None);
     };
 
     let start_label = move || {
@@ -399,38 +448,31 @@ pub fn HfWizard() -> impl IntoView {
                                 })
                                 .collect_view()}
                         </div>
-                        <Show when=move || target.get() == "chat">
-                            <label class="row dim" style="gap:5px">
+                        <Show when=move || wants_companions(&target.get(), true)>
+                            <label
+                                class="row dim"
+                                style="gap:5px"
+                                title=move || {
+                                    if target.get() == "aux" {
+                                        "The kind (embed, rerank or decision) and its settings are read from the GGUF's header once it is down"
+                                    } else {
+                                        ""
+                                    }
+                                }
+                            >
                                 <input
                                     type="checkbox"
                                     prop:checked=move || companions.get()
                                     on:change=move |ev| companions.set(event_target_checked(&ev))
                                 />
-                                "fetch projector / drafter companions"
+                                {move || {
+                                    if target.get() == "aux" {
+                                        "fetch the projector companion"
+                                    } else {
+                                        "fetch projector / drafter companions"
+                                    }
+                                }}
                             </label>
-                        </Show>
-                        <Show when=move || target.get() == "aux">
-                            <div class="seg">
-                                {["embed", "rerank"]
-                                    .into_iter()
-                                    .map(|k| {
-                                        view! {
-                                            <button
-                                                class=move || {
-                                                    if aux_kind.get() == k {
-                                                        "seg-btn active"
-                                                    } else {
-                                                        "seg-btn"
-                                                    }
-                                                }
-                                                on:click=move |_| aux_kind.set(k.to_string())
-                                            >
-                                                {k}
-                                            </button>
-                                        }
-                                    })
-                                    .collect_view()}
-                            </div>
                         </Show>
                     </div>
                     {move || fetch_err.get().map(|e| view! { <div class="wiz-err">{e}</div> })}
@@ -444,6 +486,14 @@ pub fn HfWizard() -> impl IntoView {
                                     .filter(|f| is_primary_role(&tgt, file_role(&f.file, &f.role)))
                                     .count();
                                 let others = fs.len() - picks;
+                                if fs.is_empty() {
+                                    return view! {
+                                        <div class="wiz-count dim">
+                                            {files_note.get()}
+                                        </div>
+                                    }
+                                    .into_any();
+                                }
                                 view! {
                                     <div class="wiz-count dim">
                                         {format!(
@@ -467,6 +517,7 @@ pub fn HfWizard() -> impl IntoView {
                                         </For>
                                     </div>
                                 }
+                                    .into_any()
                             })
                     }}
                     <ModalFooter>
@@ -488,6 +539,14 @@ pub fn HfWizard() -> impl IntoView {
                             {start_label}
                         </button>
                     </ModalFooter>
+                </div>
+            }
+                .into_any(),
+            Step::Planning => view! {
+                <div class="wiz">
+                    <div class="mini-head">
+                        "Planning…"
+                    </div>
                 </div>
             }
                 .into_any(),
@@ -528,6 +587,11 @@ pub fn HfWizard() -> impl IntoView {
             Step::Done { summary, edit_id } => view! {
                 <div class="wiz">
                     <div class="wiz-ok">{summary}</div>
+                    <Show when=move || aux_shown.with(Option::is_some)>
+                        <div class="fill-pane">
+                            <PlanCard plan=aux_shown/>
+                        </div>
+                    </Show>
                     <ModalFooter>
                         <button class="btn ghost" on:click=reset>
                             "Add another"
@@ -548,6 +612,11 @@ pub fn HfWizard() -> impl IntoView {
             Step::Failed { error } => view! {
                 <div class="wiz">
                     <div class="wiz-err">{error}</div>
+                    <Show when=move || aux_shown.with(Option::is_some)>
+                        <div class="fill-pane">
+                            <PlanCard plan=aux_shown/>
+                        </div>
+                    </Show>
                     <ModalFooter>
                         <span class="dim">"Recover from the Downloads page, or"</span>
                         <button class="btn ghost" on:click=reset>
@@ -562,7 +631,7 @@ pub fn HfWizard() -> impl IntoView {
 }
 
 /// Whether finishing a download of this target also creates a model row.
-/// Chat plans and creates one, aux creates one from the filename; audio needs
+/// Chat and aux plan one from the file's header and create it; audio needs
 /// family/task details the files do not carry, and an image row needs several
 /// files across several repos (image-generation §7.2).
 fn creates_a_row(target: &str) -> bool {
@@ -698,7 +767,78 @@ fn FileRow(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_role, quant_bits};
+    use super::{
+        created_name, file_role, plan_url, planned, quant_bits, wants_companions, Planned,
+    };
+    use lmgw_api_types::PlanResult;
+    use serde_json::{json, Value};
+
+    /// A Clef-shaped aux plan: a decision row with its five fields' plan and
+    /// a sibling projector, as `local_model_plan target=aux` answers it.
+    fn clef(configured: bool) -> PlanResult {
+        let configured_as = if configured {
+            json!([{"model_id": "clef", "id": 4, "enabled": true, "in_sync": true, "change": []}])
+        } else {
+            json!([])
+        };
+        serde_json::from_value(json!({
+            "model_id": "clef",
+            "params": {
+                "gguf_path": "org/Clef-GGUF/Clef-Q4_K_M.gguf",
+                "kind": "decision",
+                "ctx_size": 262144,
+                "ubatch_size": 4096,
+                "batch_size": 4096,
+                "mmproj_path": "org/Clef-GGUF/mmproj-Clef-F16.gguf",
+            },
+            "rationale": {"kind": "the header declares decision.type 'clef'"},
+            "warnings": [],
+            "configured_as": configured_as,
+            "next_step": "",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_aux_download_is_created_from_its_plan_s_kind_and_fields() {
+        let gguf = "org/Clef-GGUF/Clef-Q4_K_M.gguf";
+        let Planned::Create(body) = planned(&clef(false), gguf) else {
+            panic!("an unconfigured file is created");
+        };
+        assert_eq!(body["action"], "create");
+        assert_eq!(body["model_id"], "clef");
+        assert_eq!(body["gguf_path"], gguf);
+        assert_eq!(body["kind"], "decision", "the header's kind, not a guess");
+        assert_eq!(body["ubatch_size"], 4096);
+        assert_eq!(body["batch_size"], 4096);
+        assert_eq!(body["mmproj_path"], "org/Clef-GGUF/mmproj-Clef-F16.gguf");
+        assert_eq!(body.get("backend"), None::<&Value>, "placed as planned");
+        assert_eq!(planned(&clef(true), gguf), Planned::AlreadyServed);
+    }
+
+    #[test]
+    fn chat_and_aux_fetch_companions_when_ticked() {
+        assert!(wants_companions("chat", true));
+        assert!(wants_companions("aux", true));
+        assert!(!wants_companions("aux", false));
+        assert!(!wants_companions("audio", true));
+        assert!(!wants_companions("image", true));
+    }
+
+    /// The wizard and the Downloads page plan and name a row the same way.
+    #[test]
+    fn an_aux_file_is_planned_as_aux_and_named_by_its_kind() {
+        assert_eq!(
+            plan_url("aux", "org%2Fm.gguf"),
+            "/api/local-model-plan?target=aux&path=org%2Fm.gguf"
+        );
+        assert_eq!(
+            plan_url("chat", "org%2Fm.gguf"),
+            "/api/local-model-plan?path=org%2Fm.gguf"
+        );
+        assert_eq!(created_name(&clef(false), "aux"), "decision model 'clef'");
+        assert_eq!(created_name(&clef(false), "chat"), "'clef'");
+    }
 
     #[test]
     fn quants_read_as_a_width_ladder() {

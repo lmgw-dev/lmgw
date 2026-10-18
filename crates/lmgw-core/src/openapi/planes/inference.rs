@@ -15,7 +15,10 @@
 use lmgw_api_types::openapi_ext::{endpoint_group, model_task};
 
 use super::super::registry::{Dialect, DocRoute, Req, Resp};
-use super::super::v1::{anthropic, aux, chat, mcp, media, models, responses};
+use super::super::v1::{anthropic, aux, chat, mcp, media, models, responses, systemone};
+
+/// `POST /v1/realtime/calls` and its hangup.
+mod calls;
 
 /// A `DocRoute` with every field the inference plane leaves at its default —
 /// `Resp::Untyped` on `response` is never actually served: every route below
@@ -46,11 +49,19 @@ fn base(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
 
 pub(crate) fn routes() -> Vec<DocRoute> {
+    let mut routes = own();
+    // WebRTC calls (realtime calls design §9).
+    routes.extend(calls::routes());
+    routes
+}
+
+fn own() -> Vec<DocRoute> {
     vec![
         // -- Chat -----------------------------------------------------------
         DocRoute {
@@ -177,6 +188,41 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             writes: Some(false),
             example: Some(aux::rerank_example),
             ..base("POST", "/v1/rerank", "lmgw-inference", "Rerank documents")
+        },
+        // -- Decisions (decision-models design §2.8) ---------------------------
+        DocRoute {
+            description: "TypeSafe's System One API as llama.cpp serves it: a state and a \
+                map of typed questions (choice, score, noul), answered with calibrated \
+                probabilities and no generated text. The client object is forwarded with \
+                only model rewritten, members in the order sent (a choice question's \
+                criteria order is its option order), and the answer comes back verbatim, \
+                its model included: the id that answered upstream, not the name asked for \
+                (x-lmgw-fallback names a fallback alias). The body is read as JSON whatever \
+                its Content-Type. Routes to a local decision model (an aux row of kind \
+                decision) or to an openai or llama_cpp upstream whose catalog does not rule \
+                the model out; any other model is 501 not_supported_error before a \
+                container starts. A local row whose image predates the route is a 501 \
+                too, once its container is up and answers the route 404. The upstream's \
+                own errors are relayed as sent (llama.cpp's 500 for a prompt over the \
+                ubatch included), except a 401/403, which is lmgw's credential and a 502. \
+                The key's alias scope and budgets apply; the row is priced from lmgw's own \
+                price rows, input tokens and, where the price row charges them, output \
+                tokens (Jev's does not). Errors lmgw answers \
+                itself are llama.cpp-shaped, except the shared /v1 layers' own: the gate's \
+                401, 403 and 429, and the 413 for a declared Content-Length over \
+                max_body_mb, which are OpenAI-shaped.",
+            request: Req::Json(|g| {
+                g.root_schema_for::<lmgw_api_types::systemone::SystemOneRequest>()
+            }),
+            response: Resp::Json(|g| {
+                g.subschema_for::<lmgw_api_types::systemone::SystemOneResponse>()
+            }),
+            dialect: Dialect::LlamaCpp,
+            endpoints: &[endpoint_group::OTHER],
+            model_task: Some(model_task::DECISION),
+            writes: Some(false),
+            example: Some(systemone::example),
+            ..base("POST", "/v1/systemone", "llamacpp", "Ask a decision model")
         },
         // -- Anthropic messages -------------------------------------------------
         DocRoute {
@@ -451,11 +497,14 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 mcp_list_tools and the approval items are refused. Each call writes a \
                 realtime-tool usage row. \
                 Refused with an error naming what is missing: transcription sessions, \
-                G.711 formats, output_audio_buffer.clear (WebRTC only) and an input_audio item \
-                without its transcript. Accepted and echoed but not applied: noise_reduction, \
-                and truncation (lmgw.resolved.truncation says \"disabled\"; an overflow is an \
-                error). Not served at all: WebRTC, SIP, ephemeral client secrets, live partial \
-                transcripts and out-of-band responses. \
+                G.711 formats, output_audio_buffer.clear (a WebRTC call's) and an input_audio \
+                item without its transcript. Accepted and echoed but not applied: \
+                noise_reduction, and truncation (lmgw.resolved.truncation says \"disabled\"; \
+                an overflow is an error). WebRTC is served at POST /v1/realtime/calls. Not \
+                served at all: the sideband connection to a call (call_id, refused with 400 \
+                sideband_unsupported rather than opening an unrelated session), SIP, \
+                ephemeral client secrets, live partial transcripts and out-of-band \
+                responses. \
                 Credentials as on every /v1 route; a browser, which cannot set headers on a \
                 WebSocket, may offer its key as the subprotocol \
                 `openai-insecure-api-key.<key>` alongside `realtime` — accepted on this route \
@@ -466,7 +515,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 beta_protocol_unsupported, and with Require API key off an anonymous upgrade \
                 from another page's Origin is refused with 403. Chat models list this route in \
                 their capabilities.endpoints on GET /v1/models once an ASR and a TTS alias are \
-                configured. The TTS gets lmgw's speech instructions — \
+                configured, and /v1/realtime/calls beside it while the WebRTC UDP socket of \
+                the listener asked is bound. The TTS gets lmgw's speech instructions — \
                 session.lmgw.speech_instructions, a response.create's \
                 response.lmgw.speech_instructions, else realtime.speech_instructions — as a \
                 style, or as the description a voice-design (vdes) model designs its voice \
@@ -492,7 +542,10 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 for that device they do not exist), 409 chat_thread_admin for an Admin Chat thread the \
                 owner names (no voice mode there), and, with takeover=never, 409 \
                 chat_thread_bound while another session is bound to the thread (\"voice is in \
-                use on device 'phone'\"; nothing is taken over). A session bound with the same \
+                use on device 'phone'\"; nothing is taken over), whose error.held_by names \
+                the holder as the Chat feed's voice.bound.by does (\"device 'phone'\", \"the \
+                dashboard\") so a client shows it without reading the message; no other \
+                refusal carries held_by. A session bound with the same \
                 key, or one that is already ending (after its 1001, a revocation or its close, \
                 while it writes its last turns), does not count: takeover=never takes it over, \
                 so a client's rebind after a restart or a dropped link is not refused in its \
@@ -502,11 +555,37 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 key_scope or key_budget), every model call of the session is checked and \
                 counted against it as an unbound session's, and each refusal writes its \
                 request row. session.created then names the thread in \
-                session.lmgw.resolved.chat_thread ({id, title, temporary, admin_tools}), and \
+                session.lmgw.resolved.chat_thread ({id, title, temporary, admin_tools}) and its \
+                turn mode in session.lmgw.turn_mode (below), and \
                 the connect warm loads the thread's chat, speech-to-text and text-to-speech \
                 models as one group, which may evict idle models as the requests it announces \
                 would, whatever realtime.warm_on_connect says (that setting is for unbound \
-                sessions). The \
+                sessions). chat_folder=<id> binds an ongoing folder's current thread instead, \
+                decided by the rules of POST /chat/api/folders/{id}/current and bound in one step \
+                under the folder's lock, so no other client moves the folder in between: the \
+                current thread, or a new one from the folder's defaults when there is none, when \
+                it is out of the caller's reach, when it idled past the folder's idle minutes, or \
+                with new=true unless it has no message yet; a new thread is recorded as \
+                folder.current on the Chat feed with its reason, and the thread bound is \
+                reported in session.lmgw.resolved.chat_thread as for chat_thread. It is refused \
+                beside chat_thread (400 invalid_value) and model (400 owned_by_thread), new \
+                without chat_folder and takeover with neither parameter are 400 invalid_value, \
+                then come 404 chat_folder_not_found (a folder the caller cannot see), 409 \
+                not_ongoing and 409 folder_no_model, then the thread's own refusals, checked on \
+                the thread the decision picks before a new one is made. takeover=ask is a \
+                WebRTC call's and 400 invalid_value here. A bound session carries \
+                session.lmgw.turn_mode, automatic or push_to_talk, resolved from the thread's \
+                turn detection at the bind (push_to_talk there is push_to_talk, anything else \
+                automatic), and lmgw sets audio.input.turn_detection to match: the thread's \
+                rule (server_vad or semantic_vad, semantic_vad where it names none) in automatic \
+                mode, null in push_to_talk; session.created echoes both. A session.update naming \
+                turn_mode switches it and gets the turn detection it implies (the mode in effect \
+                named again leaves the detection as it is); one that also names \
+                audio.input.turn_detection must agree with it (null with push_to_talk, a rule \
+                with automatic), as an echo of the whole session does, else invalid_value; turn \
+                detection named alone still works and turn_mode follows it. A change of the \
+                thread's turn detection applies at the next bind. An unbound session has no \
+                turn_mode, and refuses one with invalid_value. The \
                 thread then owns the chat model, prompt, tools, speech models, voice, speech \
                 style, language, seed and conversation: a session.update that changes one of \
                 them, a response.create that overrides one, and conversation.item.create or \
@@ -565,7 +644,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 although the turn asked for reasoning off — a voice turn does unless the \
                 thread sets reasoning; no off ends in an error — and its images_note when a \
                 fallback that cannot see answered and got the turn's images as placeholders), \
-                lmgw.chat.user ({message_id, content, voice, \
+                lmgw.chat.user ({message_id, content, voice (a MessageVoice), \
                 response_id}: response_id when that response heard the turn as audio, whose \
                 user message is written once the turn is transcribed, after the reply may have \
                 started — the page puts it before that reply), lmgw.chat.input ({response_id, \
@@ -573,8 +652,8 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 and why the transcript, sent at each launch, when an audio attempt was \
                 refused, and when a llama-server that went away under the audio sends the \
                 session's later turns to it as text; never with chat_voice_audio_input off), \
-                lmgw.chat.reply ({message_id, content, unheard, voice}, {message_id, \
-                removed: true} or {message_id, skipped, voice}: the reply as stored once its \
+                lmgw.chat.reply (the ChatReply type: {message_id, content, unheard, voice (a \
+                MessageVoice)}, {message_id, removed: true} or {message_id, skipped, voice}: the reply as stored once its \
                 response ended, cut to what lmgw knew was heard; a conversation.item.truncate \
                 that arrives after that cuts it again at the position the client heard, and \
                 sends a second lmgw.chat.reply for the same message_id, which replaces the \
@@ -583,7 +662,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 lmgw.chat.thread ({chat_thread: {id, title, temporary, admin_tools}}: the thread \
                 as a response re-read it, when that differs from session.lmgw.resolved.\
                 chat_thread — a title the first spoken turn named, the admin tools switched on or \
-                off) and lmgw.response.timing ({response_id, message_id, end_of_turn_ms, asr_ms, \
+                off) and lmgw.response.timing (a VoiceTiming, flat: {response_id, message_id, end_of_turn_ms, asr_ms, \
                 first_token_ms, reasoning_ms, first_clause_ms, first_audio_ms, total_ms, \
                 to_first_audio_ms, cold, models: {asr, chat, tts}, input, input_why, \
                 transcript_wait_ms}: the timing log line as \
@@ -604,7 +683,19 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 thread as message message_id of role tool — the feed's task.done facts; it \
                 enters only while no turn of the thread runs, so one that ended during a \
                 response is said once that response's turn ended; one said while a response \
-                runs entered at that response's start, and that response answers it). lmgw \
+                runs entered at that response's start, and that response answers it). Three \
+                more lmgw events belong to a WebRTC call bound to a Chat thread and are never \
+                sent or read on this WebSocket, whose closes say the same with their codes: \
+                lmgw.session.bind_pending ({held_by}: under takeover=ask the thread was held \
+                when the call's channel opened; no session runs until the client sends \
+                lmgw.session.take_over ({}) to take it, the holder ends and the call binds by \
+                itself, or the wait of one realtime.ping_interval_s runs out; a holder that \
+                changes brings another), and lmgw.session.closed ({kind, by, message}: the \
+                bound call's last event, kind one of taken_over, revoked, out_of_reach, \
+                shutting_down, closed and thread_bound, by the new binder, the holder or who \
+                hung up and otherwise null, message the sentence a WebSocket close's reason \
+                carries, led by the revocation token for revoked). by and held_by name a client \
+                as voice.bound.by does. lmgw \
                 starts no response for a result: the client's own response.create with no new \
                 words and no turn the client committed before it, while the thread holds \
                 results no reply answered (said in this session, or there before the bind), is a \
@@ -647,7 +738,9 @@ pub(crate) fn routes() -> Vec<DocRoute> {
                 device's or not). Its reason starts with a token saying what to do, then a \
                 colon and the sentence: device_disabled (a paired device was disabled), \
                 key_expired (a paired device's key expired), key_unknown (a paired device's key \
-                was rotated or deleted: pair it again) or revoked (any other kind of key), e.g. \
+                was replaced or deleted: pair it again), certificate_expired (a paired device's \
+                client certificate passed its notAfter: pair it again) or revoked (any other \
+                kind of key), e.g. \
                 \"device_disabled: device 'desktop' was disabled\"; reconnecting with the same \
                 key is refused. A device's session bound to a thread that leaves the device's \
                 reach — the self-admin toolset attached to it, or what the device's admin tools \

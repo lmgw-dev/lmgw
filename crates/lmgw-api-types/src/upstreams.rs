@@ -33,6 +33,13 @@ pub struct UpstreamView {
     pub expose_all: bool,
     pub expose_prefix: String,
     pub supports_responses: bool,
+    /// The catalog request asks for every output modality
+    /// (`GET …/models?output_modalities=all`), so OpenRouter lists its
+    /// decision, embedding, rerank, speech, transcription, image and video
+    /// models too. Only an `openai` row of kind `generic` sends it; on by
+    /// default, off for an endpoint that refuses it (Gemini's
+    /// OpenAI-compatible one).
+    pub catalog_all_modalities: bool,
     /// A `llama_cpp` row's server: what `GET /props` said, when, or why it
     /// is unknown — one entry for the server, and for a router one more per
     /// model (its `model`). Empty on every other protocol,
@@ -75,6 +82,42 @@ pub struct UpstreamLlamaFacts {
     pub read_at: Option<i64>,
     /// Being asked now, or waiting for the row's probe.
     pub probing: bool,
+}
+
+/// `POST /api/op/upstream_test`: the upstream answered its model list. A failed
+/// connection is an error answer instead, so this one only ever says it worked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UpstreamTested {
+    /// Always `true`; a failed test is an error answer instead.
+    pub ok: bool,
+}
+
+/// `POST /api/op/model_visibility`: models of an `expose_all` upstream's live
+/// catalog were hidden from, or restored to, the client-facing model list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModelVisibilitySaved {
+    /// Always `true`; a refusal is an error answer instead.
+    pub ok: bool,
+    /// What was done, naming the model or how many, for a person to read.
+    pub message: String,
+    /// How many distinct models the call named: `model_id` and `model_ids`
+    /// together, trimmed, empty entries and repeats dropped.
+    pub count: usize,
+}
+
+impl ModelVisibilitySaved {
+    /// `{"ok": true, "message": message, "count": count}`.
+    pub fn new(message: impl Into<String>, count: usize) -> Self {
+        Self {
+            ok: true,
+            message: message.into(),
+            count,
+        }
+    }
 }
 
 /// `GET /api/upstream-models?id=` — live catalog of one upstream.

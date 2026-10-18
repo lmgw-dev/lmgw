@@ -39,7 +39,9 @@ use axum::http::request::Parts;
 use axum::response::sse::Event as SseEvent;
 use futures::stream::BoxStream;
 use futures::Stream;
+use lmgw_api_types::chat_frames as frames;
 
+use super::chat_turn::TurnFrame;
 use crate::config::ApiKeyKind;
 use crate::error::GatewayError;
 use crate::ingress::ClientProto;
@@ -296,9 +298,9 @@ impl Caller {
         }
     }
 
-    /// The generation of the server its request came in on
+    /// The listener its request came in on and its generation then
     /// (`RequestCtx::served_at`); `None` for an in-process caller.
-    pub(crate) fn served_at(&self) -> Option<u64> {
+    pub(crate) fn served_at(&self) -> Option<crate::server::ServedAt> {
         match self {
             Self::Owner(None) => None,
             Self::Owner(Some(ctx)) | Self::Device(ctx) | Self::Refused(ctx) => ctx.served_at,
@@ -420,30 +422,28 @@ impl Caller {
     {
         let watch = match self {
             Self::Owner(None) | Self::Refused(_) => None,
-            Self::Owner(Some(ctx)) | Self::Device(ctx) => {
-                crate::devices::watch(state, &ctx.principal, ctx.revocation_mark)
-            }
+            Self::Owner(Some(ctx)) | Self::Device(ctx) => crate::devices::watch(state, ctx),
         };
         let events = crate::devices::until_revoked(events, watch, |said| {
             // `kind` says what to do, as a realtime close's token and the
             // feed's `revoked` say it (review G-7).
-            let data = serde_json::json!({
-                "code": "revoked",
-                "message": said.message,
-                "kind": said.kind.as_str(),
-            });
-            Some(Ok(SseEvent::default()
-                .event("error")
-                .data(data.to_string())))
+            let frame = frames::ErrorFrame {
+                message: said.message,
+                code: Some("revoked".into()),
+                kind: Some(said.kind),
+                server_label: None,
+            };
+            Some(Ok(TurnFrame::of("error", &frame).into_sse()))
         });
         // And when the server stops, with a last `error` frame
         // `{code: "gateway_stopping"}`: the turn behind it hears its reader
         // go and saves what it had, as at a revocation.
-        let data = serde_json::json!({
-            "code": "gateway_stopping",
-            "message": crate::server::STOPPING,
-        });
-        let last = Ok(SseEvent::default().event("error").data(data.to_string()));
+        let stopping = frames::ErrorFrame {
+            message: crate::server::STOPPING.into(),
+            code: Some("gateway_stopping".into()),
+            ..Default::default()
+        };
+        let last = Ok(TurnFrame::of("error", &stopping).into_sse());
         crate::server::until_stopped(&state.stops, self.served_at(), events, Some(last))
     }
 }

@@ -32,10 +32,12 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{AuxKind, LlamaParams};
+use crate::config::{AuxBackend, AuxKind, LlamaParams};
 use crate::sdcpp_caps::SdcppCaps;
 
 use super::Class;
+
+mod aux;
 
 /// llama-server's port inside the container: fixed, because the published
 /// host port (§3.5) is what varies per model.
@@ -100,6 +102,8 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
     ("ngld", "spec-draft-ngl"),
     ("rea", "reasoning"),
     ("rerank", "reranking"),
+    ("embedding", "embeddings"),
+    ("gpu-layers", "n-gpu-layers"),
     ("temperature", "temp"),
     ("s", "seed"),
 ];
@@ -112,7 +116,12 @@ const SHORT_ALIASES: &[(&str, &str)] = &[
 /// too on rows that never touched the feature that needed hoisting. It keeps
 /// its own narrow `hoist_canonical_key` for the one pair (`-kvu`, `-no-kvu`)
 /// that must hoist.
-fn canonical_key(key: &str) -> &str {
+///
+/// The aux hoist (`AuxModel::hoist_args`, decision-models design §3.3, WP2b)
+/// does read it, because the X2 hazard does not reach it: it moves exactly
+/// the five keys an aux row has a field for and matches the canonical name
+/// against those five, so an alias of any other flag stays in `args`.
+pub(crate) fn canonical_key(key: &str) -> &str {
     SHORT_ALIASES
         .iter()
         .find(|(short, _)| *short == key)
@@ -120,10 +129,41 @@ fn canonical_key(key: &str) -> &str {
         .unwrap_or(key)
 }
 
+/// The value of the llama-server flag `key` (its long name, as the renderer
+/// emits it) in a freeform argv, under every spelling the alias table knows
+/// ([`canonical_key`]): `--mmproj p`, `-mm p` and `--mmproj=p` all answer
+/// `"mmproj"`. The last occurrence wins, because llama-server's own parser
+/// lets a later one overwrite an earlier one, and a flag whose next token is
+/// itself an option ([`is_opt`]) carries no value.
+///
+/// The one reader for a value the renderer would pass through, so what lmgw
+/// reports, charges and checks about a row's freeform flags is what its
+/// container is started with.
+pub fn flag_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+    let mut found = None;
+    let mut it = args.iter().peekable();
+    while let Some(tok) = it.next() {
+        if !is_opt(tok) {
+            continue;
+        }
+        let flag = tok.trim_start_matches('-');
+        match flag.split_once('=') {
+            Some((k, v)) if canonical_key(k) == key => found = Some(v),
+            None if canonical_key(flag) == key => {
+                if let Some(v) = it.next_if(|v| !is_opt(v)) {
+                    found = Some(v.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 /// llama-engine argv inputs for one model, split the same way the preset
 /// renderer splits `LocalModel`/`AuxModel`: a chat model carries the full
-/// [`LlamaParams`] field set, an aux model the slimmer embed/rerank one
-/// (neither uses chat sampling/jinja/speculative-decode params).
+/// [`LlamaParams`] field set, an aux model the slimmer embed/rerank/decision
+/// one (none of them uses chat sampling/jinja/speculative-decode params).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LlamaArgs {
     Chat {
@@ -137,10 +177,22 @@ pub enum LlamaArgs {
     Aux {
         gguf_path: String,
         kind: AuxKind,
-        /// Never rendered for [`AuxKind::Rerank`] regardless of this value —
-        /// see [`push_aux_flags`].
+        /// Rendered for [`AuxKind::Embed`] only, regardless of this value —
+        /// see `aux::push_aux_flags`.
         pooling: Option<String>,
         ctx_size: Option<i64>,
+        /// The row's fields of decision-models design §3.3, each rendered as
+        /// its flag and claimed against the freeform args.
+        ubatch_size: Option<i64>,
+        batch_size: Option<i64>,
+        /// Relative to the aux models dir, like `gguf_path`.
+        mmproj_path: Option<String>,
+        /// What [`crate::runtime::descriptor::ModelRuntime::placement`]
+        /// reads: `Some(Cpu)` is a container on the CPU.
+        backend: Option<AuxBackend>,
+        /// The count in effect: the row's own, or this machine's physical
+        /// cores for a CPU row that names none (`descriptor::aux_runtime`).
+        threads: Option<i64>,
         args: Vec<String>,
     },
 }
@@ -367,13 +419,28 @@ pub fn render_llama_args(spec: &RenderSpec) -> Vec<String> {
             push_freeform_args(&mut out, args, &taken);
         }
         LlamaArgs::Aux {
+            gguf_path: _,
             kind,
             pooling,
             ctx_size,
+            ubatch_size,
+            batch_size,
+            mmproj_path,
+            backend,
+            threads,
             args,
-            ..
         } => {
-            push_aux_flags(&mut out, *kind, pooling.as_deref(), *ctx_size, &mut taken);
+            let flags = aux::AuxFlags {
+                kind: *kind,
+                pooling: pooling.as_deref(),
+                ctx_size: *ctx_size,
+                ubatch_size: *ubatch_size,
+                batch_size: *batch_size,
+                mmproj_path: mmproj_path.as_deref(),
+                backend: *backend,
+                threads: *threads,
+            };
+            aux::push_aux_flags(&mut out, flags, &mut taken);
             push_freeform_args(&mut out, args, &taken);
         }
     }
@@ -708,49 +775,6 @@ fn push_chat_params(out: &mut Vec<String>, p: &LlamaParams, taken: &mut BTreeSet
     value_flag!("spec-draft-ngl", &p.spec_draft_ngl);
     value_flag!("fit", &p.fit);
     value_flag!("fit-ctx", &p.fit_ctx);
-}
-
-/// Emit the aux kind flag (+ pooling for embedders), mirroring
-/// the deleted `render_aux_preset`'s claims exactly.
-fn push_aux_flags(
-    out: &mut Vec<String>,
-    kind: AuxKind,
-    pooling: Option<&str>,
-    ctx_size: Option<i64>,
-    taken: &mut BTreeSet<String>,
-) {
-    // Both kind flags are claimed in every section, not just this section's
-    // own: a stale `--reranking` left in an embedder's freeform args would
-    // otherwise flip it into a reranker, and llama-server answers
-    // `/v1/embeddings` against a reranker with HTTP 200 and an all-zero
-    // vector (spike-verified) — a corpus of noise that looks healthy.
-    taken.insert("embeddings".to_string());
-    taken.insert("reranking".to_string());
-    match kind {
-        AuxKind::Embed => {
-            out.push("--embeddings".to_string());
-            if let Some(p) = pooling.filter(|p| !p.is_empty()) {
-                out.push("--pooling".to_string());
-                out.push(p.to_string());
-                taken.insert("pooling".to_string());
-            }
-        }
-        AuxKind::Rerank => {
-            out.push("--reranking".to_string());
-            // `--reranking` selects rank pooling internally; a `--pooling`
-            // flag from *any* source breaks reranking outright (llama-server
-            // quirk, spike-verified). Claimed unconditionally — even a
-            // structured `pooling` value on a rerank row (which should never
-            // be set, but nothing stops it structurally) must not leak
-            // through, and neither may a freeform `--pooling`.
-            taken.insert("pooling".to_string());
-        }
-    }
-    if let Some(c) = ctx_size {
-        out.push("--ctx-size".to_string());
-        out.push(c.to_string());
-        taken.insert("ctx-size".to_string());
-    }
 }
 
 /// Append freeform CLI args, dropping any whose key (or short-alias

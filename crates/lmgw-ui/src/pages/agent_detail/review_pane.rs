@@ -28,6 +28,33 @@ pub fn cost_text(result: &Value, currency: &str) -> Option<String> {
     ))
 }
 
+/// What the "Needs attention" group says about its rows: with a usable
+/// question set, the fallback, the set's measured threshold and a failed
+/// call (labs-store design §4; an unmeasured threshold is named as not
+/// applied); else the fallback, as without one. A decision model answers
+/// the same state the same way, so a re-run helps once the set changed.
+pub fn attention_why(decide: Option<lmgw_api_types::AgentDecide>) -> String {
+    const NEXT: &str = "check them, or change the set or its threshold and re-run these";
+    match decide {
+        Some(d) if d.set.is_some() && d.problem.is_none() => match d.threshold {
+            Some(t) if t > 0.0 && d.measured => format!(
+                "the fallback, a confidence below the set's measured threshold of {t}, or a \
+                 failed call — {NEXT}"
+            ),
+            Some(t) if t > 0.0 => format!(
+                "the fallback or a failed call (the set's threshold of {t} is not measured, so \
+                 not applied) — {NEXT}"
+            ),
+            _ => format!(
+                "the fallback or a failed call (the set has no measured threshold) — {NEXT}"
+            ),
+        },
+        _ => "landed on the fallback or the call failed — widen the config, then re-run just \
+              these"
+            .to_string(),
+    }
+}
+
 /// The facet id for "the rows that need a look": not a value any answer can
 /// take, so it never collides with a category.
 const ATTN_FACET: &str = "\u{1}attention";
@@ -424,11 +451,24 @@ pub(super) fn ReviewPane(ctx: RunCtx) -> impl IntoView {
             )
         }
     };
+    // Why a row needs attention: with a question set, its threshold. The
+    // band ellipsizes a long reason on a narrow window; the whole of it is
+    // its tooltip.
+    let attention_meta = move || {
+        let why = attention_why(
+            run.shape
+                .with(|s| s.as_ref().and_then(|s| s.decide.clone())),
+        );
+        let title = why.clone();
+        view! { <span title=title>{why}</span> }
+    };
     let has_attention = move || att_total.get() > 0;
     let can_apply = move || has_apply && classified.get() && !live.get();
-    let rerun_off = move || ctx.blocked() || run.busy.get() || live.get() || run.job_id().is_none();
+    let rerun_off =
+        move || ctx.classify_blocked() || run.busy.get() || live.get() || run.job_id().is_none();
     let apply_off = move || ctx.blocked() || run.busy.get() || checked.get() == 0;
     let why = move || ctx.blocked_by.get().unwrap_or_default();
+    let rerun_why = move || ctx.classify_blocked_by.get().unwrap_or_default();
 
     view! {
         <div class="review-main">
@@ -460,7 +500,7 @@ pub(super) fn ReviewPane(ctx: RunCtx) -> impl IntoView {
                                             crate::fmt::of(attention.with(Vec::len), att_total.get())
                                         })
                                         open=att_open
-                                        meta=|| "landed on the fallback or the call failed — widen the config, then re-run just these"
+                                        meta=attention_meta
                                     />
                                     <Show when=move || att_open.get()>
                                         <For each=move || attention.get() key=|r| r.view_key() let:r>
@@ -500,8 +540,8 @@ pub(super) fn ReviewPane(ctx: RunCtx) -> impl IntoView {
                     <button
                         class="btn"
                         title=move || {
-                            if ctx.blocked() {
-                                why()
+                            if ctx.classify_blocked() {
+                                rerun_why()
                             } else {
                                 "classify only the rows that need attention again; every other row keeps its answer"
                                     .to_string()
@@ -523,6 +563,7 @@ pub(super) fn ReviewPane(ctx: RunCtx) -> impl IntoView {
                         {move || format!("Apply {} checked", checked.get())}
                     </button>
                 </Show>
+                <SaveLabelled run=run/>
             </div>
             <ReviewFoot run=run/>
         </div>

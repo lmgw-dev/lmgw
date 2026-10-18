@@ -11,6 +11,8 @@ mod models;
 pub use models::*;
 mod llama_params;
 pub use llama_params::*;
+mod aux_hoist;
+pub use aux_hoist::*;
 mod mcp;
 pub use mcp::*;
 mod keys;
@@ -29,6 +31,8 @@ mod prices;
 pub use prices::*;
 mod snapshot;
 pub use snapshot::*;
+/// `From` impls for the settings blocks `GET /api/settings-full` sends.
+mod settings_dto;
 
 #[cfg(test)]
 mod tests;

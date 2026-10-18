@@ -6,6 +6,7 @@
 //! wired up fails here rather than in the browser.
 
 use lmgw_core::config::{AuxKind, HoldFallbackMode, Protocol, UpstreamKind};
+use lmgw_core::erased::Erased;
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::store::{self, NewAlias, NewAudioModel, NewAuxModel, NewLocalModel, NewUpstream};
 use serde_json::{json, Value};
@@ -110,6 +111,7 @@ async fn the_spa_is_served_at_the_root_and_the_api_backs_its_pages() {
         "/chat",
         "/audio-lab",
         "/image-lab",
+        "/decision-lab",
         "/agents",
         // Both shipped agents, one per run kind: the chat preset and the batch
         // pipeline the retired mail workflow became (agent-catalog §8).
@@ -397,12 +399,14 @@ async fn fallback_reason_round_trips_through_both_log_readers() {
         .unwrap();
     }
 
-    let mcp = lmgw_core::ops::logs(&state, None, None, None, None)
-        .await
-        .unwrap();
+    let mcp = lmgw_core::ops::logs(&state, None, None, None, None).await;
+    let mcp = lmgw_core::ops::backends::to_json(mcp).unwrap();
     let base = serve(state).await;
     let v = get_json(&base, "/api/logs").await;
-    for (rows, alias_key) in [(&v["logs"], "requested_alias"), (&mcp["logs"], "alias")] {
+    for (rows, alias_key) in [
+        (&v["logs"], "requested_alias"),
+        (&mcp["logs"], "requested_alias"),
+    ] {
         let rows = rows.as_array().unwrap();
         let row = |alias: &str| {
             rows.iter()
@@ -438,12 +442,14 @@ async fn rung_round_trips_through_both_log_readers() {
         .unwrap();
     }
 
-    let mcp = lmgw_core::ops::logs(&state, None, None, None, None)
-        .await
-        .unwrap();
+    let mcp = lmgw_core::ops::logs(&state, None, None, None, None).await;
+    let mcp = lmgw_core::ops::backends::to_json(mcp).unwrap();
     let base = serve(state).await;
     let v = get_json(&base, "/api/logs").await;
-    for (rows, alias_key) in [(&v["logs"], "requested_alias"), (&mcp["logs"], "alias")] {
+    for (rows, alias_key) in [
+        (&v["logs"], "requested_alias"),
+        (&mcp["logs"], "requested_alias"),
+    ] {
         let rows = rows.as_array().unwrap();
         let row = |alias: &str| {
             rows.iter()
@@ -842,7 +848,7 @@ async fn mcp_server_create_round_trips_through_config_plane() {
             "command": "mcp-server-github",
             "args": "--verbose",
             "env": "GITHUB_TOKEN=secret123",
-            "extra_run_args": "-v ./data:/data:Z",
+            "extra_run_args": ["-v", "./data:/data:Z"],
             "tool_prefix": "gh",
             "timeout_ms": 45000,
             "autostart": true,
@@ -947,6 +953,17 @@ async fn connect_offers_dialable_urls() {
         v.get("backends").is_none(),
         "the fixed backend rows are gone with router mode: {v}"
     );
+    // The pairing form's port (the HTTP port plus one) and its proposal for
+    // another device (the machine's addresses, so only the shape here).
+    assert_eq!(v["device_port"], 8002, "{v}");
+    for u in v["device_urls"].as_array().unwrap() {
+        assert!(u["url"].as_str().unwrap().starts_with("https://"), "{u}");
+        assert!(u["url"].as_str().unwrap().ends_with(":8002"), "{u}");
+        assert!(
+            u["interface"].is_string() && u["wireguard"].is_boolean(),
+            "{u}"
+        );
+    }
 }
 
 /// The settings surface carries the per-model-containers class shape (§6):
@@ -1066,13 +1083,18 @@ async fn the_container_prefix_is_validated_and_a_change_says_what_it_does_not_do
     use std::sync::Arc;
 
     struct Podman;
-    #[async_trait::async_trait]
     impl CommandRunner for Podman {
-        async fn run(&self, _program: &str, _args: &[String]) -> std::io::Result<CmdOutput> {
-            Ok(CmdOutput {
-                status: 0,
-                stdout: "c0ffee\n".into(),
-                stderr: String::new(),
+        fn run<'a>(
+            &'a self,
+            _program: &'a str,
+            _args: &'a [String],
+        ) -> Erased<'a, std::io::Result<CmdOutput>> {
+            Box::pin(async move {
+                Ok(CmdOutput {
+                    status: 0,
+                    stdout: "c0ffee\n".into(),
+                    stderr: String::new(),
+                })
             })
         }
     }
@@ -1328,6 +1350,7 @@ async fn hide_and_unhide_a_passthrough_model_round_trips() {
             expose_all: true,
             expose_prefix: "cat".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -1520,6 +1543,7 @@ async fn upstream_models_carries_each_entrys_catalog_facts() {
         expose_all: true,
         expose_prefix: name.into(),
         supports_responses: false,
+        catalog_all_modalities: true,
     };
     let good = store::insert_upstream(&state.db, &upstream("acme", mock.uri()))
         .await
@@ -1753,6 +1777,7 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
             expose_all: true,
             expose_prefix: "cloud".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -1785,6 +1810,11 @@ async fn v1_models_lists_all_three_local_classes_table_driven() {
                 kind: AuxKind::Embed,
                 pooling: None,
                 ctx_size: None,
+                ubatch_size: None,
+                batch_size: None,
+                mmproj_path: None,
+                backend: None,
+                threads: None,
                 args: vec![],
                 idle_seconds: 0,
                 enabled,
@@ -1987,6 +2017,7 @@ async fn insert_cloud_alias(state: &SharedState, alias: &str) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

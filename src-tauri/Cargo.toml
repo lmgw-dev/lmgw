@@ -31,3 +31,10 @@ gtk = "0.18"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+# A minted pairing link's token expiry, in the hand-off test (pairing.rs).
+# The version lmgw-core uses.
+chrono = "0.4.45"
+# Fixture dirs for the portal detection tests (portal.rs).
+tempfile = "3.27.0"

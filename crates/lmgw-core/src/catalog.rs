@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -20,6 +19,14 @@ use crate::config::{upstream_scope_key, PriceRow, PriceScope, PriceUnit, Protoco
 use crate::pricing::{per_token_to_per_mtok, PriceSource, Prices};
 use crate::state::SharedState;
 use crate::store;
+
+#[cfg(test)]
+mod openrouter_tests;
+mod price_rules;
+pub mod request;
+
+/// The price sync's summary is an answer: `lmgw-api-types` owns its shape.
+pub use lmgw_api_types::{PriceSyncSummary, UpstreamPriceSync};
 
 const TTL: Duration = Duration::from_secs(300);
 
@@ -410,15 +417,25 @@ fn catalog_prices(p: &Pricing) -> Option<Prices> {
 /// | `request` | `per_request`, beside a usable token row only; `"0"` updates an existing catalog row and creates none; absent removes it |
 /// | `image`, `web_search`, anything else | none; counted in `not_synced` unless published as zero |
 ///
+/// A model is left unpriced, with no row at all, when its catalog price is
+/// none lmgw can apply ([`price_rules`], decision-models design §6.2): its
+/// task is billed in a unit the token fields do not hold (speech,
+/// transcription, image, video, rerank), or its token price is 0/0 beside a
+/// non-zero field no row takes.
+///
 /// `aliases` is every enabled alias pointing at this upstream, as
 /// `(upstream_model_id, alias_name)` pairs. A model with one or more matching
 /// aliases is scoped to each alias by name; a model with none is scoped to
 /// [`upstream_scope_key`] instead, which is what an `expose_all` passthrough
-/// request resolves to. Every row of one model has the same scopes.
+/// request resolves to. With `passthrough` (the upstream is `expose_all`), an
+/// aliased model is scoped to its upstream key as well, because its
+/// passthrough name is routable too and prices through that key. Every row
+/// of one model has the same scopes.
 pub fn price_updates_for_upstream(
     upstream_id: i64,
     models: &[ModelInfo],
     aliases: &[(&str, &str)],
+    passthrough: bool,
 ) -> PriceUpdates {
     let mut out = PriceUpdates::default();
     for m in models {
@@ -430,22 +447,28 @@ pub fn price_updates_for_upstream(
             out.unpriced_models += 1;
             continue;
         };
+        let skipped = unsynced_fields(pricing, &prices);
+        if price_rules::not_per_token(m.task.as_deref())
+            || price_rules::free_tokens_hide_a_charge(&prices, &skipped)
+        {
+            out.unpriced_models += 1;
+            continue;
+        }
         let matching: Vec<&str> = aliases
             .iter()
             .filter(|(model_id, _)| *model_id == m.id)
             .map(|(_, alias)| *alias)
             .collect();
-        let scopes: Vec<(PriceScope, String)> = if matching.is_empty() {
-            vec![(
+        let mut scopes: Vec<(PriceScope, String)> = matching
+            .iter()
+            .map(|alias| (PriceScope::Alias, alias.to_string()))
+            .collect();
+        if matching.is_empty() || passthrough {
+            scopes.push((
                 PriceScope::UpstreamModel,
                 upstream_scope_key(upstream_id, &m.id),
-            )]
-        } else {
-            matching
-                .into_iter()
-                .map(|alias| (PriceScope::Alias, alias.to_string()))
-                .collect()
-        };
+            ));
+        }
         let mut push = |unit, prices, price, update_only| {
             for (scope_kind, scope_key) in &scopes {
                 out.rows.push(PriceUpdate {
@@ -464,58 +487,28 @@ pub fn price_updates_for_upstream(
         // price did not parse is unpriced and on the worklist, and a fee
         // written without it would price that model at the fee alone — a
         // silent number, wrong downward. A request-only sheet (a per-clip
-        // music model) is legitimate, but only as a manual row.
-        let mut skipped = Vec::new();
+        // music model) is legitimate, but only as a manual row. A fee that
+        // does not parse is in `skipped` already.
         match pricing.request.as_deref().filter(|v| !v.is_empty()) {
-            Some(v) => match sane(v) {
-                Some(fee) => push(
-                    PriceUnit::PerRequest,
-                    Prices {
-                        source: PriceSource::Catalog,
-                        ..Default::default()
-                    },
-                    Some(fee),
-                    fee == 0.0,
-                ),
-                None => skipped.push("request"),
-            },
+            Some(v) => {
+                if let Some(fee) = sane(v) {
+                    push(
+                        PriceUnit::PerRequest,
+                        Prices {
+                            source: PriceSource::Catalog,
+                            ..Default::default()
+                        },
+                        Some(fee),
+                        fee == 0.0,
+                    )
+                }
+            }
             // Published in a shape no price comes in: named in `other`, and
             // counted below. Not "absent", so a fee on file stays.
             None if pricing.other.iter().any(|f| f == "request") => {}
             // No fee published at all: a catalog fee on file is stale.
             None => out.no_fee.extend(scopes.iter().cloned()),
         }
-        // A cache rate that is published but did not become one: falling back
-        // to the input rate errs upward, but it is still a published number
-        // lmgw did not apply. A "0" on a paid model is not advertised
-        // (`catalog_prices`) and is not counted.
-        for (name, published, synced) in [
-            (
-                "input_cache_read",
-                &pricing.cache_read,
-                prices.price_cache_read,
-            ),
-            (
-                "input_cache_write",
-                &pricing.cache_write,
-                prices.price_cache_write,
-            ),
-        ] {
-            if published.as_deref().is_some_and(charges) && synced.is_none() {
-                skipped.push(name);
-            }
-        }
-        // Not synced in v1 (§6, Q5): `image` is per *input* image and so not
-        // `per_image`, and `per_web_search` is reserved.
-        for (name, published) in [
-            ("image", &pricing.image),
-            ("web_search", &pricing.web_search),
-        ] {
-            if published.as_deref().is_some_and(charges) {
-                skipped.push(name);
-            }
-        }
-        skipped.extend(pricing.other.iter().map(String::as_str));
         for name in skipped {
             *out.not_synced.entry(name.to_string()).or_default() += 1;
         }
@@ -523,47 +516,49 @@ pub fn price_updates_for_upstream(
     out
 }
 
-/// What a price sync did to one upstream.
-#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
-pub struct UpstreamPriceSync {
-    pub upstream_id: i64,
-    pub upstream: String,
-    /// Rows created or updated: one `per_mtok` row per priced model and
-    /// scope, and a `per_request` row beside it where the catalog states a
-    /// fee.
-    pub rows_written: usize,
-    /// Catalog `per_request` rows deleted because their model, priced here,
-    /// no longer publishes a `request` fee at all.
-    pub rows_removed: usize,
-    pub unpriced_models: usize,
-    /// Per field of the catalog's pricing object, how many models had their
-    /// token prices synced here and publish that field with a value other
-    /// than zero that went into no row. Left out on purpose: `image` (a
-    /// price per *input* image, not a generated one),
-    /// `web_search` (no route carries a hosted search), and the fields lmgw
-    /// does not model, such as `internal_reasoning`, `image_output`,
-    /// `overrides` or `discount`. Also a `request` fee or cache rate that is
-    /// not a price (`"-1"`, unparseable). A model counted in
-    /// `unpriced_models` had nothing synced and is not counted here again.
-    /// Empty when nothing published was left out.
-    // Billable-units design §6.
-    pub not_synced: BTreeMap<String, usize>,
-    /// The catalog fetch failed; nothing was synced for this upstream. Not
-    /// fatal to the run as a whole — one unreachable provider should not stop
-    /// every other upstream's prices from refreshing.
-    pub error: Option<String>,
-}
-
-/// Summary of one price sync run.
-#[derive(Debug, Clone, Default, Serialize, schemars::JsonSchema)]
-pub struct PriceSyncSummary {
-    pub rows_written: usize,
-    /// The upstreams' `rows_removed`, summed.
-    pub rows_removed: usize,
-    pub unpriced_models: usize,
-    /// The upstreams' `not_synced`, summed per field.
-    pub not_synced: BTreeMap<String, usize>,
-    pub upstreams: Vec<UpstreamPriceSync>,
+/// The fields of `pricing` that charge (anything but an empty string and a
+/// zero) and go into no row: what a sync counts in `not_synced`.
+fn unsynced_fields<'a>(pricing: &'a Pricing, prices: &Prices) -> Vec<&'a str> {
+    let mut skipped = Vec::new();
+    if pricing
+        .request
+        .as_deref()
+        .is_some_and(|v| !v.is_empty() && sane(v).is_none())
+    {
+        skipped.push("request");
+    }
+    // A cache rate that is published but did not become one: falling back
+    // to the input rate errs upward, but it is still a published number
+    // lmgw did not apply. A "0" on a paid model is not advertised
+    // (`catalog_prices`) and is not counted.
+    for (name, published, synced) in [
+        (
+            "input_cache_read",
+            &pricing.cache_read,
+            prices.price_cache_read,
+        ),
+        (
+            "input_cache_write",
+            &pricing.cache_write,
+            prices.price_cache_write,
+        ),
+    ] {
+        if published.as_deref().is_some_and(charges) && synced.is_none() {
+            skipped.push(name);
+        }
+    }
+    // Not synced in v1 (§6, Q5): `image` is per *input* image and so not
+    // `per_image`, and `per_web_search` is reserved.
+    for (name, published) in [
+        ("image", &pricing.image),
+        ("web_search", &pricing.web_search),
+    ] {
+        if published.as_deref().is_some_and(charges) {
+            skipped.push(name);
+        }
+    }
+    skipped.extend(pricing.other.iter().map(String::as_str));
+    skipped
 }
 
 /// Sync catalog-advertised prices into the `prices` table for every enabled
@@ -604,7 +599,7 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
                     .filter(|a| a.enabled && a.upstream_id == u.id)
                     .map(|a| (a.upstream_model_id.as_str(), a.alias.as_str()))
                     .collect();
-                let updates = price_updates_for_upstream(u.id, &models, &aliases);
+                let updates = price_updates_for_upstream(u.id, &models, &aliases, u.expose_all);
                 for pu in updates.to_write(&snap.prices) {
                     store::upsert_price(
                         &state.db,
@@ -620,6 +615,7 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
                     row.rows_written += 1;
                 }
                 for stale in updates.to_remove(&snap.prices) {
+                    // A row already gone is what the sync wanted anyway.
                     store::delete_price(&state.db, stale.id)
                         .await
                         .map_err(|e| e.to_string())?;
@@ -647,10 +643,12 @@ pub async fn sync_prices(state: &SharedState) -> Result<PriceSyncSummary, String
 pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<ModelInfo>, String> {
     let base = u.base();
     let key = u.api_key.as_deref().filter(|k| !k.is_empty());
+    // OpenRouter lists its non-text models only when asked (`request`).
+    let asked_all = request::asks_all_modalities(&state.snapshot(), u);
     let rb = match u.protocol {
         // llama-server lists its models the OpenAI way.
         Protocol::Openai | Protocol::LlamaCpp => {
-            let mut rb = state.http.get(format!("{base}/models"));
+            let mut rb = state.http.get(request::openai_models_url(base, asked_all));
             if let Some(k) = key {
                 rb = rb.bearer_auth(k);
             }
@@ -692,9 +690,10 @@ pub async fn fetch_models(state: &SharedState, u: &Upstream) -> Result<Vec<Model
         })?;
     if !resp.status().is_success() {
         return Err(format!(
-            "{}: models list failed ({})",
+            "{}: models list failed ({}){}",
             u.name,
-            resp.status()
+            resp.status(),
+            request::refusal_hint(asked_all, resp.status().as_u16())
         ));
     }
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
@@ -885,12 +884,21 @@ fn parse_modalities_openai(m: &Value, key: &str) -> Option<Vec<String>> {
     })
 }
 
-/// `embedding` when `output_modalities == [embedding]`; `image_generation`
-/// when the model's outputs are images and not text (image-generation design
-/// §5); else `chat` — and `None` when the entry states no output modalities
-/// at all (a stock `api.openai.com` list): the catalog said nothing, and
-/// `capabilities::for_catalog` goes by the name then
-/// (`capabilities::task::by_name`, realtime live run 3 D1).
+/// `embedding` when `output_modalities == [embedding]` (or OpenRouter's
+/// `[embeddings]`); for outputs without text, the task of the first of
+/// [`NON_TEXT_TASKS`] they name: `decision` for `decisions` (decision-models
+/// design §2.9), `rerank`, `tts` for `speech`, `asr` for `transcription`,
+/// `image_generation` for `image` (image-generation design §5) and
+/// `video_generation` for `video`; else `chat` — and `None` when the entry
+/// states no output modalities at all (a stock `api.openai.com` list): the
+/// catalog said nothing, and `capabilities::for_catalog` goes by the name
+/// then (`capabilities::task::by_name`, realtime live run 3 D1).
+///
+/// The words are OpenRouter's. Its full list (`?output_modalities=all`,
+/// [`request`]) names `audio`, `decisions`, `embeddings`, `image`, `rerank`,
+/// `speech`, `text`, `transcription` and `video`; each of these non-text
+/// outputs is a task lmgw already has, and none is a chat model. `audio`
+/// alone names no task here and stays `chat`, as before.
 ///
 /// "Images and not text" rather than "contains image": `task` is what picks a
 /// model's `endpoints`, and a chat model that can also draw (`[text, image]`,
@@ -903,14 +911,32 @@ fn parse_task_openai(m: &Value) -> Option<String> {
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    if out.len() == 1 && out[0] == "embedding" {
+    // OpenRouter spells it `embeddings` (decision-models design, "Found
+    // while reading").
+    if out.len() == 1 && matches!(out[0], "embedding" | "embeddings") {
         return Some("embedding".to_string());
     }
-    if out.contains(&"image") && !out.contains(&"text") {
-        return Some("image_generation".to_string());
+    if !out.contains(&"text") {
+        if let Some((_, task)) = NON_TEXT_TASKS.iter().find(|(word, _)| out.contains(word)) {
+            return Some(task.to_string());
+        }
     }
     Some("chat".to_string())
 }
+
+/// A catalog's non-text output and the task it makes a model, in the order
+/// [`parse_task_openai`] tries them. `decisions` is llama.cpp's and
+/// OpenRouter's word for a decision model's output: the model answers
+/// `/v1/systemone` (decision-models design §2.2, §2.9). `image` comes before
+/// `video`, so a model that outputs both keeps the image task it had.
+const NON_TEXT_TASKS: [(&str, &str); 6] = [
+    ("decisions", "decision"),
+    ("rerank", "rerank"),
+    ("speech", "tts"),
+    ("transcription", "asr"),
+    ("image", "image_generation"),
+    ("video", "video_generation"),
+];
 
 /// `embedContent` in `supportedGenerationMethods` ⇒ `embedding`;
 /// `generateContent` ⇒ `chat`; neither (e.g. `bidiGenerateContent`-only) ⇒
@@ -1138,7 +1164,7 @@ mod price_sync_tests {
     #[test]
     fn catalog_per_token_price_converts_to_per_mtok_row() {
         let models = vec![model("gpt-4o-mini", Some(openrouter_pricing()))];
-        let updates = price_updates_for_upstream(7, &models, &[]);
+        let updates = price_updates_for_upstream(7, &models, &[], false);
 
         assert_eq!(updates.unpriced_models, 0);
         assert_eq!(updates.rows.len(), 1);
@@ -1165,7 +1191,7 @@ mod price_sync_tests {
     fn a_model_with_no_advertised_price_writes_no_row() {
         // Gemini's models.list publishes no pricing at all.
         let models = vec![model("gemini-2.5-pro", None)];
-        let updates = price_updates_for_upstream(3, &models, &[]);
+        let updates = price_updates_for_upstream(3, &models, &[], false);
 
         assert!(
             updates.rows.is_empty(),
@@ -1184,7 +1210,7 @@ mod price_sync_tests {
                 ..Default::default()
             }),
         )];
-        let updates = price_updates_for_upstream(1, &models, &[]);
+        let updates = price_updates_for_upstream(1, &models, &[], false);
 
         assert!(updates.rows.is_empty());
         assert_eq!(updates.unpriced_models, 1);
@@ -1196,7 +1222,7 @@ mod price_sync_tests {
             model("gpt-4o-mini", Some(openrouter_pricing())),
             model("gemini-2.5-pro", None),
         ];
-        let updates = price_updates_for_upstream(7, &models, &[]);
+        let updates = price_updates_for_upstream(7, &models, &[], false);
 
         assert_eq!(updates.rows.len(), 1);
         assert_eq!(updates.unpriced_models, 1);
@@ -1206,7 +1232,7 @@ mod price_sync_tests {
     fn a_model_with_an_alias_is_scoped_to_the_alias_not_the_upstream_model() {
         let models = vec![model("gpt-4o-mini", Some(openrouter_pricing()))];
         let aliases = [("gpt-4o-mini", "cheap-chat")];
-        let updates = price_updates_for_upstream(7, &models, &aliases);
+        let updates = price_updates_for_upstream(7, &models, &aliases, false);
 
         assert_eq!(updates.rows.len(), 1);
         assert_eq!(updates.rows[0].scope_kind, PriceScope::Alias);
@@ -1220,7 +1246,7 @@ mod price_sync_tests {
             ("gpt-4o-mini", "cheap-chat"),
             ("gpt-4o-mini", "backup-chat"),
         ];
-        let updates = price_updates_for_upstream(7, &models, &aliases);
+        let updates = price_updates_for_upstream(7, &models, &aliases, false);
 
         assert_eq!(updates.rows.len(), 2);
         let mut keys: Vec<&str> = updates.rows.iter().map(|r| r.scope_key.as_str()).collect();
@@ -1244,7 +1270,7 @@ mod price_sync_tests {
                 ..Default::default()
             }),
         )];
-        let updates = price_updates_for_upstream(9, &models, &[]);
+        let updates = price_updates_for_upstream(9, &models, &[], false);
 
         assert_eq!(updates.rows.len(), 1);
         assert_eq!(updates.rows[0].prices.price_in, Some(0.0));
@@ -1262,7 +1288,7 @@ mod price_sync_tests {
     }
 
     fn prices_of(p: Pricing) -> Prices {
-        let updates = price_updates_for_upstream(1, &[model("m", Some(p))], &[]);
+        let updates = price_updates_for_upstream(1, &[model("m", Some(p))], &[], false);
         updates.rows.into_iter().next().expect("priced").prices
     }
 

@@ -68,6 +68,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::super::audio_in::{Listen, PlayView};
+use super::super::writer::Cut;
 use super::{Active, Core, Phase};
 
 /// How a turn that just started meets the active response (module doc).
@@ -208,7 +209,15 @@ impl Core {
         let Some(gen) = self.active.as_ref().map(|a| a.output.gen) else {
             return;
         };
-        let sent = self.out.purge(gen);
+        // A bound call's phone mutes when `cleared` reaches it: it heard what
+        // was sent less the playout allowance's worth (calls design §5.4).
+        // Anywhere else heard is what was sent.
+        let cut = if self.bound.is_some() {
+            Cut::BargeIn
+        } else {
+            Cut::Sent
+        };
+        let sent = self.out.purge_cut(gen, cut);
         let Some(active) = self.active.as_mut() else {
             return;
         };

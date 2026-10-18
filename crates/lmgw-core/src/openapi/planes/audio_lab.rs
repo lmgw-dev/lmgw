@@ -1,10 +1,11 @@
 //! `/audio-lab/api/*`, the Audio lab: the model list its forms are built
 //! from, the voice library of reference clips (list, upload, preview, delete,
-//! transcripts), and the four routes that hand a request to the matching
-//! `/v1` handler. The shapes are `lmgw-api-types`' `audio_lab` module, the
-//! types the handlers read and write; the four hand-offs reuse the `/v1`
-//! siblings' request and answer schemas. Admin routes (`Cap::Admin`), so
-//! they appear in the admin document only.
+//! transcripts), the four routes that hand a request to the matching `/v1`
+//! handler, and the kept group a hand-off with `?group=` records its run in.
+//! The shapes are `lmgw-api-types`' `audio_lab` module, the types the
+//! handlers read and write; the four hand-offs reuse the `/v1` siblings'
+//! request and answer schemas. Admin routes (`Cap::Admin`), so they appear
+//! in the admin document only.
 
 use lmgw_api_types::audio_lab as lab;
 use lmgw_api_types::openapi_ext::model_task;
@@ -37,6 +38,7 @@ fn route(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
@@ -54,6 +56,22 @@ macro_rules! handoff {
                 $summary,
                 concat!(
                     $description,
+                    " With `group=<id>` (a group POST /audio-lab/api/groups made for this \
+                     route) the call is kept in the lab store as that group's run: the request \
+                     as sent (an upload as a summary, its files the group's input artifacts; a \
+                     part without a filename is a text field only when it has no type of its \
+                     own but text and is UTF-8), and the answer as it streams to the client, \
+                     recorded before its last byte arrives. Speech that succeeded is an output \
+                     artifact, written to its file as it streams; a task's base64 audio \
+                     (`audio`, `named_audio_outputs[].audio`, an event's `audio`) is an output \
+                     artifact each, `lab-artifact:<id>` in its place in the kept text; any \
+                     other answer is its text. A client that stops reading leaves the run as \
+                     far as it got, error code `stopped`; one that goes while the run is being \
+                     written does not take it. The group is in flight from the claim to the \
+                     run. A group that is not the Audio lab's is a 404, one made for another \
+                     route a 400 `wrong_route`, a request naming another model than the \
+                     group's (or none) a 400 `wrong_model` naming both, one answered or being \
+                     answered a 409 `cell_answered`, each before anything is sent.",
                     " Every failure is the `/v1` route's OpenAI envelope, relayed as it came."
                 ),
             )
@@ -69,17 +87,6 @@ const CLIP_MIME_TYPES: &[&str] = &[
     "audio/aac",
     "application/octet-stream",
 ];
-
-fn voices_answer(g: &mut SchemaGenerator) -> Schema {
-    let listed = media::voices_response(g).to_value();
-    let idle = g.subschema_for::<lab::VoicesNotRunning>().to_value();
-    schemars::json_schema!({
-        "description": "The model's voice list, as GET /v1/audio/voices answers it; or, for \
-            a local model that is not running (and `start` not sent), {voices: [], running: \
-            false}.",
-        "anyOf": [listed, idle]
-    })
-}
 
 fn upload_request(g: &mut SchemaGenerator) -> Schema {
     schemas::named(
@@ -137,21 +144,27 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             query: Some(|g| g.root_schema_for::<lab::LabVoicesQuery>()),
-            response: Resp::Json(voices_answer),
+            response: Resp::Json(|g| g.root_schema_for::<lab::LabVoices>()),
             dialect: Dialect::OpenAi,
             ..route(
                 "GET",
                 "/audio-lab/api/voices",
                 "List a model's voices",
-                "The built-in voice ids and configured presets of a text-to-speech model, \
-                 for a voice picker. Unlike GET /v1/audio/voices, which answers a local model \
-                 from the gateway's own catalog, this asks the model's own server, and only \
-                 while it is already running: opening a page must not load a model onto the \
-                 GPU. A local model that is not running answers {voices: [], running: false}; \
-                 `start=1` starts it and asks (what /v1/audio/voices does with \
-                 probe=engine). An empty list is normal: the model carries no cached voice \
-                 ids and wants a reference clip. Failures are /v1/audio/voices' own OpenAI \
-                 envelope.",
+                "The voices of a text-to-speech model, for a voice picker, read the moment a \
+                 model is selected. A local model is answered from the gateway's own catalog \
+                 (what GET /v1/audio/voices answers by default): its presets, the voices \
+                 its package ships, the embeddings of its folder and the voice library's \
+                 clips, each with a `kind`, the `default` voice, the shipped voices its \
+                 package lacks on disk (`missing`) and `held`. Nothing is ever started or \
+                 claimed, so this works while the model is not running and under the GPU \
+                 hold. When the model's container is already up, the names only its own \
+                 server reports (a row whose `extra_run_args` mount another voice directory) \
+                 are added as `engine` entries. Under the GPU hold the catalog is still \
+                 answered with `held: true`; when the gate would send a request to a \
+                 fallback alias, `fallback` names it and its provider is not asked for a \
+                 list. A remote model is asked. An empty list is \
+                 normal: the model carries no cached voice ids and wants a reference clip. \
+                 Failures are /v1/audio/voices' own OpenAI envelope.",
             )
         },
         DocRoute {
@@ -264,6 +277,27 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
+            request: Req::Json(|g| g.root_schema_for::<lab::AudioAsk>()),
+            response: Resp::Json(|g| {
+                g.root_schema_for::<lmgw_api_types::lab_store::LabGroupView>()
+            }),
+            ..route(
+                "POST",
+                "/audio-lab/api/groups",
+                "Keep a group for a hand-off",
+                "Makes a kept group of one cell in the Audio lab's history, before its \
+                 request is sent: the model, the route it asks and the page's whole form \
+                 (every panel, the speech settings, the PCM format a stream is assembled \
+                 with), so a re-opened group puts the form back as it was. Answers the \
+                 group with no run; the request goes to that route's hand-off with \
+                 `group=<id>`, which records it as the run, so the hand-off's body stays \
+                 the /v1 route's own. 400 for a blank model, 422 for a body that is not an \
+                 AudioAsk (both answered `{error}`), 500 when the store cannot keep it. The \
+                 body size is not limited.",
+            )
+        },
+        DocRoute {
+            query: Some(|g| g.root_schema_for::<lab::GroupQuery>()),
             request: Req::Json(media::speech_request),
             response: Resp::Binary(media::AUDIO_MIME_TYPES),
             model_task: Some(model_task::TTS),
@@ -302,6 +336,7 @@ pub(crate) fn routes() -> Vec<DocRoute> {
             )
         },
         DocRoute {
+            query: Some(|g| g.root_schema_for::<lab::GroupQuery>()),
             request: Req::Multipart(media::alignments_request),
             response: Resp::Untyped("audio.cpp's own alignment JSON, relayed verbatim"),
             model_task: Some(model_task::ASR),

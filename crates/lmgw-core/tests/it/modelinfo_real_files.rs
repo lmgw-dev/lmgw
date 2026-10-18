@@ -63,7 +63,7 @@ async fn planning_a_multimodal_model_finds_its_projector_and_drafter() {
     let Some(state) = state_pointed_at_real_models().await else {
         return;
     };
-    let plan = modelinfo::local_model_plan(&state, WEIGHTS, false, None)
+    let plan = modelinfo::local_model_plan(&state, WEIGHTS, None)
         .await
         .unwrap();
     let p = &plan["params"];
@@ -97,9 +97,9 @@ async fn planning_a_multimodal_model_finds_its_projector_and_drafter() {
         );
     }
 
-    // No container to ask, so the runtime verdict must be absent rather than
-    // invented.
-    assert_eq!(plan["runtime"]["checked"], false);
+    // The plan reads the header and loads nothing, so it carries no runtime
+    // verdict.
+    assert!(plan.get("runtime").is_none(), "{plan}");
 }
 
 /// The live misconfiguration this check exists for: four rows in the author's
@@ -115,7 +115,7 @@ async fn a_model_without_mtp_layers_is_not_given_mtp_speculation() {
     if !have_model(QWEN) {
         return;
     }
-    let plan = modelinfo::local_model_plan(&state, QWEN, false, None)
+    let plan = modelinfo::local_model_plan(&state, QWEN, None)
         .await
         .unwrap();
     assert!(
@@ -132,7 +132,7 @@ async fn planning_an_unconfigured_gguf_proposes_creating_it() {
     let Some(state) = state_pointed_at_real_models().await else {
         return;
     };
-    let plan = modelinfo::local_model_plan(&state, WEIGHTS, false, None)
+    let plan = modelinfo::local_model_plan(&state, WEIGHTS, None)
         .await
         .unwrap();
     assert_eq!(plan["configured_as"].as_array().unwrap().len(), 0);
@@ -172,7 +172,7 @@ async fn planning_a_configured_gguf_diffs_against_the_row() {
         .await
         .unwrap();
 
-    let plan = modelinfo::local_model_plan(&state, QWEN, false, None)
+    let plan = modelinfo::local_model_plan(&state, QWEN, None)
         .await
         .unwrap();
     let d = &plan["configured_as"][0];
@@ -210,7 +210,7 @@ async fn planning_a_configured_gguf_diffs_against_the_row() {
         .unwrap();
 
     // And having applied it, the same plan now reports nothing left to do.
-    let plan = modelinfo::local_model_plan(&state, QWEN, false, None)
+    let plan = modelinfo::local_model_plan(&state, QWEN, None)
         .await
         .unwrap();
     let d = &plan["configured_as"][0];
@@ -243,7 +243,7 @@ async fn every_row_sharing_a_gguf_is_diffed() {
             .await
             .unwrap();
     }
-    let plan = modelinfo::local_model_plan(&state, WEIGHTS, false, None)
+    let plan = modelinfo::local_model_plan(&state, WEIGHTS, None)
         .await
         .unwrap();
     let rows = plan["configured_as"].as_array().unwrap();
@@ -274,7 +274,7 @@ async fn a_projector_plan_carries_the_ubatch_its_images_need() {
     if !have_model(GEMMA) {
         return;
     }
-    let plan = modelinfo::local_model_plan(&state, GEMMA, false, None)
+    let plan = modelinfo::local_model_plan(&state, GEMMA, None)
         .await
         .unwrap();
     assert_eq!(plan["params"]["mmproj_path"], MMPROJ, "{plan}");
@@ -305,14 +305,15 @@ async fn a_projector_plan_carries_the_ubatch_its_images_need() {
         .await
         .unwrap();
     // Saved all the same, with the advisory attached: it does not block.
-    assert_eq!(created["ok"], true, "{created}");
+    assert!(created.ok, "{created:?}");
     assert!(
-        created["advisories"]
-            .as_array()
-            .unwrap()
+        created
+            .advisories
+            .as_deref()
+            .unwrap_or_default()
             .iter()
-            .any(|w| w.as_str().unwrap_or("").contains("n_ubatch >= n_tokens")),
-        "{created}"
+            .any(|w| w.contains("n_ubatch >= n_tokens")),
+        "{created:?}"
     );
     let checked = crate::common::check_wire(
         lmgw_core::ops::local_model_check(&state, Some("gemma4-12b"), None)
@@ -333,7 +334,7 @@ async fn a_projector_plan_carries_the_ubatch_its_images_need() {
     assert_eq!(row["ok"], true, "{checked}");
 
     // The plan's repair patch, sent back unedited, is the whole fix.
-    let plan = modelinfo::local_model_plan(&state, GEMMA, false, None)
+    let plan = modelinfo::local_model_plan(&state, GEMMA, None)
         .await
         .unwrap();
     let d = &plan["configured_as"][0];
@@ -373,7 +374,7 @@ async fn a_causal_projector_gets_no_ubatch_floor_and_no_warning() {
         if !have_model(weights) {
             continue;
         }
-        let plan = modelinfo::local_model_plan(&state, weights, false, None)
+        let plan = modelinfo::local_model_plan(&state, weights, None)
             .await
             .unwrap();
         assert!(plan["params"]["mmproj_path"].is_string(), "{plan}");
@@ -405,10 +406,9 @@ async fn planning_against_a_projector_warns_rather_than_pretending() {
     let Some(state) = state_pointed_at_real_models().await else {
         return;
     };
-    let plan =
-        modelinfo::local_model_plan(&state, &format!("{REPO}/mmproj-kquant.gguf"), false, None)
-            .await
-            .unwrap();
+    let plan = modelinfo::local_model_plan(&state, &format!("{REPO}/mmproj-kquant.gguf"), None)
+        .await
+        .unwrap();
     let warnings = plan["warnings"].as_array().unwrap();
     assert!(
         warnings
@@ -431,7 +431,7 @@ async fn inspect_classifies_each_file_in_the_repo() {
         ("dflash-kquant.gguf", "drafter"),
     ] {
         let got = crate::common::inspect_wire(
-            modelinfo::model_inspect(&state, &format!("{REPO}/{file}"), false, None)
+            modelinfo::model_inspect(&state, &format!("{REPO}/{file}"), None)
                 .await
                 .unwrap(),
         );
@@ -442,7 +442,7 @@ async fn inspect_classifies_each_file_in_the_repo() {
     // window, so the honest figure is far below layers x context x heads —
     // which is precisely why reporting it beats making the caller guess.
     let w = crate::common::inspect_wire(
-        modelinfo::model_inspect(&state, WEIGHTS, false, None)
+        modelinfo::model_inspect(&state, WEIGHTS, None)
             .await
             .unwrap(),
     );
@@ -462,18 +462,18 @@ async fn traversal_and_missing_paths_are_refused() {
         return;
     };
     for bad in ["../../etc/passwd", "unsloth/../../etc/passwd"] {
-        let err = modelinfo::model_inspect(&state, bad, false, None)
+        let err = modelinfo::model_inspect(&state, bad, None)
             .await
             .unwrap_err();
         assert!(err.contains("plain path"), "{bad} gave: {err}");
     }
-    let err = modelinfo::model_inspect(&state, "nope/absent.gguf", false, None)
+    let err = modelinfo::model_inspect(&state, "nope/absent.gguf", None)
         .await
         .unwrap_err();
     assert!(err.contains("lmgw__gguf_files"), "unhelpful error: {err}");
 
     // The in-container spelling is what a rendered preset shows, so accept it.
-    let ok = modelinfo::model_inspect(&state, &format!("/models/{WEIGHTS}"), false, None).await;
+    let ok = modelinfo::model_inspect(&state, &format!("/models/{WEIGHTS}"), None).await;
     assert!(
         ok.is_ok(),
         "the /models/ prefix should be tolerated: {ok:?}"
@@ -652,7 +652,7 @@ async fn real_embedders_plan_as_aux_with_their_declared_pooling() {
     let Some(state) = state_pointed_at_real_embedders().await else {
         return;
     };
-    let plan = modelinfo::local_model_plan(&state, QWEN_EMBED, false, Some("aux"))
+    let plan = modelinfo::local_model_plan(&state, QWEN_EMBED, Some("aux"))
         .await
         .unwrap();
     assert_eq!(plan["class"], "aux", "{plan}");
@@ -660,18 +660,27 @@ async fn real_embedders_plan_as_aux_with_their_declared_pooling() {
     assert_eq!(plan["params"]["kind"], "embed");
     assert_eq!(plan["params"]["pooling"], "last");
     assert_eq!(plan["params"]["ctx_size"], 32768);
+    // llama-server splits a last-token embedder's input, so
+    // llama.cpp's batch defaults stay.
+    assert!(plan["params"]["ubatch_size"].is_null(), "{plan}");
 
     if have_aux(GEMMA_EMBED) {
-        let plan = modelinfo::local_model_plan(&state, GEMMA_EMBED, false, Some("aux"))
+        let plan = modelinfo::local_model_plan(&state, GEMMA_EMBED, Some("aux"))
             .await
             .unwrap();
         assert_eq!(plan["class"], "aux", "{plan}");
         assert_eq!(plan["params"]["pooling"], "mean");
         assert_eq!(plan["params"]["ctx_size"], 2048);
+        // Mean pooling reads every token: the whole input in one ubatch, as
+        // (a 1,492-token input is refused at ubatch 512).
+        assert_eq!(plan["params"]["ubatch_size"], 2048, "{plan}");
+        assert_eq!(plan["params"]["batch_size"], 2048, "{plan}");
+        let why = plan["rationale"]["ubatch_size"].as_str().unwrap();
+        assert!(why.contains("about 67.0 MiB"), "the measured 67 MiB: {why}");
     }
 
     let inspect = crate::common::inspect_wire(
-        modelinfo::model_inspect(&state, QWEN_EMBED, false, Some("aux"))
+        modelinfo::model_inspect(&state, QWEN_EMBED, Some("aux"))
             .await
             .unwrap(),
     );
@@ -681,8 +690,82 @@ async fn real_embedders_plan_as_aux_with_their_declared_pooling() {
 
     // And from the chat dir's point of view the file is simply not there —
     // the honest answer, naming the target that would find it.
-    let err = modelinfo::model_inspect(&state, QWEN_EMBED, false, None)
+    let err = modelinfo::model_inspect(&state, QWEN_EMBED, None)
         .await
         .unwrap_err();
     assert!(err.contains("target=aux"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// A decision model (decision-models design §3.2), when the test machine has Laya
+// ---------------------------------------------------------------------------
+
+/// Where Laya is looked for under `LMGW_TEST_AUX_DIR`: where `hf_add` puts
+/// it, or at the top (the probe's own directory).
+const LAYA: [&str; 2] = ["ggml-org/Laya-GGUF/Laya-Q8_0.gguf", "Laya-Q8_0.gguf"];
+
+/// The real Laya Q8_0 (Appendix B): a non-causal `modern-bert` with the
+/// `cls.output*` head that made lmgw plan it as a reranker, whose
+/// `--reranking` argv crashes llama-server at load (Appendix A.10). Its
+/// `decision.type` makes it a decision model first.
+#[tokio::test]
+async fn laya_is_a_decision_model_not_a_reranker() {
+    let Some((aux_dir, rel)) = aux_dir().and_then(|d| {
+        let rel = LAYA.into_iter().find(|f| have_aux(f))?;
+        Some((d, rel))
+    }) else {
+        eprintln!("skipping: set LMGW_TEST_AUX_DIR to a directory containing one of {LAYA:?}");
+        return;
+    };
+    let s = lmgw_core::gguf::summarize(&std::path::Path::new(&aux_dir).join(rel)).unwrap();
+    assert_eq!(s.architecture.as_deref(), Some("modern-bert"));
+    assert_eq!(s.decision_type.as_deref(), Some("laya"));
+    assert_eq!(s.decision_max_head_tokens, Some(192));
+    assert_eq!(s.attention_causal, Some(false));
+    assert!(s.has_systemone_template);
+    assert!(
+        s.has_classifier_head,
+        "the head the rerank rule used to read"
+    );
+    assert_eq!(s.context_length, Some(8192));
+
+    let state = AppState::init_for_tests().await.unwrap();
+    let mut settings = Settings::default();
+    settings.aux_router.models_dir = aux_dir;
+    settings.aux_router.image = "localhost/lmgw-test-no-such-image:none".into();
+    store::save_settings(&state.db, &settings).await.unwrap();
+    state.reload_snapshot().await.unwrap();
+
+    let inspect = modelinfo::model_inspect(&state, rel, Some("aux"))
+        .await
+        .unwrap();
+    assert_eq!(inspect.serve_as, "aux");
+    assert_eq!(inspect.aux_kind.as_deref(), Some("decision"));
+
+    // Acceptance step 1 (§6.1): the planner branch of §3.4 on the real file.
+    let plan = modelinfo::local_model_plan(&state, rel, Some("aux"))
+        .await
+        .unwrap();
+    let params = &plan["params"];
+    assert_eq!(params["kind"], "decision", "{plan}");
+    assert_eq!(params["ctx_size"], 8192, "{plan}");
+    assert_eq!(params["ubatch_size"], 8192, "{plan}");
+    assert_eq!(params["batch_size"], 8192, "{plan}");
+    assert_eq!(params["backend"], "cpu", "{plan}");
+    assert!(params["threads"].is_null(), "the physical cores: {plan}");
+    assert!(params["pooling"].is_null(), "{plan}");
+    let warnings = plan["warnings"].to_string();
+    assert!(
+        !warnings.contains("rerank") && !warnings.contains("systemone"),
+        "{plan}"
+    );
+    eprintln!(
+        "Laya plan: kind {} ctx {} ubatch {} batch {} backend {} threads (unset) {} cores",
+        params["kind"],
+        params["ctx_size"],
+        params["ubatch_size"],
+        params["batch_size"],
+        params["backend"],
+        lmgw_core::host::cpu().physical_cores
+    );
 }

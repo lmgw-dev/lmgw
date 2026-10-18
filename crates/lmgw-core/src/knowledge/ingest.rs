@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::erased::Erased;
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::quickdoc::embed::refuse_if_held;
 use crate::quickdoc::query::TiktokenCounter;
@@ -83,20 +84,21 @@ pub(crate) async fn spawn(state: &SharedState, kb: &Kb) -> Result<Spawn, String>
 
 pub struct KbIngestExecutor;
 
-#[async_trait::async_trait]
 impl JobExecutor for KbIngestExecutor {
     fn kind(&self) -> JobKind {
         JobKind::KbIngest
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("kb_ingest input: {e}"))?;
-        let outcome = run(&ctx, input.kb_id).await?;
-        if matches!(outcome, JobOutcome::Done(_)) {
-            hand_on(ctx.state.clone(), input.kb_id, ctx.id);
-        }
-        Ok(outcome)
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("kb_ingest input: {e}"))?;
+            let outcome = run(&ctx, input.kb_id).await?;
+            if matches!(outcome, JobOutcome::Done(_)) {
+                hand_on(ctx.state.clone(), input.kb_id, ctx.id);
+            }
+            Ok(outcome)
+        })
     }
 }
 

@@ -3,8 +3,9 @@
 //! beside the tokens; a stream stopped before its answer on a fee-priced
 //! scope is unpriced — never the fee, never 0 — and lands in the remainder;
 //! `price_set` checks each unit's shape on the op and on the tool alike; the
-//! CSV carries the six quantity columns at its end; and `lmgw__usage` names
-//! the quantities its remainder holds.
+//! CSV carries the six quantity columns at its end; `lmgw__usage` names
+//! the quantities its remainder holds; and a System One answer is priced per
+//! input token from a manual row (decision-models design §2.6).
 
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::common::{serve, Gw};
 use crate::e2e_proxy::setup_kind;
 use crate::stream_usage::row_after;
+use crate::support::decision_world::OPENROUTER_ANSWER;
 use crate::support::realtime_fakes::{
     chat_fake, events_until, gateway, send, text_session, user_text, Turn,
 };
@@ -595,4 +597,68 @@ async fn a_log_row_says_whether_the_remainder_counts_it() {
         rows.iter().filter(|r| r.5).count(),
         "the rollup counts the same rows: {series}"
     );
+}
+
+/// A decision on a cloud model is priced like any token row (decision-models
+/// design §2.6, §4.4): OpenRouter's documented answer, 275 tokens in and 20
+/// out, under Jev's price set by hand — $0.042 per Mtok in, 0 out. The input
+/// tokens are the row's prompt tokens and carry the whole cost; the output
+/// tokens are recorded and cost nothing; OpenRouter's own `usage.cost` is
+/// relayed to the client and never read.
+#[tokio::test]
+async fn a_decision_answer_is_priced_per_input_token_from_a_manual_row() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/systemone"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(OPENROUTER_ANSWER, "application/json"),
+        )
+        .mount(&mock)
+        .await;
+    let (state, gw) = setup_kind(
+        &format!("{}/api/v1", mock.uri()),
+        Protocol::Openai,
+        UpstreamKind::Generic,
+    )
+    .await;
+    let (status, v) = op(
+        &gw,
+        "price_set",
+        json!({"scope_key": "my-model", "price_in": 0.042, "price_out": 0.0}),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+
+    let resp = gw
+        .client()
+        .post(format!("{gw}/v1/systemone"))
+        .json(
+            &json!({"model": "my-model", "state": "I was charged twice.",
+                      "questions": {"refund": {"type": "noul", "instructions": "Refund?"}}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), OPENROUTER_ANSWER);
+
+    let row = row_after(&state, 0).await;
+    assert_eq!(
+        (row.ingress_proto.as_str(), row.class.as_deref()),
+        ("systemone", Some("aux")),
+        "{row:?}"
+    );
+    assert_eq!(
+        (row.prompt_tokens, row.completion_tokens),
+        (Some(275), Some(20)),
+        "{row:?}"
+    );
+    // The pricing's own arithmetic: tokens × $/Mtok is micro-dollars, rounded.
+    let in_micro = (275.0_f64 * 0.042).round() as i64;
+    assert_eq!(
+        (row.cost_micro, row.cost_in_micro, row.cost_out_micro),
+        (Some(in_micro), Some(in_micro), Some(0)),
+        "{row:?}"
+    );
+    assert_eq!(row.price_source.as_deref(), Some("manual"), "{row:?}");
 }

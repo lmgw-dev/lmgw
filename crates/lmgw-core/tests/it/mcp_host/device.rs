@@ -61,10 +61,10 @@ pub(crate) async fn refused(addr: &str, headers: &[(&str, &str)]) -> (u16, Value
     }
 }
 
-/// A link opened with `key` that nothing reads: a device that went silent.
-pub(crate) async fn silent(addr: &str, key: &str) -> super::Ws {
-    let auth = format!("Bearer {key}");
-    open(addr, &[("authorization", &auth)])
+/// A link opened as device `d` that nothing reads: a device that went
+/// silent.
+pub(crate) async fn silent(d: &crate::support::device_pair::Paired) -> super::Ws {
+    open(&d.addr, &[])
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"))
 }
@@ -96,9 +96,13 @@ async fn open(addr: &str, headers: &[(&str, &str)]) -> Result<super::Ws, (u16, V
 
 impl FakeDevice {
     /// Connect with `key`, offering `tools`.
-    pub(crate) async fn connect(addr: &str, key: &str, tools: Vec<Value>) -> Self {
-        let auth = format!("Bearer {key}");
-        let ws = open(addr, &[("authorization", &auth)])
+    pub(crate) async fn connect(
+        d: &crate::support::device_pair::Paired,
+        tools: Vec<Value>,
+    ) -> Self {
+        // Over the device listener with the device's certificate
+        // (`support::device_pair`): no device presents a key.
+        let ws = open(&d.addr, &[])
             .await
             .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
         Self::run(ws, tools)

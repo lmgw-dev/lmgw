@@ -31,6 +31,13 @@ pub enum ClientProto {
     /// that thread's model turns (`telemetry::ADMIN_PROTO`), and charged to
     /// the same internal identity. OpenAI's shapes, like `Chat`.
     AdminChat,
+    /// `POST /v1/systemone` (decision-models design §2.6): its own
+    /// `request_logs` label, so decisions are told from `openai` traffic, as
+    /// [`Self::Realtime`]'s are. It never parses or serializes a chat body:
+    /// the route relays the System One wire, and answers lmgw's own refusals
+    /// in llama.cpp's error shape (`proxy::systemone`). The shared `/v1`
+    /// layers' refusals, which reach it before its handler, are OpenAI's.
+    SystemOne,
 }
 
 impl ClientProto {
@@ -41,13 +48,14 @@ impl ClientProto {
             Self::Realtime => "realtime",
             Self::Chat => "chat",
             Self::AdminChat => crate::telemetry::ADMIN_PROTO,
+            Self::SystemOne => "systemone",
         }
     }
 
     /// Non-streaming response body for a completed request.
     pub fn serialize_completion(&self, alias: &str, c: &Completion) -> serde_json::Value {
         match self {
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => {
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
                 openai::serialize_completion(alias, c)
             }
             Self::AnthropicMessages => anthropic::serialize_completion(alias, c),
@@ -57,7 +65,9 @@ impl ClientProto {
     /// Error body in the client's protocol shape (§14).
     pub fn serialize_error(&self, e: &GatewayError) -> serde_json::Value {
         match self {
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => e.to_openai_json(),
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
+                e.to_openai_json()
+            }
             Self::AnthropicMessages => e.to_anthropic_json(),
         }
     }
@@ -72,7 +82,7 @@ impl ClientProto {
         include_usage: bool,
     ) -> Box<dyn ClientStreamEncoder> {
         match self {
-            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat => {
+            Self::OpenaiChat | Self::Realtime | Self::Chat | Self::AdminChat | Self::SystemOne => {
                 Box::new(openai::OpenaiStreamEncoder::new(alias, include_usage))
             }
             Self::AnthropicMessages => Box::new(anthropic::AnthropicStreamEncoder::new(alias)),

@@ -1,4 +1,5 @@
-//! The layout the Audio and Image labs share (UX plan Phase 5 task 3).
+//! The layout the Audio, Image and Decision labs share (UX plan Phase 5
+//! task 3).
 //!
 //! One head line — the model, the task, the model's state — then the form
 //! column beside the run history, with the lab's reference panel folded to a
@@ -10,10 +11,17 @@
 //! run of the session, newest first, with the count and a Clear; the run in
 //! flight leads it. Below a 760px body the two columns become one, switched
 //! by a "Form | Results (N)" seg.
+//!
+//! A lab on the lab store (labs-store design §2.1) passes `kept`: its results
+//! are the kept history, the head says so with the runs and the size, Clear
+//! deletes the lab's history on the server, and the empty text says runs are
+//! kept until deleted. Its filter and Export menu come in as `results_tools`.
 
 use leptos::html;
 use leptos::prelude::*;
+use lmgw_api_types::lab_store::LabUsage;
 
+use super::lab_history::{clear_confirm, kept_note, kept_title};
 use crate::widgets::{popover, ConfirmButton, Popover, Side, SplitPane};
 
 /// The main pane's floor beside the reference panel: a 1600px pane less the
@@ -29,6 +37,15 @@ pub(super) enum Check {
     Needs(String),
     /// Something that is filled in does not parse.
     Invalid(String),
+}
+
+/// Does a click on Stop stop? Not the second click of a double-click: Stop
+/// takes the run button's place under the pointer, so a double-clicked run
+/// button would stop its own run before it started. A click's `detail` is
+/// its count in a quick series (0 from the keyboard), so no timing of our
+/// own is needed.
+pub(super) fn stop_counts(detail: i32) -> bool {
+    detail < 2
 }
 
 /// Which column a one-column (narrow) lab shows.
@@ -321,8 +338,19 @@ pub(super) fn LabFrame(
     on_stop: Callback<()>,
     on_clear: Callback<()>,
     view: RwSignal<LabView>,
+    /// The lab keeps its runs on the server (the lab store): its usage, `None`
+    /// until it was read. `results_n` is then the kept groups, the run in
+    /// flight among them.
+    #[prop(optional, into)]
+    kept: Option<Signal<Option<LabUsage>>>,
+    /// The results head's own controls before Clear (a kept lab's filter and
+    /// Export menu).
+    #[prop(optional, into)]
+    results_tools: Option<ViewFn>,
 ) -> impl IntoView {
-    let shown_n = move || results_n.get() + usize::from(running.get());
+    let is_kept = kept.is_some();
+    let usage = move || kept.and_then(|k| k.get());
+    let shown_n = move || results_n.get() + usize::from(running.get() && !is_kept);
     let note = move || match check.get() {
         Check::Ready(s) => ("action-note", s),
         Check::Needs(s) => ("action-note needs", s),
@@ -388,7 +416,14 @@ pub(super) fn LabFrame(
                                                 <i class="dot"></i>
                                                 "running…"
                                             </span>
-                                            <button class="btn danger" on:click=move |_| on_stop.run(())>
+                                            <button
+                                                class="btn danger"
+                                                on:click=move |ev| {
+                                                    if stop_counts(ev.detail()) {
+                                                        on_stop.run(());
+                                                    }
+                                                }
+                                            >
                                                 "Stop"
                                             </button>
                                         }
@@ -412,27 +447,80 @@ pub(super) fn LabFrame(
                             <div class="results-head">
                                 <span class="results-title">"Results"</span>
                                 <span class="count">{shown_n}</span>
-                                <span class="results-note dim">"newest first · this session only"</span>
-                                <span class="spacer"></span>
+                                {if is_kept {
+                                    view! {
+                                        <span
+                                            class="results-note dim"
+                                            title=move || kept_title(usage().as_ref())
+                                        >
+                                            {move || kept_note(usage().as_ref())}
+                                        </span>
+                                    }
+                                        .into_any()
+                                } else {
+                                    view! {
+                                        <span class="results-note dim">
+                                            "newest first · this session only"
+                                        </span>
+                                    }
+                                        .into_any()
+                                }}
+                                <span class="results-tools">
+                                {results_tools.map(|t| t.run())}
                                 <Show when=any_held>
-                                    // The history is the only copy of a result
-                                    // that was not downloaded: nothing on the
-                                    // server keeps it.
-                                    <ConfirmButton
-                                        label="Clear"
-                                        confirm=move || format!("Drop all {}?", results_n.get())
-                                        class="btn ghost sm"
-                                        title="Drop every finished result of this session"
-                                        on_confirm=on_clear
-                                    />
+                                    {if is_kept {
+                                        // The server's copy goes: the confirm
+                                        // names the runs and the files.
+                                        view! {
+                                            <ConfirmButton
+                                                label="Clear"
+                                                confirm=move || {
+                                                    clear_confirm(usage().as_ref(), results_n.get())
+                                                }
+                                                class="btn ghost sm"
+                                                title="Delete this lab's whole kept history on the server"
+                                                on_confirm=on_clear
+                                            />
+                                        }
+                                            .into_any()
+                                    } else {
+                                        // The history is the only copy of a
+                                        // result that was not downloaded:
+                                        // nothing on the server keeps it.
+                                        view! {
+                                            <ConfirmButton
+                                                label="Clear"
+                                                confirm=move || format!("Drop all {}?", results_n.get())
+                                                class="btn ghost sm"
+                                                title="Drop every finished result of this session"
+                                                on_confirm=on_clear
+                                            />
+                                        }
+                                            .into_any()
+                                    }}
                                 </Show>
+                                </span>
                             </div>
                             <div class="results-list">
                                 <Show when=move || shown_n() == 0>
-                                    <div class="empty">
-                                        "Every run of this session lands here, newest first. Nothing "
-                                        "is kept on the server — download what you want to keep."
-                                    </div>
+                                    {if is_kept {
+                                        view! {
+                                            <div class="empty">
+                                                "Every ask lands here, newest first, and is kept on "
+                                                "the server until you delete it: one group from its "
+                                                "card, or all of them with Clear."
+                                            </div>
+                                        }
+                                            .into_any()
+                                    } else {
+                                        view! {
+                                            <div class="empty">
+                                                "Every run of this session lands here, newest first. Nothing "
+                                                "is kept on the server — download what you want to keep."
+                                            </div>
+                                        }
+                                            .into_any()
+                                    }}
                                 </Show>
                                 {results.run()}
                             </div>
@@ -441,5 +529,18 @@ pub(super) fn LabFrame(
                 </div>
             </SplitPane>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_ignores_the_second_click_of_a_double_click() {
+        assert!(stop_counts(0), "the keyboard");
+        assert!(stop_counts(1));
+        assert!(!stop_counts(2));
+        assert!(!stop_counts(3));
     }
 }

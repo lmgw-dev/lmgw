@@ -1,38 +1,21 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
-use lmgw_api_types::{AgentDetail, AgentField, AgentImportReport};
-use serde_json::{json, Value};
-use wasm_bindgen::JsCast;
+use lmgw_api_types::{
+    AgentDeleted, AgentDetail, AgentDuplicated, AgentField, AgentImportReport, AgentReset,
+    AgentTokenIssued, AgentTokenRead,
+};
+use serde_json::json;
 
 use super::*;
 use crate::pages::agents::short_ts;
+use crate::pages::docs::download;
 use crate::widgets::schema_form::{access_of, label_of, RELABEL_NOTE, RELABEL_SUMMARY};
 use crate::widgets::{use_toasts, Explain, MenuItem, Modal, ModalFooter, RowMenu};
 
 // ---------------------------------------------------------------------------
 // Definition
 // ---------------------------------------------------------------------------
-
-/// Start a download the way a click on `<a download>` does. The export is an
-/// attachment on the gateway's own origin, so the session rides along; the
-/// router leaves a `download` link alone.
-fn download(href: &str, filename: &str) {
-    let doc = document();
-    let Ok(el) = doc.create_element("a") else {
-        return;
-    };
-    let _ = el.set_attribute("href", href);
-    let _ = el.set_attribute("download", filename);
-    let Ok(a) = el.dyn_into::<web_sys::HtmlElement>() else {
-        return;
-    };
-    if let Some(body) = doc.body() {
-        let _ = body.append_child(&a);
-        a.click();
-        let _ = body.remove_child(&a);
-    }
-}
 
 #[component]
 pub(super) fn DefinitionTab(
@@ -111,20 +94,19 @@ pub(super) fn DefinitionTab(
     // and no longer.
     let copy_token = move || {
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentTokenRead, _>(
                 "/api/op/agent_token_get",
                 &json!({ "id": id.get_value() }),
             )
             .await;
             match res {
                 Ok(v) => {
-                    let token = v.get("token").and_then(Value::as_str).unwrap_or_default();
-                    let ok = v
-                        .get("scope_note")
-                        .and_then(Value::as_str)
-                        .map(|s| format!("token copied — {s}"))
-                        .unwrap_or_else(|| "token copied".into());
-                    crate::widgets::copy_secret(token, toasts, ok);
+                    let ok = if v.scope_note.is_empty() {
+                        "token copied".to_string()
+                    } else {
+                        format!("token copied — {}", v.scope_note)
+                    };
+                    crate::widgets::copy_secret(&v.token, toasts, ok);
                 }
                 Err(e) => toasts.err(e.to_string()),
             }
@@ -141,18 +123,14 @@ pub(super) fn DefinitionTab(
     let rotate = move |_| {
         rotate_open.set(false);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentTokenIssued, _>(
                 "/api/op/agent_token_rotate",
                 &json!({ "id": id.get_value() }),
             )
             .await;
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("token rotated")
-                        .to_string());
+                    toasts.ok(v.message);
                     reload.try_run(());
                 }
                 Err(e) => toasts.err(e.to_string()),
@@ -200,7 +178,7 @@ pub(super) fn DefinitionTab(
         }
         busy.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentReset, _>(
                 "/api/op/agent_reset",
                 &json!({ "id": id.get_value() }),
             )
@@ -208,11 +186,7 @@ pub(super) fn DefinitionTab(
             busy.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("reset")
-                        .to_string());
+                    toasts.ok(v.message);
                     reload.try_run(());
                 }
                 Err(e) => toasts.err(e.to_string()),
@@ -222,18 +196,14 @@ pub(super) fn DefinitionTab(
 
     let delete = move || {
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentDeleted, _>(
                 "/api/op/agent_delete",
                 &json!({ "id": id.get_value() }),
             )
             .await;
             match res {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("deleted")
-                        .to_string());
+                Ok(deleted) => {
+                    toasts.ok(deleted.message);
                     del_open.set(false);
                     if let Some(go) = navigate.try_get_value() {
                         go("/agents", Default::default());
@@ -512,7 +482,7 @@ fn DuplicateModal(open: RwSignal<bool>, id: String) -> impl IntoView {
         error.set(None);
         spawn_local(async move {
             let target = new_id.get_untracked().trim().to_string();
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<AgentDuplicated, _>(
                 "/api/op/agent_duplicate",
                 &json!({ "id": source.get_value(), "new_id": target }),
             )
@@ -521,11 +491,7 @@ fn DuplicateModal(open: RwSignal<bool>, id: String) -> impl IntoView {
             match res {
                 Ok(v) => {
                     open.set(false);
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("duplicated")
-                        .to_string());
+                    toasts.ok(v.message);
                     if let Some(go) = navigate.try_get_value() {
                         go(&format!("/agents/{target}"), Default::default());
                     }

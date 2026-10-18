@@ -98,7 +98,7 @@ async fn disable_action_never_blocks_on_an_unguarded_unified_pool() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
     let m = get_by_id(&state, "unguarded-unified").await;
     assert!(!m.enabled);
     // The offending settings are untouched — only `enabled` flipped.
@@ -134,7 +134,7 @@ async fn an_update_that_disables_never_blocks_on_an_unguarded_unified_pool() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
     let m = get_by_id(&state, "editor-disabled-kvu").await;
     assert!(!m.enabled);
 }
@@ -165,7 +165,7 @@ async fn disable_action_never_blocks_on_a_no_op_split() {
     )
     .await
     .unwrap();
-    assert_eq!(out["ok"], true, "{out}");
+    assert!(out.ok, "{out:?}");
     assert!(!get_by_id(&state, "no-op-split").await.enabled);
 }
 

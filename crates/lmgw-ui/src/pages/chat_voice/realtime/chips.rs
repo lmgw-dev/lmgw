@@ -18,11 +18,12 @@
 
 use leptos::html;
 use leptos::prelude::*;
-use serde_json::{json, Value};
+use lmgw_api_types::chat_threads::SettingsAck;
+use serde_json::json;
 
 use super::super::devices::EchoChip;
 use super::super::state::{remote_note, under_block, Note, NoteKind};
-use super::super::{apply_answer, StageResolved, ThreadVoice};
+use super::super::{apply_answer, AudioInputResolved, StageResolved, ThreadVoice};
 use super::Realtime;
 use crate::widgets::voice_picker::{use_voices, VoiceInput};
 use crate::widgets::{ModelPicker, Popover};
@@ -131,7 +132,7 @@ fn InputChip(rt: Realtime) -> impl IntoView {
         let resolved = rt.parts.current.with(|c| {
             c.as_ref()
                 .and_then(|t| t.voice_resolved.as_ref())
-                .and_then(|r| r.audio_input.clone())
+                .and_then(|r| r.audio_input.as_ref().map(AudioInputResolved::from))
         });
         let said = match (resolved, rt.said_input.get()) {
             (Some(mut a), Some((path, why))) => {
@@ -321,7 +322,7 @@ fn VoicePicker(rt: Realtime, open: RwSignal<bool>) -> impl IntoView {
         let status = rt.status;
         let refresh = rt.parts.refresh;
         leptos::task::spawn_local(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<SettingsAck, _>(
                 format!("/chat/api/threads/{id}/settings"),
                 &json!({ "voice": voice }),
             )

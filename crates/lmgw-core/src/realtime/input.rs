@@ -92,10 +92,9 @@ fn transcription_model(s: &Session) -> Option<&str> {
 }
 
 impl Core {
-    /// `input_audio_buffer.append`, which arrived at `arrived`: the
-    /// detector places its samples on the wall clock by that, to judge them
-    /// against the playing window (§6.4). Audio that does not decode is an
-    /// `error`, and the session goes on.
+    /// `input_audio_buffer.append`, which arrived at `arrived`: its audio,
+    /// decoded, enters as [`Self::on_audio`] captured then. Audio that does
+    /// not decode is an `error`, and the session goes on.
     pub(super) async fn input_append(
         &mut self,
         event_id: Option<&str>,
@@ -112,9 +111,17 @@ impl Core {
                 )
             }
         };
+        self.on_audio(pcm, arrived).await;
+    }
+
+    /// Input audio, PCM16 at 24 kHz, captured at `captured` — an append's
+    /// arrival, or a call's frame placed on the wall clock (calls design
+    /// §4.3): the detector places its samples by that, to judge them
+    /// against the playing window (§6.4).
+    pub(super) async fn on_audio(&mut self, pcm: Vec<i16>, captured: tokio::time::Instant) {
         self.note_margin();
         let listen = self.listen();
-        let appended = self.input.append(&pcm, arrived, &listen).await;
+        let appended = self.input.append(&pcm, captured, &listen).await;
         drop(pcm);
         self.on_appended(appended, None, None);
     }

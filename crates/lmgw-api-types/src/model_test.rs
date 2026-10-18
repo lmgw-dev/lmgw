@@ -60,16 +60,53 @@ pub struct ModelTestPassed {
     /// a chat model's.
     #[cfg_attr(feature = "schema", schemars(extend("enum" = ["chat", "aux"])))]
     pub class: String,
-    /// What was sent: `generate` (one token), `embed` or `rerank`.
+    /// What was sent: `generate` (one token), `embed`, `rerank` or `decide`
+    /// (one System One `choice` question on `/v1/systemone`).
     pub probe: String,
     /// How long the load and the probe took, in milliseconds.
     pub latency_ms: u64,
     /// For `embed`: the embedding's length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub dimensions: Option<usize>,
     /// For `rerank`: how many documents came back scored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub scored: Option<usize>,
+    /// For `decide`: the input tokens the server reported for the question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub input_tokens: Option<u64>,
+    /// For `decide`: the model's answer to the probe's `choice` question, as
+    /// it gave it. The test does not judge the choice, only that the route
+    /// answered with one of the options and probabilities that sum to 1
+    /// (decision-models design §3.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
+    pub answer: Option<Box<DecideAnswer>>,
+}
+
+/// The probe's `choice` answer, with the options in the order the model
+/// gave them. A JSON object would lose that order on the way through an op
+/// (the op's JSON is a sorted map), so the options are a list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DecideAnswer {
+    /// The most probable option.
+    pub choice: String,
+    /// Every option with its probability, in the order llama.cpp answered
+    /// them; they sum to 1.
+    pub probabilities: Vec<OptionProbability>,
+    /// How certain the model is, derived from the probabilities.
+    pub confidence: f64,
+}
+
+/// One option of a [`DecideAnswer`] and its probability.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct OptionProbability {
+    pub option: String,
+    pub probability: f64,
 }
 
 /// A chat model that loaded and answered, with the comparison of its running
@@ -91,6 +128,7 @@ pub struct ChatTestPassed {
     pub disagreements: Vec<String>,
     /// Why `props` could not be read, when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub note: Option<String>,
 }
 
@@ -99,8 +137,8 @@ pub struct ChatTestPassed {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StaticCaps {
-    pub reasoning: Option<Value>,
-    pub tool_calls: Option<Value>,
+    pub reasoning: Option<crate::capabilities::ReasoningCaps>,
+    pub tool_calls: Option<crate::capabilities::ToolCallCaps>,
     pub input_modalities: Option<Vec<String>>,
 }
 
@@ -120,11 +158,13 @@ pub struct ModelTestFailed {
     pub class: String,
     /// For an image model: the name clients call it by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub public_name: Option<String>,
     /// What was sent: `generate`, `embed`, `rerank` or `image_generation`.
     pub probe: String,
     /// For an image model: the route the probe went to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub endpoint: Option<String>,
     pub latency_ms: u64,
     /// What went wrong.
@@ -209,5 +249,6 @@ pub struct RungTest {
     pub ok: bool,
     /// Why the rung failed, when it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub error: Option<String>,
 }

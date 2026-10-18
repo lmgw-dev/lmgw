@@ -48,6 +48,11 @@ pub struct LlamaEntry {
     /// The row as it was **started**, like [`GateFacts`](crate::gate::facts::GateFacts):
     /// an edit since does not change the container that runs.
     pub ubatch_advisory: Option<String>,
+    /// For a decision row, whether its server has `POST /v1/systemone`, as
+    /// its `GET /v1/models` said (decision-models design §3.6,
+    /// `decision_route.rs`); a warning of the entry when it has not or could
+    /// not be read. `None` for every other row.
+    pub decision_route: Option<super::DecisionRoute>,
 }
 
 impl LlamaEntry {

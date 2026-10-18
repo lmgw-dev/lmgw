@@ -23,7 +23,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use futures::FutureExt;
 use lmgw_api_types::bench::{BuildIdentity, LoadResult, Phase};
 use lmgw_api_types::bench_ops::{BenchArgs, BenchJobDetail, BenchStatus};
@@ -39,6 +38,7 @@ use super::run::{BenchSink, Progress, Record};
 use super::state::{CurrentRun, OnCard, Stranded};
 use super::{run_suite, Bench, BenchTarget, Sampler, SuiteEnd};
 use crate::agent::Cancel;
+use crate::erased::Erased;
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress};
 use crate::runtime::registry::PortRetry;
 use crate::state::SharedState;
@@ -54,29 +54,30 @@ pub struct JobInput {
 /// The `benchmark` job kind.
 pub struct BenchmarkExecutor;
 
-#[async_trait]
 impl JobExecutor for BenchmarkExecutor {
     fn kind(&self) -> JobKind {
         JobKind::Benchmark
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: JobInput =
-            serde_json::from_value(input).map_err(|e| format!("benchmark input: {e}"))?;
-        let ended = run(&ctx, &input).await;
-        let value = json!({
-            "run_id": input.run_id,
-            "status": ended.status.as_str(),
-            "status_reason": ended.reason,
-            "error": ended.error,
-        });
-        Ok(match ended.status {
-            BenchStatus::Done => JobOutcome::Done(value),
-            BenchStatus::Canceled | BenchStatus::Aborted => JobOutcome::CanceledWith(value),
-            _ => JobOutcome::FailedWith {
-                error: ended.error.unwrap_or_else(|| "the run failed".into()),
-                value,
-            },
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: JobInput =
+                serde_json::from_value(input).map_err(|e| format!("benchmark input: {e}"))?;
+            let ended = run(&ctx, &input).await;
+            let value = json!({
+                "run_id": input.run_id,
+                "status": ended.status.as_str(),
+                "status_reason": ended.reason,
+                "error": ended.error,
+            });
+            Ok(match ended.status {
+                BenchStatus::Done => JobOutcome::Done(value),
+                BenchStatus::Canceled | BenchStatus::Aborted => JobOutcome::CanceledWith(value),
+                _ => JobOutcome::FailedWith {
+                    error: ended.error.unwrap_or_else(|| "the run failed".into()),
+                    value,
+                },
+            })
         })
     }
 }
@@ -123,21 +124,24 @@ struct Sink<'a> {
     run_id: i64,
 }
 
-#[async_trait]
 impl BenchSink for Sink<'_> {
-    async fn progress(&self, p: Progress) {
-        self.ctx
-            .progress(JobProgress {
-                done: p.done,
-                total: (p.total > 0).then_some(p.total),
-                stage: p.stage,
-                detail: self.detail.clone(),
-            })
-            .await;
+    fn progress<'a>(&'a self, p: Progress) -> Erased<'a, ()> {
+        Box::pin(async move {
+            self.ctx
+                .progress(JobProgress {
+                    done: p.done,
+                    total: (p.total > 0).then_some(p.total),
+                    stage: p.stage,
+                    detail: self.detail.clone(),
+                })
+                .await;
+        })
     }
 
-    async fn phase_done(&self, _phase: Phase, record: &Record) {
-        save(&self.ctx.state, self.run_id, record).await;
+    fn phase_done<'a>(&'a self, _phase: Phase, record: &'a Record) -> Erased<'a, ()> {
+        Box::pin(async move {
+            save(&self.ctx.state, self.run_id, record).await;
+        })
     }
 }
 

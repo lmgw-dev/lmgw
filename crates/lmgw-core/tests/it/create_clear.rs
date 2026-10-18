@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry};
 use lmgw_core::state::{AppState, SharedState};
 use lmgw_core::{ops, store};
@@ -25,19 +26,24 @@ const SD_HELP: &str = include_str!("../fixtures/sdcpp/sd-server-help-c678dfe.txt
 /// Answers the `--help` runs a save validates flags against; nothing starts.
 struct HelpOnly;
 
-#[async_trait::async_trait]
 impl CommandRunner for HelpOnly {
-    async fn run(&self, _program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        let help = args.iter().any(|a| a == "--help");
-        let sd = args.iter().any(|a| a == "/sd-server");
-        Ok(CmdOutput {
-            status: 0,
-            stdout: match (help, sd) {
-                (true, true) => SD_HELP.into(),
-                (true, false) => LLAMA_HELP.into(),
-                _ => String::new(),
-            },
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            let help = args.iter().any(|a| a == "--help");
+            let sd = args.iter().any(|a| a == "/sd-server");
+            Ok(CmdOutput {
+                status: 0,
+                stdout: match (help, sd) {
+                    (true, true) => SD_HELP.into(),
+                    (true, false) => LLAMA_HELP.into(),
+                    _ => String::new(),
+                },
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -77,7 +83,7 @@ async fn a_cleared_extra_run_args_inherits_on_create_for_chat_aux_and_image() {
         &state,
         ops::patch_from_args(args(json!({
             "action": "create", "model_id": "chat-cleared", "gguf_path": "chat.gguf",
-            "extra_run_args": "--cpus 2", "clear": "extra_run_args",
+            "extra_run_args": ["--cpus", "2"], "clear": "extra_run_args",
         })))
         .unwrap(),
     )
@@ -87,7 +93,7 @@ async fn a_cleared_extra_run_args_inherits_on_create_for_chat_aux_and_image() {
         &state,
         ops::patch_from_args(args(json!({
             "action": "create", "model_id": "chat-kept", "gguf_path": "chat.gguf",
-            "extra_run_args": "--cpus 2",
+            "extra_run_args": ["--cpus", "2"],
         })))
         .unwrap(),
     )
@@ -116,10 +122,10 @@ async fn a_cleared_extra_run_args_inherits_on_create_for_chat_aux_and_image() {
     .await
     .unwrap();
 
-    // The image editor's: an empty text *and* the name.
+    // The image editor's: an empty list *and* the name.
     for (id, era, clear) in [
-        ("img-cleared", "", "extra_run_args"),
-        ("img-kept", "--cpus 2", ""),
+        ("img-cleared", json!([]), "extra_run_args"),
+        ("img-kept", json!(["--cpus", "2"]), ""),
     ] {
         ops::image_model_set(
             &state,
@@ -228,8 +234,7 @@ async fn the_audio_editor_s_blank_fields_inherit_on_create() {
 /// `clear` beside it, on create and on update, for every class: an empty
 /// list is the class's run args (ASR eval 2, 2026-10-02 — twelve audio rows
 /// held `[]` and their containers had neither the GPU nor `label=disable`).
-/// Blank text is a flat tool's "not supplied", and leaves an override as it
-/// is. The store keeps the rule for any other writer.
+/// The store keeps the rule for any other writer.
 #[tokio::test]
 async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
     let (state, _dir) = state_with_dirs().await;
@@ -240,7 +245,7 @@ async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
         &state,
         ops::patch_from_args(args(json!({
             "action": "create", "model_id": "chat", "gguf_path": "chat.gguf",
-            "extra_run_args": "\n  \n",
+            "extra_run_args": ["", "  "],
         })))
         .unwrap(),
     )
@@ -270,7 +275,7 @@ async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
         &state,
         ops::patch_from_args(args(json!({
             "action": "create", "model_id": "tts", "family": "pocket_tts",
-            "path": "tts", "task": "tts", "extra_run_args": [],
+            "path": "tts", "task": "tts", "extra_run_args": ["", "  "],
         })))
         .unwrap(),
     )
@@ -402,30 +407,17 @@ async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
                 .clone(),
         ]
     };
-    set_all(json!("--cpus 2"), json!(["--cpus", "2"])).await;
+    set_all(json!(["--cpus", "2"]), json!(["--cpus", "2"])).await;
     assert_eq!(
         overrides(),
         [two.clone(), two.clone(), two.clone(), two.clone()]
     );
-    // Blank text on aux and image: not supplied, the override stays.
-    for (id, set) in [(aux_id, "aux_model_set"), (img_id, "image_model_set")] {
-        let patch = args(json!({"action": "update", "id": id, "extra_run_args": ""}));
-        match set {
-            "aux_model_set" => ops::aux_model_set(&state, ops::patch_from_args(patch).unwrap())
-                .await
-                .unwrap(),
-            _ => ops::image_model_set(&state, ops::patch_from_args(patch).unwrap())
-                .await
-                .unwrap(),
-        };
-    }
-    assert_eq!(overrides()[1], two, "aux: blank text leaves it");
-    assert_eq!(overrides()[2], two, "image: blank text leaves it");
     // An empty list on update: the class's args again.
-    set_all(json!("\n"), json!([])).await;
-    let [_, aux, img, tts] = overrides();
-    assert_eq!((aux, img, tts), (None, None, None));
+    set_all(json!([]), json!([])).await;
+    let [chat, aux, img, tts] = overrides();
+    assert_eq!((chat, aux, img, tts), (None, None, None, None));
     for (table, id) in [
+        ("local_models", "chat"),
         ("aux_models", "embed"),
         ("image_models", "img"),
         ("audio_models", "tts"),
@@ -436,10 +428,6 @@ async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
             "{table} update: NULL, not []"
         );
     }
-    // Chat: blank text is "not supplied" there (the field is text), so the
-    // override stays until a clear.
-    assert_eq!(overrides()[0], two);
-
     // Any other writer: the store keeps the rule itself.
     let row = store::get_audio_model(&state.db, tts_id)
         .await
@@ -480,11 +468,16 @@ async fn an_empty_run_args_override_is_stored_as_inherit_for_every_class() {
 #[derive(Default)]
 struct HelpRecorder(std::sync::Mutex<Vec<Vec<String>>>);
 
-#[async_trait::async_trait]
 impl CommandRunner for HelpRecorder {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        self.0.lock().unwrap().push(args.to_vec());
-        HelpOnly.run(program, args).await
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(args.to_vec());
+            HelpOnly.run(program, args).await
+        })
     }
 }
 
@@ -532,4 +525,165 @@ async fn a_create_s_flag_check_runs_with_the_class_args_an_empty_override_inheri
             .any(|a| a.iter().any(|x| x == "--aux-class-flag")),
         "no --help run carried the class's flag: {helps:?}"
     );
+}
+
+/// `extra_run_args` is a list of strings and nothing else, for all five
+/// classes: the old text form is refused by the patch itself, and an entry
+/// that holds a flag and its value (`--cpus 2`) is refused with the way to
+/// split it.
+#[tokio::test]
+async fn run_args_text_and_joined_entries_are_refused_for_every_class() {
+    let (state, _dir) = state_with_dirs().await;
+    let text = json!("--cpus 2");
+    let bodies = [
+        json!({"action": "create", "model_id": "c", "gguf_path": "chat.gguf"}),
+        json!({"action": "create", "model_id": "a", "gguf_path": "embed.gguf", "kind": "embed"}),
+        json!({"action": "create", "model_id": "i", "files": {"diffusion_model": "diffusion.gguf"}}),
+        json!({"action": "create", "model_id": "t", "family": "pocket_tts", "path": "tts", "task": "tts"}),
+        json!({"action": "create", "name": "m", "transport": "stdio", "command": "sleep"}),
+    ];
+    let with = |i: usize, v: Value| {
+        let mut b = bodies[i].as_object().unwrap().clone();
+        b.insert("extra_run_args".into(), v);
+        args(Value::Object(b))
+    };
+    // The text form never gets past the patch.
+    assert!(ops::patch_from_args::<ops::LocalModelPatch>(with(0, text.clone())).is_err());
+    assert!(ops::patch_from_args::<ops::AuxModelPatch>(with(1, text.clone())).is_err());
+    assert!(ops::patch_from_args::<ops::ImageModelPatch>(with(2, text.clone())).is_err());
+    assert!(ops::patch_from_args::<ops::AudioPatch>(with(3, text.clone())).is_err());
+    assert!(ops::patch_from_args::<ops::McpServerPatch>(with(4, text)).is_err());
+
+    // A flag and its value in one entry: refused, saying how to split it.
+    let joined = json!(["--cpus 2"]);
+    let split = |e: String| {
+        assert!(
+            e.contains("separate entries") && e.contains("'--cpus'"),
+            "{e}"
+        );
+    };
+    split(
+        ops::local_model_set(
+            &state,
+            ops::patch_from_args(with(0, joined.clone())).unwrap(),
+        )
+        .await
+        .unwrap_err(),
+    );
+    split(
+        ops::aux_model_set(
+            &state,
+            ops::patch_from_args(with(1, joined.clone())).unwrap(),
+        )
+        .await
+        .unwrap_err(),
+    );
+    split(
+        ops::image_model_set(
+            &state,
+            ops::patch_from_args(with(2, joined.clone())).unwrap(),
+        )
+        .await
+        .unwrap_err(),
+    );
+    split(
+        ops::audio_model_set(
+            &state,
+            ops::patch_from_args(with(3, joined.clone())).unwrap(),
+        )
+        .await
+        .unwrap_err(),
+    );
+    split(
+        ops::mcp_server_set(
+            &state,
+            ops::patch_from_args(with(4, joined)).unwrap(),
+            ops::RowWriter::Tool,
+        )
+        .await
+        .unwrap_err(),
+    );
+    // `--key=value` is one argument and fine.
+    ops::local_model_set(
+        &state,
+        ops::patch_from_args(with(0, json!(["--device=nvidia.com/gpu=all"]))).unwrap(),
+    )
+    .await
+    .unwrap();
+}
+
+/// An update that does not mention `extra_run_args` leaves an existing override
+/// alone, for the four model classes.
+#[tokio::test]
+async fn an_absent_run_args_list_leaves_the_override_alone_on_update() {
+    let (state, _dir) = state_with_dirs().await;
+    let two = Some(vec!["--cpus".to_string(), "2".to_string()]);
+    let era = json!(["--cpus", "2"]);
+    ops::local_model_set(
+        &state,
+        ops::patch_from_args(args(json!({
+            "action": "create", "model_id": "chat", "gguf_path": "chat.gguf",
+            "extra_run_args": era,
+        })))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    ops::aux_model_set(
+        &state,
+        ops::patch_from_args(args(json!({
+            "action": "create", "model_id": "embed", "gguf_path": "embed.gguf",
+            "kind": "embed", "extra_run_args": era,
+        })))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    ops::image_model_set(
+        &state,
+        ops::patch_from_args(args(json!({
+            "action": "create", "model_id": "img",
+            "files": {"diffusion_model": "diffusion.gguf"}, "extra_run_args": era,
+        })))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    ops::audio_model_set(
+        &state,
+        ops::patch_from_args(args(json!({
+            "action": "create", "model_id": "tts", "family": "pocket_tts",
+            "path": "tts", "task": "tts", "extra_run_args": era,
+        })))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let by_id = |id: i64| args(json!({"action": "update", "id": id, "enabled": true}));
+    let (chat_id, aux_id, img_id, tts_id) = {
+        let snap = state.snapshot();
+        (
+            snap.local_models[0].id,
+            snap.aux_models[0].id,
+            snap.image_models[0].id,
+            snap.audio_models[0].id,
+        )
+    };
+    ops::local_model_set(&state, ops::patch_from_args(by_id(chat_id)).unwrap())
+        .await
+        .unwrap();
+    ops::aux_model_set(&state, ops::patch_from_args(by_id(aux_id)).unwrap())
+        .await
+        .unwrap();
+    ops::image_model_set(&state, ops::patch_from_args(by_id(img_id)).unwrap())
+        .await
+        .unwrap();
+    ops::audio_model_set(&state, ops::patch_from_args(by_id(tts_id)).unwrap())
+        .await
+        .unwrap();
+    let snap = state.snapshot();
+    assert_eq!(snap.local_models[0].extra_run_args, two);
+    assert_eq!(snap.aux_models[0].extra_run_args, two);
+    assert_eq!(snap.image_models[0].extra_run_args, two);
+    assert_eq!(snap.audio_models[0].extra_run_args, two);
 }

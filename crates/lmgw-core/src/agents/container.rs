@@ -36,11 +36,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
+use crate::erased::Erased;
 use crate::jobs::{JobCtx, JobOutcome};
 use crate::runtime::registry::CmdOutput;
 use crate::runtime::slug;
@@ -231,27 +231,37 @@ impl Exit {
 /// (`podman stop -t <stop_grace_seconds>`), and the registry's stop verbs are
 /// keyed by model class. Everything non-streaming that *does* fit the registry
 /// — `rm -f`, `ps`, the log tail — is taken from there.
-#[async_trait]
 pub trait Spawner: Send + Sync {
-    async fn spawn(&self, program: &str, args: &[String]) -> std::io::Result<Spawned>;
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput>;
+    fn spawn<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>>;
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>>;
 
     /// [`Self::spawn`] with `env` added to the child's environment — how a
     /// container build gets its own `TMPDIR` (container-builds §14.2). A
     /// spawner that has no environment to set (a test's fake) ignores it,
     /// which is this default.
-    async fn spawn_env(
-        &self,
-        program: &str,
-        args: &[String],
-        env: &[(String, String)],
-    ) -> std::io::Result<Spawned> {
-        let _ = env;
-        self.spawn(program, args).await
+    fn spawn_env<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            let _ = env;
+            self.spawn(program, args).await
+        })
     }
 }
 
-/// The real spawner: `podman` as a child process.
+/// The real spawner: `podman` as a child process, a
+/// [`crate::child::system_tool`].
 pub struct TokioSpawner;
 
 /// Enough room that an ordinary burst of rows never makes the container wait,
@@ -259,80 +269,92 @@ pub struct TokioSpawner;
 /// a cap: see [`Spawned`].
 const LINE_BUFFER: usize = 256;
 
-#[async_trait]
 impl Spawner for TokioSpawner {
-    async fn spawn(&self, program: &str, args: &[String]) -> std::io::Result<Spawned> {
-        self.spawn_env(program, args, &[]).await
+    fn spawn<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move { self.spawn_env(program, args, &[]).await })
     }
 
-    async fn spawn_env(
-        &self,
-        program: &str,
-        args: &[String],
-        env: &[(String, String)],
-    ) -> std::io::Result<Spawned> {
-        use std::process::Stdio;
-        let mut child = tokio::process::Command::new(program)
-            .args(args)
-            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-        let out = child.stdout.take().expect("stdout was piped");
-        let err = child.stderr.take().expect("stderr was piped");
-        let (out_tx, stdout) = mpsc::channel(LINE_BUFFER);
-        let (err_tx, stderr) = mpsc::channel(LINE_BUFFER);
-        tokio::spawn(pump(out, out_tx));
-        tokio::spawn(pump(err, err_tx));
-        let (kill, mut signals) = KillHandle::channel();
-        Ok(Spawned {
-            stdout,
-            stderr,
-            kill,
-            status: Box::pin(async move {
-                let waited = loop {
-                    tokio::select! {
-                        // `wait` is cancel-safe, so losing a race to a signal
-                        // loses nothing.
-                        s = child.wait() => break s,
-                        Some(sig) = signals.recv() => {
-                            // `wait` has not returned, so the child is not
-                            // reaped and its pid is still its own. `None` only
-                            // once tokio has reaped it — then there is nothing
-                            // left to signal, and the next pass reports how it
-                            // ended.
-                            if let Some(pid) = child.id() {
-                                send_signal(pid, sig);
+    fn spawn_env<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            use std::process::Stdio;
+            let mut child =
+                crate::child::system_tool_tokio(&mut tokio::process::Command::new(program))
+                    .args(args)
+                    .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()?;
+            let out = child.stdout.take().expect("stdout was piped");
+            let err = child.stderr.take().expect("stderr was piped");
+            let (out_tx, stdout) = mpsc::channel(LINE_BUFFER);
+            let (err_tx, stderr) = mpsc::channel(LINE_BUFFER);
+            tokio::spawn(pump(out, out_tx));
+            tokio::spawn(pump(err, err_tx));
+            let (kill, mut signals) = KillHandle::channel();
+            Ok(Spawned {
+                stdout,
+                stderr,
+                kill,
+                status: Box::pin(async move {
+                    let waited = loop {
+                        tokio::select! {
+                            // `wait` is cancel-safe, so losing a race to a signal
+                            // loses nothing.
+                            s = child.wait() => break s,
+                            Some(sig) = signals.recv() => {
+                                // `wait` has not returned, so the child is not
+                                // reaped and its pid is still its own. `None` only
+                                // once tokio has reaped it — then there is nothing
+                                // left to signal, and the next pass reports how it
+                                // ended.
+                                if let Some(pid) = child.id() {
+                                    send_signal(pid, sig);
+                                }
                             }
                         }
-                    }
-                };
-                waited.map(|s| {
-                    use std::os::unix::process::ExitStatusExt;
-                    match (s.code(), s.signal()) {
-                        (Some(c), _) => Exit::Code(c),
-                        (None, Some(sig)) => Exit::Signal(sig),
-                        // Neither: not a shape Unix produces, but a `-1` that
-                        // claimed to be an exit status would be a lie.
-                        (None, None) => Exit::Signal(0),
-                    }
-                })
-            }),
+                    };
+                    waited.map(|s| {
+                        use std::os::unix::process::ExitStatusExt;
+                        match (s.code(), s.signal()) {
+                            (Some(c), _) => Exit::Code(c),
+                            (None, Some(sig)) => Exit::Signal(sig),
+                            // Neither: not a shape Unix produces, but a `-1` that
+                            // claimed to be an exit status would be a lie.
+                            (None, None) => Exit::Signal(0),
+                        }
+                    })
+                }),
+            })
         })
     }
 
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        let out = tokio::process::Command::new(program)
-            .args(args)
-            .kill_on_drop(true)
-            .output()
-            .await?;
-        Ok(CmdOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            let out = crate::child::system_tool_tokio(&mut tokio::process::Command::new(program))
+                .args(args)
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            Ok(CmdOutput {
+                status: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
         })
     }
 }
@@ -403,19 +425,30 @@ pub const SCRIPT_INSIDE: &str = "/lmgw/script.mjs";
 /// must say so rather than start something on the machine the suite runs on.
 pub struct NoSpawner(pub String);
 
-#[async_trait]
 impl Spawner for NoSpawner {
-    async fn spawn(&self, _program: &str, _args: &[String]) -> std::io::Result<Spawned> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            self.0.clone(),
-        ))
+    fn spawn<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                self.0.clone(),
+            ))
+        })
     }
-    async fn run(&self, _program: &str, _args: &[String]) -> std::io::Result<CmdOutput> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            self.0.clone(),
-        ))
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                self.0.clone(),
+            ))
+        })
     }
 }
 
@@ -1455,9 +1488,10 @@ async fn stream(
             },
             line = stderr.recv(), if !err_done => match line {
                 Some(l) => {
-                    // Verbatim into the run log (§3.2). A container that prints
-                    // its own secrets file leaks its token into its own run log
-                    // — named in the spec as the one escape hatch, and true.
+                    // Redacted before it goes anywhere: the tail below ends up
+                    // in a failed run's `error`, which `lmgw__agent_get` and the
+                    // runs routes republish, and the run log gets the same line.
+                    let l = run.redact(l);
                     // The row table is deliberately *not* republished here: a
                     // stderr line changes no row, and re-cloning the table per
                     // line is the wrong cost for a chatty container.

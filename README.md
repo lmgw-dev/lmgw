@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/lmgw-dev/lmgw/releases/latest"><img src="https://img.shields.io/github/v/release/lmgw-dev/lmgw" alt="Latest release"></a>
   <a href="https://github.com/lmgw-dev/lmgw/actions/workflows/ci.yml"><img src="https://github.com/lmgw-dev/lmgw/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-FSL--1.1--MIT-blue" alt="License: FSL-1.1-MIT"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/platform-Linux%20desktop-informational" alt="Platform: Linux desktop">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%C2%B7%20Tauri%202%20%C2%B7%20Leptos-orange" alt="Built with Rust, Tauri 2 and Leptos">
 </p>
@@ -28,6 +28,11 @@ aliases. Moving an alias from a local model to a cloud one goes unnoticed by
 the client, and while the GPU is on hold, requests can fall back to the cloud.
 It all runs from the system tray. The dashboard opens in its own window and
 works remotely from a browser too.
+
+The project site is at [lmgw-dev.github.io](https://lmgw-dev.github.io/). lmgw
+also has clients of its own: [Kai](https://github.com/lmgw-dev/kai) for the
+Plasma desktop and [Kai mobile](https://github.com/lmgw-dev/kai-mobile) for
+Android (see [Paired devices and clients](#paired-devices-and-clients)).
 
 ## Screenshots
 
@@ -79,21 +84,27 @@ works remotely from a browser too.
 ## Features
 
 **Local models**
-- **One container per model.** Chat, embedding and rerank models run on llama.cpp or ik_llama.cpp. audio.cpp covers TTS, ASR and a dozen other audio tasks, and stable-diffusion.cpp generates and edits images.
-- **VRAM-aware scheduling.** Admission works from measured GPU memory (NVML, or amdgpu sysfs). A model that doesn't fit waits, or pushes out an idle one, and idle models hand their memory back.
-- **From Hugging Face to a running model.** Download a GGUF together with its projector and draft model, and lmgw proposes llama.cpp settings from the file's metadata.
+- **One container per model.** Chat, embedding and rerank models run on llama.cpp or ik_llama.cpp, and decision models on llama.cpp from b11361 on. audio.cpp covers TTS, ASR and a dozen other audio tasks, and stable-diffusion.cpp generates and edits images.
+- **VRAM-aware scheduling.** Admission works from measured GPU memory (NVML, or amdgpu sysfs). A model that doesn't fit waits, or pushes out an idle one, and idle models hand their memory back. A row's footprint counts llama.cpp's compute buffers and lays the KV cache out the way llama.cpp does, and a plan that can't fit the card says so.
+- **From Hugging Face to a running model.** Download a GGUF together with its projector and draft model, and lmgw proposes llama.cpp settings from the file's metadata. The Models page shows the licence the file's header states.
 - **Engine builds and benchmarks.** Build engine images from any git ref with pull requests merged in. Benchmarks measure prefill, decode, VRAM and tokens per joule.
 
 **API and routing**
 - **Local OpenAI and Anthropic APIs on one port.** `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/rerank`, `/v1/messages` and more. A client in either dialect can reach any chat model.
+- **Decision models.** `/v1/systemone` relays TypeSafe's System One API: a state and typed questions (pick one option, rate on a scale, yes or no), answered with calibrated probabilities instead of generated text. It routes to a local llama.cpp decision model (llama.cpp b11361 or later), recognised from its GGUF header and exposed as `decide/<id>`, or to an OpenAI-compatible upstream such as OpenRouter. lmgw asks an OpenAI-compatible catalog for every output modality, so OpenRouter's decision models (Jev among them), embedders, rerankers and speech, image and video models appear in `/v1/models` under their own tasks. Each lists the lmgw routes that reach it on OpenRouter; image and video models list none, because no lmgw route speaks OpenRouter's image and video APIs. Price sync prices the ones billed per token, decision models and embedders among them. Speech, transcription, rerank, image and video models are billed in other units and stay unpriced until you set a price. An endpoint that refuses the question, such as Gemini's OpenAI-compatible one, gets the option switched off on its upstream.
 - **Local or cloud behind one alias.** An alias points at a local model or at an OpenAI-compatible, Anthropic or Gemini upstream. Streaming, tool calls and reasoning get translated in both directions, so switching changes nothing for the client.
 - **Model capabilities in `/v1/models`.** Context length, output limit, modalities and reasoning controls, per model.
-- **Voice conversations.** `/v1/realtime` speaks OpenAI's Realtime protocol over a WebSocket and answers with a cascade of your own models: turn detection inside lmgw, speech to text, a chat model, text to speech. See [Voice conversations](#voice-conversations).
+- **Voice conversations.** `/v1/realtime` speaks OpenAI's Realtime protocol over a WebSocket, and `/v1/realtime/calls` over WebRTC, and answers with a cascade of your own models: turn detection inside lmgw, speech to text, a chat model, text to speech. See [Voice conversations](#voice-conversations).
 - **MCP gateway.** Stdio servers (Podman-isolated by default) and HTTP servers sit behind one `/mcp` endpoint, each under its own tool prefix. For upstreams without `/v1/responses`, lmgw runs that API itself, MCP tool calls included.
 
 **Docs and knowledge**
 - **Library docs for small models.** A small local model reasons well but hasn't memorised every API. lmgw ingests the documentation of the libraries you use, one corpus per library version, and serves it to any agent as the `docs__resolve` and `docs__query` MCP tools. Search fuses BM25 with embeddings and can rerank. A model picks the chunk boundaries and code copies the text, so every chunk is the original word for word. When an agent finds a library missing, it can ask for it with `docs__request`.
 - **Knowledge bases for your own files.** Put PDFs, office documents and spreadsheets into named collections. lmgw extracts the text and embeds it with the model you choose, and scanned pages can go through a vision model for OCR. In Chat, answers cite numbered excerpts that open the passage in its file. Agents can search the same bases through the `kb__*` tools on `/mcp`.
+
+**Devices and clients**
+- **Device link.** Paired phones and desktops connect to a separate TLS listener (the HTTP port plus one by default, off until the first pairing turns it on) that serves only paired devices. Pairing pins lmgw's own certificate authority through the pairing link or QR code and enrols a key pair the device made itself, and from then on the device authenticates with its client certificate (mutual TLS). Bearer device keys are gone. A key's policy still decides what the device may reach, including the tools a device hosts itself.
+- **Chat feed as a push channel.** `GET /chat/api/feed` streams what changes in Chat, with a keep-alive each device sets for its own connection, so a phone holds one connection open and gets new messages and open approvals without ntfy or any push service.
+- **Kai and Kai mobile.** lmgw's own clients: a voice assistant for the Plasma desktop and a native Android app. See [Paired devices and clients](#paired-devices-and-clients).
 
 **Operations**
 - **Usage and cost.** Every request is logged with its tokens, latency and price. Charts break it down by alias and key.
@@ -104,6 +115,7 @@ works remotely from a browser too.
 - **Desktop app, remote-ready.** The tray menu covers the GPU hold, starting and stopping models, and updates, and the dashboard opens in a native window. Bind lmgw to your LAN and the same dashboard works remotely in any browser.
 - **Rust from gateway to dashboard.** The dashboard is about 88,000 lines of Rust (Leptos), compiled to WebAssembly and built with cargo and Trunk. There's no npm anywhere in the tree. JavaScript is limited to vendored libraries for chat rendering (highlight.js, KaTeX, Mermaid, DOMPurify) and about 700 lines of glue for the window title bar and code blocks.
 - **Chat, plus labs for audio and images.** Chat with any alias, with attachments, knowledge bases and MCP tools. Dictate into it, have replies read aloud, or talk with a conversation in voice mode, all on your own speech models (see [Voice in the Chat](#voice-in-the-chat)). The Audio lab and Image lab are playgrounds for the speech and image routes.
+- **Lab store and the Decision lab.** The labs keep their runs on the server, in a store of their own that survives restarts until you delete it. The Decision lab runs `/v1/systemone` questions against a decision model: question sets, set runs with their metrics, and JSONL or CSV export. The Audio and Image labs save the files their runs made, one file as it is or several as a zip with a manifest. Batch agents can classify through a question set too.
 - **Self-administration over MCP.** The `lmgw__*` tools on `/mcp/admin` let an agent such as Claude Code inspect and configure the gateway. They stay off until you enable their key, and start out read-only.
 - **Agents.** JSON manifests define chat presets, batch pipelines whose results you review before anything gets written, and container agents that bring their own UI.
 
@@ -118,7 +130,7 @@ flowchart LR
     gw --> cloud["Cloud providers<br/>OpenAI-compatible · Anthropic · Gemini"]
     gw --> mcps["MCP servers"]
     subgraph podman["Podman: one container per model"]
-        llama["llama.cpp<br/>chat · embed · rerank"]
+        llama["llama.cpp<br/>chat · embed · rerank · decide"]
         audio["audio.cpp<br/>speech"]
         sd["stable-diffusion.cpp<br/>images"]
     end
@@ -159,12 +171,13 @@ glibc at least that recent. On anything older, build from source.
 
 On Fedora, install the toolchain and the Tauri build dependencies. The list
 follows Tauri's prerequisites, which is the only reason `openssl-devel` is on
-it: lmgw itself doesn't link OpenSSL.
+it: lmgw itself doesn't link OpenSSL. `opus-devel` is lmgw's own, for the
+system libopus that WebRTC calls link.
 
 ```sh
 sudo dnf install rust cargo rust-std-static-wasm32-unknown-unknown \
     webkit2gtk4.1-devel gtk3-devel libsoup3-devel librsvg2-devel openssl-devel \
-    libayatana-appindicator-gtk3-devel rpm-build gcc gcc-c++ make
+    libayatana-appindicator-gtk3-devel opus-devel rpm-build gcc gcc-c++ make
 export PATH="$HOME/.cargo/bin:$PATH"   # cargo installs land here
 cargo install tauri-cli --version '^2.0' --locked
 # Trunk builds the dashboard. Take its release binary, since building trunk
@@ -225,6 +238,33 @@ access takes three changes. Set the bind address to `0.0.0.0:<port>` under
 network. Then open `http://<host>:<port>/` in any browser on your LAN and sign
 in with the `owner:dashboard` key, copied from **Usage → Keys & budgets**.
 
+### Paired devices and clients
+
+Two apps are lmgw's own clients. They use the OpenAI-compatible routes where
+those fit and lmgw's own API (the Chat feed, the device link, calls bound to a
+Chat thread) where they need more:
+
+- **[Kai](https://github.com/lmgw-dev/kai)** is a voice assistant for the KDE
+  Plasma desktop. Press a shortcut in any app and talk; everything goes into
+  one ongoing conversation in lmgw's Chat that you can also read and continue
+  in a browser. It runs no models of its own.
+- **[Kai mobile](https://github.com/lmgw-dev/kai-mobile)** is the Android
+  client, a native app (Kotlin and Compose around a Rust core), first released
+  alongside lmgw 0.5.0. It follows the Chat feed.
+
+Both pair over the device link. Open **Pair a device…** on the Devices card
+(**Usage → Keys & budgets**) and choose the address the device should use (this
+computer, the LAN or WireGuard); if the device listener is off, pairing turns it
+on (it can also be switched under **Settings → Network & access → Devices**).
+The card shows a pairing link and its QR code. They carry lmgw's CA fingerprint and a one-time token that expires after
+ten minutes by default; the device sends the public key of a key pair it made
+itself and gets a certificate back. Both sides then show a confirmation code,
+and the pairing is complete when you confirm it on the card. Apart from
+enrolment, the device listener answers only a request that carries a certificate
+lmgw issued. It serves the inference routes (`/v1`, `/tokenize`, `/mcp`), the
+Chat routes and a device's own `/mcp/host` link, and nothing else: no
+dashboard, no `/api`, and no bearer key or cookie.
+
 ### Voice conversations
 
 `ws://127.0.0.1:8787/v1/realtime` speaks OpenAI's GA Realtime protocol. The
@@ -259,9 +299,31 @@ them), unless its alias's `capabilities.speech` override declares
 
 Implemented are conversation sessions with audio or text output, PCM16 at
 24 kHz, `server_vad`, `semantic_vad` and manual turns, barge-in, client-side
-function tools, and MCP tools that lmgw runs itself. WebRTC, SIP, ephemeral
-keys, transcription-only sessions and G.711 are not, and the API reference
-lists the details.
+function tools, MCP tools that lmgw runs itself, and WebRTC calls. SIP,
+ephemeral keys, the sideband connection, transcription-only sessions and G.711
+are not, and the API reference lists the details.
+
+**WebRTC calls.** `POST /v1/realtime/calls` is OpenAI's WebRTC transport for
+the same sessions: a client posts its SDP offer with its key (raw
+`application/sdp`, or multipart with a `session` part) and gets the answer
+back. The audio then travels as Opus over UDP, encrypted (DTLS-SRTP), the
+events on the `oai-events` data channel, and
+`POST /v1/realtime/calls/{call_id}/hangup` ends a call. OpenAI's browser
+example and the Agents SDK's `OpenAIRealtimeWebRTC` (with `baseUrl` pointed at
+lmgw and `useInsecureApiKey`) work unchanged. A phone on a cellular link is
+what it is for: a lost packet costs 20 ms of concealed audio instead of holding
+up the stream behind it, and the client's own echo cancellation and jitter
+buffer do their work. lmgw answers with one ICE-lite host candidate, the
+address the POST arrived on, and has no STUN or TURN, so the client must reach
+that address directly: on the LAN, or through a VPN such as WireGuard. The UDP
+port is the HTTP port's number unless **Settings → Realtime → WebRTC calls**
+names another, on the HTTP listener's address; for clients on other machines,
+open that UDP port beside the TCP one. A paired device calls through the device
+listener and uses its port, TCP and UDP. The same group shows each socket and
+the live calls with their round trip and playout. A call bound to a Chat thread
+or folder (`chat_thread`, `chat_folder`) carries lmgw's own events beside
+OpenAI's, which lmgw's own clients read. `scripts/webrtc-interop.sh` runs
+Chromium's libwebrtc against a scratch gateway to check all of it.
 
 **MCP tools on `/v1/realtime`.** A session can use the tools of the MCP
 servers lmgw serves on `/mcp`, and of the built-in `docs` and `kb` toolsets.
@@ -391,6 +453,7 @@ spoken.
 
 | Document | Covers |
 | --- | --- |
+| [lmgw-dev.github.io](https://lmgw-dev.github.io/) | The project site |
 | [docs/agents.md](docs/agents.md) | Writing agents: manifests, batch pipelines, container agents |
 | [docs/backends.md](docs/backends.md) | Building and pinning engine images for llama.cpp, ik_llama.cpp, audio.cpp and stable-diffusion.cpp |
 | [docs/amd-arch.md](docs/amd-arch.md) | Running on Arch Linux with an AMD Ryzen APU |
@@ -421,6 +484,28 @@ diff to, and a smoke set; the dashboard build and the worklet check run only
 when their inputs changed. The narrowing needs nextest (without it, `--changed`
 runs the whole suite), and the full run stays the check before a merge.
 
+### Podman under SELinux
+
+Every rootless container start runs `pasta`, Podman's network helper, in a
+confined SELinux domain. Whatever that domain may not use becomes an AVC
+denial, and on a desktop each denial is a setroubleshoot notification. Three
+rules keep container starts quiet:
+
+- **Spawn `podman` through `lmgw_core::child::system_tool`** (or
+  `system_tool_tokio`). The child inherits no descriptor beyond stdio, so the
+  desktop app's open WebKitGTK and GPU files never reach `pasta`. It also gets
+  no `LD_LIBRARY_PATH`, so the target directory cargo puts there and an
+  AppImage's mount stay out of `pasta`'s loader search. A child that is not a
+  system tool gets `child::stdio_only`. The working directory doesn't matter.
+- **Never bind-mount the checkout, a worktree or a parent directory with `:Z`
+  or `:z`.** The relabel is recursive and stays after the container is gone:
+  the whole tree becomes `container_file_t`, which `pasta` and other confined
+  tools may not search. Copy what a tool needs into a directory of its own
+  under `target/` and mount that. `restorecon -RF <checkout>` puts the default
+  labels back after an accident.
+- **Hold a lock around a command with `flock -o FILE cmd`.** Plain `flock`
+  hands the lock's descriptor to the command and to every container it starts.
+
 ### Typed answers
 
 lmgw's own API (Chat, knowledge, the labs, the agent run API, the dashboard
@@ -434,7 +519,12 @@ relays of another program's JSON (listed with the reason in `UNTYPED`,
 The `/v1` protocol routes (OpenAI, Anthropic, llama.cpp, MCP) follow those
 protocols, so their request and response schemas are written by hand
 (`json_schema!` in `crates/lmgw-core/src/openapi/v1`) and their handlers pass
-JSON through; they are held to the protocol, not to an lmgw type.
+JSON through; they are held to the protocol, not to an lmgw type. System One
+(`POST /v1/systemone`) is the `/v1` protocol whose schema comes from
+`lmgw-api-types` (`systemone`): lmgw is itself a client of that wire, so one
+type set describes it and serves lmgw's own callers. The handler still relays
+the bytes as sent, and drift tests hold the types to llama.cpp's, TypeSafe's
+and OpenRouter's answers.
 
 Two checks enforce the rule for the rest:
 
@@ -524,14 +614,8 @@ copies an audited, scanned tree onto the public tip, and `--tag` puts the releas
 
 ## License
 
-lmgw is source-available under the Functional Source License, version 1.1,
-with MIT as its future license ([FSL-1.1-MIT](LICENSE.md)). Anyone can run it,
-at home or inside a company, and change and share it. Selling it is the
-exception. A commercial product or service that substitutes for lmgw, such as
-a rebranded copy or a paid hosted gateway, needs a separate license from its
-author until the release it builds on turns two years old, and from then on
-that release is plain MIT. The dashboard bundles KaTeX, Mermaid, DOMPurify and
-highlight.js, each under its own license, in
+lmgw is under the MIT License ([LICENSE.md](LICENSE.md)). The dashboard
+bundles KaTeX, Mermaid, DOMPurify and highlight.js, each under its own license, in
 [crates/lmgw-ui/assets/vendor](crates/lmgw-ui/assets/vendor/). The gateway
 embeds the Silero VAD model (MIT) from
 [crates/lmgw-core/assets/realtime](crates/lmgw-core/assets/realtime/) and links

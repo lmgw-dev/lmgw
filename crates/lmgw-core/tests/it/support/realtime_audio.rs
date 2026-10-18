@@ -153,6 +153,7 @@ pub async fn add_asr_alias_named(state: &SharedState, fake: &AsrFake, alias: &st
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

@@ -120,6 +120,7 @@ pub(crate) async fn setup(mock: &MockServer) -> SharedState {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -536,6 +537,11 @@ async fn a_gpu_hold_stops_the_ingest_and_leaves_files_pending() {
             kind: AuxKind::Embed,
             pooling: None,
             ctx_size: None,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: vec![],
             idle_seconds: 0,
             enabled: true,
@@ -549,7 +555,7 @@ async fn a_gpu_hold_stops_the_ingest_and_leaves_files_pending() {
     .await
     .unwrap();
     state.reload_snapshot().await.unwrap();
-    let alias = state.snapshot().aux_public_name("embed-local");
+    let alias = state.snapshot().aux_name_for(AuxKind::Embed, "embed-local");
     // Seeded directly: creating it through the op would probe the model,
     // and there is no container here to answer.
     let id = kstore::insert_kb(

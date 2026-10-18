@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::agent::Cancel;
+use crate::erased::Erased;
 use crate::runtime::argv::{podman_run_argv, RenderSpec};
 use crate::runtime::registry::{ephemeral_port, log_excerpt_of, CmdOutput, CommandRunner};
 
@@ -43,12 +44,11 @@ const HEALTH_POLL: Duration = Duration::from_millis(250);
 const EXIT_POLL: Duration = Duration::from_secs(2);
 
 /// How a run reaches podman and a host port (§9's launcher seam).
-#[async_trait::async_trait]
 pub trait BenchLauncher: Send + Sync {
     /// A free loopback port for the container's 8080.
     fn free_port(&self) -> std::io::Result<u16>;
     /// One `podman` invocation: `argv` without the program name.
-    async fn podman(&self, argv: &[String]) -> std::io::Result<CmdOutput>;
+    fn podman<'a>(&'a self, argv: &'a [String]) -> Erased<'a, std::io::Result<CmdOutput>>;
 }
 
 /// The production launcher: `podman` through a [`CommandRunner`] (the
@@ -64,14 +64,13 @@ impl PodmanLauncher {
     }
 }
 
-#[async_trait::async_trait]
 impl BenchLauncher for PodmanLauncher {
     fn free_port(&self) -> std::io::Result<u16> {
         ephemeral_port()
     }
 
-    async fn podman(&self, argv: &[String]) -> std::io::Result<CmdOutput> {
-        self.runner.run("podman", argv).await
+    fn podman<'a>(&'a self, argv: &'a [String]) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move { self.runner.run("podman", argv).await })
     }
 }
 

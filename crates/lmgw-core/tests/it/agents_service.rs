@@ -25,10 +25,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use futures::StreamExt;
 use lmgw_core::agents::container::{Spawned, Spawner};
 use lmgw_core::agents::service;
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::CmdOutput;
 use lmgw_core::server::build_router;
 use lmgw_core::state::{AppState, SharedState};
@@ -522,84 +522,89 @@ fn run_count(calls: &Arc<Mutex<Vec<Vec<String>>>>) -> usize {
         .count()
 }
 
-#[async_trait]
 impl Spawner for Fake {
-    async fn spawn(&self, _p: &str, _a: &[String]) -> std::io::Result<Spawned> {
-        panic!("service mode never uses the streaming seam");
+    fn spawn<'a>(&'a self, _p: &'a str, _a: &'a [String]) -> Erased<'a, std::io::Result<Spawned>> {
+        Box::pin(async move {
+            panic!("service mode never uses the streaming seam");
+        })
     }
-    async fn run(&self, _p: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        self.calls.lock().unwrap().push(args.to_vec());
-        if args.first().map(String::as_str) == Some("run") {
-            if self.held_start {
-                // Until the start is cancelled, which drops this future.
-                std::future::pending::<()>().await;
-            }
-            let i = args.iter().position(|a| a == "-p").expect("published");
-            let port: u16 = args[i + 1].split(':').nth(1).unwrap().parse().unwrap();
-            if self
-                .taken
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
-                return Ok(port_taken(port));
-            }
-            // lmgw probed this port free and released it before publishing it,
-            // so under a loaded full suite another test's ephemeral socket can
-            // hold it for a moment: answered as podman answers it, which lmgw
-            // retries once on a fresh port (§10.4).
-            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-                Ok(l) => l,
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Ok(port_taken(port)),
-                Err(e) => return Err(e),
-            };
-            if self.tcp_only {
-                // Accept and say nothing: a process that is listening but will
-                // never finish a health probe.
-                tokio::spawn(async move {
-                    let mut held = Vec::new();
-                    while let Ok((sock, _)) = listener.accept().await {
-                        held.push(sock);
+    fn run<'a>(
+        &'a self,
+        _p: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(args.to_vec());
+            if args.first().map(String::as_str) == Some("run") {
+                if self.held_start {
+                    // Until the start is cancelled, which drops this future.
+                    std::future::pending::<()>().await;
+                }
+                let i = args.iter().position(|a| a == "-p").expect("published");
+                let port: u16 = args[i + 1].split(':').nth(1).unwrap().parse().unwrap();
+                if take_one(&self.taken) {
+                    return Ok(port_taken(port));
+                }
+                // lmgw probed this port free and released it before publishing it,
+                // so under a loaded full suite another test's ephemeral socket can
+                // hold it for a moment: answered as podman answers it, which lmgw
+                // retries once on a fresh port (§10.4).
+                let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                    Ok(l) => l,
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                        return Ok(port_taken(port))
                     }
-                });
-            } else {
-                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-                let app = fake_container_app(self.rest.clone());
-                let served = tokio::spawn(async move {
-                    let _ = axum::serve(listener, app)
-                        .with_graceful_shutdown(async {
-                            let _ = rx.await;
-                        })
-                        .await;
-                });
-                *self.kill.lock().unwrap() = Some((tx, served));
+                    Err(e) => return Err(e),
+                };
+                if self.tcp_only {
+                    // Accept and say nothing: a process that is listening but will
+                    // never finish a health probe.
+                    tokio::spawn(async move {
+                        let mut held = Vec::new();
+                        while let Ok((sock, _)) = listener.accept().await {
+                            held.push(sock);
+                        }
+                    });
+                } else {
+                    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                    let app = fake_container_app(self.rest.clone());
+                    let served = tokio::spawn(async move {
+                        let _ = axum::serve(listener, app)
+                            .with_graceful_shutdown(async {
+                                let _ = rx.await;
+                            })
+                            .await;
+                    });
+                    *self.kill.lock().unwrap() = Some((tx, served));
+                }
             }
-        }
-        // `podman logs --tail <n>` answers with the number of lines it was
-        // asked for, so a test can tell "the default excerpt" from "what the
-        // reader raised it to" — and from `-1`, the whole log.
-        if args.first().map(String::as_str) == Some("logs") {
-            let tail = args
-                .iter()
-                .position(|a| a == "--tail")
-                .and_then(|i| args.get(i + 1))
-                .cloned()
-                .unwrap_or_default();
-            let n: usize = if tail == "-1" {
-                40
-            } else {
-                tail.parse().unwrap_or(0)
-            };
-            let body: String = (0..n).map(|i| format!("line {i}\n")).collect();
-            return Ok(CmdOutput {
+            // `podman logs --tail <n>` answers with the number of lines it was
+            // asked for, so a test can tell "the default excerpt" from "what the
+            // reader raised it to" — and from `-1`, the whole log.
+            if args.first().map(String::as_str) == Some("logs") {
+                let tail = args
+                    .iter()
+                    .position(|a| a == "--tail")
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+                    .unwrap_or_default();
+                let n: usize = if tail == "-1" {
+                    40
+                } else {
+                    tail.parse().unwrap_or(0)
+                };
+                let body: String = (0..n).map(|i| format!("line {i}\n")).collect();
+                return Ok(CmdOutput {
+                    status: 0,
+                    stdout: format!("tail={tail}\n{body}"),
+                    stderr: String::new(),
+                });
+            }
+            Ok(CmdOutput {
                 status: 0,
-                stdout: format!("tail={tail}\n{body}"),
+                stdout: "deadbeef\n".into(),
                 stderr: String::new(),
-            });
-        }
-        Ok(CmdOutput {
-            status: 0,
-            stdout: "deadbeef\n".into(),
-            stderr: String::new(),
+            })
         })
     }
 }
@@ -882,7 +887,7 @@ async fn the_proxy_owns_the_forwarded_headers_and_carries_no_credential_in() {
         // app is told to trust these, so lmgw owns them.
         .header("x-forwarded-host", "evil.example")
         .header("x-forwarded-proto", "https")
-        .header("x-forwarded-for", "192.168.1.1")
+        .header("x-forwarded-for", "198.51.100.1")
         .header("x-forwarded-prefix", "/somewhere")
         .header("forwarded", "host=evil.example")
         // A client naming the Admin-gated face itself, on the public one.
@@ -906,7 +911,7 @@ async fn the_proxy_owns_the_forwarded_headers_and_carries_no_credential_in() {
         "{seen}"
     );
     assert_eq!(seen["x-forwarded-proto"], json!("http"), "{seen}");
-    // The TCP peer, not the client's `192.168.1.1` and not the listener's own
+    // The TCP peer, not the client's `198.51.100.1` and not the listener's own
     // address; and the face this request really came in on.
     assert_eq!(
         seen["x-forwarded-for"],
@@ -1005,7 +1010,7 @@ async fn raw_upgrade(base: &Gw, host: &str, path: &str, payload: &[u8]) -> (Stri
     let mut sock = sock.connect(base.addr()).await.unwrap();
     let req = upgrade_head(host, path).replacen(
         "\r\n\r\n",
-        "\r\nX-Lmgw-Face: mcp\r\nX-Forwarded-For: 192.168.1.1\r\n\r\n",
+        "\r\nX-Lmgw-Face: mcp\r\nX-Forwarded-For: 198.51.100.1\r\n\r\n",
         1,
     );
     sock.write_all(req.as_bytes()).await.unwrap();
@@ -1381,7 +1386,7 @@ async fn stop_and_start_are_ops_the_app_tab_can_press() {
     // button means.
     let (status, v) = op(&base, "agent_service_stop", json!({ "id": "board" })).await;
     assert_eq!(status, 200, "{v}");
-    assert_eq!(v["stopped"], Value::Null, "{v}");
+    assert!(v.get("stopped").is_none(), "{v}");
 }
 
 /// §12's open question, answered: rotation stops the container that is holding
@@ -1557,7 +1562,7 @@ async fn re_pointing_a_mount_stops_the_app_container_holding_it() {
     let (status, v) = op(&base, "agent_config_set", bind(&first)).await;
     assert_eq!(status, 200, "{v}");
     assert_eq!(v["mounts_repointed"], json!([]), "{v}");
-    assert_eq!(v["service_stopped"], Value::Null, "{v}");
+    assert!(v.get("service_stopped").is_none(), "{v}");
     let d = detail(&base, "board").await;
     assert_eq!(d["service"]["running"], json!(true), "{d}");
 
@@ -2094,7 +2099,7 @@ async fn the_mcp_face_is_the_owners_and_its_container_never_sees_the_key() {
         .get(format!("{base}/agents/board/mcp/seen"))
         .bearer_auth(&base.key)
         .header("x-lmgw-face", "app")
-        .header("x-forwarded-for", "192.168.1.1")
+        .header("x-forwarded-for", "198.51.100.1")
         .send()
         .await
         .unwrap()
@@ -2299,12 +2304,12 @@ async fn a_service_id_that_is_not_a_dns_label_is_refused_with_its_code() {
 async fn an_agent_origin_that_takes_the_gateways_own_address_is_refused() {
     let (state, base, _calls) = with_fake().await;
     // A gateway reachable under a name rather than an IP, and a suffix that is
-    // that name's tail: `board.lan` would then be both the dashboard and the
+    // that name's tail: `board.example` would then be both the dashboard and the
     // agent. Written straight to the settings because the address is a
     // fixture, not something the test is exercising.
     let mut settings = state.snapshot().settings.clone();
-    settings.bind_addr = "board.lan:8001".into();
-    settings.agent_origin_suffix = "lan".into();
+    settings.bind_addr = "board.example:8001".into();
+    settings.agent_origin_suffix = "example".into();
     store::save_settings(&state.db, &settings).await.unwrap();
     state.reload_snapshot().await.unwrap();
 
@@ -2320,7 +2325,7 @@ async fn an_agent_origin_that_takes_the_gateways_own_address_is_refused() {
         v["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("board.lan"),
+            .contains("board.example"),
         "{v}"
     );
     // Nothing was written: the refusal comes before the row.
@@ -2353,10 +2358,10 @@ async fn an_origin_suffix_that_shadows_the_gateway_is_refused() {
 
     // The shape rules are ordinary input errors, and say what is wrong.
     for (bad, why) in [
-        ("lmgw.lan:8001", "carries a port"),
-        ("http://lmgw.lan", "not a URL"),
+        ("lmgw.example:8001", "carries a port"),
+        ("http://lmgw.example", "not a URL"),
         ("", "cannot be empty"),
-        ("lmgw_.lan", "contains '_'"),
+        ("lmgw_.example", "contains '_'"),
     ] {
         let (status, v) = op(
             &base,
@@ -2376,13 +2381,13 @@ async fn an_origin_suffix_that_shadows_the_gateway_is_refused() {
     let (status, v) = op(
         &base,
         "settings_set_full",
-        json!({ "agent_origin_suffix": "Lmgw.Lan" }),
+        json!({ "agent_origin_suffix": "Lmgw.Example" }),
     )
     .await;
     assert_eq!(status, 200, "{v}");
     let (_, body) = get(&base, "/api/settings-full").await;
     let full: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(full["agent_origin_suffix"], json!("lmgw.lan"), "{full}");
+    assert_eq!(full["agent_origin_suffix"], json!("lmgw.example"), "{full}");
 }
 
 /// Origins are computed per request, so a suffix change resyncs nothing — but
@@ -2403,32 +2408,32 @@ async fn a_suffix_change_stops_every_running_app_container() {
     let (status, v) = op(
         &base,
         "settings_set_full",
-        json!({ "agent_origin_suffix": "lmgw.lan" }),
+        json!({ "agent_origin_suffix": "lmgw.example" }),
     )
     .await;
     assert_eq!(status, 200, "{v}");
     let message = v["message"].as_str().unwrap_or_default();
     assert!(message.contains("old origin"), "{v}");
-    assert!(message.contains("http://<id>.lmgw.lan"), "{v}");
+    assert!(message.contains("http://<id>.lmgw.example"), "{v}");
 
     let d = detail(&base, "board").await;
     assert_eq!(d["service"]["running"], json!(false), "{d}");
     let port = base.base.rsplit(':').next().unwrap();
     assert_eq!(
         d["service"]["origin"],
-        json!(format!("http://board.lmgw.lan:{port}/")),
+        json!(format!("http://board.lmgw.example:{port}/")),
         "{d}"
     );
     // Saving the same suffix again is not a change, so nothing is stopped for
     // it — the next request starts the container under the new origin, which
     // is where the app answers from the moment the setting is saved.
-    let (status, body) = app_get(&base, "board.lmgw.lan", "/").await;
+    let (status, body) = app_get(&base, "board.lmgw.example", "/").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(run_count(&calls), 2);
     let (status, v) = op(
         &base,
         "settings_set_full",
-        json!({ "agent_origin_suffix": "lmgw.lan" }),
+        json!({ "agent_origin_suffix": "lmgw.example" }),
     )
     .await;
     assert_eq!(status, 200, "{v}");
@@ -2961,7 +2966,8 @@ async fn the_app_log_tail_defaults_to_the_excerpt_and_the_reader_can_raise_it() 
     )
     .await;
     assert_eq!(status, 200, "{res}");
-    assert_eq!(res["lines"], json!(200), "{res}");
+    // The count that came back: the fake's `tail=200` header and 200 lines.
+    assert_eq!(res["lines"], json!(201), "{res}");
     assert_eq!(res["running"], json!(true), "{res}");
     assert!(
         res["log"].as_str().unwrap().starts_with("tail=200"),
@@ -2971,7 +2977,7 @@ async fn the_app_log_tail_defaults_to_the_excerpt_and_the_reader_can_raise_it() 
         res["message"]
             .as_str()
             .unwrap()
-            .contains("the last 200 lines"),
+            .contains("the last 201 lines"),
         "{res}"
     );
 
@@ -2992,7 +2998,7 @@ async fn the_app_log_tail_defaults_to_the_excerpt_and_the_reader_can_raise_it() 
 
     // Omitted means the same excerpt the page starts from.
     let (_, res) = op(&base, "agent_service_log", json!({ "id": "board" })).await;
-    assert_eq!(res["lines"], json!(12), "{res}");
+    assert_eq!(res["lines"], json!(13), "{res}");
 
     // Nothing running is an answer, not an error — the container may have
     // idle-stopped between the page load and the click.
@@ -3025,4 +3031,18 @@ fn no_service_doc() -> String {
   "run": { "kind": "container", "image": "localhost/plain:1", "columns": ["subject"] }
 }"#
     .to_string()
+}
+
+/// Take one of `n` if one is left (`fetch_update`'s old job here). A
+/// compare-exchange loop, so it builds on a toolchain from before that
+/// method's rename to `try_update` as on one after it.
+fn take_one(n: &AtomicU32) -> bool {
+    let mut cur = n.load(Ordering::SeqCst);
+    while cur > 0 {
+        match n.compare_exchange(cur, cur - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => cur = now,
+        }
+    }
+    false
 }

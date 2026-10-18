@@ -516,8 +516,8 @@ pub async fn runtime_warnings(
             } else {
                 format!(
                     "this agent has a dev_url ({url}) but declares no run.service, so nothing \
-                     reads it: there is no app to proxy. Clear it, or give the manifest a \
-                     service block."
+                     reads it: there is no app to proxy. Saving the manifest again clears \
+                     it, or give the manifest a service block."
                 )
             },
             false,

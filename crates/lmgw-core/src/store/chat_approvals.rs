@@ -568,6 +568,8 @@ pub(super) async fn decline_waiting(
         .bind(pending.to_json())
         .execute(&mut *conn)
         .await?;
+    // The reply no longer waits: a client showing it hears that.
+    super::feed::record_updated(&mut *conn, thread_id, id, Some(&by.named)).await?;
     for a in &declined {
         record_decided(&mut *conn, thread_id, id, a, &by.named).await?;
     }
@@ -657,6 +659,7 @@ pub async fn claim_approvals(
         .bind(pending.to_json())
         .execute(&mut *tx)
         .await?;
+    super::feed::record_updated(&mut tx, thread_id, message_id, Some(&by.named)).await?;
     for d in decided.iter().filter(|d| d.by.is_some()) {
         record_decided(
             &mut tx,
@@ -717,6 +720,9 @@ pub async fn close_unrun(
         .bind(pending.to_json())
         .execute(&mut *tx)
         .await?;
+    // The gateway's own write: the reply's record now says the calls never
+    // ran.
+    super::feed::record_updated(&mut tx, thread_id, message_id, None).await?;
     // The feed says it again for each approved one: it never ran.
     for id in &marked {
         let Some(d) = pending.decision(id).filter(|d| d.approve) else {
@@ -773,6 +779,7 @@ pub async fn resume_chat_reply(
     if n == 0 {
         return Ok(false);
     }
+    super::feed::record_updated(&mut tx, thread_id, id, by).await?;
     record_requested(&mut tx, thread_id, id, r.pending_approvals.as_ref(), by).await?;
     sqlx::query("UPDATE chat_threads SET updated_at=datetime('now') WHERE id=?1")
         .bind(thread_id)

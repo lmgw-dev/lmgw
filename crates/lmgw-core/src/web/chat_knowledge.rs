@@ -391,7 +391,14 @@ pub(super) async fn run_auto(
             // context onto the new one, where the next turn would reuse it.
             let saved = match ticket.save_lock().await {
                 Some(_proof) => repo
-                    .set_message_knowledge(state, thread_id, message_id, &kb_refs, Some(&context))
+                    .set_message_knowledge(
+                        state,
+                        thread_id,
+                        message_id,
+                        &kb_refs,
+                        Some(&context),
+                        caller,
+                    )
                     .await
                     .map(Some),
                 None => Ok(None),

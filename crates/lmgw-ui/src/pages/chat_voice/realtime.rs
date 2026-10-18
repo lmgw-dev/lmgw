@@ -403,7 +403,7 @@ impl Realtime {
         let resolved = t
             .voice_resolved
             .as_ref()
-            .map(|r| r.turn_detection.value.clone())
+            .map(|r| r.turn_detection.value.as_str().to_string())
             .unwrap_or_default();
         self.ptt.set(resolved == "push_to_talk");
         self.admin_tools

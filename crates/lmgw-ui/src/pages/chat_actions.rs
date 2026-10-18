@@ -10,7 +10,8 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Deserialize;
+use lmgw_api_types::chat::ContinueState;
+use lmgw_api_types::chat_threads::ReplyEdited;
 use serde_json::{json, Value};
 
 use super::chat::{in_owner, new_msg, scroll_down, Msg, ThreadDetail};
@@ -18,15 +19,6 @@ use super::chat_approvals::{self, Verdicts};
 use super::chat_knowledge::KbDraftChips;
 use super::chat_turn::{run_turn, Turn, TurnEnv};
 use crate::widgets::{use_toasts, ConfirmButton};
-
-/// The thread's `continue` verdict: whether its last reply can be continued
-/// on the route the thread resolves to, and if not, why.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct ContinueState {
-    pub ok: bool,
-    pub reason: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Pure helpers over the message list
@@ -237,19 +229,15 @@ impl ActionEnv {
         // (`chat_sync`).
         env.turn.own.bump();
         env.turn.scope.spawn(async move {
-            let res = crate::api::post::<Value, _>(
+            let res = crate::api::post::<ReplyEdited, _>(
                 Self::msg_url(tid, mid, "edit"),
                 &json!({ "content": text }),
             )
             .await;
             match res {
-                Ok(v) => {
+                Ok(edited) => {
                     env.turn.own.bump();
-                    let saved = v["message"]["content"]
-                        .as_str()
-                        .unwrap_or(&text)
-                        .to_string();
-                    m.content.set(saved);
+                    m.content.set(edited.message.content);
                     m.reasoning.set(String::new());
                     m.tokens.set(None);
                     m.tools.set(Vec::new());

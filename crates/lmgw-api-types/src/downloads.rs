@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::MessageAck;
+
 /// `GET /api/hf/repo?repo=` — the repo's weights files, split parts collapsed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -12,6 +14,13 @@ pub struct RepoFiles {
     /// response from before the image class existed; `chat` then.
     pub target: String,
     pub files: Vec<RepoFile>,
+    /// How to read `role` and what to do with the list, for a person or an
+    /// agent. It differs by `target`: the image classes' roles are filename
+    /// heuristics and a pipeline spans several repos, the others name the
+    /// `weights` file to hand to `hf_add`, which fetches its companions. When
+    /// `files` is empty (nothing in the repo matched) it says so plainly
+    /// instead.
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -39,14 +48,47 @@ pub struct RepoFile {
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct HfAddResult {
+    /// Always `true`; a refusal is an error answer instead.
     pub ok: bool,
     pub repo: String,
+    /// The weights file asked for: the `file`, or the one the `quant` named.
     pub weights: String,
+    /// The projector and the drafter queued beside the weights. Empty when
+    /// `companions` was off, when the repo has none beside that file, and for
+    /// the `image` target (a pipeline's components live in other repos).
+    pub companions: Vec<HfCompanion>,
+    /// How many files went into the queue: the weights, the companions, and
+    /// every part of a split GGUF.
     pub files_queued: u32,
+    /// The tracked rows of the file asked for, the companions and every part
+    /// of a split GGUF, with the id each can be followed by in
+    /// `GET /api/hf/downloads`.
     pub downloads: Vec<QueuedDownload>,
+    /// What to look out for in what was queued, one sentence each; empty when
+    /// nothing. Today: a shard of a sharded `.safetensors` is queued alone,
+    /// and stable-diffusion.cpp cannot reassemble shards.
+    pub warnings: Vec<String>,
     /// Relative GGUF path (`repo/file`) — feed to plan/create once done.
     pub gguf_path: String,
+    /// `repo/`: the directory under the models dir that the repo's files land
+    /// in, with the trailing slash.
+    pub dest_prefix: String,
+    /// The class whose models dir the files go to: `chat | aux | audio |
+    /// image` (`embed` as asked is `aux` here).
+    pub target: String,
+    /// What was queued and what to do next, which depends on `target`.
     pub message: String,
+}
+
+/// A file `hf_add` queued beside the weights.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HfCompanion {
+    /// Path inside the repo.
+    pub file: String,
+    /// `mmproj | drafter`.
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -65,8 +107,6 @@ pub struct QueuedDownload {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DownloadsView {
     pub downloads: Vec<DownloadRow>,
-    /// Number of live (actually transferring) downloads.
-    pub active: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -77,7 +117,7 @@ pub struct DownloadRow {
     pub repo: String,
     pub file: String,
     pub dest_path: String,
-    /// `chat | aux | audio`.
+    /// `chat | aux | audio | image`.
     pub target: String,
     /// `queued | downloading | done | failed | update_available` — a row that
     /// claims queued/downloading with no live progress is *interrupted*
@@ -104,4 +144,36 @@ impl DownloadRow {
     pub fn interrupted(&self) -> bool {
         matches!(self.status.as_str(), "queued" | "downloading") && self.received_bytes.is_none()
     }
+}
+
+/// What `hf_set` answers, by `action`: a [`MessageAck`] for `redownload`,
+/// `cancel` and `delete`, an [`HfUpdatesChecked`] for `check_updates`.
+///
+/// The two shapes share only `ok`, so this is the document's description of
+/// the one op, not a type to read an answer into: a reader knows the action it
+/// sent and reads that action's type.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum HfSetAnswer {
+    /// `action: redownload | cancel | delete`.
+    Done(MessageAck),
+    /// `action: check_updates`.
+    Checked(HfUpdatesChecked),
+}
+
+/// `POST /api/op/hf_set` with `action: check_updates`: the tracked downloads of
+/// one class compared with the hub.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HfUpdatesChecked {
+    /// `false` when a file could not be compared (`errors` is not empty); the
+    /// answer is still a success, for the files that could.
+    pub ok: bool,
+    /// How many finished downloads now differ from the hub's copy; each is
+    /// flagged `update_available`.
+    pub updates_available: u64,
+    /// One sentence per file the hub could not be asked about.
+    pub errors: Vec<String>,
 }

@@ -6,6 +6,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use lmgw_api_types as dto;
+
 use crate::config::HoldFallbackMode;
 use crate::runtime::{lifecycle, Class};
 use crate::state::SharedState;
@@ -182,7 +184,10 @@ fn overlay_default_preset(p: &Option<Value>, cur: Option<Value>) -> Option<Value
     }
 }
 
-pub async fn audio_model_set(st: &SharedState, p: AudioPatch) -> Result<Value, String> {
+pub async fn audio_model_set(
+    st: &SharedState,
+    p: AudioPatch,
+) -> Result<dto::AudioModelSaved, String> {
     use crate::store;
     let snap = st.snapshot();
     let reload = || async { st.reload_snapshot().await.map_err(|e| e.to_string()) };
@@ -274,7 +279,12 @@ pub async fn audio_model_set(st: &SharedState, p: AudioPatch) -> Result<Value, S
                 extra_run_args: if crate::ops::clear_has(p.clear.as_deref(), "extra_run_args") {
                     None
                 } else {
-                    crate::ops::run_args_override(p.extra_run_args.clone())
+                    crate::ops::run_args_override(
+                        p.extra_run_args
+                            .as_deref()
+                            .map(crate::ops::arg_list)
+                            .transpose()?,
+                    )
                 },
                 warm_start: p.warm_start.unwrap_or(false),
                 hold_fallback_mode,
@@ -289,12 +299,14 @@ pub async fn audio_model_set(st: &SharedState, p: AudioPatch) -> Result<Value, S
             let threads = engine::note(new.threads, crate::host::cpu())
                 .map(|n| format!("; {n}"))
                 .unwrap_or_default();
-            Ok(serde_json::json!({
-                "ok": true, "id": id,
-                "message": format!(
+            Ok(dto::AudioModelSaved {
+                ok: true,
+                id,
+                message: format!(
                     "audio model '{model_id}' created — start it to serve it{threads}"
                 ),
-            }))
+                ..Default::default()
+            })
         }
         "update" | "enable" | "disable" => {
             let id = p.id.ok_or("pass id")?;
@@ -404,7 +416,13 @@ pub async fn audio_model_set(st: &SharedState, p: AudioPatch) -> Result<Value, S
                 extra_run_args: if crate::ops::clear_has(p.clear.as_deref(), "extra_run_args") {
                     None
                 } else {
-                    crate::ops::run_args_override(p.extra_run_args.clone().or(cur.extra_run_args))
+                    crate::ops::run_args_override(
+                        p.extra_run_args
+                            .as_deref()
+                            .map(crate::ops::arg_list)
+                            .transpose()?
+                            .or(cur.extra_run_args),
+                    )
                 },
                 warm_start: p.warm_start.unwrap_or(cur.warm_start),
                 hold_fallback_mode,
@@ -460,15 +478,26 @@ pub async fn audio_model_set(st: &SharedState, p: AudioPatch) -> Result<Value, S
             if let Some(n) = engine::note(upd.threads, crate::host::cpu()) {
                 reset.push_str(&format!("; {n}"));
             }
-            Ok(serde_json::json!({
-                "ok": true, "id": id,
-                "residency_reset": residency_reset,
-                "message": match note {
-                    Some(note) => format!("audio model updated — {note}{reset}"),
-                    None => format!("audio model updated — it is not running, so the next request \
-                                     starts it with the new configuration{reset}"),
+            Ok(dto::AudioModelSaved {
+                ok: true,
+                id,
+                residency_reset: Some(residency_reset),
+                message: match note {
+                    Some(note) => {
+                        format!(
+                            "audio model '{}' {} — {note}{reset}",
+                            upd.model_id,
+                            super::saved_verb(&p.action)
+                        )
+                    }
+                    None => format!(
+                        "audio model '{}' {} — it is not running, so the next request \
+                         starts it with the new configuration{reset}",
+                        upd.model_id,
+                        super::saved_verb(&p.action)
+                    ),
                 },
-            }))
+            })
         }
         "delete" => {
             let id = p.id.ok_or("pass id")?;
@@ -482,10 +511,15 @@ pub async fn audio_model_set(st: &SharedState, p: AudioPatch) -> Result<Value, S
             reload().await?;
             // §3.4: immediately, not at the next boot.
             lifecycle::drop_model(st, Class::Audio, &cur.model_id).await;
-            Ok(serde_json::json!({
-                "ok": true,
-                "message": "audio model deleted — its container was stopped and removed",
-            }))
+            Ok(dto::AudioModelSaved {
+                ok: true,
+                id,
+                message: format!(
+                    "audio model '{}' deleted — its container was stopped and removed",
+                    cur.model_id
+                ),
+                ..Default::default()
+            })
         }
         other => Err(format!(
             "unknown action '{other}' (create, update, delete, enable, disable)"
@@ -559,8 +593,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res["ok"], true);
-        let id = res["id"].as_i64().unwrap();
+        assert!(res.ok);
+        let id = res.id;
         let saved = store::get_audio_model(&state.db, id)
             .await
             .unwrap()
@@ -592,8 +626,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res["ok"], true);
-        let saved = store::get_audio_model(&state.db, res["id"].as_i64().unwrap())
+        assert!(res.ok);
+        let saved = store::get_audio_model(&state.db, res.id)
             .await
             .unwrap()
             .unwrap();
@@ -625,7 +659,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let id = res["id"].as_i64().unwrap();
+        let id = res.id;
         let saved = store::get_audio_model(&state.db, id)
             .await
             .unwrap()
@@ -779,7 +813,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res["ok"], true);
+        assert!(res.ok);
     }
 
     /// A sparse update patch (only `enabled`) must not clobber the fields it
@@ -798,7 +832,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res["ok"], true);
+        assert!(res.ok);
 
         let saved = store::get_audio_model(&state.db, id)
             .await
@@ -843,7 +877,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(res["ok"], true);
+        assert!(res.ok);
         assert!(store::get_audio_model(&state.db, id)
             .await
             .unwrap()

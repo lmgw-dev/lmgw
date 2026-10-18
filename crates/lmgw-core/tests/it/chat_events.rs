@@ -158,12 +158,8 @@ async fn a_device_rolling_its_folder_over_names_the_folder_and_the_new_thread() 
 async fn a_device_s_spoken_turn_names_the_thread_s_messages() {
     let (w, d) = device_world().await;
     let tid = chat_thread(&w, &d.client, "chatty").await;
-    let bearer = format!("Bearer {}", d.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");

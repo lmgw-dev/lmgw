@@ -1,11 +1,13 @@
 //! Prices & usage (usage-analytics design §2.2, §2.3, §5; billable-units
 //! design §8)
 
-use serde_json::{json, Value};
+use lmgw_api_types as dto;
+use lmgw_api_types::self_admin::{Prices, Usage, UsageCellView};
 
 use crate::catalog;
-use crate::config::PriceScope;
-use crate::pricing::micro_to_units;
+use crate::config::{PriceRow, PriceScope};
+use crate::pricing::{micro_to_units, PriceSource};
+use crate::principal::Refusal;
 use crate::state::SharedState;
 use crate::store::{self, GroupBy, UsageFilter};
 use crate::telemetry::RequestClass;
@@ -17,9 +19,8 @@ pub use units::PriceRates;
 /// happened, per upstream: rows written, models that advertised no usable
 /// price (written nowhere — §2.3), and any upstream whose catalog fetch
 /// failed. See [`catalog::sync_prices`] for the mechanics.
-pub async fn prices_sync(state: &SharedState) -> Result<Value, String> {
-    let summary = catalog::sync_prices(state).await?;
-    serde_json::to_value(&summary).map_err(|e| e.to_string())
+pub async fn prices_sync(state: &SharedState) -> Result<dto::PriceSyncSummary, String> {
+    catalog::sync_prices(state).await
 }
 
 /// Every model the gateway serves that resolves to **no price at all**, with
@@ -73,60 +74,76 @@ pub async fn unpriced_models(state: &SharedState) -> Result<Vec<(String, i64)>, 
     Ok(out)
 }
 
-/// One row of `prices`, as JSON.
-fn price_row_view(r: &crate::config::PriceRow) -> Value {
-    json!({
-        "id": r.id,
-        "scope_kind": r.scope_kind.as_str(),
-        "scope_key": r.scope_key,
-        "unit": r.unit,
-        "price_in": r.price_in,
-        "price_out": r.price_out,
-        "price_cache_read": r.price_cache_read,
-        "price_cache_write": r.price_cache_write,
-        "price": r.price,
-        "source": r.source.as_str(),
-        "note": r.note,
-        "updated_at": r.updated_at,
-    })
+/// One row of `prices`, as the dashboard's Prices page and `lmgw__prices`
+/// both list it. Every field of the row is named: one added to [`PriceRow`] or
+/// to the view fails the build here, where the answer is decided.
+pub fn price_row_view(r: &PriceRow) -> dto::PriceRowView {
+    let PriceRow {
+        id,
+        scope_kind,
+        scope_key,
+        unit,
+        price_in,
+        price_out,
+        price_cache_read,
+        price_cache_write,
+        source,
+        note,
+        updated_at,
+        price,
+    } = r;
+    dto::PriceRowView {
+        id: *id,
+        scope_kind: scope_kind.as_str().to_string(),
+        scope_key: scope_key.clone(),
+        unit: unit.as_str().to_string(),
+        price_in: *price_in,
+        price_out: *price_out,
+        price_cache_read: *price_cache_read,
+        price_cache_write: *price_cache_write,
+        source: source.as_str().to_string(),
+        note: note.clone(),
+        updated_at: updated_at.clone(),
+        price: *price,
+    }
 }
 
 /// Every price sheet on file, plus the enabled aliases that resolve to no
 /// price at all — the worklist for `price_set` (an upstream that publishes no
 /// pricing, e.g. Gemini, is priced by hand or not at all, and this is how an
 /// owner or agent finds out which aliases that currently means).
-pub async fn prices(state: &SharedState) -> Result<Value, String> {
+pub async fn prices(state: &SharedState) -> Result<Prices, String> {
     let snap = state.snapshot();
     let rows = store::list_prices(&state.db)
         .await
         .map_err(|e| e.to_string())?;
-    let sheets: Vec<Value> = rows.iter().map(price_row_view).collect();
+    let sheets = rows.iter().map(price_row_view).collect();
 
-    let unpriced: Vec<Value> = unpriced_models(state)
+    let unpriced = unpriced_models(state)
         .await?
         .into_iter()
-        .map(|(name, requests)| json!({ "model": name, "unpriced_requests": requests }))
+        .map(|(name, requests)| dto::UnpricedModel { name, requests })
         .collect();
 
-    Ok(json!({
-        "currency": snap.settings.currency,
-        "sheets": sheets,
-        "unpriced_models": unpriced,
-        "hint": format!(
+    Ok(Prices {
+        currency: snap.settings.currency.clone(),
+        sheets,
+        unpriced_models: unpriced,
+        hint: format!(
             "Each sheet prices one scope in one unit, and a scope may hold a row per unit \
              (tokens plus a per-request fee, say); a request costs the sum of every unit \
              priced for it, and is unpriced when any of those units' quantities is \
              unknown. Units: {}. A manual row always wins over a catalog row for the same \
              scope and unit. lmgw__prices_sync refreshes the catalog rows; lmgw__price_set \
              writes a manual one (needed for upstreams like Gemini that publish no pricing \
-             at all). unpriced_models covers configured aliases *and* the passthrough \
+             at all). unpriced_models ({{name, requests}}) covers configured aliases *and* the passthrough \
              models an expose_all upstream serves, counted from the usage rollup, and lists \
              a model only when no unit resolves a price for it, through the same order a \
              real request uses — so a local model never appears here: it is free_local, \
              not unpriced.",
             units::unit_table()
         ),
-    }))
+    })
 }
 
 /// Manual price upsert (usage-analytics design §2.2) — always wins over a
@@ -146,7 +163,7 @@ pub async fn price_set(
     unit: Option<&str>,
     rates: PriceRates,
     note: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<dto::PriceSaved, String> {
     let scope = match scope_kind.trim() {
         "alias" => PriceScope::Alias,
         "upstream_model" => PriceScope::UpstreamModel,
@@ -171,22 +188,30 @@ pub async fn price_set(
         .await
         .map_err(|e| e.to_string())?;
     state.reload_snapshot().await.map_err(|e| e.to_string())?;
-    Ok(json!({
-        "ok": true,
-        "scope_kind": scope.as_str(),
-        "scope_key": scope_key,
-        "unit": unit.as_str(),
-        "source": "manual",
-    }))
+    Ok(dto::PriceSaved {
+        ok: true,
+        scope_kind: scope.as_str().to_string(),
+        scope_key: scope_key.to_string(),
+        unit: unit.as_str().to_string(),
+        source: PriceSource::Manual.as_str().to_string(),
+    })
 }
 
 /// Delete one price row by id (from `lmgw__prices`).
-pub async fn price_delete(state: &SharedState, id: i64) -> Result<Value, String> {
-    store::delete_price(&state.db, id)
+///
+/// An id no row has is a [`Refusal::not_found`]: `404 not_found` on the HTTP
+/// plane, its message on the tool plane.
+pub async fn price_delete(state: &SharedState, id: i64) -> Result<dto::IdAck, Refusal> {
+    let existed = store::delete_price(&state.db, id)
         .await
         .map_err(|e| e.to_string())?;
+    if !existed {
+        return Err(Refusal::not_found(format!(
+            "no price row {id} — ids are listed by lmgw__prices"
+        )));
+    }
     state.reload_snapshot().await.map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true, "id": id }))
+    Ok(dto::IdAck::new(id))
 }
 
 /// Format a cost total together with its unpriced remainder — the §2.3 UI
@@ -211,34 +236,34 @@ fn money_with_unpriced(c: &store::UsageCell, currency: &str) -> String {
 /// One [`store::UsageCell`] rendered for `lmgw__usage` — money formatted with
 /// its unpriced remainder stated beside it, latency and decode speed averaged
 /// from the sums rather than left as raw hist inputs a caller cannot read.
-fn usage_cell_view(c: &store::UsageCell, currency: &str) -> Value {
+fn usage_cell_view(c: &store::UsageCell, currency: &str) -> UsageCellView {
     let avg_ttfb_ms = (c.ttfb_count > 0).then(|| c.ttfb_sum as f64 / c.ttfb_count as f64);
     let avg_total_ms = (c.total_count > 0).then(|| c.total_sum as f64 / c.total_count as f64);
     let decode_tok_s = (c.decode_ms > 0.0).then(|| c.decode_tokens as f64 / (c.decode_ms / 1000.0));
-    json!({
-        "series": if c.series.is_empty() { Value::Null } else { json!(c.series) },
-        "requests": c.requests,
-        "tokens_in": c.tokens_in,
-        "tokens_out": c.tokens_out,
-        "tokens_cached": c.tokens_cached,
-        "tokens_cache_write": c.tokens_cache_write,
-        "tokens_reasoning": c.tokens_reasoning,
-        "audio_in_ms": c.audio_in_ms,
-        "chars_in": c.chars_in,
-        "images_out": c.images_out,
-        "cost": money_with_unpriced(c, currency),
-        "cost_micro": c.cost_micro,
-        "unpriced_requests": c.cost_unknown_requests,
-        "unpriced_tokens": c.cost_unknown_tokens,
-        "unpriced_audio_in_ms": c.cost_unknown_audio_in_ms,
-        "unpriced_chars_in": c.cost_unknown_chars_in,
-        "unpriced_images_out": c.cost_unknown_images_out,
-        "errors": c.errors,
-        "refusals": c.refusals,
-        "avg_ttfb_ms": avg_ttfb_ms,
-        "avg_total_ms": avg_total_ms,
-        "decode_tok_s": decode_tok_s,
-    })
+    UsageCellView {
+        series: (!c.series.is_empty()).then(|| c.series.clone()),
+        requests: c.requests,
+        tokens_in: c.tokens_in,
+        tokens_out: c.tokens_out,
+        tokens_cached: c.tokens_cached,
+        tokens_cache_write: c.tokens_cache_write,
+        tokens_reasoning: c.tokens_reasoning,
+        audio_in_ms: c.audio_in_ms,
+        chars_in: c.chars_in,
+        images_out: c.images_out,
+        cost: money_with_unpriced(c, currency),
+        cost_micro: c.cost_micro,
+        unpriced_requests: c.cost_unknown_requests,
+        unpriced_tokens: c.cost_unknown_tokens,
+        unpriced_audio_in_ms: c.cost_unknown_audio_in_ms,
+        unpriced_chars_in: c.cost_unknown_chars_in,
+        unpriced_images_out: c.cost_unknown_images_out,
+        errors: c.errors,
+        refusals: c.refusals,
+        avg_ttfb_ms,
+        avg_total_ms,
+        decode_tok_s,
+    }
 }
 
 /// `usage_top`'s ranked rows, folded to `limit` with the tail summed into a
@@ -292,11 +317,12 @@ fn fold_other(mut rows: Vec<store::UsageCell>, limit: usize) -> Vec<store::Usage
 /// `store::UsageFilter` wants, at day granularity.
 ///
 /// `to`: an ISO date (`YYYY-MM-DD`); omitted means "through today" (UTC).
-/// `from`: an ISO date, or an `<N>d` shorthand meaning N days before `to`
-/// (`7d`, `30d`, …); omitted means `30d`. The range covers whole days,
-/// `from` 00:00 through the end of `to`, both inclusive.
+/// `from`: an ISO date, or an `<N>d` shorthand meaning the last N whole days
+/// ending with `to` (`7d`, `30d`, …: `to` and the N-1 days before it); omitted
+/// means `30d`. The range covers whole days, `from` 00:00 through the end of
+/// `to`, both inclusive.
 fn parse_usage_range(from: Option<&str>, to: Option<&str>) -> Result<(String, String), String> {
-    use chrono::{Duration, NaiveDate, Utc};
+    use chrono::{Days, Duration, NaiveDate, Utc};
 
     let today = Utc::now().date_naive();
     let to_date = match to.map(str::trim).filter(|s| !s.is_empty()) {
@@ -304,10 +330,18 @@ fn parse_usage_range(from: Option<&str>, to: Option<&str>) -> Result<(String, St
         Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
             .map_err(|_| format!("invalid 'to' date '{s}' (expected YYYY-MM-DD)"))?,
     };
+    let last_days = |n: u64| -> Result<NaiveDate, String> {
+        if n == 0 {
+            return Err("'from' as '<N>d' needs N of at least 1".to_string());
+        }
+        to_date
+            .checked_sub_days(Days::new(n - 1))
+            .ok_or_else(|| format!("'from' '{n}d' reaches before the calendar starts"))
+    };
     let from_date = match from.map(str::trim).filter(|s| !s.is_empty()) {
-        None => to_date - Duration::days(30),
-        Some(s) => match s.strip_suffix('d').and_then(|n| n.parse::<i64>().ok()) {
-            Some(n) => to_date - Duration::days(n),
+        None => last_days(30)?,
+        Some(s) => match s.strip_suffix('d').and_then(|n| n.parse::<u64>().ok()) {
+            Some(n) => last_days(n)?,
             None => NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
                 format!("invalid 'from' date '{s}' (expected YYYY-MM-DD, or e.g. '7d')")
             })?,
@@ -323,6 +357,12 @@ fn parse_usage_range(from: Option<&str>, to: Option<&str>) -> Result<(String, St
     Ok((from_key, to_key))
 }
 
+/// An hour key (`2026-10-12T00`) as the ISO 8601 UTC instant it names
+/// (`2026-10-12T00:00:00Z`).
+fn hour_key_instant(key: &str) -> String {
+    format!("{key}:00:00Z")
+}
+
 /// What did I spend, on what — the query behind `lmgw__usage`, over the same
 /// `usage_hourly` rollups the (future) dashboard reads, so a chart and this
 /// tool can never disagree (§5).
@@ -335,13 +375,13 @@ pub async fn usage(
     class: Option<&str>,
     alias: Option<&str>,
     limit: Option<i64>,
-) -> Result<Value, String> {
+) -> Result<Usage, String> {
     let (from_key, to_key) = parse_usage_range(from, to)?;
-    let group = match group_by
+    let group_name = group_by
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("alias")
-    {
+        .unwrap_or("alias");
+    let group = match group_name {
         "alias" => GroupBy::Alias,
         "key" => GroupBy::Key,
         "class" => GroupBy::Class,
@@ -370,15 +410,16 @@ pub async fn usage(
         }
     };
 
+    let alias = alias
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let filter = UsageFilter {
         from: from_key.clone(),
         to: to_key.clone(),
-        alias: alias
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from),
+        alias: alias.clone(),
         key_id: None,
-        class,
+        class: class.clone(),
         upstream_id: None,
         // No browser here to read a timezone from; report in UTC and say so,
         // rather than silently mislabeling a day boundary (§3.4).
@@ -404,16 +445,21 @@ pub async fn usage(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(json!({
-        "from": from_key,
-        "to": to_key,
-        "timezone": "UTC",
-        "currency": currency,
-        "units_since": units_since,
-        "totals": usage_cell_view(&totals, &currency),
-        "group_by": group_by.unwrap_or("alias"),
-        "breakdown": breakdown.iter().map(|c| usage_cell_view(c, &currency)).collect::<Vec<_>>(),
-        "hint": "cost is money in every billable unit (tokens, audio minutes, characters, \
+    Ok(Usage {
+        from: hour_key_instant(&from_key),
+        to: hour_key_instant(&to_key),
+        class,
+        alias,
+        timezone: "UTC".to_string(),
+        totals: usage_cell_view(&totals, &currency),
+        breakdown: breakdown
+            .iter()
+            .map(|c| usage_cell_view(c, &currency))
+            .collect(),
+        currency,
+        units_since,
+        group_by: group_name.to_string(),
+        hint: "cost is money in every billable unit (tokens, audio minutes, characters, \
                  images, request fees) and states its unpriced remainder inline, with the \
                  tokens and quantities that remainder holds — a total with unpriced requests \
                  folded in understates what was actually spent, not the whole story. \
@@ -421,6 +467,7 @@ pub async fn usage(
                  input characters, generated images), recorded since units_since; before it \
                  they read 0 because nothing was recorded. Sync catalog prices with \
                  lmgw__prices_sync, or check lmgw__prices for models with no price on file \
-                 at all.",
-    }))
+                 at all."
+            .to_string(),
+    })
 }

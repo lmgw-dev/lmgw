@@ -30,13 +30,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use super::chat_turn::{tools_may_run, RowWatch, ToolsHeld};
 use super::claim::LoopClaim;
 use crate::agent::{ToolExecutor, ToolOutcome};
+use crate::erased::Erased;
 use crate::proxy::StopHandle;
 
 /// What a call the turn did not run says, in its result: why.
@@ -94,25 +94,26 @@ impl<'a, E: ToolExecutor + ?Sized> HeardTools<'a, E> {
     }
 }
 
-#[async_trait]
 impl<E: ToolExecutor + ?Sized> ToolExecutor for HeardTools<'_, E> {
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-        if let Some(row) = &self.row {
-            let gate = self.gate.get_or_init(|| async {
-                if row.borrow().is_none() {
-                    self.claim.let_go().await;
+    fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+        Box::pin(async move {
+            if let Some(row) = &self.row {
+                let gate = self.gate.get_or_init(|| async {
+                    if row.borrow().is_none() {
+                        self.claim.let_go().await;
+                    }
+                    tools_may_run(row.clone()).await
+                });
+                let gate = *gate.await;
+                if let Err(why) = gate {
+                    if why.stops() {
+                        self.held_off.store(true, Ordering::Relaxed);
+                        self.stop.stop();
+                    }
+                    return ToolOutcome::error(not_run(why));
                 }
-                tools_may_run(row.clone()).await
-            });
-            let gate = *gate.await;
-            if let Err(why) = gate {
-                if why.stops() {
-                    self.held_off.store(true, Ordering::Relaxed);
-                    self.stop.stop();
-                }
-                return ToolOutcome::error(not_run(why));
             }
-        }
-        self.inner.call(name, args).await
+            self.inner.call(name, args).await
+        })
     }
 }

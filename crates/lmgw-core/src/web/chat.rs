@@ -413,6 +413,7 @@ pub(super) fn err_json(
         Json(ApiError {
             code: code.to_string(),
             message: message.into(),
+            ..Default::default()
         }),
     )
         .into_response()
@@ -530,7 +531,7 @@ pub async fn upload_attachment(
         Ok(aid) => {
             let mut meta = [new.into_meta(aid, id)];
             chat_attach_gate::annotate_drafts(&state, &thread, &mut meta).await;
-            Json(&meta[0]).into_response()
+            Json(chat_wire::attachment(&meta[0])).into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
     }
@@ -1351,7 +1352,7 @@ where
                 "error",
                 &frames::ErrorFrame {
                     message: msg.clone(),
-                    code: None,
+                    ..Default::default()
                 },
             ),
         };
@@ -1454,6 +1455,7 @@ where
         let not_saved = frames::ErrorFrame {
             message: NOT_SAVED.into(),
             code: Some("not_saved".into()),
+            ..Default::default()
         };
         let _ = emit(chat_turn::TurnFrame::of("error", &not_saved)).await;
     }

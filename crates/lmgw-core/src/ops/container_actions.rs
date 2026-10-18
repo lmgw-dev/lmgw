@@ -69,15 +69,15 @@ fn hold_refusal(action: &str) -> String {
 }
 
 /// Canonical group target (per-model-containers design §8): `target` now
-/// names a **group**, never a model — `all` spans every class, `embed` is
-/// accepted as the pre-rename spelling of `aux`. `None` means "every class"
+/// names a **group**, never a model — `all` spans every class; the pre-rename
+/// `embed` is refused like any unknown group. `None` means "every class"
 /// (`all`), so a caller filters the registry/vram views with
 /// `Iterator::is_none_or` instead of a second branch per call site.
 fn normalize_group_target(target: &str) -> Result<Option<Class>, String> {
     match target.trim() {
         "all" => Ok(None),
         "chat" => Ok(Some(Class::Chat)),
-        "embed" | "aux" => Ok(Some(Class::Aux)),
+        "aux" => Ok(Some(Class::Aux)),
         "audio" => Ok(Some(Class::Audio)),
         "image" => Ok(Some(Class::Image)),
         other => Err(format!(

@@ -4,8 +4,8 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{ChainDetail, ChainRow, ResponsesIndex};
-use serde_json::{json, Value};
+use lmgw_api_types::{ChainDetail, ChainRow, MessageAck, ResponsesIndex};
+use serde_json::json;
 
 use leptos_router::hooks::use_navigate;
 
@@ -45,15 +45,14 @@ pub fn TrafficConversations() -> impl IntoView {
 
     let gc = move |scope: &'static str| {
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/responses_gc", &json!({ "scope": scope }))
-                .await
+            match crate::api::post::<MessageAck, _>(
+                "/api/op/responses_gc",
+                &json!({ "scope": scope }),
+            )
+            .await
             {
-                Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("done")
-                        .to_string());
+                Ok(done) => {
+                    toasts.ok(done.message);
                     bump();
                 }
                 Err(e) => toasts.err(e.to_string()),
@@ -275,7 +274,7 @@ fn ChainRowView(
                                     let chain_id = del_id.get_value();
                                     spawn_local(async move {
                                         match crate::api::post::<
-                                            Value,
+                                            MessageAck,
                                             _,
                                         >(
                                                 "/api/op/response_chain_delete",

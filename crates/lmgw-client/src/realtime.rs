@@ -6,9 +6,27 @@
 //! Only what a client acts on is typed; every other event, and one of
 //! those whose fields do not read, is [`ServerEvent::Unknown`] with its
 //! `type` and the event as sent. The `lmgw.*` events are a bound
-//! session's own (chat-voice design §8.6). A few payloads a client passes on
-//! whole (a chat frame's data, a message's voice, the timing line) stay
-//! `serde_json::Value`s; an FFI wrapper hands them over as JSON text.
+//! session's own (chat-voice design §8.6); their payloads are
+//! `lmgw-api-types`' types ([`MessageVoice`], [`VoiceTiming`], [`ChatReply`]),
+//! read strictly: an event whose fields do not read is
+//! [`ServerEvent::Unknown`]. A chat frame's data stays a
+//! `serde_json::Value`; an FFI wrapper hands it over as JSON text.
+//!
+//! **A WebRTC call** (`POST /v1/realtime/calls`, realtime calls design;
+//! [`crate::requests::calls`]) carries the same events on its `oai-events`
+//! data channel, without the audio deltas (the audio is on RTP), and adds:
+//! - OpenAI's `output_audio_buffer.started`, `.stopped` and `.cleared`, the
+//!   player facts a call's client reads instead of its own playback;
+//! - on a bound call, lmgw's own: [`ServerEvent::BindPending`],
+//!   [`ServerEvent::SessionClosed`] (its end, read by [`call_close`]),
+//!   [`ServerEvent::Starved`], and `lmgw.event.part`, the parts an event
+//!   larger than the channel's message size travels in, which a
+//!   [`Joiner`] joins before [`parse`] (module [`parts`]);
+//! - the client's own, among [`ClientEvent`]'s: the stop
+//!   ([`ClientEvent::ResponseStop`]), the take-over, the playout reports,
+//!   the turn mode switch ([`ClientEvent::BoundSessionUpdate`]) and OpenAI's
+//!   [`ClientEvent::OutputAudioBufferClear`], split by a [`Splitter`] where
+//!   one is larger than lmgw's message size.
 //!
 //! **Late MCP task results** (MCP Tasks design §3.4, §4.2). A tool whose
 //! server runs it as a task answers its turn at once (`started, job <id>`,
@@ -41,29 +59,41 @@
 //! push-to-talk `input_audio_buffer.commit` of silence and its
 //! `response.create` — a cough's equal. A continuation a cough cuts before
 //! anything of it was heard runs again after the cough. A
-//! [`ServerEvent::TaskDone`] that comes while a response runs is answered by
-//! that response (the result entered as its user message was written,
-//! before it, or at its turn's start, and is in its request): send no
-//! `response.create` for it.
+//! [`ServerEvent::TaskDone`] that comes while a response is open (its audio
+//! still playing included) is not answered by that response: a result that
+//! ends mid-turn enters the thread only after that turn ends (lmgw-core's
+//! `realtime::thread::tasks`). Keep its continuation owed and send
+//! `response.create` at the next quiet point; should the result have been
+//! answered after all, that response ends `empty_turn`.
 
+use lmgw_api_types::realtime::{
+    BIND_PENDING, OUTPUT_AUDIO_BUFFER_CLEARED, OUTPUT_AUDIO_BUFFER_STARTED,
+    OUTPUT_AUDIO_BUFFER_STOPPED, OUTPUT_AUDIO_STARVED, SESSION_CLOSED,
+};
+use serde::Deserialize;
 use serde_json::Value;
 
 pub use lmgw_api_types::chat::TASK_DONE_EVENT;
 pub use lmgw_api_types::chat_approvals::{ApprovalDecidedEvent, ApprovalRequest};
 pub use lmgw_api_types::chat_feed::TaskDone;
-pub use lmgw_api_types::chat_voice::ModelState;
+pub use lmgw_api_types::chat_threads::{MessageVoice, VoiceTiming};
+pub use lmgw_api_types::chat_voice::{ChatReply, ModelState};
 pub use lmgw_api_types::realtime::{
-    RevokeKind, CLOSE_GOING_AWAY, CLOSE_OUT_OF_REACH, CLOSE_REVOKED, CLOSE_TAKEN_OVER,
-    SHUTTING_DOWN,
+    BindPending, ClosedKind, EventPart, OutputAudioStarved, RevokeKind, SessionClosed, TurnMode,
+    CLOSE_GOING_AWAY, CLOSE_OUT_OF_REACH, CLOSE_REVOKED, CLOSE_TAKEN_OVER, SHUTTING_DOWN,
 };
 
+mod call;
 mod client;
 mod close;
+pub mod parts;
 #[cfg(test)]
 mod tests;
 
+pub use call::{BoundSession, PlayoutReport};
 pub use client::{ClientEvent, TurnDetection, Updates};
-pub use close::{close_kind, CloseKind};
+pub use close::{call_close, close_kind, CallClose, CloseKind};
+pub use parts::{Joined, Joiner, Splitter};
 
 /// One server event a client acts on.
 ///
@@ -133,7 +163,7 @@ pub enum ServerEvent {
     ChatUser {
         message_id: i64,
         content: String,
-        voice: Value,
+        voice: Box<MessageVoice>,
         response_id: Option<String>,
     },
     /// `lmgw.chat.input`: how a response's turns reach the chat model —
@@ -148,12 +178,12 @@ pub enum ServerEvent {
     /// knew was heard, and another when the client's truncate arrives after
     /// that and cuts it again at the heard position. A later
     /// `lmgw.chat.reply` for the same `message_id` replaces the earlier one.
-    ChatReply(ChatReply),
+    ChatReply(Box<ChatReply>),
     /// `lmgw.model.state`: a stage's model state.
     ModelState(ModelState),
-    /// `lmgw.response.timing`: a response's timing line, its fields as they
-    /// came.
-    Timing(Value),
+    /// `lmgw.response.timing`: a response's timing line, with the models
+    /// that answered each stage.
+    Timing(Box<VoiceTiming>),
     /// `lmgw.chat.thread`: the thread as a response re-read it.
     Thread(ThreadFacts),
     /// `conversation.item.done` of an `mcp_approval_request` item: a call
@@ -178,6 +208,33 @@ pub enum ServerEvent {
     /// [`ClientEvent::ResponseCreate`] with no new words answers it (module
     /// doc).
     TaskDone(TaskDone),
+    /// `output_audio_buffer.started` (a WebRTC call's): lmgw sent response
+    /// `response_id`'s first audio frame, so its audio is in the player. On
+    /// a call this is the player fact `response.output_audio.delta` is on a
+    /// WebSocket ([`crate::voice::Machine::output_started`]).
+    OutputAudioBufferStarted { response_id: String },
+    /// `output_audio_buffer.stopped`, right after the `response.done` of a
+    /// response whose audio played to its end: the client has played it
+    /// ([`crate::voice::Machine::output_stopped`]).
+    OutputAudioBufferStopped { response_id: String },
+    /// `output_audio_buffer.cleared`, instead of `stopped`, right after the
+    /// `response.done` of a response whose audio was cut before its end: lmgw
+    /// stopped sending it (a confirmed barge-in, a stop, a cancel, a
+    /// `clear`). The barge-in verdict: mute the remote track until the next
+    /// `started` ([`crate::voice::Machine::output_cleared`]).
+    OutputAudioBufferCleared { response_id: String },
+    /// `lmgw.output_audio.starved` (a bound call's): the response's audio ran
+    /// dry, or came again ([`crate::voice::Machine::starved`]).
+    Starved(OutputAudioStarved),
+    /// `lmgw.session.bind_pending` (a call bound with `takeover=ask`): the
+    /// thread is held by `held_by`, and no session runs until the client's
+    /// [`ClientEvent::TakeOver`], or until the holder ends and
+    /// `session.created` follows by itself. Every other client event
+    /// meanwhile is answered `error` `bind_pending`.
+    BindPending(BindPending),
+    /// `lmgw.session.closed` (a bound call's last event): why lmgw ends the
+    /// call; [`call_close`] reads it as a [`CloseKind`].
+    SessionClosed(SessionClosed),
     /// Any other `type`, or a typed one whose fields do not read: its
     /// `type` and the whole event as sent, for a client to skip and log.
     Unknown { kind: String, data: Value },
@@ -211,6 +268,13 @@ pub struct SessionFacts {
     pub prefix_padding_ms: Option<u32>,
     /// `session.lmgw.half_duplex`.
     pub half_duplex: Option<bool>,
+    /// `session.lmgw.turn_mode`, on a session bound to a Chat thread: how
+    /// its turns end, as lmgw resolved it from the thread's voice settings
+    /// (realtime calls design §2.2). A client shows it and switches it with
+    /// [`ClientEvent::BoundSessionUpdate`]; it derives no turn detection
+    /// itself.
+    /// `None` on an unbound session, or from a gateway before the field.
+    pub turn_mode: Option<TurnMode>,
     /// `session.lmgw.resolved`: the aliases that answer, and the voice.
     pub chat: Option<String>,
     pub asr: Option<String>,
@@ -218,24 +282,6 @@ pub struct SessionFacts {
     pub voice: Option<String>,
     /// `session.lmgw.resolved.chat_thread`.
     pub thread: Option<ThreadFacts>,
-}
-
-/// `lmgw.chat.reply`: a spoken reply as finalized — or finalized again: a
-/// later one for the same `message_id` replaces the earlier
-/// ([`ServerEvent::ChatReply`]).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ChatReply {
-    pub message_id: i64,
-    /// The words heard (the reply's text from now on).
-    pub content: Option<String>,
-    /// The words sent but not heard.
-    pub unheard: Option<String>,
-    /// The message's voice record, verbatim (`Null` when absent).
-    pub voice: Value,
-    /// Heard by nobody, and no tool ran: the reply is gone from the thread.
-    pub removed: bool,
-    /// The reply was not cut to what was heard, and why: it stays whole.
-    pub skipped: Option<String>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -265,6 +311,7 @@ impl SessionFacts {
             turn_detection: opt(&td["type"]),
             prefix_padding_ms: td["prefix_padding_ms"].as_u64().map(|n| n as u32),
             half_duplex: session["lmgw"]["half_duplex"].as_bool(),
+            turn_mode: TurnMode::deserialize(&session["lmgw"]["turn_mode"]).ok(),
             chat: opt(&r["chat"]),
             asr: opt(&r["asr"]),
             tts: opt(&r["tts"]),
@@ -338,25 +385,24 @@ pub fn parse(text: &str) -> Option<ServerEvent> {
             event: s(&v, "event"),
             data: v["data"].clone(),
         },
-        "lmgw.chat.user" => ServerEvent::ChatUser {
-            message_id: v["message_id"].as_i64().unwrap_or_default(),
-            content: s(&v, "content"),
-            voice: v["voice"].clone(),
-            response_id: opt(&v["response_id"]),
+        "lmgw.chat.user" => match serde_json::from_value::<MessageVoice>(v["voice"].clone()) {
+            Ok(voice) => ServerEvent::ChatUser {
+                message_id: v["message_id"].as_i64().unwrap_or_default(),
+                content: s(&v, "content"),
+                voice: Box::new(voice),
+                response_id: opt(&v["response_id"]),
+            },
+            Err(_) => ServerEvent::Unknown { kind, data: v },
         },
         "lmgw.chat.input" => ServerEvent::ChatInput {
             response_id: s(&v, "response_id"),
             input: s(&v, "input"),
             why: opt(&v["why"]),
         },
-        "lmgw.chat.reply" => ServerEvent::ChatReply(ChatReply {
-            message_id: v["message_id"].as_i64().unwrap_or_default(),
-            content: v["content"].as_str().map(str::to_string),
-            unheard: v["unheard"].as_str().map(str::to_string),
-            voice: v["voice"].clone(),
-            removed: v["removed"].as_bool() == Some(true),
-            skipped: v["skipped"].as_str().map(str::to_string),
-        }),
+        "lmgw.chat.reply" => match serde_json::from_value::<ChatReply>(strip(v.clone())) {
+            Ok(r) => ServerEvent::ChatReply(Box::new(r)),
+            Err(_) => ServerEvent::Unknown { kind, data: v },
+        },
         "conversation.item.truncated" => ServerEvent::Truncated {
             item_id: s(&v, "item_id"),
             audio_end_ms: v["audio_end_ms"].as_u64().unwrap_or_default(),
@@ -365,7 +411,10 @@ pub fn parse(text: &str) -> Option<ServerEvent> {
             Ok(m) => ServerEvent::ModelState(m),
             Err(_) => ServerEvent::Unknown { kind, data: v },
         },
-        "lmgw.response.timing" => ServerEvent::Timing(strip(v)),
+        "lmgw.response.timing" => match serde_json::from_value::<VoiceTiming>(strip(v.clone())) {
+            Ok(t) => ServerEvent::Timing(Box::new(t)),
+            Err(_) => ServerEvent::Unknown { kind, data: v },
+        },
         "lmgw.chat.thread" => match ThreadFacts::of(&v["chat_thread"]) {
             Some(t) => ServerEvent::Thread(t),
             None => ServerEvent::Unknown { kind, data: v },
@@ -392,6 +441,27 @@ pub fn parse(text: &str) -> Option<ServerEvent> {
                 Err(_) => ServerEvent::Unknown { kind, data: v },
             }
         }
+        OUTPUT_AUDIO_BUFFER_STARTED => ServerEvent::OutputAudioBufferStarted {
+            response_id: s(&v, "response_id"),
+        },
+        OUTPUT_AUDIO_BUFFER_STOPPED => ServerEvent::OutputAudioBufferStopped {
+            response_id: s(&v, "response_id"),
+        },
+        OUTPUT_AUDIO_BUFFER_CLEARED => ServerEvent::OutputAudioBufferCleared {
+            response_id: s(&v, "response_id"),
+        },
+        OUTPUT_AUDIO_STARVED => match OutputAudioStarved::deserialize(&v) {
+            Ok(e) => ServerEvent::Starved(e),
+            Err(_) => ServerEvent::Unknown { kind, data: v },
+        },
+        BIND_PENDING => match BindPending::deserialize(&v) {
+            Ok(e) => ServerEvent::BindPending(e),
+            Err(_) => ServerEvent::Unknown { kind, data: v },
+        },
+        SESSION_CLOSED => match SessionClosed::deserialize(&v) {
+            Ok(e) => ServerEvent::SessionClosed(e),
+            Err(_) => ServerEvent::Unknown { kind, data: v },
+        },
         _ => ServerEvent::Unknown { kind, data: v },
     })
 }

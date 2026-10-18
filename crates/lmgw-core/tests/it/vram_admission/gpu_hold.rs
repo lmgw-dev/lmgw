@@ -58,6 +58,7 @@ pub(super) async fn cloud_upstream(f: &Fixture, alias: &str) -> MockServer {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -89,7 +90,7 @@ pub(super) fn fallback_reason(resp: &reqwest::Response) -> Option<&str> {
 
 /// Engage the hold the way every surface does — through the op, so the sweep
 /// and the snapshot reload are part of what is under test.
-pub(super) async fn engage_hold(f: &Fixture) -> Value {
+pub(super) async fn engage_hold(f: &Fixture) -> lmgw_api_types::HoldSet {
     lmgw_core::ops::hold_set(&f.state, true).await.unwrap()
 }
 
@@ -196,13 +197,18 @@ async fn engaging_the_hold_stops_an_idle_resident_model() {
     assert_eq!(f.runs(), vec!["chat-model".to_string()]);
 
     let out = engage_hold(&f).await;
-    assert_eq!(out["active"], true);
+    assert!(out.active);
     assert_eq!(
-        out["stopped"],
-        json!(["chat/chat-model"]),
-        "the op response is what the tray and the dashboard report: {out}"
+        out.stopped,
+        ["chat/chat-model"],
+        "the op response is what the tray and the dashboard report: {out:?}"
     );
-    assert_eq!(out["draining"], json!([]), "{out}");
+    assert!(out.draining.is_empty(), "{out:?}");
+    // The lists the sweep fills are in the document as lists of text.
+    crate::common::round_trips::<lmgw_api_types::HoldSet>(
+        "ops::hold_set",
+        &serde_json::to_value(&out).unwrap(),
+    );
     assert_eq!(
         f.stops(),
         vec!["chat-model".to_string()],
@@ -259,6 +265,11 @@ async fn a_held_embed_request_falls_back_through_its_own_row_override() {
             kind: aux.kind,
             pooling: aux.pooling.clone(),
             ctx_size: aux.ctx_size,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: aux.args.clone(),
             idle_seconds: aux.idle_seconds,
             enabled: aux.enabled,
@@ -449,8 +460,8 @@ async fn engaging_the_hold_lists_a_busy_resident_as_draining_and_reap_idle_stops
     );
 
     let out = engage_hold(&f).await;
-    assert_eq!(out["stopped"], json!([]), "still working: {out}");
-    assert_eq!(out["draining"], json!(["chat/chat-model"]), "{out}");
+    assert!(out.stopped.is_empty(), "still working: {out:?}");
+    assert_eq!(out.draining, ["chat/chat-model"], "{out:?}");
     assert!(f.stops().is_empty(), "{:?}", f.stops());
 
     let v = vram_status(&f.gateway).await;
@@ -638,6 +649,7 @@ async fn legacy_completions_under_hold_with_an_anthropic_fallback_is_the_handler
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -863,6 +875,11 @@ async fn a_fallback_served_request_that_fails_upstream_still_names_the_fallback(
             kind: aux.kind,
             pooling: aux.pooling.clone(),
             ctx_size: aux.ctx_size,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: aux.args.clone(),
             idle_seconds: aux.idle_seconds,
             enabled: aux.enabled,
@@ -919,34 +936,32 @@ async fn a_stop_that_fails_during_the_hold_sweep_is_reported_as_failed_not_as_no
     *f.podman.fail_stop.lock().unwrap() = true;
 
     let out = engage_hold(&f).await;
-    assert_eq!(out["active"], true, "the hold still engages: {out}");
-    assert_eq!(
-        out["stopped"],
-        json!([]),
-        "nothing was actually stopped: {out}"
+    assert!(out.active, "the hold still engages: {out:?}");
+    assert!(
+        out.stopped.is_empty(),
+        "nothing was actually stopped: {out:?}"
     );
-    assert_eq!(
-        out["draining"],
-        json!([]),
-        "a failed stop is not something that drains — nothing retries it: {out}"
+    assert!(
+        out.draining.is_empty(),
+        "a failed stop is not something that drains — nothing retries it: {out:?}"
     );
-    let failed = out["failed"].as_array().expect("a failed bucket").clone();
-    assert_eq!(failed.len(), 1, "{out}");
-    let entry = failed[0].as_str().unwrap_or_default();
+    crate::common::round_trips::<lmgw_api_types::HoldSet>(
+        "ops::hold_set",
+        &serde_json::to_value(&out).unwrap(),
+    );
+    assert_eq!(out.failed.len(), 1, "{out:?}");
+    let entry = out.failed[0].as_str();
     assert!(
         entry.starts_with("chat/chat-model: "),
-        "named the way every other bucket names a model: {out}"
+        "named the way every other bucket names a model: {out:?}"
     );
     assert!(
         entry.contains("not stopping"),
-        "and carrying podman's own reason: {out}"
+        "and carrying podman's own reason: {out:?}"
     );
     assert!(
-        out["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("could NOT be stopped"),
-        "the one-line message a tray click sees must say it too: {out}"
+        out.message.contains("could NOT be stopped"),
+        "the one-line message a tray click sees must say it too: {out:?}"
     );
 
     // The world agrees: the container really is still holding its memory.
@@ -985,6 +1000,11 @@ async fn quickdoc_refuses_to_embed_through_a_hold_fallback_and_never_calls_it() 
             kind: aux.kind,
             pooling: aux.pooling.clone(),
             ctx_size: aux.ctx_size,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: aux.args.clone(),
             idle_seconds: aux.idle_seconds,
             enabled: aux.enabled,

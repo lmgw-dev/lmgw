@@ -11,11 +11,11 @@
 
 use std::time::Duration;
 
-use lmgw_core::config::HoldFallbackMode;
-use lmgw_core::runtime::descriptor::RungPos;
+use lmgw_core::config::{AuxKind, HoldFallbackMode};
+use lmgw_core::runtime::descriptor::{model_runtime, RungPos};
 use lmgw_core::runtime::registry::{Marked, Origin, RuntimeState, RuntimeView};
-use lmgw_core::runtime::Class;
-use lmgw_core::store::NewCandidateAlias;
+use lmgw_core::runtime::{Class, Placement};
+use lmgw_core::store::{self, NewCandidateAlias};
 use lmgw_core::vram::{self, BackgroundStart, Climbed, LocalHold, Restart};
 use serde_json::{json, Value};
 
@@ -514,4 +514,173 @@ async fn owner_climbs_that_can_go_one_after_the_other_both_climb() {
         view(&g, "big").unwrap().rung.as_ref().map(|r| r.rung),
         Some(2)
     );
+}
+
+// ---------------------------------------------------------------------------
+// An aux row on the CPU (decision-models design §3.3)
+// ---------------------------------------------------------------------------
+
+async fn embed(gw: &Gw, model: &str) -> reqwest::Response {
+    gw.client()
+        .post(format!("{gw}/v1/embeddings"))
+        .json(&json!({"model": model, "input": "hi"}))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn vram_status(gw: &Gw) -> Value {
+    gw.client()
+        .get(format!("{gw}/api/vram"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn set_aux_column(g: &Gpu, model: &str, set: &str) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE aux_models SET {set} WHERE model_id = '{model}'"
+    )))
+    .execute(&g.state.db)
+    .await
+    .unwrap();
+    g.state.reload_snapshot().await.unwrap();
+}
+
+async fn hold_on(g: &Gpu) {
+    let mut s = g.state.snapshot().settings.clone();
+    s.hold.active = true;
+    store::save_settings(&g.state.db, &s).await.unwrap();
+    g.state.reload_snapshot().await.unwrap();
+}
+
+/// An aux row with `backend: cpu` is a CPU container to both placement
+/// predicates: the row's (`Snapshot::placement`, which resolution and the
+/// hold read) and its descriptor's (`ModelRuntime::placement`, which
+/// admission and the registry entry read). Under the GPU hold it serves
+/// itself, with no fallback and no refusal; the ledger charges it nothing;
+/// and its container starts without the class's GPU passthrough. Its GPU
+/// twin beside it is held.
+#[tokio::test]
+async fn a_cpu_aux_row_serves_under_the_hold_uncharged_and_without_the_gpu() {
+    let g = Gpu::new(10 * GIB, 2, 2).await;
+    let gw = serve(g.state.clone()).await;
+    g.aux("cpu-embed", AuxKind::Embed, 2 * GIB).await;
+    g.aux("gpu-embed", AuxKind::Embed, 2 * GIB).await;
+    set_aux_column(&g, "cpu-embed", "backend = 'cpu'").await;
+    hold_on(&g).await;
+
+    let snap = g.state.snapshot();
+    assert_eq!(snap.placement(Class::Aux, "cpu-embed"), Placement::Cpu);
+    assert_eq!(snap.placement(Class::Aux, "gpu-embed"), Placement::Gpu);
+    assert_eq!(
+        snap.placement(Class::Aux, "unknown"),
+        Placement::Gpu,
+        "the stricter answer"
+    );
+    let rt = model_runtime(&snap, Class::Aux, "cpu-embed").unwrap();
+    assert_eq!(rt.placement(), Placement::Cpu);
+
+    let resp = embed(&gw, "embed/cpu-embed").await;
+    let (status, fallback) = (
+        resp.status(),
+        header(&resp, "x-lmgw-fallback").map(str::to_string),
+    );
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(fallback, None, "the row served itself: {v}");
+    assert_eq!(g.runs(), ["cpu-embed"]);
+    assert_eq!(view(&g, "cpu-embed").unwrap().placement, Placement::Cpu);
+
+    let vram = vram_status(&gw).await;
+    assert!(
+        vram["resident"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["model"] != "cpu-embed"),
+        "a CPU container is not on the ledger: {vram}"
+    );
+    assert_eq!(vram["estimated_resident_bytes"], 0, "{vram}");
+
+    let argv = g.world().run_argv.values().next().unwrap().join(" ");
+    assert!(!argv.contains("nvidia.com/gpu"), "no GPU device: {argv}");
+    assert!(argv.contains("-e NVIDIA_VISIBLE_DEVICES=void"), "{argv}");
+    assert!(argv.contains("--security-opt label=disable"), "{argv}");
+    assert!(argv.contains("--n-gpu-layers 0"), "{argv}");
+    let cores = lmgw_core::host::cpu().physical_cores;
+    assert!(argv.contains(&format!("--threads {cores}")), "{argv}");
+
+    let resp = embed(&gw, "embed/gpu-embed").await;
+    let status = resp.status();
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(status, 503, "{v}");
+    assert_eq!(v["error"]["code"], "gpu_hold", "{v}");
+    assert_eq!(g.runs(), ["cpu-embed"], "the GPU row started nothing");
+
+    // Engaging the hold through the op keeps the running CPU aux container,
+    // and the op's one line says so without calling it an audio model.
+    lmgw_core::ops::hold_set(&g.state, false).await.unwrap();
+    let out = lmgw_core::ops::hold_set(&g.state, true).await.unwrap();
+    assert_eq!(out.kept_on_cpu, ["aux/cpu-embed"], "{out:?}");
+    assert!(
+        out.message
+            .contains("; models that run on the CPU keep serving (aux/cpu-embed)"),
+        "{out:?}"
+    );
+    assert!(!out.message.contains("audio"), "{out:?}");
+}
+
+/// A row switched to `backend: cpu` while its container runs on the GPU
+/// keeps that container's charge: the ledger plans an aux entry by the
+/// placement it was started with, as it does an audio one, not by the row's
+/// new `backend`. The next start is the CPU's.
+#[tokio::test]
+async fn an_aux_row_switched_to_the_cpu_keeps_its_running_containers_charge() {
+    let g = Gpu::new(10 * GIB, 2, 2).await;
+    let gw = serve(g.state.clone()).await;
+    g.aux("embedder", AuxKind::Embed, 2 * GIB).await;
+    assert_eq!(embed(&gw, "embed/embedder").await.status(), 200);
+    let charged = |vram: &Value| {
+        vram["resident"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["model"] == "embedder")
+            .map(|r| r["estimated_bytes"].as_u64().unwrap())
+    };
+    assert_eq!(charged(&vram_status(&gw).await), Some(2 * GIB));
+
+    set_aux_column(&g, "embedder", "backend = 'cpu'").await;
+    assert_eq!(
+        g.state.snapshot().placement(Class::Aux, "embedder"),
+        Placement::Cpu,
+        "the row's next start"
+    );
+    assert_eq!(view(&g, "embedder").unwrap().placement, Placement::Gpu);
+    let vram = vram_status(&gw).await;
+    assert_eq!(charged(&vram), Some(2 * GIB), "{vram}");
+    assert_eq!(vram["estimated_resident_bytes"], 2 * GIB, "{vram}");
+}
+
+/// Under a hold that survived a restart, boot warm-starts the aux rows on
+/// the CPU and skips the GPU ones (`lifecycle::boot`, which reads the
+/// descriptor's placement).
+#[tokio::test]
+async fn under_the_hold_boot_warm_starts_a_cpu_aux_row_and_not_a_gpu_one() {
+    let g = Gpu::new(10 * GIB, 2, 2).await;
+    g.aux("cpu-embed", AuxKind::Embed, GIB).await;
+    g.aux("gpu-embed", AuxKind::Embed, GIB).await;
+    set_aux_column(&g, "cpu-embed", "backend = 'cpu', warm_start = 1").await;
+    set_aux_column(&g, "gpu-embed", "warm_start = 1").await;
+    hold_on(&g).await;
+
+    lmgw_core::runtime::lifecycle::boot(&g.state).await;
+
+    assert_eq!(g.runs(), ["cpu-embed"]);
+    assert_eq!(view(&g, "cpu-embed").unwrap().placement, Placement::Cpu);
+    assert!(view(&g, "gpu-embed").is_none());
 }

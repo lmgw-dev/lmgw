@@ -78,8 +78,7 @@ pub(super) async fn run(socket: WebSocket, init: LinkInit) {
     let device = device_name(&server).to_string();
     // One of the device's connections: online while it lives, `last_seen_at`
     // as it opens and closes (L15), and closed with 4003 on a revocation.
-    let mut conn =
-        crate::devices::connect(&state, &ctx.principal, ctx.revocation_mark, LinkKind::Tools).await;
+    let mut conn = crate::devices::connect(&state, &ctx, LinkKind::Tools).await;
     let ping_s = state.snapshot().settings.mcp.host_ping_interval_s;
     let (transport, mut side) = transport::pair();
     let link = state.mcp.link_opened(&server, side.open.clone()).await;

@@ -15,6 +15,7 @@
 //! Editing a built-in keeps `source = 'builtin'`, so "Reset to shipped"
 //! ([`shipped`]) can put the embedded manifest back while keeping the config.
 
+use lmgw_api_types::AgentsRestored;
 use serde_json::{Map, Value};
 
 use crate::state::SharedState;
@@ -548,7 +549,7 @@ pub async fn migrate_mail_kv(state: &SharedState) {
 
 /// "Restore shipped agents": re-insert every built-in the catalog is missing,
 /// ignoring the seeded set. The deliberate counterpart to [`seed`].
-pub async fn restore(state: &SharedState) -> Result<Value, String> {
+pub async fn restore(state: &SharedState) -> Result<AgentsRestored, String> {
     let mut seen = seeded(state).await;
     let before = seen.clone();
     let mut restored: Vec<String> = Vec::new();
@@ -577,15 +578,16 @@ pub async fn restore(state: &SharedState) -> Result<Value, String> {
     if seen != before {
         write_seeded(state, &seen).await;
     }
-    Ok(serde_json::json!({
-        "ok": true,
-        "restored": restored,
-        "message": if restored.is_empty() {
-            "every shipped agent is already in the catalog".to_string()
-        } else {
-            format!("restored {}", restored.join(", "))
-        },
-    }))
+    let message = if restored.is_empty() {
+        "every shipped agent is already in the catalog".to_string()
+    } else {
+        format!("restored {}", restored.join(", "))
+    };
+    Ok(AgentsRestored {
+        ok: true,
+        restored,
+        message,
+    })
 }
 
 #[cfg(test)]
@@ -805,7 +807,7 @@ mod tests {
 
         let row = row(&state).await;
         let m = manifest::load(&row.manifest).unwrap();
-        assert_eq!(m.version.as_deref(), Some("3.0.0"));
+        assert_eq!(m.version.as_deref(), Some("3.1.0"));
         assert!(m.apply_step().unwrap().is_script(), "still a turn: {row:?}");
         let config: Value = serde_json::from_str(&row.config).unwrap();
         assert_eq!(config["categories"], serde_json::json!(["Work", "Bills"]));
@@ -979,7 +981,7 @@ mod tests {
         let row = row(&state).await;
         assert_eq!(
             manifest::load(&row.manifest).unwrap().version.as_deref(),
-            Some("3.0.0")
+            Some("3.1.0")
         );
         assert_eq!(
             kv(&state).await[MAIL_AGENT_ID],

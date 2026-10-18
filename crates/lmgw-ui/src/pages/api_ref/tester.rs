@@ -48,10 +48,8 @@ pub fn ActionBar(
     let reveals = op.reveals_secret;
     let deprecated = op.deprecated;
     // Review R3 #8: what the document already says about the operation's
-    // relatives — the self-admin tool sharing its code path, and the op a
-    // deprecated alias stands for.
+    // relatives — the self-admin tool sharing its code path.
     let tool = op.tool.clone();
-    let alias_of = op.alias_of.clone();
     let untyped = op.untyped_reason().map(str::to_string);
     let confirm_text = format!(
         "Send {method} {path}?{}",
@@ -110,10 +108,6 @@ pub fn ActionBar(
             {writes.then(|| view! { <span class="chip warn">"writes"</span> })}
             {reveals.then(|| view! { <span class="chip warn">"reveals a secret"</span> })}
             {deprecated.then(|| view! { <span class="chip err">"deprecated"</span> })}
-            {alias_of.map(|a| {
-                let title = format!("A deprecated alias: send {a} instead — same arguments, same answer.");
-                view! { <span class="chip off" title=title>"alias of " {a}</span> }
-            })}
             {tool.map(|t| {
                 let title = format!("Same code path as the self-admin MCP tool {t}, served on /mcp/admin.");
                 view! { <span class="chip off" title=title>"same as MCP tool " {t}</span> }

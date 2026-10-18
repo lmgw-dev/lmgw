@@ -14,14 +14,14 @@ use crate::store;
 
 /// Queue an explicit set of repo files (e.g. an audio.cpp spec package) into
 /// `target`'s models dir with a single repo listing. Split-GGUF names still
-/// expand to all parts present in the repo. Returns the number of files
-/// queued.
+/// expand to all parts present in the repo. Returns the tracked row of every
+/// file queued, every part of a split GGUF included.
 pub(crate) async fn queue_files(
     state: &SharedState,
     repo: &str,
     files: &[String],
     target: &str,
-) -> Result<usize, String> {
+) -> Result<Vec<lmgw_api_types::QueuedDownload>, String> {
     queue_files_at(state, repo, files, target, "main", None).await
 }
 
@@ -36,7 +36,7 @@ pub(crate) async fn queue_files_at(
     target: &str,
     revision: &str,
     pin_note: Option<&str>,
-) -> Result<usize, String> {
+) -> Result<Vec<lmgw_api_types::QueuedDownload>, String> {
     // Before the listing and before any row is written: a dev instance on a
     // models dir outside its data dir refuses here (`models_dir_to_write`).
     hf::models_dir_to_write(state, target)?;
@@ -61,16 +61,30 @@ pub(crate) async fn queue_files_at(
             }
         }
     }
+    let mut queued = Vec::with_capacity(parts.len());
     for part in &parts {
         let dest = hf::dest_rel_path(repo, part)?;
         let id = store::upsert_hf_model_at(&state.db, repo, part, &dest, target, revision)
             .await
             .map_err(|e| e.to_string())?;
-        if let Ok(Some(row)) = store::get_hf_model(&state.db, id).await {
-            hf_download::start(state, &row).await?;
-        }
+        let row = store::get_hf_model(&state.db, id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("download entry {id} for {part} vanished"))?;
+        hf_download::start(state, &row).await?;
+        // Read again: starting moves the row on (queued → downloading).
+        let row = store::get_hf_model(&state.db, id)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(row);
+        queued.push(lmgw_api_types::QueuedDownload {
+            id,
+            file: row.file,
+            dest_path: row.dest_path,
+            status: row.status,
+        });
     }
-    Ok(parts.len())
+    Ok(queued)
 }
 
 /// Re-download a tracked row (also serves update / retry / resume). Returns the

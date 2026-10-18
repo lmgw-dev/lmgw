@@ -26,6 +26,7 @@ use std::time::Duration;
 use lmgw_core::config::{
     AuxKind, HoldFallbackMode, LlamaParams, Protocol, Route, Settings, UpstreamKind,
 };
+use lmgw_core::erased::Erased;
 use lmgw_core::ladder::Rung;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry, HOST_PID_FORMAT};
 use lmgw_core::state::{AppState, SharedState};
@@ -283,128 +284,133 @@ struct Podman {
     world: Arc<Mutex<World>>,
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Podman {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        let ok = CmdOutput {
-            status: 0,
-            stdout: "c0ffee\n".into(),
-            stderr: String::new(),
-        };
-        match args[0].as_str() {
-            "ps" => Ok(CmdOutput {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            let ok = CmdOutput {
                 status: 0,
-                stdout: self.world.lock().unwrap().ps(args).to_string(),
+                stdout: "c0ffee\n".into(),
                 stderr: String::new(),
-            }),
-            "inspect"
-                if args.get(2).map(String::as_str) == Some("json")
-                    && self.world.lock().unwrap().listed =>
-            {
-                let w = self.world.lock().unwrap();
-                let name = args.last().cloned().unwrap_or_default();
-                match w.run_argv.get(&name).filter(|_| w.is_loaded(&name)) {
-                    Some(argv) => Ok(CmdOutput {
-                        status: 0,
-                        stdout: inspected(argv).to_string(),
-                        stderr: String::new(),
-                    }),
-                    None => Ok(CmdOutput {
-                        status: 125,
-                        stdout: String::new(),
-                        stderr: format!("Error: no such container {name}\n"),
-                    }),
-                }
-            }
-            "run" => {
-                let name = flag(args, "--name").unwrap_or_default().to_string();
-                let model = args
-                    .iter()
-                    .find_map(|a| a.strip_prefix("lmgw.model="))
-                    .expect("every managed container is labelled with its model")
-                    .to_string();
-                let port: u16 = flag(args, "-p")
-                    .and_then(|p| p.rsplit(':').nth(1))
-                    .and_then(|p| p.parse().ok())
-                    .expect("every managed container publishes a host port");
-                let file = flag(args, "-m")
-                    .and_then(|m| m.rsplit('/').next())
-                    .unwrap_or_default()
-                    .to_string();
-                let gate = {
-                    let mut w = self.world.lock().unwrap();
-                    w.runs.push(model.clone());
-                    w.run_gate.clone()
-                };
-                if let Some(mut gate) = gate {
-                    let _ = gate.wait_for(|open| *open).await;
-                }
-                let mut w = self.world.lock().unwrap();
-                if w.fail_run.contains(&model) {
-                    return Ok(CmdOutput {
-                        status: 125,
-                        stdout: String::new(),
-                        stderr: format!("Error: {model} failed to start (test)\n"),
-                    });
-                }
-                let bytes = w.files.get(&file).copied().unwrap_or(0);
-                // Above any real `pid_max`, so the real `/proc` walk under it
-                // finds nothing.
-                let pid = 5_000_000 + w.runs.len() as u32;
-                w.pids.insert(model.clone(), pid);
-                w.size.insert(model.clone(), bytes);
-                w.run_argv.insert(name.clone(), args.to_vec());
-                w.names.insert(name, model.clone());
-                w.ports.insert(port, model.clone());
-                if let Some(served) = audiocpp_options::served(args) {
-                    w.served.insert(model.clone(), served);
-                }
-                if args
-                    .iter()
-                    .any(|a| a == "--mmproj" || a.starts_with("--mmproj="))
+            };
+            match args[0].as_str() {
+                "ps" => Ok(CmdOutput {
+                    status: 0,
+                    stdout: self.world.lock().unwrap().ps(args).to_string(),
+                    stderr: String::new(),
+                }),
+                "inspect"
+                    if args.get(2).map(String::as_str) == Some("json")
+                        && self.world.lock().unwrap().listed =>
                 {
-                    w.projectors.insert(model.clone());
-                }
-                w.loaded.insert(model);
-                Ok(ok)
-            }
-            // Per-process attribution's `State.Pid` read (§4.7).
-            "inspect" if args.get(2).map(String::as_str) == Some(HOST_PID_FORMAT) => {
-                let w = self.world.lock().unwrap();
-                let (mut stdout, mut stderr) = (String::new(), String::new());
-                for n in &args[3..] {
-                    let pid = w
-                        .names
-                        .get(n)
-                        .filter(|m| w.loaded.contains(*m))
-                        .and_then(|m| w.pids.get(m));
-                    match pid {
-                        Some(pid) => stdout.push_str(&format!("{n} {pid}\n")),
-                        None => stderr.push_str(&format!("Error: no such object: \"{n}\"\n")),
+                    let w = self.world.lock().unwrap();
+                    let name = args.last().cloned().unwrap_or_default();
+                    match w.run_argv.get(&name).filter(|_| w.is_loaded(&name)) {
+                        Some(argv) => Ok(CmdOutput {
+                            status: 0,
+                            stdout: inspected(argv).to_string(),
+                            stderr: String::new(),
+                        }),
+                        None => Ok(CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr: format!("Error: no such container {name}\n"),
+                        }),
                     }
                 }
-                Ok(CmdOutput {
-                    status: if stderr.is_empty() { 0 } else { 125 },
-                    stdout,
-                    stderr,
-                })
-            }
-            "stop" => {
-                let gate = self.world.lock().unwrap().stop_gate.clone();
-                if let Some(mut gate) = gate {
-                    let _ = gate.wait_for(|open| *open).await;
+                "run" => {
+                    let name = flag(args, "--name").unwrap_or_default().to_string();
+                    let model = args
+                        .iter()
+                        .find_map(|a| a.strip_prefix("lmgw.model="))
+                        .expect("every managed container is labelled with its model")
+                        .to_string();
+                    let port: u16 = flag(args, "-p")
+                        .and_then(|p| p.rsplit(':').nth(1))
+                        .and_then(|p| p.parse().ok())
+                        .expect("every managed container publishes a host port");
+                    let file = flag(args, "-m")
+                        .and_then(|m| m.rsplit('/').next())
+                        .unwrap_or_default()
+                        .to_string();
+                    let gate = {
+                        let mut w = self.world.lock().unwrap();
+                        w.runs.push(model.clone());
+                        w.run_gate.clone()
+                    };
+                    if let Some(mut gate) = gate {
+                        let _ = gate.wait_for(|open| *open).await;
+                    }
+                    let mut w = self.world.lock().unwrap();
+                    if w.fail_run.contains(&model) {
+                        return Ok(CmdOutput {
+                            status: 125,
+                            stdout: String::new(),
+                            stderr: format!("Error: {model} failed to start (test)\n"),
+                        });
+                    }
+                    let bytes = w.files.get(&file).copied().unwrap_or(0);
+                    // Above any real `pid_max`, so the real `/proc` walk under it
+                    // finds nothing.
+                    let pid = 5_000_000 + w.runs.len() as u32;
+                    w.pids.insert(model.clone(), pid);
+                    w.size.insert(model.clone(), bytes);
+                    w.run_argv.insert(name.clone(), args.to_vec());
+                    w.names.insert(name, model.clone());
+                    w.ports.insert(port, model.clone());
+                    if let Some(served) = audiocpp_options::served(args) {
+                        w.served.insert(model.clone(), served);
+                    }
+                    if args
+                        .iter()
+                        .any(|a| a == "--mmproj" || a.starts_with("--mmproj="))
+                    {
+                        w.projectors.insert(model.clone());
+                    }
+                    w.loaded.insert(model);
+                    Ok(ok)
                 }
-                let name = args.last().cloned().unwrap_or_default();
-                let mut w = self.world.lock().unwrap();
-                if let Some(model) = w.names.get(&name).cloned() {
-                    w.loaded.remove(&model);
-                    w.stops.push(model);
+                // Per-process attribution's `State.Pid` read (§4.7).
+                "inspect" if args.get(2).map(String::as_str) == Some(HOST_PID_FORMAT) => {
+                    let w = self.world.lock().unwrap();
+                    let (mut stdout, mut stderr) = (String::new(), String::new());
+                    for n in &args[3..] {
+                        let pid = w
+                            .names
+                            .get(n)
+                            .filter(|m| w.loaded.contains(*m))
+                            .and_then(|m| w.pids.get(m));
+                        match pid {
+                            Some(pid) => stdout.push_str(&format!("{n} {pid}\n")),
+                            None => stderr.push_str(&format!("Error: no such object: \"{n}\"\n")),
+                        }
+                    }
+                    Ok(CmdOutput {
+                        status: if stderr.is_empty() { 0 } else { 125 },
+                        stdout,
+                        stderr,
+                    })
                 }
-                Ok(ok)
+                "stop" => {
+                    let gate = self.world.lock().unwrap().stop_gate.clone();
+                    if let Some(mut gate) = gate {
+                        let _ = gate.wait_for(|open| *open).await;
+                    }
+                    let name = args.last().cloned().unwrap_or_default();
+                    let mut w = self.world.lock().unwrap();
+                    if let Some(model) = w.names.get(&name).cloned() {
+                        w.loaded.remove(&model);
+                        w.stops.push(model);
+                    }
+                    Ok(ok)
+                }
+                _ => Ok(ok),
             }
-            _ => Ok(ok),
-        }
+        })
     }
 }
 
@@ -908,6 +914,11 @@ impl Gpu {
                 kind,
                 pooling: None,
                 ctx_size: None,
+                ubatch_size: None,
+                batch_size: None,
+                mmproj_path: None,
+                backend: None,
+                threads: None,
                 args: vec![],
                 idle_seconds: 0,
                 enabled: true,
@@ -1013,6 +1024,7 @@ impl Gpu {
                 expose_all: false,
                 expose_prefix: String::new(),
                 supports_responses: false,
+                catalog_all_modalities: true,
             },
         )
         .await

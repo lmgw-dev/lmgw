@@ -11,6 +11,7 @@
 //!   the placeholder with its value.
 
 use leptos::prelude::*;
+use lmgw_api_types::SettingsFull;
 use serde_json::{json, Map, Value};
 
 use super::FolderInfo;
@@ -126,11 +127,10 @@ fn changed(seeded: Seeded, now: Seeded) -> Map<String, Value> {
 /// The global retention, for the placeholders: `(archive, purge)` days.
 fn globals() -> LocalResource<Option<(i64, i64)>> {
     LocalResource::new(|| async {
-        let v = crate::api::get::<Value>("/api/settings-full").await.ok()?;
-        Some((
-            v["chat_archive_days"].as_i64()?,
-            v["chat_purge_days"].as_i64()?,
-        ))
+        let full = crate::api::get::<SettingsFull>("/api/settings-full")
+            .await
+            .ok()?;
+        Some((full.chat_archive_days, full.chat_purge_days))
     })
 }
 

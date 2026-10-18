@@ -53,6 +53,7 @@ async fn world() -> World {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -614,16 +615,9 @@ async fn a_device_s_hand_attached_kb_label_searches_as_the_device() {
             .await;
     }
     w.base("Taxes", ("notes.md", kbfix::NOTES)).await;
-    let r = post(
-        &w.gw,
-        "/api/op/key_create",
-        json!({ "kind": "device", "name": "phone" }),
-    )
-    .await;
-    assert_eq!(r.status(), 200);
-    let paired: Value = r.json().await.unwrap();
-    let device_id = paired["id"].as_i64().unwrap();
-    let device = crate::device_chat::bearer(paired["key"].as_str().unwrap());
+    let paired = crate::support::device_pair::pair(&w.state, &w.gw, "phone", json!({})).await;
+    let device_id = paired.id;
+    let device = &paired.client;
     let created: Value = device
         .post(format!("{}/chat/api/threads", w.gw))
         .json(&json!({ "model_alias": "m" }))
@@ -683,16 +677,9 @@ async fn a_device_s_auto_retrieval_embeds_as_the_device() {
     let w = world().await;
     mount_openai_reply(&w.chat, "done", 1, 1).await;
     let taxes = w.base("Taxes", ("notes.md", kbfix::NOTES)).await;
-    let r = post(
-        &w.gw,
-        "/api/op/key_create",
-        json!({ "kind": "device", "name": "phone" }),
-    )
-    .await;
-    assert_eq!(r.status(), 200);
-    let paired: Value = r.json().await.unwrap();
-    let device_id = paired["id"].as_i64().unwrap();
-    let device = crate::device_chat::bearer(paired["key"].as_str().unwrap());
+    let paired = crate::support::device_pair::pair(&w.state, &w.gw, "phone", json!({})).await;
+    let device_id = paired.id;
+    let device = &paired.client;
     let created: Value = device
         .post(format!("{}/chat/api/threads", w.gw))
         .json(&json!({ "model_alias": "m" }))

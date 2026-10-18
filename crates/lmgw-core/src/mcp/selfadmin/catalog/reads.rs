@@ -46,7 +46,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                  also lists candidate aliases — 'kind': \
                  'candidate_alias' distinguishes them from a plain alias — each with its \
                  candidates list (primary first), background flag, enabled facets, which \
-                 candidates are routable right now, any problems (a candidate or the fallback \
+                 candidates are routable right now (routable_candidates), any problems (a candidate or the fallback \
                  that stopped supporting an enabled facet, say), and deferrals_24h — how many \
                  times a background alias answered gpu_deferred (declined rather than disturb \
                  ordinary traffic) in the last 24 hours. Answering this makes the same cached catalog \
@@ -101,7 +101,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 "Tail the gateway request log (every /v1 request and MCP tool call, newest \
                  first) with status, latency, tokens and error details. fallback_reason says \
                  why a fallback answered instead of the requested local model (hold, \
-                 external_vram, background, unavailable); upstream is the fallback. rung is the 1-based rung \
+                 external_vram, background, unavailable); upstream_name is the fallback. rung is the 1-based rung \
                  a ladder model's row was judged on (empty for a row without a ladder, and for \
                  one a fallback answered instead). Use it to diagnose a failing model or \
                  upstream.",
@@ -141,12 +141,16 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "The complete stored configuration of one local model — chat, aux \
-                 (embedding / rerank), image (stable-diffusion.cpp) or audio (audio.cpp) — \
+                 (embedding / rerank / decision), image (stable-diffusion.cpp) or audio \
+                 (audio.cpp) — \
                  every parameter, whether each file it references actually exists on disk, \
                  static problems, and the exact command line its container is started with. \
                  Use this to read back what you just wrote; lmgw__models only lists names. A \
                  model id is looked up in the chat table first, then aux, then image, then \
-                 audio; the result says which ('class'). An image row comes back with its \
+                 audio; the result says which ('class'). An aux row also carries the thread \
+                 count its container starts with and where it comes from (threads_in_effect, \
+                 threads_source: row, args, cores, logical_cpus or llama_server). An image row \
+                 comes back with its \
                  files/args maps, its modes and edit flag, and a files_present map saying \
                  which paths resolve. An audio row comes back with every field, whether its \
                  model directory is present, the server.json its container is started with \
@@ -206,7 +210,8 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: false,
             description:
                 "List the model files present in one class's models directory (chat by \
-                 default; target=aux for the embedding / rerank dir), with sizes and whether \
+                 default; target=aux for the embedding / rerank / decision dir), with sizes \
+                 and whether \
                  a model entry already uses each one. This is how you discover what is on \
                  disk without shell access — the paths returned are exactly what gguf_path, \
                  mmproj_path and draft_gguf_path expect, together with the same target. \
@@ -226,7 +231,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "target",
                     enum_p(
                         "Which class's models directory the path is under. Default 'chat'. \
-                         'aux' is the embedding / rerank models dir, 'image' the \
+                         'aux' is the embedding / rerank / decision models dir, 'image' the \
                          stable-diffusion.cpp one — the four classes keep separate trees, so \
                          a file downloaded with lmgw__hf_add target=aux is only visible here \
                          with target=aux.",
@@ -244,12 +249,12 @@ pub(super) fn tools() -> Vec<Builtin> {
                  head counts, quantization, whether it carries a chat template, whether it \
                  has MTP layers, and whether it is weights / a multimodal projector / a \
                  speculative drafter. Also says which class serves it ('serve_as': an \
-                 embedding or rerank model is an aux model, recognised by the pooling_type \
-                 or classifier head in its header, whatever directory it sits in), \
-                 estimates KV cache cost, and optionally probes whether the RUNNING \
-                 llama.cpp build supports the architecture at all — a build older than the \
-                 model fails to load with 'unknown model architecture', and this is the \
-                 cheap way to find that out. Reads only the file header.",
+                 embedding, rerank or decision model is an aux model, recognised by the \
+                 pooling_type, classifier head or decision.type in its header, whatever \
+                 directory it sits in), \
+                 and estimates KV cache cost. Reads only the file header and loads \
+                 nothing: whether the image can load the model shows on \
+                 lmgw__local_model_test.",
             props: vec![
                 (
                     "gguf_path",
@@ -259,21 +264,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "target",
                     enum_p(
                         "Which class's models directory the path is under. Default 'chat'. \
-                         'aux' is the embedding / rerank models dir — the four classes keep \
+                         'aux' is the embedding / rerank / decision models dir — the four \
+                         classes keep \
                          separate trees, so a file downloaded with lmgw__hf_add target=aux is \
                          only visible here with target=aux. 'image' is the \
                          stable-diffusion.cpp tree, whose files are mostly not GGUF: only a \
                          .gguf there has a header to read.",
                         &["chat", "aux", "audio", "image"],
-                    ),
-                ),
-                (
-                    "probe",
-                    bool_p(
-                        "Ask the running llama-server whether it knows this architecture. \
-                         An unsupported one is reported in about a second; a supported one \
-                         costs the full ~10s budget, because the check passing means the \
-                         model went on loading. Default true.",
                     ),
                 ),
             ],
@@ -287,10 +284,16 @@ pub(super) fn tools() -> Vec<Builtin> {
                  in a models directory, by reading its metadata and finding its companion \
                  files (projector, drafter) beside it. The result's 'class' says which set \
                  tool takes it: a chat model's params are lmgw__local_model_set's; an \
-                 embedding or rerank model (recognised from the header, not the filename) \
-                 gets kind, pooling and ctx_size for lmgw__aux_model_set instead — pass \
+                 embedding, rerank or decision model (recognised from the header, not the \
+                 filename) gets kind, pooling, ctx_size and, where the header calls for \
+                 them, ubatch_size, batch_size, mmproj_path and backend for \
+                 lmgw__aux_model_set instead — pass \
                  target=aux for a file in the aux models dir. Every value carries a \
-                 rationale, and warnings name combinations that would fail to load. Start \
+                 rationale, and warnings name combinations that would fail to load, \
+                 including a GPU plan whose estimated footprint does not fit the card \
+                 (with the largest ctx_size that does; the plan keeps the trained \
+                 context). It reads the header only and loads nothing; \
+                 lmgw__local_model_test is what loads a model. Start \
                  here instead of guessing llama.cpp parameters. If a configured model \
                  already uses this GGUF, 'configured_as' additionally reports how each one \
                  differs from the plan and carries a ready-made update patch — so this is \
@@ -306,7 +309,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "target",
                     enum_p(
                         "Which class's models directory the path is under. Default 'chat'. \
-                         'aux' is the embedding / rerank models dir — the classes keep \
+                         'aux' is the embedding / rerank / decision models dir — the classes \
+                         keep \
                          separate trees, so a file downloaded with lmgw__hf_add target=aux is \
                          only visible here with target=aux. 'image' plans from the shipped \
                          RECIPE list rather than from a header — pass a diffusion model or \
@@ -315,14 +319,6 @@ pub(super) fn tools() -> Vec<Builtin> {
                          not on disk named together with the lmgw__hf_add call that fetches \
                          it; an unrecognised file says so and lists the recipes it knows.",
                         &["chat", "aux", "image"],
-                    ),
-                ),
-                (
-                    "probe",
-                    bool_p(
-                        "Also check whether the running llama.cpp build supports the \
-                         architecture. Adds up to ~10s. Default true; set false when you \
-                         only want the parameters.",
                     ),
                 ),
             ],
@@ -361,7 +357,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 "List the weights files in a Hugging Face repo, each classified by role — \
                  'weights', 'mmproj' (multimodal projector) or 'drafter' (speculative \
                  decoding) — with its quantization label and size. Split GGUFs are collapsed \
-                 into one entry. Call this before lmgw__hf_add to choose a quantization. \
+                 into one entry. A repo with nothing to list answers an empty `files` and a `note` saying so. Call this before lmgw__hf_add to choose a quantization. \
                  With target=image it lists .safetensors / .ckpt / .pt / .pth as well as \
                  .gguf, and names the roles of an image pipeline instead (diffusion, \
                  checkpoint, vae, text_encoder, lora, upscaler) — but one image pipeline \
@@ -433,19 +429,24 @@ pub(super) fn tools() -> Vec<Builtin> {
                  remainder beside it (a request with no price on file is never \
                  folded in as a silent zero, which would read as authoritative and be wrong \
                  downward) — see lmgw__prices for which aliases that currently affects and \
-                 why. Dates are UTC; there is no browser here to read a timezone from.",
+                 why. Dates are UTC; there is no browser here to read a timezone from. The answer \
+                 echoes the window as 'from' (inclusive) and 'to' (exclusive) ISO 8601 UTC \
+                 instants, and the class, alias and group_by that were applied.",
             props: vec![
                 (
                     "from",
                     str_p(
                         "Start of the range: an ISO date (YYYY-MM-DD), or '<N>d' meaning N \
-                         days before 'to' (e.g. '7d', '30d'). Default '30d'.",
+                         days ending with 'to' (e.g. '7d' is 'to' and the 6 days before it). \
+                         Default '30d'.",
                     ),
                 ),
                 (
                     "to",
                     str_p(
-                        "End of the range (inclusive), an ISO date. Default today (UTC).",
+                        "Last day of the range, inclusive, an ISO date (YYYY-MM-DD). Default \
+                         today (UTC). The answer's 'to' is the exclusive end instant: the \
+                         start of the day after this one.",
                     ),
                 ),
                 (
@@ -483,7 +484,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                  other unit one `price` per its scale (per minute of input audio, per 1M \
                  input characters, per generated image, per answered request). Plus \
                  `unpriced_models`: every model for which no unit resolves a price at all, \
-                 with the requests each has already spent unpriced. That list covers the \
+                 each as {name, requests} — the requests it has already spent unpriced. \
+                 That list covers the \
                  configured aliases *and* the passthrough models an expose_all upstream \
                  serves, counted from the usage rollup — on a gateway with no configured \
                  aliases the passthrough models are the only ones there are. A manual row \
@@ -555,7 +557,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                  `secret` field replaced by `{has_value}`, the config form the manifest \
                  declares (each field's type, format, default, enum and bounds), which of its \
                  tool labels resolve right now, the tool-call and wall-clock budget a run is \
-                 bounded by, and the run in flight if there is one. Read this before editing a \
+                 bounded by, the run in flight if there is one (live_job) and the latest run's outcome \
+                 (last_run). Read this before editing a \
                  manifest: lmgw__agent_set replaces the whole document, so start from this one.",
             props: vec![("id", str_p("Agent id, from lmgw__agents."))],
             required: &["id"],
@@ -585,7 +588,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                  since last run (ref)'; empty reasons = up to date as of checked_at; what \
                  could not be checked (a forge rate limit with its reset time) is in errors. \
                  An update is acted on with lmgw__build_run. Also 'repo_presets' — the \
-                 preset ids lmgw__build_set preset= accepts. With id: that build and its runs, \
+                 repository presets (the id is what lmgw__build_set preset= takes). With id: that build and its runs, \
                  newest first, each with its status (running; succeeded; unverified = built \
                  but not GPU-checked, e.g. under the GPU hold; broken = a verify check failed; \
                  failed; canceled; up_to_date = those exact inputs were already built and \

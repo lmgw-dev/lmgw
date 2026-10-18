@@ -50,7 +50,12 @@ pub async fn run(cx: &PhaseCx<'_>, out: &mut Vec<DecodePoint>) -> Result<(), Ben
             let t = *rec
                 .timings()
                 .map_err(|e| BenchError::Failed(format!("decode at depth {d}: {e}")))?;
-            tok_s.push(t.predicted_per_second);
+            // A rate llama.cpp did not give is left out, not counted as 0, so
+            // `tok_s` uses whichever repetitions reported one; unlike
+            // `distinct_token_ratio` and the energy, which need every
+            // repetition or none (they cannot diverge today: both engines
+            // always send the rates).
+            tok_s.extend(t.predicted_per_second);
             generated.push(t.predicted_n as f64);
             evaluated.push(t.prompt_n as f64);
             distinct.extend(rec.distinct_ratio(t.predicted_n));
@@ -59,6 +64,11 @@ pub async fn run(cx: &PhaseCx<'_>, out: &mut Vec<DecodePoint>) -> Result<(), Ben
                 windows.push(EnergyWindow { start, end, tokens });
             }
             cx.steps.advance();
+        }
+        if tok_s.is_empty() {
+            return Err(BenchError::Failed(format!(
+                "decode at depth {d}: the server reported no decode rate"
+            )));
         }
         let (energy, energy_unmeasured) = if windows.len() == reps as usize {
             cx.sampler.energy(&windows).await.into_parts()

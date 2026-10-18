@@ -506,6 +506,11 @@ async fn a_held_local_reranker_is_refused_up_front() {
             kind: lmgw_core::config::AuxKind::Rerank,
             pooling: None,
             ctx_size: None,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: vec![],
             idle_seconds: 0,
             enabled: true,
@@ -519,7 +524,9 @@ async fn a_held_local_reranker_is_refused_up_front() {
     .await
     .unwrap();
     state.reload_snapshot().await.unwrap();
-    let alias = state.snapshot().aux_public_name("rerank-local");
+    let alias = state
+        .snapshot()
+        .aux_name_for(lmgw_core::config::AuxKind::Rerank, "rerank-local");
     let id = super::knowledge::ingested(
         &state,
         &gw,

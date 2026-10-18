@@ -18,7 +18,7 @@
 //!   pre-flight `check_background_start`), `vram/climb.rs`,
 //!   `vram/background.rs` (`join_at`);
 //! * the refusals that name the hold themselves: `local_model_test` (all
-//!   classes), the runtime probe of `local_model_plan`, quickdoc's batch
+//!   classes), quickdoc's batch
 //!   runners and its pinned embedder, and a build run's GPU verify.
 //!
 //! **And the registry, as the net under all of them** (§13 decision 44).
@@ -40,8 +40,8 @@
 //! **The hold wins.** Under both, a site answers as the hold does: the hold
 //! is the owner's own switch and ends the run anyway (§3.3).
 //!
-//! **Per model** ([`Snapshot::gpu_block_for`]): an audio row on the CPU
-//! (`runtime::Placement::Cpu`) is blocked by the lease and never by the
+//! **Per model** ([`Snapshot::gpu_block_for`]): an audio or aux row on the
+//! CPU (`runtime::Placement::Cpu`) is blocked by the lease and never by the
 //! hold. Every site that decides for one model asks that instead.
 //!
 //! **Not the outside-VRAM trigger.** Unlike the hold, the lease leaves
@@ -109,15 +109,24 @@ impl Snapshot {
     /// stricter answer. A running container's own placement is its
     /// registry entry's ([`crate::runtime::registry::Registry::placement_of`]).
     pub fn placement(&self, class: Class, model_id: &str) -> Placement {
-        if class != Class::Audio {
-            return Placement::Gpu;
+        match class {
+            Class::Audio => self
+                .audio_models
+                .iter()
+                .find(|m| m.model_id == model_id)
+                .map_or(Placement::Gpu, |m| {
+                    crate::runtime::audio::placement(m, &self.settings.audio)
+                }),
+            // An aux row's own `backend` (decision-models design §3.3).
+            Class::Aux => self
+                .aux_models
+                .iter()
+                .find(|m| m.model_id == model_id)
+                .map_or(Placement::Gpu, |m| {
+                    crate::runtime::aux::placement(m.backend)
+                }),
+            Class::Chat | Class::Image => Placement::Gpu,
         }
-        self.audio_models
-            .iter()
-            .find(|m| m.model_id == model_id)
-            .map_or(Placement::Gpu, |m| {
-                crate::runtime::audio::placement(m, &self.settings.audio)
-            })
     }
 }
 

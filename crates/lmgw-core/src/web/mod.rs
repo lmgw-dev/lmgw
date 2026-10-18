@@ -77,7 +77,7 @@ pub(crate) mod chat_feed;
 /// Chat folders (chat-complete design §5), ongoing-conversation folders and
 /// a folder's own retention (client-apps design §3, §11 Q2).
 mod chat_folders;
-pub(crate) use chat_folders::FolderLocks;
+pub(crate) use chat_folders::{pick as folder_pick, FolderLocks};
 /// Knowledge bases in Chat threads (chat-complete design §9.3): which bases a
 /// turn uses, auto mode's retrieval and `<context>` block, the checks.
 mod chat_knowledge;
@@ -127,7 +127,10 @@ pub use chat_turn::{spoken_turn_for_tests, spoken_turn_held_for_tests, HeldTurnF
 pub(crate) mod chat_voice;
 /// The Chat API's bodies as `lmgw-api-types`' typed DTOs (client-apps
 /// design §4.3), written in the byte order the API always had.
-mod chat_wire;
+pub(crate) mod chat_wire;
+/// The Decision lab's server (labs-store design §2): `/decision-lab/api/*`,
+/// in process through `/v1/systemone`.
+pub(crate) mod decision_lab;
 /// Visible to [`crate::ops`] so the tool plane drives the same download,
 /// re-download and update-check paths as the dashboard rather than a parallel
 /// implementation of them.
@@ -135,6 +138,9 @@ pub(crate) mod hf;
 /// The Image lab's mini-API (image-generation design §8): the Audio lab's
 /// sibling for `/v1/images/*`.
 mod image_lab;
+/// The lab store's routes (labs-store design §1.6): `/labs/api/*`, shared by
+/// the three labs.
+mod labs_store;
 /// `POST /api/op/{name}`'s body extractor: no body is `{}`.
 mod op_body;
 /// The op dispatcher's vocabulary (api-docs design §4.7). `pub` because the
@@ -345,8 +351,9 @@ fn chat_owner_routes() -> Router<SharedState> {
     Router::new().route("/chat/api/threads/rows", get(chat::thread_rows))
 }
 
-/// The Audio lab and the Image lab — the two playgrounds the owner drives by
-/// hand. [`Cap::Admin`](crate::principal::Cap::Admin): they spend money on the
+/// The Audio, Image and Decision labs — the playgrounds the owner drives by
+/// hand — and the lab store they keep their history in.
+/// [`Cap::Admin`](crate::principal::Cap::Admin): they spend money on the
 /// owner's aliases with no key of their own, and no device ever holds them.
 fn labs_routes() -> Router<SharedState> {
     Router::new()
@@ -391,19 +398,130 @@ fn labs_routes() -> Router<SharedState> {
             "/audio-lab/api/tasks/run",
             post(audio_lab::tasks_run).layer(axum::extract::DefaultBodyLimit::disable()),
         )
-        // Image lab: the sd-server playground (image-generation §8). Both
-        // dispatch routes drop axum's body limit exactly as `/v1/images/*`
-        // does in `server::build_router` — an edit carries whole images, and a
-        // generation's answer is bounded by nothing but the picture.
+        // A kept group's form carries every panel whole (a task's raw JSON
+        // included): no guessed body limit either.
+        .route(
+            "/audio-lab/api/groups",
+            post(audio_lab::groups::create).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        // Image lab: the sd-server playground (image-generation §8). A group
+        // is made from the form first, then run. The group routes drop axum's
+        // body limit exactly as `/v1/images/*` does in `server::build_router`:
+        // an edit carries whole images, and a form is the size it is. A run
+        // has no body; its answer is bounded by nothing but the picture.
         .route("/image-lab/api/models", get(image_lab::list_models))
         .route(
-            "/image-lab/api/generate",
-            post(image_lab::generate).layer(axum::extract::DefaultBodyLimit::disable()),
+            "/image-lab/api/groups",
+            post(image_lab::create_generate).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
-            "/image-lab/api/edit",
-            post(image_lab::edit).layer(axum::extract::DefaultBodyLimit::disable()),
+            "/image-lab/api/groups/edit",
+            post(image_lab::create_edit).layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        .route("/image-lab/api/groups/{id}/run", post(image_lab::run))
+        // Decision lab: the System One playground (labs-store design §2). The
+        // count and the Ask take a form that can carry images, so they drop
+        // axum's body limit as the other labs' dispatch routes do; a cell has
+        // no body, and the real handler bounds the bytes it is handed by
+        // `max_body_mb`.
+        .route(
+            "/decision-lab/api/models",
+            get(decision_lab::models::list_models),
+        )
+        .route(
+            "/decision-lab/api/count",
+            post(decision_lab::count::count).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/decision-lab/api/groups",
+            post(decision_lab::groups::create).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/decision-lab/api/groups/{id}/cells/{cell}",
+            post(decision_lab::cells::run),
+        )
+        // Set runs (labs-store design §3.3): the preview and the start take a
+        // whole CSV or JSONL file as text, so they drop axum's body limit as
+        // the Ask does.
+        .route(
+            "/decision-lab/api/batches/preview",
+            post(decision_lab::batches::preview).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/decision-lab/api/batches",
+            get(decision_lab::batches::list)
+                .post(decision_lab::batches::start)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        // A batch agent's apply run as a labelled set run (§4): its rows,
+        // copied, whatever their number.
+        .route(
+            "/decision-lab/api/batches/from-agent",
+            post(decision_lab::from_agent::save),
+        )
+        .route(
+            "/decision-lab/api/batches/{id}",
+            get(decision_lab::batches::get),
+        )
+        .route(
+            "/decision-lab/api/batches/{id}/items",
+            get(decision_lab::batches::items),
+        )
+        .route(
+            "/decision-lab/api/batches/{id}/cancel",
+            post(decision_lab::batch_control::cancel),
+        )
+        .route(
+            "/decision-lab/api/batches/{id}/resume",
+            post(decision_lab::batch_control::resume),
+        )
+        .route(
+            "/decision-lab/api/batches/{id}/delete",
+            post(decision_lab::batch_control::delete),
+        )
+        .route(
+            "/decision-lab/api/batches/{id}/metrics",
+            get(decision_lab::batch_metrics::metrics),
+        )
+        // A threshold write and a preset's save carry a question set whole,
+        // whose size nothing bounds: no guessed body limit either.
+        .route(
+            "/decision-lab/api/batches/{id}/threshold",
+            post(decision_lab::batch_metrics::threshold)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        // The lab store (labs-store design §1.6): the same operations for all
+        // three labs, `{lab}` naming which.
+        .route("/labs/api/{lab}/groups", get(labs_store::groups::list))
+        .route("/labs/api/{lab}/groups/{id}", get(labs_store::groups::get))
+        .route(
+            "/labs/api/{lab}/groups/{id}/delete",
+            post(labs_store::groups::delete),
+        )
+        .route("/labs/api/{lab}/clear", post(labs_store::groups::clear))
+        .route("/labs/api/{lab}/usage", get(labs_store::groups::usage))
+        .route(
+            "/labs/api/{lab}/orphans/delete",
+            post(labs_store::groups::delete_orphans),
+        )
+        .route("/labs/api/{lab}/export", get(labs_store::export::export))
+        .route(
+            "/labs/api/{lab}/presets",
+            get(labs_store::presets::list)
+                .post(labs_store::presets::create)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/labs/api/{lab}/presets/{id}",
+            get(labs_store::presets::get)
+                .post(labs_store::presets::update)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/labs/api/{lab}/presets/{id}/delete",
+            post(labs_store::presets::delete),
+        )
+        .route("/labs/api/artifacts/{id}", get(labs_store::artifacts::get))
 }
 
 // ---------------------------------------------------------------------------

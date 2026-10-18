@@ -12,6 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use lmgw_core::config::{AuxKind, Settings};
+use lmgw_core::erased::Erased;
 use lmgw_core::ops;
 use lmgw_core::runtime::descriptor::model_runtime;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry};
@@ -40,16 +41,21 @@ fn ok(stdout: &str) -> CmdOutput {
     }
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Fake {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman", "the registry only ever shells podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args[0].as_str() {
-            "run" => Ok(ok("c0ffee\n")),
-            "logs" => Ok(ok(&self.logs.lock().unwrap().clone())),
-            _ => Ok(ok("")),
-        }
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman", "the registry only ever shells podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args[0].as_str() {
+                "run" => Ok(ok("c0ffee\n")),
+                "logs" => Ok(ok(&self.logs.lock().unwrap().clone())),
+                _ => Ok(ok("")),
+            }
+        })
     }
 }
 
@@ -172,6 +178,11 @@ async fn fixture(chat: &[(&str, bool)], aux: &[(&str, bool)]) -> Fixture {
                 kind: AuxKind::Embed,
                 pooling: None,
                 ctx_size: None,
+                ubatch_size: None,
+                batch_size: None,
+                mmproj_path: None,
+                backend: None,
+                threads: None,
                 args: vec![],
                 idle_seconds: 0,
                 enabled: true,
@@ -584,12 +595,30 @@ async fn gateway_status_carries_runtime_and_drops_the_old_containers_key() {
             .unwrap(),
     );
 
-    let status = ops::status(&f.state).await.unwrap();
+    let status = ops::backends::to_json(ops::status(&f.state).await).unwrap();
     assert!(status.get("containers").is_none(), "{status}");
     let runtime = status["runtime"].as_array().expect("runtime array");
     assert_eq!(runtime.len(), 1);
     assert_eq!(runtime[0]["model_id"], "m1");
     assert_eq!(runtime[0]["class"], "chat");
+
+    // Over HTTP the same answer reads back through the document's type, runtime
+    // row and GPU ledger included.
+    let gw = crate::common::serve(f.state.clone()).await;
+    let live: serde_json::Value = gw
+        .client()
+        .get(format!("{gw}/api/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let typed =
+        crate::common::round_trips::<lmgw_api_types::GatewayStatus>("GET /api/status", &live);
+    assert_eq!(typed.runtime.len(), 1);
+    assert!(typed.candidate_aliases.is_none(), "{live}");
+    assert!(live.get("candidate_aliases").is_none(), "{live}");
 }
 
 // ---------------------------------------------------------------------------

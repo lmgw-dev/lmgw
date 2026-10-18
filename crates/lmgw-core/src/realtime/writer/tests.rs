@@ -2,6 +2,7 @@
 //! channel standing in for the socket. The pacing tests run on tokio's paused
 //! clock, so "released at 600 ms" is exact.
 
+use axum::extract::ws::Message;
 use futures::StreamExt;
 use serde_json::Value;
 
@@ -360,7 +361,7 @@ async fn a_close_sends_what_was_said_and_drops_what_is_paced() {
     }
     ob.send(event(9));
     ob.flush(&out).await;
-    out.close(1000, "bye".into());
+    out.close(Close::GoingAway);
     task.await.unwrap();
     let mut frames = Vec::new();
     while let Ok(m) = rx.try_recv() {
@@ -610,7 +611,7 @@ async fn a_peer_s_close_quiets_the_writer_until_the_session_lets_go() {
         .await
         .expect("no sender waits on a quiet writer");
     out.ping();
-    out.close(1000, "bye".into());
+    out.close(Close::GoingAway);
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert!(
         !task.is_finished(),

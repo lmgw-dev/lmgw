@@ -1,7 +1,7 @@
 //! Where models and MCP servers come from: `lmgw__mcp_server_set`,
 //! `lmgw__hf_add`, `lmgw__image_recipe_add`, `lmgw__hf_set`.
 
-use crate::mcp::selfadmin::{bool_p, enum_p, int_p, str_p, Builtin};
+use crate::mcp::selfadmin::{bool_p, enum_p, int_p, str_p, strs_p, Builtin};
 
 pub(super) fn tools() -> Vec<Builtin> {
     vec![
@@ -10,9 +10,9 @@ pub(super) fn tools() -> Vec<Builtin> {
             writes: true,
             description:
                 "Create, update, delete, enable, disable or test a southbound MCP server that \
-                 lmgw aggregates. List-valued fields are newline-delimited text: args and \
-                 extra_run_args one per line, env as KEY=VALUE lines, headers as \
-                 'Name: Value' lines. Omit env/headers on update to keep the stored values. \
+                 lmgw aggregates. extra_run_args is a list of strings, one per \
+                 argument; the other list-valued fields are newline-delimited text: args one \
+                 per line, env as KEY=VALUE lines, headers as 'Name: Value' lines. Omit env/headers on update to keep the stored values. \
                  A call that moves url to another address (update, enable or disable) must \
                  pass headers as text in the same call when the server holds any (\"\" sends \
                  none; null keeps the stored ones, so it does not count), or it is refused \
@@ -59,7 +59,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 ),
                 (
                     "extra_run_args",
-                    str_p("Extra 'podman run' arguments, one per line."),
+                    strs_p("Extra 'podman run' arguments, one per entry."),
                 ),
                 (
                     "headers",
@@ -104,9 +104,10 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Download a model from Hugging Face into the models directory — the normal \
                  way to get a new model onto this gateway. Fetches the weights file you \
-                 name (or pick by quantization) together with its multimodal projector and \
-                 speculative drafter from the same directory, because a model usually needs \
-                 all of them. Split GGUFs expand to every part automatically. Downloads run \
+                 name (or pick by quantization) together with its multimodal projector and, \
+                 for target=chat, its speculative drafter from the same directory, because a \
+                 model usually needs all of them. Split GGUFs expand to every part \
+                 automatically. Downloads run \
                  in the background: poll lmgw__hf_downloads, then call \
                  lmgw__local_model_plan on the result. target=image downloads the \
                  stable-diffusion.cpp kinds (.safetensors, .ckpt, .pt, .pth as well as \
@@ -140,7 +141,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     "target",
                     enum_p(
                         "Which models directory to download into. Default 'chat'. Use 'aux' \
-                         for embedding and rerank models and 'image' for stable-diffusion.cpp \
+                         for embedding, rerank and decision models and 'image' for \
+                         stable-diffusion.cpp \
                          pipeline files — a row can only address files in its own class's \
                          directory, and this is what keeps the file in the updater's view \
                          (lmgw__hf_set check_updates).",
@@ -150,8 +152,9 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "companions",
                     bool_p(
-                        "Also fetch the projector and drafter beside the weights. Default \
-                         true; set false to download only the file you named.",
+                        "Also fetch the projector beside the weights, and for target=chat \
+                         the drafter (an aux row has none). Default true; set false to \
+                         download only the file you named.",
                     ),
                 ),
             ],

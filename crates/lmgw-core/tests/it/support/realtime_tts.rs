@@ -181,6 +181,7 @@ pub async fn add_tts_alias(state: &SharedState, fake: &TtsFake) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -240,6 +241,7 @@ async fn add_cloud_tts(state: &SharedState, fake: &TtsFake, alias: &str, speech:
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

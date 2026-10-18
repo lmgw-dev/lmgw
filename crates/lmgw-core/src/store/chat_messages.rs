@@ -6,7 +6,9 @@
 //! Every write here takes the thread id as well as the message id and matches
 //! both, so a message id from another thread is simply not found; and every
 //! write that changed something bumps the thread's `updated_at`, the idle
-//! clock the sidebar sorts by and the archive sweep reads.
+//! clock the sidebar sorts by and the archive sweep reads. Each records its
+//! `message.*` change in its own transaction, `by` its author
+//! (`feed::record_messages`, client-apps design §2.2).
 
 use sqlx::SqlitePool;
 
@@ -75,7 +77,8 @@ pub async fn append_chat_reply(pool: &SqlitePool, thread_id: i64, r: &ChatReply)
 }
 
 /// [`append_chat_reply`], `by` naming the turn's starter in the feed's
-/// `approval.requested` records of a gated turn's calls.
+/// `message.added` record and the `approval.requested` records of a gated
+/// turn's calls.
 pub async fn append_chat_reply_by(
     pool: &SqlitePool,
     thread_id: i64,
@@ -107,6 +110,7 @@ pub async fn append_chat_reply_by(
     .execute(&mut *tx)
     .await?
     .last_insert_rowid();
+    feed::record_added(&mut tx, thread_id, id, by).await?;
     super::chat_approvals::record_requested(
         &mut tx,
         thread_id,
@@ -126,13 +130,14 @@ pub async fn append_chat_reply_by(
 /// in one transaction, so an edit cannot land between the check and the
 /// write (review R1 finding 1). A spoken reply keeps its voice, less the
 /// unheard rest: the continuation follows the heard text (chat-voice design
-/// §3).
+/// §3). `by`: the continue's caller, in the feed's `message.updated`.
 pub async fn continue_chat_reply(
     pool: &SqlitePool,
     thread_id: i64,
     id: i64,
     prefix: &str,
     r: &ChatReply,
+    by: feed::By<'_>,
 ) -> DbResult<ContinueSave> {
     let mut tx = super::begin_write(pool).await?;
     let now: Option<(String, Option<String>)> = sqlx::query_as(
@@ -169,6 +174,7 @@ pub async fn continue_chat_reply(
     .bind(&r.images_note)
     .execute(&mut *tx)
     .await?;
+    feed::record_updated(&mut tx, thread_id, id, by).await?;
     touch_thread(&mut tx, thread_id).await?;
     tx.commit().await?;
     Ok(ContinueSave::Saved)
@@ -181,13 +187,16 @@ pub async fn continue_chat_reply(
 /// `tool`), which stays and is answered again (MCP Tasks design T13). Its own attachments stay bound. A
 /// dictated message whose text changed loses its `voice`: the text is no
 /// longer what was spoken (chat-voice design §3). `false` — and nothing
-/// written — when no such user message is in this thread.
+/// written — when no such user message is in this thread. The feed hears
+/// `message.updated` for it and `message.deleted` for what went, `by` the
+/// editor.
 pub async fn rewrite_chat_user_message(
     pool: &SqlitePool,
     thread_id: i64,
     id: i64,
     content: &str,
     kb_refs: &[i64],
+    by: feed::By<'_>,
 ) -> DbResult<bool> {
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
@@ -205,11 +214,16 @@ pub async fn rewrite_chat_user_message(
     if n == 0 {
         return Ok(false);
     }
-    sqlx::query("DELETE FROM chat_messages WHERE thread_id = ?1 AND id > ?2 AND role <> 'tool'")
-        .bind(thread_id)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    feed::record_updated(&mut tx, thread_id, id, by).await?;
+    let gone: Vec<i64> = sqlx::query_scalar(
+        "DELETE FROM chat_messages WHERE thread_id = ?1 AND id > ?2 AND role <> 'tool'
+         RETURNING id",
+    )
+    .bind(thread_id)
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    feed::record_deleted(&mut tx, thread_id, &gone, by).await?;
     touch_thread(&mut tx, thread_id).await?;
     tx.commit().await?;
     Ok(true)
@@ -230,6 +244,51 @@ pub async fn get_chat_message(
     Ok(row.as_ref().map(chat_message_from_row))
 }
 
+/// Messages `ids` of thread `thread_id` as stored now, oldest first, with
+/// the attachments sent with them, in their order: what the feed's
+/// `message.added` and `message.updated` render (client-apps design §2.3).
+/// A message gone, or another thread's, is not there. Read in one
+/// transaction, so the attachments are the messages'.
+pub async fn chat_messages_by_ids(
+    pool: &SqlitePool,
+    thread_id: i64,
+    ids: &[i64],
+) -> DbResult<(Vec<ChatMessageRow>, Vec<ChatAttachmentMeta>)> {
+    if ids.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let list = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
+    // Reads only, for one snapshot: deferred, as no write lock is needed
+    // (`begin_write` is for a transaction that writes).
+    #[allow(clippy::disallowed_methods)]
+    let mut tx = pool.begin().await?;
+    let rows = sqlx::query(
+        "SELECT * FROM chat_messages
+         WHERE thread_id = ?1 AND id IN (SELECT value FROM json_each(?2)) ORDER BY id",
+    )
+    .bind(thread_id)
+    .bind(&list)
+    .fetch_all(&mut *tx)
+    .await?;
+    let atts = sqlx::query(
+        "SELECT id, thread_id, message_id, kind, name, mime, size, mode, meta
+         FROM chat_attachments
+         WHERE thread_id = ?1 AND message_id IN (SELECT value FROM json_each(?2))
+         ORDER BY ord, id",
+    )
+    .bind(thread_id)
+    .bind(&list)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((
+        rows.iter().map(chat_message_from_row).collect(),
+        atts.iter()
+            .map(super::chat_attachments::chat_attachment_meta_from_row)
+            .collect(),
+    ))
+}
+
 /// The thread's newest message, `None` when it has none.
 pub async fn last_chat_message(
     pool: &SqlitePool,
@@ -246,12 +305,13 @@ pub async fn last_chat_message(
 /// Rewrite one message's columns in place — the row, its id, its position
 /// and its attachments stay (an edited user message keeps its files). An
 /// edited reply's tool record goes, and so does what it waited on.
-/// `false` when no such message is in this thread.
+/// `false` when no such message is in this thread. `by`: the editor.
 pub async fn update_chat_message(
     pool: &SqlitePool,
     thread_id: i64,
     id: i64,
     m: &ChatMessageUpdate,
+    by: feed::By<'_>,
 ) -> DbResult<bool> {
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query(
@@ -271,6 +331,7 @@ pub async fn update_chat_message(
     .await?
     .rows_affected();
     if n > 0 {
+        feed::record_updated(&mut tx, thread_id, id, by).await?;
         touch_thread(&mut tx, thread_id).await?;
     }
     tx.commit().await?;
@@ -279,8 +340,13 @@ pub async fn update_chat_message(
 
 /// Delete one message; its attachments go with it (the `message_id` foreign
 /// key cascades, migration 0038). `false` when no such message is in this
-/// thread.
-pub async fn delete_chat_message(pool: &SqlitePool, thread_id: i64, id: i64) -> DbResult<bool> {
+/// thread. `by`: who deleted it.
+pub async fn delete_chat_message(
+    pool: &SqlitePool,
+    thread_id: i64,
+    id: i64,
+    by: feed::By<'_>,
+) -> DbResult<bool> {
     let mut tx = super::begin_write(pool).await?;
     let n = sqlx::query("DELETE FROM chat_messages WHERE id=?1 AND thread_id=?2")
         .bind(id)
@@ -289,6 +355,7 @@ pub async fn delete_chat_message(pool: &SqlitePool, thread_id: i64, id: i64) -> 
         .await?
         .rows_affected();
     if n > 0 {
+        feed::record_deleted(&mut tx, thread_id, &[id], by).await?;
         touch_thread(&mut tx, thread_id).await?;
     }
     tx.commit().await?;
@@ -301,30 +368,32 @@ pub async fn delete_chat_message(pool: &SqlitePool, thread_id: i64, id: i64) -> 
 /// [`list_chat_messages`] reads a thread in. A late MCP task result (role
 /// `tool`) is no reply and stays: the work happened, and the turn that
 /// follows answers it again (MCP Tasks design T13). Deleting one by itself
-/// is [`delete_chat_message`]'s.
+/// is [`delete_chat_message`]'s. The feed hears `message.deleted` for what
+/// went, `by` who cut it.
 pub async fn truncate_chat_messages(
     pool: &SqlitePool,
     thread_id: i64,
     id: i64,
     inclusive: bool,
+    by: feed::By<'_>,
 ) -> DbResult<u64> {
     let sql = if inclusive {
-        "DELETE FROM chat_messages WHERE thread_id=?1 AND id >= ?2 AND role <> 'tool'"
+        "DELETE FROM chat_messages WHERE thread_id=?1 AND id >= ?2 AND role <> 'tool' RETURNING id"
     } else {
-        "DELETE FROM chat_messages WHERE thread_id=?1 AND id > ?2 AND role <> 'tool'"
+        "DELETE FROM chat_messages WHERE thread_id=?1 AND id > ?2 AND role <> 'tool' RETURNING id"
     };
     let mut tx = super::begin_write(pool).await?;
-    let n = sqlx::query(sql)
+    let gone: Vec<i64> = sqlx::query_scalar(sql)
         .bind(thread_id)
         .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    if n > 0 {
+        .fetch_all(&mut *tx)
+        .await?;
+    if !gone.is_empty() {
+        feed::record_deleted(&mut tx, thread_id, &gone, by).await?;
         touch_thread(&mut tx, thread_id).await?;
     }
     tx.commit().await?;
-    Ok(n)
+    Ok(gone.len() as u64)
 }
 
 async fn touch_thread(tx: &mut sqlx::SqliteConnection, thread_id: i64) -> DbResult<()> {

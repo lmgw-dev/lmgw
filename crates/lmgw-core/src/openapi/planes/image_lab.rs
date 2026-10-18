@@ -1,8 +1,10 @@
 //! `/image-lab/api/*`, the Image lab: the model list its form is built from,
-//! and the two routes that turn the form into a `/v1/images/*` request and
-//! hand it to that handler. The shapes are `lmgw-api-types`' `image_lab`
-//! module, the types the handlers read and write. Admin routes
-//! (`Cap::Admin`), so they appear in the admin document only.
+//! the two routes that keep a form as a group, and the one that turns a kept
+//! group into its `/v1/images/*` request, hands it to that handler and keeps
+//! the answer as its run. The shapes are
+//! `lmgw-api-types`' `image_lab` module, the types the handlers read and
+//! write. Admin routes (`Cap::Admin`), so they appear in the admin document
+//! only.
 
 use lmgw_api_types::image_lab as lab;
 use lmgw_api_types::openapi_ext::model_task;
@@ -34,30 +36,34 @@ fn route(
         model_task: None,
         confirm_note: None,
         writes: None,
+        errors: &[],
         example: None,
     }
 }
 
 fn edit_request(g: &mut SchemaGenerator) -> Schema {
-    let form = g.subschema_for::<lab::ImageGenForm>().to_value();
+    let form = g.subschema_for::<lab::ImageLabForm>().to_value();
     schemas::named(
         g,
         "ImageLabEditRequest",
         schemars::json_schema!({
             "type": "object",
-            "required": ["form", "image"],
+            "required": ["form"],
             "properties": {
                 "form": {
                     "type": "string",
                     "contentMediaType": "application/json",
-                    "description": "The form as a JSON string: an ImageGenForm, the same \
-                        document the generate route takes as its body.",
+                    "description": "The form as a JSON string: the ImageGenForm the \
+                        generate route takes as its body, with optionally `image` and `mask` \
+                        naming kept pictures ({id, name}, an artifact the lab store keeps) \
+                        in place of an upload.",
                     "contentSchema": form
                 },
                 "image": {
                     "type": "string",
                     "format": "binary",
-                    "description": "The picture to edit."
+                    "description": "The picture to edit; stands in for the form's `image` \
+                        ref. One of the two is required."
                 },
                 "mask": {
                     "type": "string",
@@ -91,50 +97,79 @@ pub(crate) fn routes() -> Vec<DocRoute> {
         },
         DocRoute {
             request: Req::Json(|g| g.root_schema_for::<lab::ImageGenForm>()),
-            response: Resp::Json(|g| g.root_schema_for::<lab::ImageGenerateResult>()),
+            response: Resp::Json(|g| {
+                g.root_schema_for::<lmgw_api_types::lab_store::LabGroupView>()
+            }),
             dialect: Dialect::OpenAi,
             model_task: Some(model_task::IMAGE_GENERATION),
-            writes: Some(false),
             ..route(
                 "POST",
-                "/image-lab/api/generate",
-                "Generate an image from the form",
-                "The dashboard's structured form, turned into the exact \
-                 /v1/images/generations body and handed to that route's handler in the \
-                 gateway: the same guards, GPU hold, admission, model rewrite and logging, \
-                 and the call appears in the request log. Where /v1/images/generations takes \
-                 the OpenAI body, this takes the form, whose fields are the strings the \
-                 inputs hold (an empty one says nothing about that setting); everything the \
-                 OpenAI route does not read goes into sd.cpp's \
-                 <sd_cpp_extra_args> block appended to the prompt. A success is wrapped: \
-                 `request` is the body that was built and sent, `headers` the x-lmgw-* \
-                 headers the route stamped (a hold fallback names itself there), `response` \
-                 the route's answer. A failure is not wrapped: the route's own status and \
-                 OpenAI-shaped error come back as they were. A form that is no request at all \
-                 (no prompt, no model, a malformed number, only half of the size, a prompt \
-                 carrying sd.cpp's own delimiters) is a 400 with code image_lab_form. The \
-                 body size is not limited.",
+                "/image-lab/api/groups",
+                "Keep a generation's form as a group",
+                "The dashboard's structured form, checked to build the exact \
+                 /v1/images/generations body and kept in the lab store as a group of one \
+                 cell (variant `generate`), answered with no run yet: nothing is sent. The \
+                 page then runs it (/image-lab/api/groups/{id}/run), so it holds the group, \
+                 in flight, before the request goes out. The form's fields are the strings \
+                 the inputs hold (an empty one says nothing about that setting); everything \
+                 the OpenAI route does not read goes into sd.cpp's <sd_cpp_extra_args> \
+                 block appended to the prompt. A form that is no request at all (no prompt, \
+                 no model, a malformed number, only half of the size, a prompt carrying \
+                 sd.cpp's own delimiters) is a 400 with code image_lab_form; a store that \
+                 cannot keep the group a 500 with code lab_store. The body size is not \
+                 limited.",
             )
         },
         DocRoute {
             request: Req::Multipart(edit_request),
-            response: Resp::Json(|g| g.root_schema_for::<lab::ImageEditResult>()),
+            response: Resp::Json(|g| {
+                g.root_schema_for::<lmgw_api_types::lab_store::LabGroupView>()
+            }),
             dialect: Dialect::OpenAi,
             model_task: Some(model_task::IMAGE_EDIT),
-            writes: Some(false),
             ..route(
                 "POST",
-                "/image-lab/api/edit",
-                "Edit an image from the form",
-                "As /image-lab/api/generate, for /v1/images/edits. The route takes the \
-                 form and the pictures as parts of one multipart upload (`form` as JSON, \
-                 `image`, optionally `mask`) and builds the single multipart request \
-                 /v1/images/edits accepts, with the form's text fields and `model` in it. \
-                 `request` in the answer is a summary of what was sent: the text fields as \
-                 sent and each file part by name, file name, content type and size. A \
-                 missing `form` or `image`, a form that is no request, a malformed upload \
-                 and a model whose edit pipeline is off are the same 400 or the /v1 route's \
-                 own refusal as for generate. The body size is not limited.",
+                "/image-lab/api/groups/edit",
+                "Keep an edit's form and pictures as a group",
+                "As /image-lab/api/groups, for an edit (variant `edit`): the form and the \
+                 pictures as parts of one multipart upload (`form` as JSON, `image`, \
+                 optionally `mask`). The picture and the mask are the group's input \
+                 artifacts; the form may name kept ones instead of uploading them \
+                 (`image`, `mask`: {id, name}, a picture the store keeps, sent under the \
+                 kept file's own name). A missing `form` or picture, a ref the store does \
+                 not keep, a ref to an artifact that is no picture (its type named), a form \
+                 that is no edit and a malformed upload are the same 400 as for a \
+                 generation. Nothing is sent. The body size is not limited.",
+            )
+        },
+        DocRoute {
+            path_ints: &["id"],
+            response: Resp::Json(|g| g.root_schema_for::<lab::ImageLabAnswer>()),
+            dialect: Dialect::OpenAi,
+            ..route(
+                "POST",
+                "/image-lab/api/groups/{id}/run",
+                "Run a kept group",
+                "The group's one cell: claimed (the group is in flight until its run is \
+                 in), its request built from the stored form (an edit's multipart from its \
+                 kept picture and mask, `model` among the fields) and handed to \
+                 /v1/images/generations' or /v1/images/edits' handler in the gateway: the \
+                 same guards, GPU hold, admission, model rewrite and logging, and the call \
+                 appears in the request log. The answer is 200 whatever the route said: the \
+                 group, its run inside with the request as `request` (a generation's body \
+                 as sent; an edit's text fields as sent and each file part by name, file \
+                 name, content type, size and kept file `lab-artifact:<id>`), the route's \
+                 status, code and message, its x-lmgw-* headers (a hold fallback names \
+                 itself there) and its answer as text, each `b64_json` picture replaced by \
+                 `lab-artifact:<id>`, the output artifact /labs/api/artifacts/{id} serves. \
+                 The answer is kept even when the client goes away once the route has \
+                 answered; a client that goes away before leaves the group with no run. \
+                 `store_error` says why a run was not kept (a full disk, the group deleted \
+                 meanwhile): it is then there with no id, its pictures inline. No body. 404 \
+                 not_found for a group that is not the Image lab's, 409 cell_answered for \
+                 one that has its run or is being answered (a re-ask is a new group), 500 \
+                 cell_unbuilt for a stored form that no longer builds a request, 404 \
+                 file_missing for a kept picture whose file is gone.",
             )
         },
     ]

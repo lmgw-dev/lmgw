@@ -63,7 +63,12 @@ async fn a_registered_server_s_task_is_followed_through_the_lazy_connect() {
         "job t1 (builder__build) completed\nbuilt on the server"
     );
     assert!(srv.inits() >= 2, "the follower connected again");
-    assert!(!w.state.mcp.has_open_tasks(server));
+    // The row is written first and the follower forgotten right after: the
+    // registry is read once that has happened, not in the gap between.
+    crate::common::patience::until("its follower stopped", || {
+        !w.state.mcp.has_open_tasks(server)
+    })
+    .await;
 }
 
 /// A caller with no thread: the bridge answers the call with the task's

@@ -15,7 +15,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use lmgw_core::config::{AuxKind, SelfAdmin, Settings};
+use lmgw_core::config::{AuxBackend, AuxKind, SelfAdmin, Settings};
+use lmgw_core::erased::Erased;
 use lmgw_core::gguf::synth;
 use lmgw_core::runtime::registry::{CmdOutput, CommandRunner, Registry};
 use lmgw_core::server::build_router;
@@ -50,28 +51,33 @@ fn ok(stdout: &str) -> CmdOutput {
     }
 }
 
-#[async_trait::async_trait]
 impl CommandRunner for Fake {
-    async fn run(&self, program: &str, args: &[String]) -> std::io::Result<CmdOutput> {
-        assert_eq!(program, "podman");
-        self.calls.lock().unwrap().push(args.to_vec());
-        match args[0].as_str() {
-            "run" if args.last().is_some_and(|a| a == "--help") => {
-                if self.help_broken.load(std::sync::atomic::Ordering::Relaxed) {
-                    Ok(CmdOutput {
-                        status: 127,
-                        stdout: String::new(),
-                        stderr: "/llama-server: error while loading shared libraries: \
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<CmdOutput>> {
+        Box::pin(async move {
+            assert_eq!(program, "podman");
+            self.calls.lock().unwrap().push(args.to_vec());
+            match args[0].as_str() {
+                "run" if args.last().is_some_and(|a| a == "--help") => {
+                    if self.help_broken.load(std::sync::atomic::Ordering::Relaxed) {
+                        Ok(CmdOutput {
+                            status: 127,
+                            stdout: String::new(),
+                            stderr: "/llama-server: error while loading shared libraries: \
                                  libcuda.so.1: cannot open shared object file"
-                            .into(),
-                    })
-                } else {
-                    Ok(ok(LLAMA_HELP))
+                                .into(),
+                        })
+                    } else {
+                        Ok(ok(LLAMA_HELP))
+                    }
                 }
+                "run" => Ok(ok("c0ffee\n")),
+                _ => Ok(ok("")),
             }
-            "run" => Ok(ok("c0ffee\n")),
-            _ => Ok(ok("")),
-        }
+        })
     }
 }
 
@@ -203,6 +209,11 @@ fn aux_row(model_id: &str, gguf: &str, kind: AuxKind, pooling: Option<&str>) -> 
         kind,
         pooling: pooling.map(String::from),
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: vec![],
         idle_seconds: 0,
         enabled: true,
@@ -374,7 +385,7 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
         &base,
         &sid,
         "lmgw__model_inspect",
-        json!({ "gguf_path": EMBEDDER, "target": "aux", "probe": false }),
+        json!({ "gguf_path": EMBEDDER, "target": "aux" }),
     )
     .await;
     assert_eq!(inspect["serve_as"], "aux", "{inspect}");
@@ -386,7 +397,7 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
         &base,
         &sid,
         "lmgw__local_model_plan",
-        json!({ "gguf_path": EMBEDDER, "target": "aux", "probe": false }),
+        json!({ "gguf_path": EMBEDDER, "target": "aux" }),
     )
     .await;
     assert_eq!(plan["class"], "aux", "{plan}");
@@ -403,7 +414,7 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
         "{plan}"
     );
 
-    // Create from the plan, with CPU placement in the escape hatch.
+    // Create from the plan, with CPU placement in its fields.
     let (is_err, created) = call(
         &base,
         &sid,
@@ -415,7 +426,8 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
             "kind": "embed",
             "pooling": "last",
             "ctx_size": 32768,
-            "extra_args": "--n-gpu-layers 0\n--threads 16",
+            "backend": "cpu",
+            "threads": 16,
         }),
     )
     .await;
@@ -435,7 +447,9 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
     assert_eq!(row.kind, AuxKind::Embed);
     assert_eq!(row.pooling.as_deref(), Some("last"));
     assert_eq!(row.ctx_size, Some(32768));
-    assert_eq!(row.args, vec!["--n-gpu-layers", "0", "--threads", "16"]);
+    assert_eq!(row.backend, Some(AuxBackend::Cpu));
+    assert_eq!(row.threads, Some(16));
+    assert!(row.args.is_empty(), "{:?}", row.args);
     assert!(
         snap.local_models.is_empty(),
         "nothing landed in the chat table"
@@ -460,6 +474,11 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
         "{cmd}"
     );
     assert!(cmd.contains("--n-gpu-layers 0"), "{cmd}");
+    assert!(cmd.contains("--threads 16"), "{cmd}");
+    assert_eq!(
+        (&got["backend"], &got["threads"]),
+        (&json!("cpu"), &json!(16))
+    );
 
     // The listing now shows the file in use.
     let (_, aux_files) = call(&base, &sid, "lmgw__gguf_files", json!({ "target": "aux" })).await;
@@ -499,19 +518,19 @@ async fn a_row_whose_flags_could_not_be_checked_says_so() {
         &f.state,
         serde_json::from_value(json!({
             "action": "create", "model_id": "q", "gguf_path": CHAT,
-            "extra_args": "--no-warmup",
+            "extra_args": ["--no-warmup"],
         }))
         .unwrap(),
     )
     .await
     .unwrap();
-    let said = chat["warnings"].to_string();
+    let said = chat.warnings.clone().unwrap_or_default().join("\n");
     for part in [
         "could not read llama-server --help from image",
         "libcuda.so.1",
         "not validated",
     ] {
-        assert!(said.contains(part), "{part:?} missing: {chat}");
+        assert!(said.contains(part), "{part:?} missing: {chat:?}");
     }
     let got = crate::common::read_wire(
         ops::local_model_get(&f.state, None, Some("q"), None)
@@ -534,8 +553,12 @@ async fn a_row_whose_flags_could_not_be_checked_says_so() {
     .await
     .unwrap();
     assert!(
-        aux["warnings"].to_string().contains("not validated"),
-        "{aux}"
+        aux.warnings
+            .clone()
+            .unwrap_or_default()
+            .join("\n")
+            .contains("not validated"),
+        "{aux:?}"
     );
 
     // Once the image answers, the same rows validate clean: the warning was
@@ -554,7 +577,7 @@ async fn a_row_whose_flags_could_not_be_checked_says_so() {
 #[tokio::test]
 async fn a_reranker_is_recognised_by_its_head_and_planned_without_pooling() {
     let f = fixture(vec![0.1]).await;
-    let plan = modelinfo::local_model_plan(&f.state, RERANKER, false, Some("aux"))
+    let plan = modelinfo::local_model_plan(&f.state, RERANKER, Some("aux"))
         .await
         .unwrap();
     assert_eq!(plan["class"], "aux", "{plan}");
@@ -574,11 +597,9 @@ async fn a_reranker_is_recognised_by_its_head_and_planned_without_pooling() {
     )
     .await
     .unwrap();
-    let warnings = created["warnings"].as_array().unwrap();
+    let warnings = created.warnings.as_deref().unwrap();
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap().contains("kind=rerank")),
+        warnings.iter().any(|w| w.contains("kind=rerank")),
         "{warnings:?}"
     );
 
@@ -608,7 +629,7 @@ async fn an_embedder_found_in_the_chat_dir_gets_an_aux_plan_that_says_where_it_b
     // The file "arrived" in the chat dir (a chat-target download).
     synth::embedding("qwen3", 3, 32768).write_to(&f.chat_dir.path().join(EMBEDDER));
 
-    let plan = modelinfo::local_model_plan(&f.state, EMBEDDER, false, None)
+    let plan = modelinfo::local_model_plan(&f.state, EMBEDDER, None)
         .await
         .unwrap();
     assert_eq!(
@@ -1028,20 +1049,71 @@ async fn llama_flags_and_model_inspect_answer_their_documented_types() {
     assert!(narrowed.flags.len() < narrowed.flag_count);
 
     let chat = crate::common::inspect_wire(
-        lmgw_core::modelinfo::model_inspect(&f.state, CHAT, false, None)
+        lmgw_core::modelinfo::model_inspect(&f.state, CHAT, None)
             .await
             .unwrap(),
     );
     assert_eq!(chat["serve_as"], "chat", "{chat}");
-    assert_eq!(
-        chat["runtime"],
-        json!({"checked": false, "reason": "probe not requested"})
-    );
+    assert!(chat.get("runtime").is_none(), "{chat}");
     let embed = crate::common::inspect_wire(
-        lmgw_core::modelinfo::model_inspect(&f.state, EMBEDDER, false, Some("aux"))
+        lmgw_core::modelinfo::model_inspect(&f.state, EMBEDDER, Some("aux"))
             .await
             .unwrap(),
     );
     assert_eq!(embed["serve_as"], "aux", "{embed}");
     assert_eq!(embed["aux_kind"], "embed", "{embed}");
+}
+
+/// A multimodal embedder's plan proposes its sibling projector in
+/// `extra_args`, and both the plan's parameters and a row's
+/// `configured_as[].apply` go straight into `lmgw__aux_model_set`: the list the
+/// plan writes is the list the tool takes.
+#[tokio::test]
+async fn a_projector_sibling_in_the_plan_goes_into_aux_model_set_unchanged() {
+    let f = fixture(vec![0.1, 0.2]).await;
+    let aux_dir = f.state.snapshot().settings.aux_router.models_dir.clone();
+    let projector = "Qwen/Qwen3-Embedding-0.6B-GGUF/mmproj-Qwen3-Embedding-0.6B-F16.gguf";
+    let mut header = synth::embedding("clip", 0, 0);
+    header.str("general.type", "mmproj");
+    header.write_to(&std::path::Path::new(&aux_dir).join(projector));
+    let base = serve(f.state.clone()).await;
+    let sid = initialize(&base).await;
+
+    let plan_args = json!({ "gguf_path": EMBEDDER, "target": "aux" });
+    let (_, plan) = call(&base, &sid, "lmgw__local_model_plan", plan_args.clone()).await;
+    assert_eq!(plan["params"]["mmproj_path"], projector, "{plan}");
+    assert!(plan["params"]["extra_args"].is_null(), "{plan}");
+
+    let mut params = plan["params"].as_object().unwrap().clone();
+    params.insert("action".into(), json!("create"));
+    params.insert("model_id".into(), json!("mm-embed"));
+    params.insert("gguf_path".into(), json!(EMBEDDER));
+    let (is_err, created) = call(&base, &sid, "lmgw__aux_model_set", Value::Object(params)).await;
+    assert!(!is_err, "{created}");
+
+    // A row set up without the projector: the plan's `apply` fixes it.
+    let (is_err, _) = call(
+        &base,
+        &sid,
+        "lmgw__aux_model_set",
+        json!({"action": "update", "model_id": "mm-embed", "clear": "mmproj_path"}),
+    )
+    .await;
+    assert!(!is_err);
+    let (_, plan) = call(&base, &sid, "lmgw__local_model_plan", plan_args).await;
+    let apply = plan["configured_as"]
+        .as_array()
+        .and_then(|rows| rows.iter().find_map(|r| r.get("apply")))
+        .unwrap_or_else(|| panic!("a row missing the projector gets an apply: {plan}"));
+    assert_eq!(apply["mmproj_path"], projector, "{apply}");
+    let (is_err, applied) = call(&base, &sid, "lmgw__aux_model_set", apply.clone()).await;
+    assert!(!is_err, "apply must be callable as written: {applied}");
+    let snap = f.state.snapshot();
+    let row = snap
+        .aux_models
+        .iter()
+        .find(|m| m.model_id == "mm-embed")
+        .unwrap();
+    assert_eq!(row.mmproj_path.as_deref(), Some(projector));
+    assert!(row.args.is_empty(), "{:?}", row.args);
 }

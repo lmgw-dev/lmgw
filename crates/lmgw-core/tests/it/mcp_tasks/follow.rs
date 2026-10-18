@@ -25,7 +25,12 @@ async fn a_status_notification_ends_the_task_at_once() {
         result_text(&row),
         "job t1 (desktop__build) completed\n42 files built"
     );
-    assert!(!w.state.mcp.has_open_tasks(server));
+    // The row is written first and the follower forgotten right after: the
+    // registry is read once that has happened, not in the gap between.
+    patience::until("its follower stopped", || {
+        !w.state.mcp.has_open_tasks(server)
+    })
+    .await;
 }
 
 /// Without notifications, `tasks/get` runs at the task's own

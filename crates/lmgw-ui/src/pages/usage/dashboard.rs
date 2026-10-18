@@ -333,7 +333,7 @@ pub fn Usage() -> impl IntoView {
                         vec![
                             (String::new(), "all classes".to_string()),
                             ("chat".into(), "chat".into()),
-                            ("aux".into(), "aux (embed/rerank)".into()),
+                            ("aux".into(), "aux (embed/rerank/decision)".into()),
                             ("audio".into(), "audio".into()),
                             ("image".into(), "image".into()),
                             ("tool".into(), "tool".into()),

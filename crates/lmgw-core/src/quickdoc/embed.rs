@@ -22,12 +22,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use quickdoc_core::embed::{validate_vector, EmbedIdentity, Embedder};
 use quickdoc_core::error::{QuickdocError, Result as QResult};
 use quickdoc_core::store::Corpus;
 
 use crate::config::{AuxKind, Snapshot};
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::proxy::{self, RequestCtx};
 use crate::state::SharedState;
@@ -158,57 +158,58 @@ impl InProcessEmbedder {
     }
 }
 
-#[async_trait]
 impl Embedder for InProcessEmbedder {
     fn identity(&self) -> EmbedIdentity {
         self.identity.clone()
     }
 
-    async fn embed(&self, texts: &[String]) -> QResult<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        // The one thing the request path does that a corpus cannot survive: a
-        // GPU hold re-routes `self.alias` to its row's fallback and answers
-        // with *that* model's vectors (gpu-hold design §2/§4). They would pass
-        // every check below — the width can match by coincidence — and land in
-        // a corpus pinned to `self.identity`, one silently unsearchable half
-        // and one honest half. So the hold is refused here, before the call,
-        // and again below on what the call returned.
-        refuse_if_held(&self.state, &self.alias, CORPUS_PIN)
-            .map_err(|e| QuickdocError::Embedder(e.to_string()))?;
-        let key = charge(&self.state, self.caller.as_ref(), &self.alias)
+    fn embed<'a>(&'a self, texts: &'a [String]) -> Erased<'a, QResult<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            if texts.is_empty() {
+                return Ok(Vec::new());
+            }
+            // The one thing the request path does that a corpus cannot survive: a
+            // GPU hold re-routes `self.alias` to its row's fallback and answers
+            // with *that* model's vectors (gpu-hold design §2/§4). They would pass
+            // every check below — the width can match by coincidence — and land in
+            // a corpus pinned to `self.identity`, one silently unsearchable half
+            // and one honest half. So the hold is refused here, before the call,
+            // and again below on what the call returned.
+            refuse_if_held(&self.state, &self.alias, CORPUS_PIN)
+                .map_err(|e| QuickdocError::Embedder(e.to_string()))?;
+            let key = charge(&self.state, self.caller.as_ref(), &self.alias)
+                .await
+                .map_err(|e| QuickdocError::Embedder(e.to_string()))?;
+            let (_, headers, resp) = proxy::embed_once(
+                &self.state,
+                &self.alias,
+                texts.to_vec(),
+                telemetry::EMBED_PROTO,
+                key,
+            )
             .await
-            .map_err(|e| QuickdocError::Embedder(e.to_string()))?;
-        let (_, headers, resp) = proxy::embed_once(
-            &self.state,
-            &self.alias,
-            texts.to_vec(),
-            telemetry::EMBED_PROTO,
-            key,
-        )
-        .await
-        .map_err(|(_, _, e)| QuickdocError::Embedder(format!("{}: {e}", self.alias)))?;
-        if let Some(fb) = headers.fallback() {
-            return Err(QuickdocError::Embedder(format!(
-                "'{}' was answered by the GPU-hold fallback '{fb}' — this corpus is pinned to \
+            .map_err(|(_, _, e)| QuickdocError::Embedder(format!("{}: {e}", self.alias)))?;
+            if let Some(fb) = headers.fallback() {
+                return Err(QuickdocError::Embedder(format!(
+                    "'{}' was answered by the GPU-hold fallback '{fb}' — this corpus is pinned to \
                  {}, so vectors from another model are refused rather than mixed in. Release \
                  the hold and run this again.",
-                self.alias, self.identity
-            )));
-        }
-        if resp.embeddings.len() != texts.len() {
-            return Err(QuickdocError::EmbedCount {
-                want: texts.len(),
-                got: resp.embeddings.len(),
-            });
-        }
-        // Width and the all-zero reranker vector, per input. A mismatch is an
-        // error, never a reshape.
-        for (i, v) in resp.embeddings.iter().enumerate() {
-            validate_vector(&self.identity.model, i, v, self.identity.dims)?;
-        }
-        Ok(resp.embeddings)
+                    self.alias, self.identity
+                )));
+            }
+            if resp.embeddings.len() != texts.len() {
+                return Err(QuickdocError::EmbedCount {
+                    want: texts.len(),
+                    got: resp.embeddings.len(),
+                });
+            }
+            // Width and the all-zero reranker vector, per input. A mismatch is an
+            // error, never a reshape.
+            for (i, v) in resp.embeddings.iter().enumerate() {
+                validate_vector(&self.identity.model, i, v, self.identity.dims)?;
+            }
+            Ok(resp.embeddings)
+        })
     }
 }
 
@@ -371,7 +372,7 @@ pub fn alias_for_identity(snap: &Snapshot, id: &EmbedIdentity) -> Option<String>
             .iter()
             .find(|m| m.enabled && m.model_id == id.model)
         {
-            return Some(snap.aux_public_name(&m.model_id));
+            return Some(snap.aux_public_name(m));
         }
     }
     let router = snap.router_upstream();

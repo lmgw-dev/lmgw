@@ -26,8 +26,6 @@
 //! remembers the name from an earlier `tools/list` gets the reason instead of a
 //! silent success.
 
-use serde::Serialize;
-
 use crate::config::{SelfAdmin, Snapshot};
 use crate::state::SharedState;
 
@@ -46,71 +44,11 @@ const KB_SOURCE_NAME: &str = "lmgw (knowledge)";
 const KIND_BUILTIN: &str = "builtin";
 const KIND_SERVER: &str = "server";
 
-/// One tool the gateway can serve, with its provenance and current state.
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolEntry {
-    /// Fully-qualified exposed name — what a caller actually names, and the key
-    /// the disable switch is stored under.
-    pub name: String,
-    /// The label a thread or a `{"type":"mcp"}` block attaches this tool's
-    /// source by (`lmgw`, `docs`, or the server's prefix/name).
-    pub source_label: String,
-    /// Human name of the source, for a group header.
-    pub source_name: String,
-    /// [`KIND_BUILTIN`] or [`KIND_SERVER`].
-    pub source_kind: String,
-    pub server_id: Option<i64>,
-    /// Northbound route it is served on: `/mcp` or `/mcp/admin`.
-    pub plane: String,
-    pub description: Option<String>,
-    /// The server's own name for it, when a prefix hides it.
-    pub upstream_name: Option<String>,
-    /// The name it would have if no other source offered a tool of that
-    /// name: set when a collision gave it its server's prefix
-    /// ([`super::names`]).
-    pub moved_from: Option<String>,
-    /// Why it moved, with [`Self::moved_from`]: who else claims that name,
-    /// and whether that claim is only what a server listed when it was last
-    /// connected.
-    pub moved_reason: Option<String>,
-    /// The owner's switch. `false` ⇒ a `tool_disabled` row exists.
-    pub enabled: bool,
-    /// Offered right now — `enabled` **and** the source condition holds.
-    pub available: bool,
-    /// Why it is not available. `None` exactly when `available`.
-    pub reason: Option<String>,
-    /// A disable record whose tool the gateway no longer offers: kept visible
-    /// here rather than retained as invisible state.
-    pub stale: bool,
-    pub disabled_at: Option<String>,
-}
-
-/// One source of tools, so a source that currently offers *none* (disabled
-/// server, self-admin off, a server that has not connected) is still visible
-/// with the reason — the per-tool rows cannot carry that, because there are no
-/// per-tool rows to carry it.
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolSource {
-    pub label: String,
-    pub name: String,
-    pub kind: String,
-    pub server_id: Option<i64>,
-    pub plane: String,
-    /// Whether the source itself is in a state where its tools are offered.
-    pub available: bool,
-    pub reason: Option<String>,
-    /// Tools this source contributes to the inventory right now.
-    pub tool_count: i64,
-    /// How many of those the owner has switched off.
-    pub disabled_count: i64,
-}
-
-/// The inventory: sources first (group headers), then every tool.
-#[derive(Debug, Clone, Serialize)]
-pub struct Inventory {
-    pub sources: Vec<ToolSource>,
-    pub tools: Vec<ToolEntry>,
-}
+// The inventory is the dashboard's wire type itself, so what `GET /api/tools`
+// sends and what the document describes cannot drift from what is built here.
+pub use lmgw_api_types::{
+    ToolEntryView as ToolEntry, ToolInventory as Inventory, ToolSourceView as ToolSource,
+};
 
 /// Why the `self_admin` mode gate hides a tool, if it does. `writes` selects
 /// between the two thresholds the gate has.

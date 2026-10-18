@@ -807,7 +807,7 @@ under the same standing permission:
     ladder fixture only: the pool fixtures render `--ctx-size` too, and
     they keep their own mock.
 
-**Live check (2026-09-27, dev instance, RTX 4090, image
+**Live check (2026-09-27, dev instance, a 24 GB GPU, image
 `localhost/lmgw-llama-server:official-master`).** A three-rung row:
 Qwen3.5-0.8B UD-Q4_K_XL at 4096, the same file at 16384, then Qwen3.5-2B
 UD-Q4_K_XL at 65536 (`parallel` 1, `n_predict` 256, no projector). The 2B

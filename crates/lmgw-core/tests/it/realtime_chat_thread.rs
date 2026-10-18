@@ -2,7 +2,9 @@
 //! Chat thread — the handshake's binding and refusals, takeover, what the
 //! thread owns, the turn through the chat engine, the journal's writes in
 //! their fixed order with the heard cut, the `lmgw.*` extension events and
-//! the drain at disconnect.
+//! the drain at disconnect. And from the realtime calls design (§2.2, §2.8)
+//! on the WebSocket: binding a folder's current thread (`folder`), the turn
+//! mode (`turn_mode`) and `error.held_by`.
 //!
 //! Over a real socket (`tokio-tungstenite`) with the dashboard's cookie,
 //! manual commits of synthetic PCM (silence: the ASR fake answers what the
@@ -23,6 +25,7 @@ use crate::support::realtime_tts::{add_tts_alias, speech, tts_fake, wav, TtsFake
 mod binding;
 mod cuts;
 mod ends;
+mod folder;
 mod journal;
 mod models;
 mod profile;
@@ -30,6 +33,7 @@ mod reasoning;
 mod refusals;
 mod stopped_rows;
 mod tasks;
+mod turn_mode;
 mod turns;
 
 // -- harness -------------------------------------------------------------------
@@ -173,10 +177,30 @@ impl World {
     /// The handshake for thread `tid` with `headers`: the socket, or the
     /// refusal's status and body.
     pub async fn connect(&self, query: &str, headers: &[(&str, &str)]) -> Result<Ws, (u16, Value)> {
+        self.connect_at(&self.addr(), query, headers).await
+    }
+
+    /// [`Self::connect`] as a paired device: through its proxy to the
+    /// device listener, with its certificate (`support::device_pair`).
+    pub async fn connect_as(
+        &self,
+        device: &crate::support::device_pair::Paired,
+        query: &str,
+    ) -> Result<Ws, (u16, Value)> {
+        self.connect_at(&device.addr, query, &[]).await
+    }
+
+    /// [`Self::connect`] at `addr`.
+    pub async fn connect_at(
+        &self,
+        addr: &str,
+        query: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Ws, (u16, Value)> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         use tokio_tungstenite::tungstenite::http::HeaderName;
         use tokio_tungstenite::tungstenite::Error as WsError;
-        let mut req = format!("ws://{}/v1/realtime?{query}", self.addr())
+        let mut req = format!("ws://{addr}/v1/realtime?{query}")
             .into_client_request()
             .unwrap();
         for (k, v) in headers {

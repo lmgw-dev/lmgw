@@ -63,6 +63,13 @@ async fn sent_behind_the_first_clause(first: Bytes) -> (SharedState, Ws, ChatFak
     events_until(&mut ws, "conversation.item.done").await;
     send(&mut ws, json!({"type": "response.create"})).await;
     stub.wait_calls(1).await;
+    // The call goes out from the responder and the first clause from the
+    // voice's own task, which settles its route first: either can reach its
+    // server first. The clause is held there, so it stays the only one.
+    crate::common::patience::until("the first clause to reach the voice", || {
+        tts.seen.count() >= 1
+    })
+    .await;
     assert_eq!(tts.seen.count(), 1, "still on the first clause");
     (state, ws, chat, held)
 }

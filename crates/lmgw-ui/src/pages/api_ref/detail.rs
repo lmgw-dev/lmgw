@@ -153,7 +153,7 @@ fn render_param_row(p: Value) -> impl IntoView {
 
 fn render_response(row: (String, Value), components: StoredValue<Value>) -> impl IntoView {
     let (status, resp) = row;
-    let is_default = status == "default";
+    let is_error = status == "default" || status.starts_with('4') || status.starts_with('5');
     let description = resp
         .get("description")
         .and_then(Value::as_str)
@@ -168,7 +168,7 @@ fn render_response(row: (String, Value), components: StoredValue<Value>) -> impl
     view! {
         <div class="sv-resp">
             <div class="sv-resp-head">
-                <span class="chip" class:err=is_default class:ok=!is_default>{status}</span>
+                <span class="chip" class:err=is_error class:ok=!is_error>{status}</span>
                 <span class="dim">{description}</span>
             </div>
             {schema.map(|s| components.with_value(|c| schema_view(&s, c, &[], false)))}

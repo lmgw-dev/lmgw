@@ -33,8 +33,7 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "target",
                     enum_p(
-                        "Which group of models. Omit when 'model' is given. 'embed' is \
-                         accepted as the old name for 'aux'.",
+                        "Which group of models. Omit when 'model' is given.",
                         &["all", "chat", "aux", "audio", "image"],
                     ),
                 ),
@@ -77,8 +76,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                  idle right now, and refuses every new local load: no request start, no warm \
                  start, no lmgw__container start/restart, no lmgw__local_model_test. Models \
                  that are mid-request are never killed — they come back as 'draining' and are \
-                 stopped as soon as they finish. Audio models that run on the CPU (an \
-                 audio row with backend 'cpu') keep serving: they use no VRAM, so the hold \
+                 stopped as soon as they finish. Models that run on the CPU (an \
+                 audio or aux row with backend 'cpu') keep serving: they use no VRAM, so the hold \
                  neither stops nor refuses them (named as kept_on_cpu). Releasing it puts \
                  everything back: models start on demand again. Engaging it also aborts a benchmark run that is going \
                  (lmgw__bench_start), removing its container. The switch is persisted, so it \
@@ -99,8 +98,9 @@ pub(super) fn tools() -> Vec<Builtin> {
             description:
                 "Change gateway settings. Pass only the fields to change. Never settable \
                  here, by any caller: the settings that decide who may reach lmgw and with \
-                 what credential — auth_enabled, self_admin, bind_addr and \
-                 agent_origin_suffix. They change on Settings in the dashboard; a call that \
+                 what credential — auth_enabled, self_admin, bind_addr, agent_origin_suffix \
+                 and devices (the device listener and how long a pairing token and a \
+                 device's certificate live). They change on Settings in the dashboard; a call that \
                  names one is refused, naming it, and changes nothing. Also left to the \
                  dashboard: the HF/update/forge tokens and the builds directory.",
             props: vec![
@@ -148,9 +148,21 @@ pub(super) fn tools() -> Vec<Builtin> {
                 (
                     "chat_feed_keepalive_s",
                     int_p(
-                        "Seconds between the Chat feed's keep-alive comments, at least 1; \
-                         said in the feed's hello as keepalive_s. An open feed keeps the \
-                         interval it opened with.",
+                        "Seconds between the Chat feed's keep-alive comments, at least 1 and at \
+                         most chat_feed_keepalive_max_s; said in the feed's hello as \
+                         keepalive_s. A feed that asks for its own keeps that instead, and an \
+                         open feed keeps the interval it opened with.",
+                    ),
+                ),
+                (
+                    "chat_feed_keepalive_max_s",
+                    int_p(
+                        "The longest keep-alive, in seconds, a feed may ask for itself \
+                         (GET /chat/api/feed?keepalive_s=, as a phone holding its feed in the \
+                         background does), at least 1 and at most 86400 (a day). A request past \
+                         it is refused naming this setting. Between events a feed sends only its \
+                         keep-alive, so this bounds how long a feed whose device vanished \
+                         silently stays open. Applies to feeds opened after the change.",
                     ),
                 ),
                 (
@@ -422,8 +434,13 @@ pub(super) fn tools() -> Vec<Builtin> {
                          session's own). Output: output_lead_ms, synthesis_ahead_s, \
                          longest_pause_ms (0 = keep the engine's silences), \
                          warm_on_connect. Limits: max_message_mb, max_frame_mb (not both 0), \
-                         ping_interval_s. Refused, naming the field: an alias of the wrong \
-                         task, a semantic_vad row that cannot run, an unknown script. \
+                         ping_interval_s. WebRTC calls, both applied at the next start: \
+                         webrtc_enabled, webrtc_port (null = the HTTP port's number, 0 = \
+                         chosen by the OS); their audio, applied to the next call: \
+                         webrtc_reorder_ms (0 = no wait, at most 40950), \
+                         webrtc_commit_window_ms, webrtc_output_kbps (6 to 510). Refused, \
+                         naming the field: an alias of the wrong task, a semantic_vad row \
+                         that cannot run, an unknown script, a value out of its range. \
                          Example: '{\"tts_alias\": \"audio/pocket-tts\", \
                          \"warm_on_connect\": true}'.",
                     ),

@@ -212,6 +212,7 @@ async fn setup(mock: &MockServer) -> SharedState {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -743,6 +744,7 @@ async fn a_reranker_can_never_become_a_corpus_embedder() {
             expose_all: true,
             expose_prefix: "embed".into(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -755,6 +757,11 @@ async fn a_reranker_can_never_become_a_corpus_embedder() {
             kind: AuxKind::Rerank,
             pooling: None,
             ctx_size: None,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: vec![],
             idle_seconds: 0,
             enabled: true,

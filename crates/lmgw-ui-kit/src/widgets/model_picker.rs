@@ -105,7 +105,8 @@ pub fn ModelPicker(
     /// The `capabilities.task` values this choice is for (`&["chat"]`);
     /// empty means every task. Models of other tasks stay reachable behind
     /// the "+N other tasks" chip, and a model whose task is unknown is
-    /// always offered.
+    /// always offered. A model no lmgw route serves
+    /// ([`CatalogEntry::routable`]) is never one of these tasks' own.
     #[prop(optional)]
     tasks: &'static [&'static str],
     /// Adds a "" choice with this label, e.g. "manifest default".
@@ -158,7 +159,7 @@ pub fn ModelPicker(
     let empty_label = StoredValue::new(empty_label);
 
     let in_scope = move |e: &CatalogEntry| {
-        tasks.is_empty() || e.task.as_deref().is_none_or(|t| tasks.contains(&t))
+        tasks.is_empty() || (e.routable && e.task.as_deref().is_none_or(|t| tasks.contains(&t)))
     };
     let scope_len = Memo::new(move |_| all.with(|a| a.iter().filter(|e| in_scope(e)).count()));
     let others = Memo::new(move |_| all.with(Vec::len) - scope_len.get());

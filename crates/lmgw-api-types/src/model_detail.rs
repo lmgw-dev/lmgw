@@ -17,7 +17,7 @@ use super::{DownloadedFrom, LearnedResidency, LocalModelDetail};
 pub enum LocalModelRead {
     /// A llama-server chat model.
     Chat(LocalModelDetail),
-    /// An embedding or rerank model.
+    /// An embedding, rerank or decision model.
     Aux(AuxModelDetail),
     /// A stable-diffusion.cpp pipeline.
     Image(ImageModelDetail),
@@ -25,7 +25,7 @@ pub enum LocalModelRead {
     Audio(AudioModelDetail),
 }
 
-/// An aux (embedding or rerank) model read back.
+/// An aux (embedding, rerank or decision) model read back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AuxModelDetail {
@@ -33,25 +33,47 @@ pub struct AuxModelDetail {
     pub model_id: String,
     /// The name clients call it by, with the aux prefix.
     pub public_name: String,
-    /// `embed` or `rerank`.
+    /// `embed`, `rerank` or `decision`.
     pub kind: String,
-    /// The route that serves it: `/v1/embeddings` or `/v1/rerank`.
+    /// The route that serves it: `/v1/embeddings`, `/v1/rerank` or
+    /// `/v1/systemone`.
     pub endpoint: String,
     pub pooling: Option<String>,
     pub ctx_size: Option<i64>,
+    /// `--ubatch-size`; null takes llama-server's default.
+    pub ubatch_size: Option<i64>,
+    /// `--batch-size`; null takes llama-server's default.
+    pub batch_size: Option<i64>,
+    /// A projector (`--mmproj`), relative to the aux models dir.
+    pub mmproj_path: Option<String>,
+    /// `cpu` runs the row on the CPU; null runs it on the GPU.
+    pub backend: Option<String>,
+    /// `--threads`; null renders none on the GPU, and on the CPU this
+    /// machine's physical cores (the logical CPU count where the core
+    /// topology cannot be read) unless the row's extra args name a count.
+    pub threads: Option<i64>,
+    /// The thread count its container starts with: `threads`, else a count
+    /// the extra args name, else on the CPU this machine's cores. Null when
+    /// nothing names one (a GPU row: llama-server picks) or the args' value
+    /// is not a number.
+    pub threads_in_effect: Option<i64>,
+    /// Where `threads_in_effect` comes from.
+    pub threads_source: crate::aux_engine::AuxThreadsSource,
     pub gguf_path: String,
     pub gguf_present: bool,
+    /// The licence the GGUF header states; null when it states none.
+    pub licence: Option<crate::ModelLicence>,
     /// `hf` or `manual`.
     pub source: String,
     pub downloaded_from: Option<DownloadedFrom>,
-    /// One llama-server option per line.
-    pub extra_args: String,
+    /// One entry per llama-server option (round-trips with the patch field).
+    pub extra_args: Vec<String>,
     pub idle_seconds: i64,
     pub enabled: bool,
     /// Container image override; null inherits the aux class's.
     pub image: Option<String>,
-    /// `podman run` args override, one per line; null inherits.
-    pub extra_run_args: Option<String>,
+    /// `podman run` args override, one entry per argument; null inherits.
+    pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
     /// `inherit`, `none` or `alias`.
     pub hold_fallback_mode: String,
@@ -82,8 +104,8 @@ pub struct ImageModelDetail {
     pub endpoints: Vec<String>,
     pub enabled: bool,
     pub image: Option<String>,
-    /// `podman run` args override, one per line; null inherits.
-    pub extra_run_args: Option<String>,
+    /// `podman run` args override, one entry per argument; null inherits.
+    pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
     pub idle_seconds: i64,
     pub hold_fallback_mode: String,
@@ -131,8 +153,8 @@ pub struct AudioModelDetail {
     pub enabled: bool,
     /// Container image override; null inherits the audio class's.
     pub image: Option<String>,
-    /// `podman run` args override, one per line; null inherits.
-    pub extra_run_args: Option<String>,
+    /// `podman run` args override, one entry per argument; null inherits.
+    pub extra_run_args: Option<Vec<String>>,
     pub warm_start: bool,
     pub hold_fallback_mode: String,
     pub hold_fallback: Option<String>,
@@ -140,8 +162,8 @@ pub struct AudioModelDetail {
     pub residency: Option<LearnedResidency>,
     /// The image the container starts from (the row's, else the class's).
     pub effective_image: String,
-    /// The `podman run` args in effect, one per line.
-    pub effective_extra_run_args: String,
+    /// The `podman run` args in effect, one entry per argument.
+    pub effective_extra_run_args: Vec<String>,
     /// `gpu` or `cpu`.
     pub runs_on: String,
     pub threads_in_effect: i64,

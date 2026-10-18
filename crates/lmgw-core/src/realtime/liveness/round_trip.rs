@@ -73,6 +73,19 @@ struct Inner {
     said: bool,
 }
 
+impl Inner {
+    /// A measured round trip, kept unless it is longer than the bound.
+    fn keep(&mut self, rtt: Duration) {
+        if self.bound.is_some_and(|b| rtt >= b) {
+            return;
+        }
+        if self.kept.len() == KEPT {
+            self.kept.pop_front();
+        }
+        self.kept.push_back(rtt);
+    }
+}
+
 impl RoundTrip {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         // Plain fields: a panic while it was held cannot leave them half
@@ -107,14 +120,15 @@ impl RoundTrip {
             return;
         }
         inner.sent = None;
-        let rtt = at.saturating_duration_since(sent);
-        if inner.bound.is_some_and(|b| rtt >= b) {
-            return;
-        }
-        if inner.kept.len() == KEPT {
-            inner.kept.pop_front();
-        }
-        inner.kept.push_back(rtt);
+        inner.keep(at.saturating_duration_since(sent));
+    }
+
+    /// A round trip a call's receiver report measured (calls design §8.1,
+    /// `calls::audio::rtcp`): a call sends no pings, and the phone's reports
+    /// stand in for the pongs, kept by the same rules — the least of the
+    /// last [`KEPT`], and none of the bound or longer.
+    pub fn reported(&self, rtt: Duration) {
+        self.lock().keep(rtt);
     }
 
     /// The least of the last round trips, if any ping was answered yet.
@@ -215,5 +229,21 @@ mod tests {
             ping(60 + 20 * k, 120);
         }
         assert_eq!(rt.get(), Some(Duration::from_millis(120)));
+    }
+
+    #[test]
+    fn a_calls_reported_round_trips_keep_the_same_rules() {
+        // Calls design §8.1: the phone's receiver reports stand in for the
+        // pongs — least of the last KEPT, the bound dropping an overlong one.
+        let rt = RoundTrip::default();
+        rt.bound(Duration::from_secs(20));
+        rt.reported(Duration::from_millis(80));
+        rt.reported(Duration::from_millis(45));
+        rt.reported(Duration::from_secs(25));
+        assert_eq!(rt.get(), Some(Duration::from_millis(45)));
+        for _ in 0..KEPT {
+            rt.reported(Duration::from_millis(60));
+        }
+        assert_eq!(rt.get(), Some(Duration::from_millis(60)));
     }
 }

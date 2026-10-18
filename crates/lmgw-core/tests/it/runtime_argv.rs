@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use lmgw_core::config::{AuxKind, LlamaParams};
+use lmgw_core::config::{AuxBackend, AuxKind, LlamaParams};
 use lmgw_core::runtime::argv::{
     podman_run_argv, render_engine_args, render_image_args, render_llama_args, EngineArgs,
     ImageArgs, LlamaArgs, RenderSpec,
@@ -63,6 +63,11 @@ fn aux_spec(
             kind,
             pooling: pooling.map(String::from),
             ctx_size,
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: args.iter().map(|s| s.to_string()).collect(),
         }),
         health_path: "/health",
@@ -429,6 +434,210 @@ fn rerank_never_emits_pooling_even_when_set() {
         !args.iter().any(|a| a == "--pooling" || a == "rank"),
         "{args:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Decision rows and the aux fields (decision-models design §3.3, §3.5)
+// ---------------------------------------------------------------------------
+
+/// `spec` with the aux row fields of §3.3 set.
+fn with_fields(
+    mut spec: RenderSpec,
+    ubatch: Option<i64>,
+    batch: Option<i64>,
+    mmproj: Option<&str>,
+    cpu: bool,
+    threads: Option<i64>,
+) -> RenderSpec {
+    let EngineArgs::Llama(LlamaArgs::Aux {
+        ubatch_size,
+        batch_size,
+        mmproj_path,
+        backend,
+        threads: t,
+        ..
+    }) = &mut spec.engine
+    else {
+        panic!("an aux spec");
+    };
+    *ubatch_size = ubatch;
+    *batch_size = batch;
+    *mmproj_path = mmproj.map(String::from);
+    *backend = cpu.then_some(AuxBackend::Cpu);
+    *t = threads;
+    spec
+}
+
+fn count(args: &[String], tok: &str) -> usize {
+    args.iter().filter(|a| a.as_str() == tok).count()
+}
+
+/// A decision row renders no kind flag (§3.5): llama-server turns on
+/// embedding mode itself, and `--reranking` crashes it at load (Appendix
+/// A.10). Every spelling of a kind flag and any `--pooling` left in the
+/// freeform args is dropped, and so is a structured `pooling`.
+#[test]
+fn a_decision_row_renders_no_kind_flag_and_drops_stale_ones() {
+    let args = render_llama_args(&aux_spec(
+        "laya",
+        "Laya-Q8_0.gguf",
+        AuxKind::Decision,
+        Some("cls"),
+        Some(8192),
+        &[
+            "--reranking",
+            "--rerank",
+            "--embeddings",
+            "--embedding",
+            "--pooling",
+            "rank",
+            "--flash-attn",
+            "on",
+        ],
+    ));
+    for flag in [
+        "--reranking",
+        "--rerank",
+        "--embeddings",
+        "--embedding",
+        "--pooling",
+        "rank",
+        "cls",
+    ] {
+        assert_eq!(count(&args, flag), 0, "{flag}: {args:?}");
+    }
+    assert!(has_pair(&args, "--ctx-size", "8192"), "{args:?}");
+    assert!(has_pair(&args, "--flash-attn", "on"), "{args:?}");
+}
+
+/// The five fields render as their flags, and each claims every spelling of
+/// its flag, so a stale copy in the freeform args is dropped rather than
+/// rendered twice (llama-server takes the last one).
+#[test]
+fn the_aux_fields_render_as_their_flags_and_claim_them() {
+    let spec = with_fields(
+        aux_spec(
+            "kev",
+            "Kev-4B.gguf",
+            AuxKind::Decision,
+            None,
+            Some(262_144),
+            &[
+                "-ub",
+                "512",
+                "--batch-size=512",
+                "-mm",
+                "/models/other.gguf",
+                "--no-mmproj",
+                "-ngl",
+                "99",
+                "--gpu-layers=99",
+                "-t",
+                "4",
+            ],
+        ),
+        Some(2048),
+        Some(2048),
+        Some("org/Kev/mmproj.gguf"),
+        true,
+        Some(16),
+    );
+    let args = render_llama_args(&spec);
+    assert!(has_pair(&args, "--ubatch-size", "2048"), "{args:?}");
+    assert!(has_pair(&args, "--batch-size", "2048"), "{args:?}");
+    assert!(
+        has_pair(&args, "--mmproj", "/models/org/Kev/mmproj.gguf"),
+        "{args:?}"
+    );
+    assert!(has_pair(&args, "--n-gpu-layers", "0"), "{args:?}");
+    assert!(has_pair(&args, "--threads", "16"), "{args:?}");
+    for stale in [
+        "-ub",
+        "512",
+        "--batch-size=512",
+        "-mm",
+        "/models/other.gguf",
+        "--no-mmproj",
+        "-ngl",
+        "99",
+        "--gpu-layers=99",
+        "-t",
+        "4",
+    ] {
+        assert_eq!(count(&args, stale), 0, "{stale}: {args:?}");
+    }
+}
+
+/// The alias table is shared with the chat renderer, so the two spellings
+/// added for the aux fields (`--gpu-layers`, `--embedding`) act on chat rows
+/// too: a chat row's freeform `--gpu-layers N` loses to its `n_gpu_layers`
+/// field like `-ngl N` always did, instead of rendering after it and
+/// winning in llama-server. Without the field it still renders.
+#[test]
+fn a_chat_rows_gpu_layers_spelling_loses_to_its_field_like_ngl() {
+    let params = LlamaParams {
+        n_gpu_layers: Some(99),
+        ..Default::default()
+    };
+    for stale in [
+        &["--gpu-layers", "10"][..],
+        &["--gpu-layers=10"],
+        &["-ngl", "10"],
+    ] {
+        let args = render_llama_args(&chat_spec("qwen", "qwen.gguf", params.clone(), stale));
+        assert!(has_pair(&args, "--n-gpu-layers", "99"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.contains("10")),
+            "{stale:?}: {args:?}"
+        );
+    }
+    let args = render_llama_args(&chat_spec(
+        "qwen",
+        "qwen.gguf",
+        LlamaParams::default(),
+        &["--gpu-layers", "10"],
+    ));
+    assert!(has_pair(&args, "--gpu-layers", "10"), "{args:?}");
+}
+
+/// An unset field claims nothing: a row whose placement still rides in its
+/// freeform args renders exactly the argv it rendered before the fields
+/// existed, so boot adoption keeps its container.
+#[test]
+fn unset_aux_fields_claim_nothing_and_leave_the_argv_as_it_was() {
+    let args = render_llama_args(&aux_spec(
+        "e5",
+        "e5.gguf",
+        AuxKind::Embed,
+        Some("mean"),
+        Some(512),
+        &["--n-gpu-layers", "0", "--threads", "8", "-ub", "512"],
+    ));
+    let expected: Vec<String> = [
+        "-m",
+        "/models/e5.gguf",
+        "--alias",
+        "e5",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+        "--embeddings",
+        "--pooling",
+        "mean",
+        "--ctx-size",
+        "512",
+        "--n-gpu-layers",
+        "0",
+        "--threads",
+        "8",
+        "-ub",
+        "512",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(args, expected);
 }
 
 // ---------------------------------------------------------------------------

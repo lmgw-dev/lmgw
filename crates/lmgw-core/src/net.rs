@@ -83,6 +83,39 @@ pub fn primary_base_url(bind_addr: &str) -> String {
         .unwrap_or_else(|| format!("http://{bind_addr}"))
 }
 
+/// The dashboard's URL for a device's `hello` (device link design §7.2),
+/// from `bind_addr`.
+///
+/// - A device paired as "this computer" (`this_computer`) gets it always:
+///   the primary URL, loopback for a wildcard bind.
+/// - Any other device gets it only when a host other than this one can
+///   reach it: a loopback bind is `None`; a concrete address is itself; a
+///   wildcard bind is the address the device's own connection arrived on
+///   (`arrived_on`, canonical), `None` when that is not a usable address.
+pub fn dashboard_url(
+    bind_addr: &str,
+    this_computer: bool,
+    arrived_on: Option<IpAddr>,
+) -> Option<String> {
+    if this_computer {
+        return Some(format!("{}/", primary_base_url(bind_addr)));
+    }
+    let Ok(addr) = bind_addr.parse::<SocketAddr>() else {
+        // A host name: loopback by name reaches nothing from elsewhere.
+        let host = bind_addr.rsplit_once(':').map_or(bind_addr, |(h, _)| h);
+        return (!host.eq_ignore_ascii_case("localhost")).then(|| format!("http://{bind_addr}/"));
+    };
+    let port = addr.port();
+    let host = if addr.ip().is_unspecified() {
+        arrived_on.filter(|ip| !ip.is_loopback() && !ip.is_unspecified())?
+    } else if addr.ip().is_loopback() {
+        return None;
+    } else {
+        addr.ip()
+    };
+    Some(format!("http://{}:{port}/", url_host(host)))
+}
+
 /// The machine's own host name, or `None` where the kernel does not publish
 /// one in a file.
 ///
@@ -231,6 +264,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_dashboard_url_is_for_this_computer_or_where_others_can_reach_it() {
+        let lan: IpAddr = "198.51.100.20".parse().unwrap();
+        let here = |bind| dashboard_url(bind, true, Some(lan));
+        let there = |bind, on| dashboard_url(bind, false, on);
+        // This computer: always, a wildcard bind as loopback.
+        assert_eq!(
+            here("127.0.0.1:8001").as_deref(),
+            Some("http://127.0.0.1:8001/")
+        );
+        assert_eq!(
+            here("0.0.0.0:8001").as_deref(),
+            Some("http://127.0.0.1:8001/")
+        );
+        assert_eq!(
+            here("192.0.2.10:8001").as_deref(),
+            Some("http://192.0.2.10:8001/")
+        );
+        // Another device: nothing on loopback, a concrete address as itself,
+        // a wildcard as the address its connection arrived on.
+        assert_eq!(there("127.0.0.1:8001", Some(lan)), None);
+        assert_eq!(there("[::1]:8001", Some(lan)), None);
+        assert_eq!(
+            there("192.0.2.10:8001", None).as_deref(),
+            Some("http://192.0.2.10:8001/")
+        );
+        assert_eq!(
+            there("0.0.0.0:8001", Some(lan)).as_deref(),
+            Some("http://198.51.100.20:8001/")
+        );
+        assert_eq!(
+            there("[::]:8001", Some("2001:db8::5".parse().unwrap())).as_deref(),
+            Some("http://[2001:db8::5]:8001/")
+        );
+        assert_eq!(there("0.0.0.0:8001", None), None);
+        assert_eq!(
+            there("0.0.0.0:8001", Some("127.0.0.1".parse().unwrap())),
+            None
+        );
+        // A host name: loopback by name reaches nothing from elsewhere.
+        assert_eq!(there("localhost:8001", Some(lan)), None);
+        assert_eq!(
+            there("lmgw.example:8001", None).as_deref(),
+            Some("http://lmgw.example:8001/")
+        );
+    }
+
+    #[test]
     fn concrete_bind_is_passed_through() {
         assert_eq!(
             reachable_urls("127.0.0.1:8787"),
@@ -240,8 +320,8 @@ mod tests {
             }]
         );
         assert_eq!(
-            reachable_urls("192.168.1.10:8001")[0].url,
-            "http://192.168.1.10:8001"
+            reachable_urls("198.51.100.10:8001")[0].url,
+            "http://198.51.100.10:8001"
         );
         assert_eq!(reachable_urls("[::1]:8001")[0].url, "http://[::1]:8001");
     }
@@ -269,8 +349,8 @@ mod tests {
     #[test]
     fn unparseable_bind_survives() {
         assert_eq!(
-            primary_base_url("my-host.lan:8001"),
-            "http://my-host.lan:8001"
+            primary_base_url("my-host.example:8001"),
+            "http://my-host.example:8001"
         );
     }
 
@@ -284,7 +364,7 @@ mod tests {
         }
         // A bind address that is a name rather than an address is passed
         // through by `reachable_urls`, and is a name the gateway answers on.
-        assert!(own_host_names("board.lan:8001").contains(&"board.lan".to_string()));
+        assert!(own_host_names("board.example:8001").contains(&"board.example".to_string()));
     }
 
     /// The mDNS name and the resolver's completions are names this box answers
@@ -296,13 +376,13 @@ mod tests {
         let names = compose_own_host_names(
             "0.0.0.0:8001",
             Some("Myhost".into()),
-            &["lmgw.lan".into(), "home.arpa".into()],
+            &["lmgw.example".into(), "home.arpa".into()],
         );
         for expected in [
             "127.0.0.1",
             "myhost",
             "myhost.local",
-            "myhost.lmgw.lan",
+            "myhost.lmgw.example",
             "myhost.home.arpa",
         ] {
             assert!(
@@ -321,33 +401,37 @@ mod tests {
         assert_eq!(sorted.len(), names.len(), "{names:?}");
         // An `/etc/hostname` holding an FQDN keeps it, and its first label is
         // what gets completed.
-        let fqdn = compose_own_host_names("127.0.0.1:8001", Some("myhost.lmgw.lan".into()), &[]);
-        assert!(fqdn.contains(&"myhost.lmgw.lan".to_string()), "{fqdn:?}");
+        let fqdn =
+            compose_own_host_names("127.0.0.1:8001", Some("myhost.lmgw.example".into()), &[]);
+        assert!(
+            fqdn.contains(&"myhost.lmgw.example".to_string()),
+            "{fqdn:?}"
+        );
         assert!(fqdn.contains(&"myhost.local".to_string()), "{fqdn:?}");
         // No host name published: the bind address alone, as before.
         assert_eq!(
-            compose_own_host_names("127.0.0.1:8001", None, &["lmgw.lan".into()]),
+            compose_own_host_names("127.0.0.1:8001", None, &["lmgw.example".into()]),
             vec!["127.0.0.1".to_string()]
         );
     }
 
     #[test]
     fn search_domains_are_read_off_both_keywords_and_comments_are_not() {
-        let text = "# generated by resolvconf\nnameserver 127.0.0.53\nsearch lmgw.lan \
-                    home.arpa.\ndomain lmgw.lan ; the old spelling\noptions edns0\n";
+        let text = "# generated by resolvconf\nnameserver 127.0.0.53\nsearch lmgw.example \
+                    home.arpa.\ndomain lmgw.example ; the old spelling\noptions edns0\n";
         assert_eq!(
             resolv_search_domains(text),
-            vec!["lmgw.lan".to_string(), "home.arpa".to_string()]
+            vec!["lmgw.example".to_string(), "home.arpa".to_string()]
         );
         assert!(resolv_search_domains("nameserver 1.1.1.1\n").is_empty());
-        assert!(resolv_search_domains("#search lmgw.lan\n").is_empty());
+        assert!(resolv_search_domains("#search lmgw.example\n").is_empty());
     }
 
     #[test]
     fn host_header_port_is_stripped() {
         assert_eq!(host_only("127.0.0.1:8001"), "127.0.0.1");
-        assert_eq!(host_only("myhost.lan"), "myhost.lan");
-        assert_eq!(host_only("[fd00::1]:8001"), "[fd00::1]");
+        assert_eq!(host_only("myhost.example"), "myhost.example");
+        assert_eq!(host_only("[2001:db8::1]:8001"), "[2001:db8::1]");
         assert_eq!(host_only(""), "");
     }
 }

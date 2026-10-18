@@ -38,7 +38,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use lmgw_api_types::chat_frames as frames;
 use lmgw_api_types::mcp_apps::{ToolReadyFrame, ToolResultFrame};
 
@@ -50,6 +49,7 @@ use crate::agent::{
     ToolExecutor, TurnRunner,
 };
 use crate::config::Route;
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ingress::responses::McpToolSpec;
 use crate::ingress::ClientProto;
@@ -213,92 +213,93 @@ struct Answering {
 /// there is no prefill, and the continuation fields only where llama-server
 /// answers. Always from the loop's own request (the thread's own params),
 /// never from what another route was sent.
-#[async_trait]
 impl PerRoute for ChatRunner {
-    async fn request(
-        &self,
-        route: &Route,
-        hold: Option<&crate::vram::LocalHold>,
-        rerouted: Option<&crate::gate::GateHeaders>,
-        ir: &ChatRequest,
-    ) -> Result<Option<ChatRequest>, GatewayError> {
-        // A fallback that cannot see gets the turn's PDFs as their text and
-        // its other images as placeholders, first: everything below fits
-        // that (`chat_turn::blind`).
-        let blind = self.blind.on_route(&self.state, route, ir).await;
-        let ir = blind.as_ref().unwrap_or(ir);
-        // Only the first request of a continue ends with the reply; every
-        // later one ends with tool results and goes out as it is.
-        let continuing = self.continuing
-            && ir
-                .messages
-                .last()
-                .is_some_and(|m| m.role == Role::Assistant);
-        let headers = rerouted.unwrap_or(&self.admitted);
-        let answered_by = chat_turn::answered_by(&self.state.snapshot(), headers);
-        let answering = chat_turn::answering(answered_by.as_deref(), headers, &ir.model_alias);
-        let fitted = chat_turn::fit_route(
-            &self.state,
-            (route, hold),
-            answering,
-            ir,
-            (continuing, self.hears),
-        )
-        .await;
-        // A model that cannot take the audio, once the user row is settled:
-        // this call goes with the row's words (`unheard`, review V2).
-        let (fit, as_text) = match fitted {
-            Err(e) if e.code() == chat_turn::AUDIO_NOT_HEARD => {
-                let text = match &self.unheard {
-                    Some(spoken) => spoken.as_transcript(&self.state, ir).await?,
-                    None => None,
-                };
-                let Some(text) = text else {
-                    return Err(e);
-                };
-                tracing::info!(
+    fn request<'a>(
+        &'a self,
+        route: &'a Route,
+        hold: Option<&'a crate::vram::LocalHold>,
+        rerouted: Option<&'a crate::gate::GateHeaders>,
+        ir: &'a ChatRequest,
+    ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>> {
+        Box::pin(async move {
+            // A fallback that cannot see gets the turn's PDFs as their text and
+            // its other images as placeholders, first: everything below fits
+            // that (`chat_turn::blind`).
+            let blind = self.blind.on_route(&self.state, route, ir).await;
+            let ir = blind.as_ref().unwrap_or(ir);
+            // Only the first request of a continue ends with the reply; every
+            // later one ends with tool results and goes out as it is.
+            let continuing = self.continuing
+                && ir
+                    .messages
+                    .last()
+                    .is_some_and(|m| m.role == Role::Assistant);
+            let headers = rerouted.unwrap_or(&self.admitted);
+            let answered_by = chat_turn::answered_by(&self.state.snapshot(), headers);
+            let answering = chat_turn::answering(answered_by.as_deref(), headers, &ir.model_alias);
+            let fitted = chat_turn::fit_route(
+                &self.state,
+                (route, hold),
+                answering,
+                ir,
+                (continuing, self.hears),
+            )
+            .await;
+            // A model that cannot take the audio, once the user row is settled:
+            // this call goes with the row's words (`unheard`, review V2).
+            let (fit, as_text) = match fitted {
+                Err(e) if e.code() == chat_turn::AUDIO_NOT_HEARD => {
+                    let text = match &self.unheard {
+                        Some(spoken) => spoken.as_transcript(&self.state, ir).await?,
+                        None => None,
+                    };
+                    let Some(text) = text else {
+                        return Err(e);
+                    };
+                    tracing::info!(
                     "chat: {} cannot take this heard turn's audio ({e}); the call goes with the \
                      turn's transcript",
                     answering.name()
                 );
-                let fit = chat_turn::fit_route(
-                    &self.state,
-                    (route, hold),
-                    answering,
-                    &text,
-                    (continuing, false),
-                )
-                .await?;
-                (fit, Some(text))
+                    let fit = chat_turn::fit_route(
+                        &self.state,
+                        (route, hold),
+                        answering,
+                        &text,
+                        (continuing, false),
+                    )
+                    .await?;
+                    (fit, Some(text))
+                }
+                other => (other?, None),
+            };
+            // The call's row says what its content lost: to the thread's own
+            // model, to this route (`blind`), and a heard turn's audio going as
+            // its transcript.
+            let unheard = as_text.is_some().then(|| {
+                crate::degraded::lacks(answering.name(), false, "audio", "transcript sent")
+            });
+            let degraded =
+                crate::degraded::join([self.turn_degraded.clone(), self.blind.marker(), unheard]);
+            *self.answering.lock().unwrap_or_else(|e| e.into_inner()) = Answering {
+                ignored: fit.ignored,
+                answered_by,
+                llama_server: route.upstream.kind == crate::config::UpstreamKind::LlamaServer,
+                fitted: None,
+                degraded,
+            };
+            if blind.is_none() && as_text.is_none() && !continuing && !fit.params_changed {
+                // The request as the loop built it is what this route takes —
+                // no copy of the whole history for nothing.
+                return Ok(None);
             }
-            other => (other?, None),
-        };
-        // The call's row says what its content lost: to the thread's own
-        // model, to this route (`blind`), and a heard turn's audio going as
-        // its transcript.
-        let unheard = as_text
-            .is_some()
-            .then(|| crate::degraded::lacks(answering.name(), false, "audio", "transcript sent"));
-        let degraded =
-            crate::degraded::join([self.turn_degraded.clone(), self.blind.marker(), unheard]);
-        *self.answering.lock().unwrap_or_else(|e| e.into_inner()) = Answering {
-            ignored: fit.ignored,
-            answered_by,
-            llama_server: route.upstream.kind == crate::config::UpstreamKind::LlamaServer,
-            fitted: None,
-            degraded,
-        };
-        if blind.is_none() && as_text.is_none() && !continuing && !fit.params_changed {
-            // The request as the loop built it is what this route takes —
-            // no copy of the whole history for nothing.
-            return Ok(None);
-        }
-        let mut req = as_text.unwrap_or_else(|| ir.clone());
-        req.params = fit.params;
-        if continuing {
-            chat_turn::mark_continuation(route, &mut req);
-        }
-        Ok(Some(req))
+            let mut req = as_text.unwrap_or_else(|| ir.clone());
+            req.params = fit.params;
+            if continuing {
+                chat_turn::mark_continuation(route, &mut req);
+            }
+            Ok(Some(req))
+        })
     }
 
     /// An off the route took in another form joins the overrides it dropped.
@@ -317,96 +318,100 @@ impl PerRoute for ChatRunner {
     }
 }
 
-#[async_trait]
 impl TurnRunner for ChatRunner {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        let started = Instant::now();
-        // One model call of a device's turn (L4): its key's check, a refusal
-        // — its row written — failing the loop with the gateway error it was.
-        self.caller
-            .check(
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            let started = Instant::now();
+            // One model call of a device's turn (L4): its key's check, a refusal
+            // — its row written — failing the loop with the gateway error it was.
+            self.caller
+                .check(
+                    &self.state,
+                    ClientProto::Chat,
+                    &ir.model_alias,
+                    crate::telemetry::RequestClass::Chat,
+                )
+                .await?;
+            let hold = match self.claim.for_call().await {
+                Ok(hold) => hold,
+                // A block came on while the claim was let go: the call goes
+                // where the gate sends any request under it (`claim`'s module
+                // doc, review V12).
+                Err(_) if self.state.snapshot().gpu_block().is_some() => {
+                    let opened = match claim::under_block(&self.state, ir).await {
+                        Ok(opened) => opened,
+                        Err(f) => {
+                            let route = f.route.as_deref().unwrap_or(&self.route);
+                            let fallback = f.headers.fallback_reason();
+                            let (alias, proto) = (&ir.model_alias, self.proto);
+                            refused::record(
+                                &self.state,
+                                (self.caller.key(), alias),
+                                proto,
+                                route,
+                                fallback,
+                                started,
+                                &f.error,
+                            )
+                            .await;
+                            return Err(f.error);
+                        }
+                    };
+                    return proxy::stream_once_on(
+                        &self.state,
+                        opened.hold.as_ref(),
+                        &opened.route,
+                        opened.headers.fallback_reason(),
+                        ir,
+                        self.proto,
+                        self.caller.key(),
+                        deadline.saturating_sub(started.elapsed()),
+                        sink,
+                        Some((self, Some(&opened.headers))),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    // A claim let go and refused again: its request row, as any
+                    // refusal of the loop's (`refused`).
+                    let (alias, route) = (&ir.model_alias, &self.route);
+                    refused::record(
+                        &self.state,
+                        (self.caller.key(), alias),
+                        self.proto,
+                        route,
+                        self.fallback,
+                        started,
+                        &e,
+                    )
+                    .await;
+                    return Err(e);
+                }
+            };
+            // `stream_once_on` is erased (`crate::erased`), so this poll frame
+            // holds a pointer to its future, not the ~119 KB the inline call
+            // added in a debug build. That keeps the turn -> gate chain within
+            // the 2 MiB test-thread stack it shares. The block re-route call
+            // above is boxed through the erased callee for the same reason.
+            proxy::stream_once_on(
                 &self.state,
-                ClientProto::Chat,
-                &ir.model_alias,
-                crate::telemetry::RequestClass::Chat,
+                hold.as_ref(),
+                &self.route,
+                self.fallback,
+                ir,
+                self.proto,
+                self.caller.key(),
+                deadline.saturating_sub(started.elapsed()),
+                sink,
+                Some((self, None)),
             )
-            .await?;
-        let hold = match self.claim.for_call().await {
-            Ok(hold) => hold,
-            // A block came on while the claim was let go: the call goes
-            // where the gate sends any request under it (`claim`'s module
-            // doc, review V12).
-            Err(_) if self.state.snapshot().gpu_block().is_some() => {
-                let opened = match claim::under_block(&self.state, ir).await {
-                    Ok(opened) => opened,
-                    Err(f) => {
-                        let route = f.route.as_deref().unwrap_or(&self.route);
-                        let fallback = f.headers.fallback_reason();
-                        let (alias, proto) = (&ir.model_alias, self.proto);
-                        refused::record(
-                            &self.state,
-                            (self.caller.key(), alias),
-                            proto,
-                            route,
-                            fallback,
-                            started,
-                            &f.error,
-                        )
-                        .await;
-                        return Err(f.error);
-                    }
-                };
-                return proxy::stream_once_on(
-                    &self.state,
-                    opened.hold.as_ref(),
-                    &opened.route,
-                    opened.headers.fallback_reason(),
-                    ir,
-                    self.proto,
-                    self.caller.key(),
-                    deadline.saturating_sub(started.elapsed()),
-                    sink,
-                    Some((self, Some(&opened.headers))),
-                )
-                .await;
-            }
-            Err(e) => {
-                // A claim let go and refused again: its request row, as any
-                // refusal of the loop's (`refused`).
-                let (alias, route) = (&ir.model_alias, &self.route);
-                refused::record(
-                    &self.state,
-                    (self.caller.key(), alias),
-                    self.proto,
-                    route,
-                    self.fallback,
-                    started,
-                    &e,
-                )
-                .await;
-                return Err(e);
-            }
-        };
-        // Boxed: 119 KB of debug-build poll frame when inline, on the turn -> gate
-        // chain that shares a 2 MiB test-thread stack.
-        Box::pin(proxy::stream_once_on(
-            &self.state,
-            hold.as_ref(),
-            &self.route,
-            self.fallback,
-            ir,
-            self.proto,
-            self.caller.key(),
-            deadline.saturating_sub(started.elapsed()),
-            sink,
-            Some((self, None)),
-        ))
-        .await
+            .await
+        })
     }
 }
 
@@ -457,130 +462,131 @@ impl ChatSink {
     }
 }
 
-#[async_trait]
 impl EventSink for ChatSink {
-    async fn emit(&mut self, ev: LoopEvent) -> bool {
-        match ev {
-            // A new turn after tool calls continues the same visible answer:
-            // the island renders one assistant bubble per send, with the tool
-            // activity shown inline, which is what the transcript looks like.
-            LoopEvent::TurnStarted { .. } => {
-                if let Some(t) = self.tasks.as_mut() {
-                    Box::pin(t.turn_started()).await;
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+        Box::pin(async move {
+            match ev {
+                // A new turn after tool calls continues the same visible answer:
+                // the island renders one assistant bubble per send, with the tool
+                // activity shown inline, which is what the transcript looks like.
+                LoopEvent::TurnStarted { .. } => {
+                    if let Some(t) = self.tasks.as_mut() {
+                        Box::pin(t.turn_started()).await;
+                    }
+                    true
                 }
-                true
-            }
-            // Nothing said after a stop is relayed or kept.
-            LoopEvent::Text(_) | LoopEvent::Reasoning(_) if self.stop.is_raised() => true,
-            LoopEvent::Text(t) => {
-                self.first_at.get_or_insert_with(Instant::now);
-                self.text.push_str(&t);
-                self.emit_raw(TurnFrame::of("delta", &frames::TextFrame { text: t }))
-                    .await
-            }
-            LoopEvent::Reasoning(t) => {
-                self.first_at.get_or_insert_with(Instant::now);
-                self.reasoning.push_str(&t);
-                self.emit_raw(TurnFrame::of("reasoning", &frames::TextFrame { text: t }))
-                    .await
-            }
-            LoopEvent::CallStarted { index, name, .. } => {
-                let start = frames::ToolStartFrame {
+                // Nothing said after a stop is relayed or kept.
+                LoopEvent::Text(_) | LoopEvent::Reasoning(_) if self.stop.is_raised() => true,
+                LoopEvent::Text(t) => {
+                    self.first_at.get_or_insert_with(Instant::now);
+                    self.text.push_str(&t);
+                    self.emit_raw(TurnFrame::of("delta", &frames::TextFrame { text: t }))
+                        .await
+                }
+                LoopEvent::Reasoning(t) => {
+                    self.first_at.get_or_insert_with(Instant::now);
+                    self.reasoning.push_str(&t);
+                    self.emit_raw(TurnFrame::of("reasoning", &frames::TextFrame { text: t }))
+                        .await
+                }
+                LoopEvent::CallStarted { index, name, .. } => {
+                    let start = frames::ToolStartFrame {
+                        index,
+                        id: None,
+                        name,
+                    };
+                    self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Start(start)))
+                        .await
+                }
+                LoopEvent::CallArgs { index, fragment } => {
+                    let args = frames::ToolArgsFrame { index, fragment };
+                    self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Args(args)))
+                        .await
+                }
+                // What a client that shows the call's MCP Apps view needs before
+                // the call runs (client-apps design §7.5): whether it waits for
+                // an approval, the label it came from and its view.
+                LoopEvent::CallReady {
                     index,
-                    id: None,
+                    call_id,
                     name,
-                };
-                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Start(start)))
-                    .await
-            }
-            LoopEvent::CallArgs { index, fragment } => {
-                let args = frames::ToolArgsFrame { index, fragment };
-                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Args(args)))
-                    .await
-            }
-            // What a client that shows the call's MCP Apps view needs before
-            // the call runs (client-apps design §7.5): whether it waits for
-            // an approval, the label it came from and its view.
-            LoopEvent::CallReady {
-                index,
-                call_id,
-                name,
-                args,
-                server_label,
-                needs_approval,
-            } => {
-                let ready = ToolReadyFrame {
-                    index,
-                    arguments: args,
-                    call_id: Some(call_id),
+                    args,
                     server_label,
-                    needs_approval: Some(needs_approval),
-                    ui_resource: self.ui_resources.get(&name).cloned(),
-                    name,
-                };
-                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Ready(ready)))
-                    .await
-            }
-            // What an MCP Apps host needs besides the text (client-apps
-            // design §7.3, §7.5): the label the tool came from, the
-            // namespaced UI resource it links to, and the result as MCP has
-            // it — its content blocks as sent, its structured content. No
-            // bound of its own: a result is as large as its server sent it
-            // (a device's by `mcp.host_max_message_mb`).
-            LoopEvent::CallResult {
-                index,
-                call_id,
-                name,
-                server_label,
-                blocks,
-                is_error,
-                ms,
-                structured,
-                content,
-            } => {
-                let (text, _) = flatten_tool_result(&blocks);
-                // A call that started an MCP task says which (§4.3), so a
-                // client never reads it out of `started, job …`.
-                let task = match self.tasks.as_ref() {
-                    Some(t) => Box::pin(t.of_call(&call_id)).await,
-                    None => None,
-                };
-                let result = ToolResultFrame {
+                    needs_approval,
+                } => {
+                    let ready = ToolReadyFrame {
+                        index,
+                        arguments: args,
+                        call_id: Some(call_id),
+                        server_label,
+                        needs_approval: Some(needs_approval),
+                        ui_resource: self.ui_resources.get(&name).cloned(),
+                        name,
+                    };
+                    self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Ready(ready)))
+                        .await
+                }
+                // What an MCP Apps host needs besides the text (client-apps
+                // design §7.3, §7.5): the label the tool came from, the
+                // namespaced UI resource it links to, and the result as MCP has
+                // it — its content blocks as sent, its structured content. No
+                // bound of its own: a result is as large as its server sent it
+                // (a device's by `mcp.host_max_message_mb`).
+                LoopEvent::CallResult {
                     index,
-                    output: text,
+                    call_id,
+                    name,
+                    server_label,
+                    blocks,
                     is_error,
                     ms,
-                    server_label: Some(server_label),
-                    ui_resource: self.ui_resources.get(&name).cloned(),
-                    structured_content: structured,
-                    content: Some(content),
-                    call_id: Some(call_id),
-                    task,
-                    name,
-                };
-                self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Result(result)))
-                    .await
-            }
-            LoopEvent::Done { usage, reason } => {
-                self.usage = usage;
-                // A cancel is the turn being stopped, and the turn says so
-                // itself (`report_stop`, or `done` to a caller that stopped
-                // it): there is no budget to raise.
-                let stopped = reason == StopReason::Incomplete(agent::REASON_CANCELED);
-                if let (StopReason::Incomplete(why), false) = (reason, stopped) {
-                    let msg = format!(
-                        "the run stopped early: {why} (raise it under Settings → Agents & \
-                         tools if this was too tight)"
-                    );
-                    let error = frames::ErrorFrame {
-                        message: msg,
-                        code: None,
+                    structured,
+                    content,
+                } => {
+                    let (text, _) = flatten_tool_result(&blocks);
+                    // A call that started an MCP task says which (§4.3), so a
+                    // client never reads it out of `started, job …`.
+                    let task = match self.tasks.as_ref() {
+                        Some(t) => Box::pin(t.of_call(&call_id)).await,
+                        None => None,
                     };
-                    self.emit_raw(TurnFrame::of("error", &error)).await;
+                    let result = ToolResultFrame {
+                        index,
+                        output: text,
+                        is_error,
+                        ms,
+                        server_label: Some(server_label),
+                        ui_resource: self.ui_resources.get(&name).cloned(),
+                        structured_content: structured,
+                        content: Some(content),
+                        call_id: Some(call_id),
+                        task,
+                        name,
+                    };
+                    self.emit_raw(TurnFrame::of("tool", &frames::ToolFrame::Result(result)))
+                        .await
                 }
-                true
+                LoopEvent::Done { usage, reason } => {
+                    self.usage = usage;
+                    // A cancel is the turn being stopped, and the turn says so
+                    // itself (`report_stop`, or `done` to a caller that stopped
+                    // it): there is no budget to raise.
+                    let stopped = reason == StopReason::Incomplete(agent::REASON_CANCELED);
+                    if let (StopReason::Incomplete(why), false) = (reason, stopped) {
+                        let msg = format!(
+                            "the run stopped early: {why} (raise it under Settings → Agents & \
+                         tools if this was too tight)"
+                        );
+                        let error = frames::ErrorFrame {
+                            message: msg,
+                            ..Default::default()
+                        };
+                        self.emit_raw(TurnFrame::of("error", &error)).await;
+                    }
+                    true
+                }
             }
-        }
+        })
     }
 }
 
@@ -609,7 +615,7 @@ pub(super) async fn run_send(
         async move {
             let error = frames::ErrorFrame {
                 message,
-                code: None,
+                ..Default::default()
             };
             let _ = tx.send(TurnFrame::of("error", &error)).await;
             let done = frames::DoneFrame::aborted();
@@ -639,11 +645,7 @@ pub(super) async fn run_send(
     let resolved = turn
         .or_stop(
             &tx,
-            Box::pin(crate::gate::resolve(
-                &state,
-                &ir.model_alias,
-                crate::gate::RouteCheck::None,
-            )),
+            crate::gate::resolve(&state, &ir.model_alias, crate::gate::RouteCheck::None),
         )
         .await;
     let routed = match resolved {
@@ -711,31 +713,38 @@ pub(super) async fn run_send(
             require_approval: plan.floor.rule(&snap, &agg, KB_LABEL, &plan.mcp),
         });
     }
-    // Every label that failed did so only because its device is offline
-    // (client-apps design §5.3): reported, and the turn runs without them.
-    let mut only_offline = false;
+    // Every label that failed did so only because its device is offline, or
+    // is a device this caller is not granted (`Failed::absent`, client-apps
+    // design §5.3 as changed 2026-10-15): reported, and the turn runs
+    // without them.
+    let mut only_absent = false;
     if !specs.is_empty() {
         // The owner's own turn: the owner attached these labels, and the
         // gateway's scope reaches them. A device's turn resolves under its
-        // key's tool scope (client-apps design L4): a label it keeps out is
-        // reported below like a server that could not be reached.
+        // key's tool scope and device-tools grant (client-apps design L4,
+        // L16): a label it may not use is reported below with its reason.
         let scope = Box::pin(turn.caller().scope(&state)).await;
         let resolved = match turn
-            .or_stop(&tx, Box::pin(mcp_exec::resolve(&state, &specs, &scope)))
+            .or_stop(
+                &tx,
+                Box::pin(mcp_exec::resolve_attached(&state, &specs, &scope)),
+            )
             .await
         {
             Ok(r) => r,
             Err(why) => return turn.report_stop(why, &tx).await,
         };
-        for (label, why) in &resolved.failed {
-            let message = if label == KB_LABEL {
-                format!("knowledge-base tools: {why}")
+        for f in &resolved.failed {
+            let message = if f.label == KB_LABEL {
+                format!("knowledge-base tools: {}", f.why)
             } else {
-                format!("MCP server '{label}': {why}")
+                format!("MCP server '{}': {}", f.label, f.why)
             };
             let error = frames::ErrorFrame {
                 message,
-                code: None,
+                code: Some(f.code.as_str().to_string()),
+                server_label: Some(f.label.clone()),
+                ..Default::default()
             };
             let _ = tx.send(TurnFrame::of("error", &error)).await;
         }
@@ -745,11 +754,7 @@ pub(super) async fn run_send(
         offered.extend(resolved.servers);
         ui_resources.extend(resolved.ui_resources);
         tools.extend(resolved.tools);
-        only_offline = !resolved.failed.is_empty()
-            && resolved
-                .failed
-                .iter()
-                .all(|(label, _)| resolved.offline.contains(label));
+        only_absent = !resolved.failed.is_empty() && resolved.failed.iter().all(|f| f.absent);
     }
 
     // No tools at all: either self-admin is off, or every attached server
@@ -757,8 +762,10 @@ pub(super) async fn run_send(
     // model improvise an answer about a gateway or a search it cannot reach.
     if tools.is_empty() {
         // A device being off never refuses a turn (client-apps design §5.3,
-        // R6): with only offline labels it runs as a plain chat turn.
-        if only_offline && !plan.admin {
+        // R6), and neither does a device's label this caller is not granted
+        // (2026-10-15): a phone in a folder whose label is the desktop's
+        // answers as a plain chat turn, after the frame that says why.
+        if only_absent && !plan.admin {
             // Boxed: the plain path's future inside this one's would make
             // one state machine of both.
             return Box::pin(super::chat::run_send(state, turn, ir, tx)).await;
@@ -1095,6 +1102,7 @@ pub(super) async fn run_send(
         let not_saved = frames::ErrorFrame {
             message: NOT_SAVED.into(),
             code: Some("not_saved".into()),
+            ..Default::default()
         };
         sink.say(TurnFrame::of("error", &not_saved)).await;
     }

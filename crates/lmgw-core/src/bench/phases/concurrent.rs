@@ -55,14 +55,15 @@ pub async fn run(cx: &PhaseCx<'_>, out: &mut Vec<ConcurrentPoint>) -> Result<(),
                     end,
                     predicted_n: t.predicted_n,
                 });
-                rates.push(t.predicted_per_second);
+                rates.extend(t.predicted_per_second);
                 timings.push(t);
             }
             let agg = aggregate_tok_s(&spans).ok_or_else(|| {
                 BenchError::Failed(format!("concurrent {n}: an empty decode window"))
             })?;
             aggregate.push(agg);
-            per_stream.push(median(&rates).unwrap_or_default());
+            // A repetition in which no stream reported a rate adds no point.
+            per_stream.extend(median(&rates));
             let start = spans.iter().map(|s| s.first_token).min();
             let end = spans.iter().map(|s| s.end).max();
             if let (Some(start), Some(end)) = (start, end) {
@@ -73,6 +74,11 @@ pub async fn run(cx: &PhaseCx<'_>, out: &mut Vec<ConcurrentPoint>) -> Result<(),
                 });
             }
             cx.steps.advance();
+        }
+        if per_stream.is_empty() {
+            return Err(BenchError::Failed(format!(
+                "concurrent {n}: the server reported no decode rate"
+            )));
         }
         let (energy, energy_unmeasured) = cx.sampler.energy(&windows).await.into_parts();
         out.push(ConcurrentPoint {

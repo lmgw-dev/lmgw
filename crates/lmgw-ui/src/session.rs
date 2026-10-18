@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::Deserialize;
+use lmgw_api_types::SessionView;
 use serde_json::json;
 use wasm_bindgen::JsValue;
 
@@ -79,15 +79,6 @@ pub fn is_locked() -> bool {
     gate().locked.get_untracked()
 }
 
-/// What `GET /api/session` answers. `kind` and `name` describe the current
-/// principal and are deliberately ignored here: the dashboard has one thing
-/// to decide on load, which is whether to show the page or the card.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct SessionView {
-    authenticated: bool,
-}
-
 /// Ask once, on app start, whether this browser has a session (§3.4).
 pub fn start() {
     // `?login=invalid` is the login route's redirect for a key that matched no
@@ -103,6 +94,9 @@ pub fn start() {
         // A transport failure is not a locked session — a gateway that is down
         // says nothing about this browser's cookie — so only an answer counts,
         // and `decode` raises the gate by itself for the refusal that does.
+        // `kind` and `name` of the answer are deliberately ignored here: the
+        // dashboard has one thing to decide on load, which is whether to show
+        // the page or the card.
         if let Ok(s) = crate::api::get::<SessionView>("/api/session").await {
             if !s.authenticated {
                 lock();

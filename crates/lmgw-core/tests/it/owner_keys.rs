@@ -87,7 +87,7 @@ async fn make_owner(gw: &Gw, name: &str) -> (i64, String) {
     assert_eq!(status, 200, "{v}");
     (
         v["id"].as_i64().unwrap(),
-        v["plaintext"].as_str().unwrap().to_string(),
+        v["key"].as_str().unwrap().to_string(),
     )
 }
 
@@ -102,7 +102,7 @@ async fn an_owner_key_is_minted_named_and_listed_as_one() {
     )
     .await;
     assert_eq!(status, 200, "{v}");
-    let plaintext = v["plaintext"].as_str().unwrap();
+    let plaintext = v["key"].as_str().unwrap();
     // The prefix is the point: a string found in a config file says which of
     // the three kinds of credential it is.
     assert!(plaintext.starts_with("lmgw-owner-"), "{v}");
@@ -113,11 +113,9 @@ async fn an_owner_key_is_minted_named_and_listed_as_one() {
     let row = listed(&gw, "owner:laptop").await;
     assert_eq!(row["kind"], json!("owner"), "{row}");
     assert_eq!(row["enabled"], json!(true), "{row}");
-    // The list never carries a plaintext, whatever the row's kind.
-    assert!(
-        row.get("key").is_none() && row.get("plaintext").is_none(),
-        "{row}"
-    );
+    // The list never carries a key, whatever the row's kind, under either name.
+    assert!(row.get("key").is_none(), "{row}");
+    assert!(row.get("plaintext").is_none(), "{row}");
 
     // And it authenticates: every enabled owner row holds everything.
     let (status, _) = status_as(&bearer(plaintext), &gw).await;
@@ -159,9 +157,9 @@ async fn the_client_kind_answers_to_both_its_names_and_to_none() {
     ] {
         let (status, v) = op(&gw, "key_create", args).await;
         assert_eq!(status, 200, "{name}: {v}");
-        assert!(v["plaintext"].as_str().unwrap().starts_with("lmgw-"), "{v}");
+        assert!(v["key"].as_str().unwrap().starts_with("lmgw-"), "{v}");
         assert!(
-            !v["plaintext"].as_str().unwrap().starts_with("lmgw-owner-"),
+            !v["key"].as_str().unwrap().starts_with("lmgw-owner-"),
             "{v}"
         );
         assert_eq!(listed(&gw, name).await["kind"], json!("key"), "{name}");

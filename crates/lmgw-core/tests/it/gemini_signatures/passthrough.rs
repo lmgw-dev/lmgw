@@ -54,6 +54,7 @@ async fn native_responses_gateway(mock: &MockServer) -> Gw {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: true,
+            catalog_all_modalities: true,
         },
     )
     .await

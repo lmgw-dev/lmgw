@@ -9,6 +9,7 @@ use wiremock::MockServer;
 
 use super::*;
 use crate::config::{Protocol, Upstream, UpstreamKind};
+use crate::erased::Erased;
 use crate::ir::{Message, ReasoningControl, Role, StreamDelta};
 use crate::state::AppState;
 
@@ -16,18 +17,19 @@ use crate::state::AppState;
 /// take a heard turn's audio.
 struct Refuses;
 
-#[async_trait::async_trait]
 impl PerRoute for Refuses {
-    async fn request(
-        &self,
-        _route: &Route,
-        _hold: Option<&crate::vram::LocalHold>,
-        _rerouted: Option<&crate::gate::GateHeaders>,
-        _ir: &ChatRequest,
-    ) -> Result<Option<ChatRequest>, GatewayError> {
-        Err(GatewayError::InvalidRequest {
-            code: "audio_input_unsupported",
-            message: "gpt does not take audio input".into(),
+    fn request<'a>(
+        &'a self,
+        _route: &'a Route,
+        _hold: Option<&'a crate::vram::LocalHold>,
+        _rerouted: Option<&'a crate::gate::GateHeaders>,
+        _ir: &'a ChatRequest,
+    ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>> {
+        Box::pin(async move {
+            Err(GatewayError::InvalidRequest {
+                code: "audio_input_unsupported",
+                message: "gpt does not take audio input".into(),
+            })
         })
     }
 }
@@ -108,16 +110,15 @@ async fn a_route_the_caller_refuses_gets_no_catalog_read() {
 /// Never answers, as a capability check waiting on a provider's catalog.
 struct Hangs;
 
-#[async_trait::async_trait]
 impl PerRoute for Hangs {
-    async fn request(
-        &self,
-        _route: &Route,
-        _hold: Option<&crate::vram::LocalHold>,
-        _rerouted: Option<&crate::gate::GateHeaders>,
-        _ir: &ChatRequest,
-    ) -> Result<Option<ChatRequest>, GatewayError> {
-        std::future::pending().await
+    fn request<'a>(
+        &'a self,
+        _route: &'a Route,
+        _hold: Option<&'a crate::vram::LocalHold>,
+        _rerouted: Option<&'a crate::gate::GateHeaders>,
+        _ir: &'a ChatRequest,
+    ) -> Erased<'a, Result<Option<ChatRequest>, GatewayError>> {
+        Box::pin(async move { std::future::pending().await })
     }
 }
 

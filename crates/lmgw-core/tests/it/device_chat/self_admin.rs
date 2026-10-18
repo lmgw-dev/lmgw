@@ -103,12 +103,8 @@ async fn attaching_the_self_admin_toolset_takes_a_thread_out_of_a_device_s_reach
     let tid = chat_thread(&w, &d.client, "chatty").await;
     let mut feed = Feed::open(&w, &d.client, "", None).await;
     let mut owners = Feed::open(&w, &owner, "", None).await;
-    let bearer = format!("Bearer {}", d.key);
     let mut ws = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
 

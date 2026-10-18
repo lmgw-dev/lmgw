@@ -83,7 +83,7 @@ bound session's tools are the thread's (chat-voice §8.1).
 11. **OpenAI-shaped routes copy OpenAI's protocol**; lmgw-only behaviour is opt-in.
 12. **No hidden limits.** Every limit is a visible setting, a logged note or an explicit error.
 
-## Taken in this draft (open to the owner's veto)
+## Taken in this draft
 
 **L1. A device key is stored as a hash only**, like a client key. Its plaintext appears once, in
 the pairing link. A lost key is re-paired with Rotate, which for a hash-only row is a new code path
@@ -502,7 +502,8 @@ WebSocket to `GET /mcp/host`, and lmgw is the MCP client on it.
   agent rows are owned by their agent.
 - Its message and frame sizes are settings. A second link from the same key takes over.
 - An offline device's label is reported and its tools are skipped; it never refuses a turn by
-  itself.
+  itself. *(changed 2026-10-15: so is a device's label the caller is not granted (L16): reported
+  with its reason, `tool_unreachable`, and never a reason to refuse a turn by itself; §5.3.)*
 - Every call lmgw stops waiting on is cancelled to the device.
 - Sampling is refused on device rows.
 
@@ -531,10 +532,31 @@ that started it.
 **L16. A device-hosted label is reachable only:**
 - by the owner (and the gateway's own runs on the owner's behalf);
 - by the device that hosts it;
-- by principals whose tool scope names that label explicitly.
+- by a client key or device whose **device-tools grant** names that label;
+- by an agent whose manifest names it.
 
-It is never in a default, `all`, `deny` or anonymous scope, whatever *Require API key* says. §5.6
-gives the rule and how a browser page is kept away.
+The grant decides reach, the tool scope filters tools: a granted label's tools are filtered by the
+key's tool scope as any server's are (`all` every tool, an `allow` list's patterns, a `deny`
+list's exclusions). Without the grant no key reaches the label, whatever its tool scope says, and
+an anonymous caller never does, whatever *Require API key* says. §5.6 gives the rule and how a
+browser page is kept away.
+
+*(changed 2026-10-15: the owner's decision. The rule was "principals whose tool scope names that
+label explicitly", so only an `allow` list naming `kai__*` reached Kai desktop's tools, and an
+`allow` list holds only its patterns: "every tool plus Kai's desktop tools" could not be said, and
+a paired phone with scope `all`, in a Kai folder, got "no MCP server with label 'kai'". Now a key's
+policy carries `device_tools`, a list of hosted labels (`["kai"]`), independent of the tool
+scope's mode; one mechanism (alpha, no compatibility): an `allow` pattern naming `kai__*` no
+longer reaches the label by itself. Migration 0082 grants a key the labels its `allow` patterns
+named, so it keeps what it reached, unless another line of its list could match the label's tools
+(a line with a `*`, not naming the label, whose text before the `*` is a prefix of `kai__`: `*`,
+`k*`, `*__search`). Under the old rule only the naming lines filtered such a list, so granting it
+would have let the broad line admit every tool of the label. That *mixed* key gets no grant and
+loses its narrow reach instead of gaining a wide one; the boot log names each such key and label,
+and the Keys page and the policy dialog flag any pattern that names a hosted label the key is not
+granted (`lmgw_api_types::scope::migration_grants`, `ungranted_named`). A label no device hosts yet is accepted, since a
+phone may be paired before its desktop ever connected; the Devices card says which granted labels
+no device hosts. Agents keep their manifest.)*
 
 **L17. Expiry is checked on `Chat` routes too** (401 `key_expired`), and the revocation signal fires
 at `expires_at`, so a device's open feed, link and sessions end then.
@@ -692,7 +714,8 @@ spec pins the extension document above. G's first step re-reads it (§7.4).
   - The pairing form shows the alias scope, budget and tool scope, prefilled `all`, no budget.
     The card marks an unscoped, unbudgeted device in amber (§11 Q1).
   - A device's own scope never reaches self-admin, because it never holds `Admin` (`mcp/scope.rs:86`).
-  - It never reaches another device's hosted label unless it names it explicitly (L16).
+  - It never reaches another device's hosted label unless it names it explicitly (L16). *(changed
+    2026-10-15: unless its device-tools grant names it, L16.)*
 - **`principal_list`** (`mcp/scope.rs:245-278`) gives `Device` the client key's arm. The match is
   exhaustive, so the new kind cannot slip into "reaches nothing" unnoticed.
 
@@ -778,6 +801,8 @@ new capability is held by nobody until an arm names it:
   (`web/agentchat.rs:487-490`).
 - A label the scope keeps out is reported to the turn like a server that could not be reached,
   never dropped silently. Under L16 that covers another device's label the scope does not name.
+  *(changed 2026-10-15: another device's label the device is not granted; reported with its real
+  reason and a code, §5.3.)*
 
 **Writes** (L5).
 - A device's `mcp_tools`, in a thread's settings or a folder's defaults, pass the check in L5;
@@ -878,6 +903,11 @@ another principal's turn runs. The feed gives it what it needs to do that (`turn
   ```
 
   The QR code of the same string is [Android].
+
+  *Superseded 2026-10-14:* this v1 string is replaced by the pairing link v2 of
+  [the device link](2026-10-14-device-link-design.md) (its D6, §3.1): `https` URLs only, one or
+  more, `fp` required (the hash of lmgw's device CA key), and a one-time pairing token in place of
+  `key`. Rows paired with v1 are paired again (its §12). The QR code is built there (its WP4).
 - **`url`** is prefilled from `net::primary_base_url(bind_addr)` and editable, because a phone needs
   the tunnel's name. A loopback URL carries the note "reachable from this computer only".
 - **`fp=sha256:<hex>`** is reserved for a TLS listener. lmgw serves none today, so no link carries
@@ -1348,6 +1378,12 @@ updated with it:
   `device:`.
 - **The keep-alive interval is the stream's own**: a stream keeps the value it opened with and
   announced, and a changed setting applies to feeds opened after it.
+  *Changed 2026-10-14 (device link WP5, its §7):* a stream may ask for its own,
+  `?keepalive_s=` from 1 to `chat_feed_keepalive_max_s` (default 900), and `hello.keepalive_s`
+  says it; the table's backstop read keeps `chat_feed_keepalive_s`. `hello` also lists
+  `open_approvals`, and a live `caught_up {cursor}` follows the catch-up once per stream.
+  *Changed 2026-10-15 (owner):* every `state` carries `open_approvals` again, and one follows each
+  move of a device's reach and each `resync` that passed records (device link §7.3).
 - **Documented now.** The route has a `DocRoute` under a new "Chat" tag; its events are typed in
   `lmgw-api-types::chat_feed`. The rest of the Chat API stays excluded until WP6. *WP6 documented
   the desktop subset beside it (§4.3).*
@@ -1678,6 +1714,10 @@ page reads them again through the Chat API.
   a message write past the seam in any crate, SQL of a file's own that writes `chat_messages`
   outside the store, and a writer call in the seam outside `marked(`;
   `web/chat_repo/marks_tests.rs` checks that each of the seam's writes marks its thread.
+  *Changed 2026-10-14 (WP10, §4.4):* the marks are gone. `messages` names the threads the
+  `message.*` records name, read from the table like `threads` and `folders`; the seam's
+  `marked(` became `recorded(`, which wakes the feeds after a write that recorded in its own
+  transaction, and `web/chat_repo/records_tests.rs` replaced `marks_tests.rs`.
 - **Delivery.** The first change of a burst waits a fixed 200 ms (not a setting), then one read
   names everything changed up to it: at most one frame per 200 ms plus that read, except one
   the keep-alive read finds. One with `resync: true` on every connect, since frames are not
@@ -2029,6 +2069,90 @@ Beside it, on `/v1`:
   `Cap::Admin`, and excluded as the dashboard's backend (§3.6): the Chat page's re-read of the
   rows a `chat` frame named. A device's feed carries whole rows already.
 
+### 4.4 As built (WP10), 2026-10-14
+
+B and D for Android (kai-mobile P3). The QR code is the device link's WP4; `keepalive_s`,
+`caught_up`, `hello.open_approvals` and `approval.requested.thread_title` are its WP5.
+- **The records.** Every store function whose own SQL writes `chat_messages` records in that
+  transaction (`store::feed::record_messages` and its `record_added`, `record_updated`,
+  `record_deleted`, `store/feed/messages.rs`), the ids as a JSON array in the table's
+  `message_ids` column, which migration 0063 had made for them: no migration. A write that fails
+  or matches nothing records nothing. The level is the thread's at the write (L3).
+  - `message.added`: a user message (after its attachments are bound), a saved reply, a late MCP
+    task result entering the thread (on its own or inside a send), `append_chat_message`.
+  - `message.updated`: an edit, a continue, a resumed turn's save, a resend's user message, a
+    stored retrieval, a spoken reply's annotation or cut, and every write of a reply's pending
+    approvals: a decision, a decline by a new message, a close as not run.
+  - `message.deleted`: a delete (a spoken reply nobody heard included), a truncation and a
+    resend's cut, with the ids their `DELETE … RETURNING id` named.
+  - A Keep records none (its `thread.created` names a thread a client reads whole), a thread
+    deleted whole none (its `thread.deleted`), and a sent attachment's later transcript none
+    (§2.5).
+- **One record per write site**, not one per transaction. A send's transaction records, in
+  order: `message.updated` for a previous reply whose waiting calls it declines,
+  `message.added` for each task result entering before it, then `message.added` for the user
+  message. Clients apply events by message id either way; one record per site keeps the rule
+  the scan checks simple.
+- **`by`.** The sender of a user message; the turn's starter for its reply, continue, resumed
+  save and stored retrieval; the editor or deleter; the decider for a decision and for the
+  decline a new message makes. A bound session's annotation, cut and unheard delete name the
+  session that writes them: its journal passes the session's caller to `chat_voice::bound`
+  (`realtime/thread/journal/finalize.rs`). *Corrected in the WP10 review:* the first build read
+  the binder of the session bound to the thread now, so a session taken over and draining its
+  journal behind the fence wrote its cut as the new binder's, and a client that knows its own
+  changes by `by` took it for its own. `null` for a task result entering the thread, a call
+  closed as not run and the plain append.
+- **Rendering** (`web/chat_feed/messages.rs`): `message.added` and `message.updated` are
+  `{thread_id, thread_title, messages, by}` (`chat_feed::MessagesChanged`), each message
+  through `chat_wire::message` with its attachments, as `GET /chat/api/threads/{id}` lists it
+  now; `message.deleted` is `{thread_id, message_ids, by}` (`MessagesDeleted`). A message gone
+  by delivery is left out, and an added or updated record whose messages are all gone, or
+  whose thread is, is not sent: a later record says why. No record of a thread out of the
+  reader's reach now is sent, as for `thread.*`. The title is the
+  thread's at delivery, so a send's user message delivered before the send names an untitled
+  thread may say "New chat"; its `thread.updated` and the reply's event carry the title. A
+  `message.*` record whose message list does not read is an error, which the stream passes
+  after `RENDER_ATTEMPTS` with a `resync` naming it (W5-16), never silently.
+- **One rendered event per stream** (*changed in the WP10 review*). A message event carries
+  its messages whole, and a reply's tool record can hold tool-result images, so a page
+  rendered whole (up to `chat_feed_page_size`, at most 10 000 records) could hold that many
+  messages in one stream's memory. A page is now held as its records (`FeedStream::queue`),
+  and each is rendered when the stream is about to send it (`render_next`): a stream holds
+  one rendered event, plus the page's small records. A record that fails to render drops the
+  rest of the queue, and the stream reads again from its cursor, as before. The page-size
+  setting's hint, its maximum's reason and `MAX_PAGE_SIZE`'s doc say so.
+- **Left for later: two reads per record.** Rendering a `message.*` record reads its thread
+  and its messages with their attachments, one record at a time, as a `thread.*` record reads
+  its thread; a catch-up of many records of one thread reads the thread as often. Batching
+  those reads per page is shared work with `thread.*`.
+- **The marks are gone** (§3.6's note). `Feed::messages_changed` and `threads_deleted` went
+  with them, and the seam scan gained a second rule: a store function whose SQL writes
+  `chat_messages` must record in its own body (the Keep excepted). Its write regex reads `OR`
+  clauses, quoted and schema-qualified names and words split across a `concat!`'s literals;
+  its doc names what a regex over source cannot see (SQL built at run time, comments between
+  the words, a CTE or view, a migration's trigger).
+- **Typed and documented.** `MessagesChanged` and `MessagesDeleted` are in
+  `lmgw-api-types::chat_feed`, `FeedEvent` reads them (`MessageAdded`, `MessageUpdated`,
+  `MessageDeleted`), and the feed's `DocRoute` lists the three events; a test validates real
+  events against the document. `Message`, the attachment (`AttachmentMeta`, §4.3's
+  `Attachment`), `SendRequest`, the send stream's frames, `voice_resolved` and
+  `GET /chat/api/threads/{id}` were typed and documented already by the typing sprint of
+  2026-10-10 (`openapi/exclusions.rs`), so WP10 found that part done. It added
+  `chat_frames::TurnEvent` beside the frames: a turn stream's frame read by its name, with
+  `Unknown` for a newer gateway's frame or `tool` event, and a test that keeps the send's
+  documented frames equal to `TURN_EVENTS`.
+- **`lmgw-client`**: `feed` re-exports `MessagesChanged` and `MessagesDeleted`, and `FeedReader`
+  yields the three events typed; its module doc names `TurnEvent` for a turn's stream.
+- **Tests**: `web/chat_repo/records_tests.rs` (each seam write's records, kind, ids and author;
+  a taken-over session's writes named as its own; a failed write, a miss, a temporary thread
+  and a thread delete record no message), `web/chat_feed/stream.rs` (a page rendered one record
+  at a time; an unreadable message record passed with a `resync`),
+  `tests/it/chat_feed/messages.rs` (a device's turn reaching the owner's feed whole, catch-up
+  equal to the thread's listing, edit, regenerate and delete live and caught up, L3 for Admin
+  Chat and the self-admin toolset at the write, the reach re-read at delivery for a thread
+  hidden since, `added` and `deleted` alike, and a `read_only` device hearing the toolset's
+  messages), and the seam scan's record rule and write regex.
+
 ## 5. Device-hosted MCP (E) [Desktop 2, Desktop 3, Android]
 
 ### 5.1 The link (L11)
@@ -2086,12 +2210,52 @@ Beside it, on `/v1`:
   connection of device '<name>' took over".
 - **Offline devices.** Resolving a label of an offline device answers at once, without
   `LAZY_LIST_BUDGET`'s wait (`mcp/mod.rs:92`): "device '<name>' is not connected (last seen …)".
+  *(changed 2026-10-15: "device '<name>' is offline (last seen …)", everywhere these words are
+  said.)*
   - **A turn is never refused for it.** The label is reported (an `error` frame naming it) and the
     turn runs without that label's tools. If every label failed only because its device is
     offline, the turn runs as a plain chat turn. The Chat's "no usable tool, so refuse" rule
     (`web/agentchat.rs:497-530`) applies only when some failure is not "device offline".
+    *(changed 2026-10-15: nor for a device's label the caller is not granted, which is absent the
+    same way; see the note below.)*
   - A conversation whose only label is a desktop's therefore still answers from the phone while
     the desktop is off (R6).
+- **Honest reasons for attached labels.** *(changed 2026-10-15: the owner's decision.)* The labels
+  a thread or its folder attached, and an agent manifest's, resolve through
+  `exec::resolve_attached`: each failure says its real reason, and the Chat's `error` frame for it
+  carries `server_label` and a code (`lmgw_api_types::chat_frames::LabelCode`, typed in the OpenAPI
+  document's frame description; `lmgw-client` re-exports it with `TurnEvent`, and
+  `ErrorFrame::label_code` reads it):
+  - `tool_unreachable`: a device's label the caller is not granted, "this device may not use the
+    tools of device 'kai desktop' (label kai): grant it under the device's policy (Device tools)"; or
+    a server the caller's tool scope keeps out whole, "none of the tools of MCP server 'X' are
+    within the tool scope of …";
+  - `tool_offline`: "device 'kai desktop' is offline (last seen …)";
+  - `tool_disabled`: "MCP server 'X' is disabled", as before;
+  - `tool_unknown`: "no MCP server with label 'X' is registered on this gateway (available: …)",
+    without the sentence about `server_url`, which is right only for a `/v1/responses` spec;
+  - `tool_failed`: a server the caller may use that offered nothing usable (its connection's
+    error, nothing left by `allowed_tools`, tools for its app views only). The fifth code is the
+    build's: without it a label failure of this kind would carry no code.
+
+  A label the caller is not granted is absent like an offline device's: a turn whose every failed
+  label is an offline or ungranted device's runs as a plain chat turn after the frames, so a phone
+  in a Kai folder without the grant still answers. A voice session bound to the thread relays the
+  frames (`lmgw.chat.frame`) and its response completes as that turn does; until now any `error`
+  frame failed a bound response, an offline desktop's included (`realtime/thread/turn.rs`). Any other failure (a scope that keeps a granted
+  label or another server out included) still refuses a turn left with no tool, as before. Labels
+  a caller supplies itself (`/v1/responses` tool specs, a realtime `session.update`,
+  `GET /v1/mcp/servers/{label}`) keep the answered-as-nonexistent rule: a server the caller can
+  never use reads as one that does not exist, with the `server_url` sentence, so nothing is learned
+  by probing. A device writing an ungranted label into a thread or a folder default is told the
+  grant is what it lacks (L5's 403 `tool_label_out_of_scope`); it chose the label itself, so the
+  message names the label and the remedy but not the hosting device, which a turn's frame for a
+  label attached earlier does.
+
+  *(2026-10-15, open: `tool_failed`, the fifth code, awaits the owner's OK. It is load-bearing: the
+  realtime relay tells a label's notice from a turn's own error by the `tool_*` code on the frame
+  (`realtime/thread/turn.rs`), and a label failure of this kind with no code would be taken for
+  the turn's error and fail a bound voice response.)*
 - **On disconnect** the device's tools leave the aggregate, and `/mcp` subscribers get
   `tools/list_changed`. The device's own `notifications/tools/list_changed` makes lmgw list again.
 
@@ -2134,14 +2298,23 @@ plane: `/mcp`, `/v1/responses` `mcp` blocks, realtime `mcp` tools, `/v1/mcp/serv
 | owner key, owner cookie | yes |
 | the gateway's own runs (`ToolScope::gateway()`: the dashboard's threads, in-process agent runs) | yes, as the owner's |
 | the device that hosts it | yes (its own tools) |
-| a client key or device key with tool scope `allow` | only if a pattern names the label: its literal text before the first wildcard starts with `<label>__` (`desktop__*`, `desktop__see_screen`); `*` or `d*` does not |
-| a client key or device key with tool scope `all` or `deny` | no |
+| a client key or device key whose device-tools grant names the label | yes; its tool scope filters the label's tools as any server's: `all` every tool, `allow` the tools its patterns match (`*`, `kai__*`, `kai__see_screen`), `deny` all but the excluded |
+| any other client key or device key | no, whatever its tool scope says (`kai__*` alone does not reach it) |
 | an agent | only if its manifest's `tools[]` names the label |
 | anonymous | **no**, whatever *Require API key* says |
 
+*(changed 2026-10-15: the owner's decision, L16's note. The rows for `allow`, and for `all` and
+`deny`, gave way to the grant's two rows: the grant decides reach, the tool scope filters tools.
+`KeyPolicy::device_tools` (`api_keys.device_tools`, migration 0082) holds it; `key_create` and
+`key_set` take it for client and device keys, any label a device could host (the hosting label's
+syntax, none of lmgw's own namespaces), hosted now or not; an owner key refuses one, an agent token
+and an internal identity with a refusal that names `device_tools`. `ToolScope::holds_back` names a device row a caller
+may not use at all, and `Hosted::granted` reads the grant.)*
+
 **In code.** `principal_list`'s `All` for anonymous and for `all`-mode keys stops at device rows: a
 `List::All` carries "except device-hosted namespaces", read from the snapshot's device rows.
-`/v1/mcp/servers` lists a device label only to principals that reach it.
+`/v1/mcp/servers` lists a device label only to principals that reach it. *(changed 2026-10-15:
+"except the device-hosted namespaces it is not granted".)*
 
 **A browser page is kept away** because no route hands it a principal that reaches a device label:
 - an anonymous request reaches none, so the permissive CORS layer, which mirrors request headers
@@ -2156,7 +2329,11 @@ plane: `/mcp`, `/v1/responses` `mcp` blocks, realtime `mcp` tools, `/v1/mcp/serv
   through its manifest.
 
 **Visible:** the Devices card lists, per hosted label, every principal that reaches it (owner, the
-device, each named key, device and agent).
+device, each named key, device and agent). *(changed 2026-10-15: each key and device whose grant
+names it. The pairing form, its review step and the key policy dialog carry a* **Device tools**
+*field: a checkbox per label a paired device hosts now, a free entry for one none hosts yet, and
+a note naming such a label; a device row shows its grant as chips, amber for a label no device
+hosts.)*
 
 *For WP7 (review W3-9), 2026-10-07:* L5's write check has a shortcut, `!scope.narrows()` →
 admitted, for a tool scope with no list of its own (`all`). Once device-hosted labels exist that
@@ -2308,7 +2485,7 @@ was silent:
   `/v1/responses` continuation's request principal), also when that is the call's own caller. A
   device decides whether a self-approval counts: Kai treats `approval.by == lmgw/caller` as not
   approved unless the caller is the owner, the gateway or its own key.
-- **The decider's reach** (taken in this draft, open to the owner's veto). The resumed turn runs
+- **The decider's reach** (taken in this draft). The resumed turn runs
   as its starter, whose reach may be wider than the decider's, so an approval would be a
   device's path to calls it may not make itself. When the decider is not the owner, every
   approving verdict is refused whose call its own tool scope (`ToolScope::admits`) does not
@@ -2377,19 +2554,19 @@ was silent:
   id, and so does every edit, delete, resend or cut-back of the history; a session that lagged
   reads its own thread again. A session does not show the calls that waited before it bound: a
   client reads them from the thread or the feed.
-- **A call gone from under a bound session** (taken in this draft, open to the owner's veto):
+- **A call gone from under a bound session** (taken in this draft):
   when the reply that holds a call the session showed is edited, deleted or cut away, the
   session says `lmgw.approval.decided` with `approve: false` and `by: null`, and stops waiting
   for it: nobody decided it, and it never runs. A decided call whose turn never started is said
   with `approve: false` too.
-- **A bound session's resume holds its starter's slot** (taken in this draft, open to the
-  owner's veto): as the route's, it takes the starter key's concurrency slot before deciding,
+- **A bound session's resume holds its starter's slot** (taken in this draft): as the route's, it takes the starter key's concurrency slot before deciding,
   unless the session holds that key's own already (the session's slot holds its place, realtime
   §10.3); a refusal fails the response with `key_rate`.
 - **An unbound session** refuses `mcp_approval_response` (`invalid_value`, saying approvals are
   taken on a session bound to a chat thread) and `mcp_approval_request`, as before.
 - **Temporary threads** take approvals too, in memory, and record nothing in the feed.
 - **`POST …/transcribe`** is documented now (`Dictation`), with `requests::transcribe`.
+- **`POST …/send`** has its builder, `requests::send` (2026-10-15): the message and the reply it starts, answered as the turn's frames (`text/event-stream`, read with `feed::SseDecoder`), a refusal before the stream read with `read_refusal`.
 - **Dashboard (built after WP9):** a waiting call's card shows its arguments with Approve and
   Decline under it (with several waiting, each card picks a verdict and a bar sends them, or
   approves or declines all), the resumed reply streams into the same message, and the route's
@@ -2791,7 +2968,11 @@ flag and opaque without it, the ribbon's opaque with it (`scripts/drive/chat-voi
   `desktop__*`, another device, the hosting device, an agent with and without the label, the owner,
   on `/mcp`, `/v1/responses` (including a cross-origin anonymous browser-shaped request),
   realtime, discovery and Chat turns; and an `all` device writing another device's label into a
-  thread or a folder default (L5, review W3-9) refused.
+  thread or a folder default (L5, review W3-9) refused. *(changed 2026-10-15: each mode with and
+  without the grant, a granted label's tools filtered by the scope, `allow desktop__*` without the
+  grant reaching nothing; the Kai-folder case through the chat send route as paired devices — a
+  granted phone's turn calls the desktop's tool, an ungranted one's gets `tool_unreachable` and
+  answers plainly; `tests/it/mcp_host/reach.rs`.)*
 - **The host link,** with a fake device over WebSocket:
   - `initialize` and listing;
   - a call with `_meta`;
@@ -2833,7 +3014,7 @@ Live checks run on a dev instance (`scripts/dev-instance.sh`), never the real da
 | 7 | E: `/mcp/host`, the rmcp WebSocket transport and the manager's `Device` arm, the device rows from the grant, status and takeover, offline resolution that never refuses a turn, size and ping settings, `notifications/cancelled`, `_meta` stamping, L16 in `ToolScope` with the Devices card's reach list | Desktop 2 |
 | 8 | G: §7.4's re-read, resources on `/mcp` with namespacing and the extension capability, `visibility` in model runs, the `tool` frame fields | Desktop 2 |
 | 9 | F: `require_approval` on thread tools, the gated Chat turn and its route, `by`, the bound session's items and `lmgw.approval.decided`, the feed events | Desktop 3 |
-| 10 | B and D for Android: `message.*` records in every message write, the remaining DTOs and `DocRoute`s, the QR code | Android |
+| 10 | B and D for Android: `message.*` records in every message write, the remaining DTOs and `DocRoute`s, ~~the QR code~~ (*moved 2026-10-14* to [the device link](2026-10-14-device-link-design.md)'s WP4). *Built 2026-10-14 (§4.4).* | Android |
 
 ## 11. Open questions for the owner, in priority order
 
@@ -2864,9 +3045,16 @@ with the checkbox; (4) 7 days, persisted; (5) hash-only, Rotate re-pairs; (6) Us
   threads that carry it.~~ *Built 2026-10-07:* the device's switch "may use lmgw's admin tools"
   (`self_admin`, L3's and L5's notes), a level per device since the pre-merge review's P-3.
 - Folder-scoped device keys (a device that sees only some folders).
-- Push to a backgrounded phone: lmgw posts feed events to the device's UnifiedPush endpoint.
-- TLS on lmgw's listener, which brings the pairing link's `fp`.
-- WebRTC realtime (`/v1/realtime/calls`) for mobile jitter.
+- ~~Push to a backgrounded phone: lmgw posts feed events to the device's UnifiedPush endpoint.~~
+  *Designed 2026-10-14* in [the device link](2026-10-14-device-link-design.md) (its §7), without
+  UnifiedPush: the push channel is the Chat feed, held open by the device itself.
+- ~~TLS on lmgw's listener, which brings the pairing link's `fp`.~~ *Designed 2026-10-14* in
+  [the device link](2026-10-14-device-link-design.md): a TLS listener for devices with mutual TLS,
+  and the pairing link v2's `fp`.
+- ~~WebRTC realtime (`/v1/realtime/calls`) for mobile jitter.~~ *Designed 2026-10-14* in
+  [WebRTC realtime calls](2026-10-14-realtime-calls-design.md). *Built 2026-10-15* (that
+  record's §13.3): the route, the bound call's events and `lmgw-client`'s side are on main; the
+  Android client's playout position waits on that record's Q5.
 - Live mirroring of another client's running turn in the feed.
 - Sampling from device-hosted servers under the device key; elicitation; resource subscriptions.
 - A URL scheme lmgw's shell handles to open its own window at a thread.

@@ -213,11 +213,11 @@ mod tests {
     fn draft_stats_sum_only_what_was_reported() {
         let t = |d: Option<u64>, a: Option<u64>| Timings {
             prompt_n: 0,
-            prompt_ms: 0.0,
-            prompt_per_second: 0.0,
+            prompt_ms: Some(0.0),
+            prompt_per_second: Some(0.0),
             predicted_n: 0,
-            predicted_ms: 0.0,
-            predicted_per_second: 0.0,
+            predicted_ms: Some(0.0),
+            predicted_per_second: Some(0.0),
             cache_n: None,
             draft_n: d,
             draft_n_accepted: a,

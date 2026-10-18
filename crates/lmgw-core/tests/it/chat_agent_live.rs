@@ -74,6 +74,7 @@ pub(crate) async fn gateway_on(base: &str) -> (lmgw_core::state::SharedState, cr
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

@@ -310,7 +310,8 @@ pub async fn image_token_bound(
     };
 
     let configured_bound = || {
-        modelinfo::arg_value(row.args, &["image-max-tokens"]).and_then(|v| v.parse::<u64>().ok())
+        crate::runtime::argv::flag_value(row.args, "image-max-tokens")
+            .and_then(|v| v.parse::<u64>().ok())
     };
     let need_configured_bound = |why: &str| {
         Err(format!(

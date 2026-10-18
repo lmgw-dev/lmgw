@@ -96,16 +96,16 @@ const MODELS: [(&str, &str, &str, &str, f64); 3] = [
 const LEARNED: [Measured; 3] = [
     Measured {
         bytes: 981_000_000,
-        source: "realtime design §9.4: pocket-tts-german learned 0.981 GB on an RTX 4090, \
+        source: "realtime design §9.4: pocket-tts-german learned 0.981 GB on a 24 GB GPU, \
                  2026-10-01",
     },
     Measured {
         bytes: 1_455_000_000,
-        source: "realtime design §9.4: nemotron-asr learned 1.455 GB on an RTX 4090, 2026-10-01",
+        source: "realtime design §9.4: nemotron-asr learned 1.455 GB on a 24 GB GPU, 2026-10-01",
     },
     Measured {
         bytes: 3_343_000_000,
-        source: "realtime design §9.4: qwen3-asr-1.7b learned 3.343 GB on an RTX 4090, \
+        source: "realtime design §9.4: qwen3-asr-1.7b learned 3.343 GB on a 24 GB GPU, \
                  2026-10-01",
     },
 ];
@@ -113,7 +113,7 @@ const LEARNED: [Measured; 3] = [
 /// What the eager qwen3-asr row (b) holds at `ready`, before any request.
 const EAGER_AT_READY: Measured = Measured {
     bytes: 2_875_000_000,
-    source: "realtime design §9.4: qwen3-asr eager held 2.875 GB at ready on an RTX 4090, \
+    source: "realtime design §9.4: qwen3-asr eager held 2.875 GB at ready on a 24 GB GPU, \
              2026-10-01",
 };
 

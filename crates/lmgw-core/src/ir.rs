@@ -592,12 +592,21 @@ pub struct Usage {
 pub struct Timings {
     /// Prompt (prefill) tokens actually processed this turn (excludes cache).
     pub prompt_n: u64,
-    pub prompt_ms: f64,
-    pub prompt_per_second: f64,
+    /// Milliseconds spent on the prompt; `None` when llama.cpp gave no finite
+    /// number (it writes a non-finite one as `null`), never a measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_ms: Option<f64>,
+    /// Prompt tokens processed per second; `None` when not finite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_per_second: Option<f64>,
     /// Generated (decode) tokens so far.
     pub predicted_n: u64,
-    pub predicted_ms: f64,
-    pub predicted_per_second: f64,
+    /// Milliseconds spent generating; `None` when not finite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_ms: Option<f64>,
+    /// Tokens generated per second; `None` when not finite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_per_second: Option<f64>,
     /// Prompt tokens served from the KV cache (reused, not recomputed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_n: Option<u64>,

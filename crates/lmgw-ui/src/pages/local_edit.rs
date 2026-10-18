@@ -17,7 +17,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use lmgw_api_types::{
-    GgufFiles, LlamaParams, LocalModelDetail, PlanResult, Rung, RungPlan, SettingsFull,
+    GgufFiles, LlamaParams, LocalModelDetail, LocalModelSaved, PlanResult, Rung, RungPlan,
+    SettingsFull,
 };
 use serde_json::{json, Map, Value};
 
@@ -1051,9 +1052,9 @@ fn Editor(id_param: String) -> impl IntoView {
         public.set(d.public);
         enabled.set(d.enabled);
         idle_seconds.set(d.idle_seconds.to_string());
-        extra_args.set(d.extra_args.clone());
+        extra_args.set(d.extra_args.join("\n"));
         image.set(d.image.clone().unwrap_or_default());
-        extra_run_args.set(d.extra_run_args.clone().unwrap_or_default());
+        extra_run_args.set(d.extra_run_args.clone().unwrap_or_default().join("\n"));
         warm_start.set(d.warm_start);
         hold_mode.set(match d.hold_fallback_mode.as_str() {
             "alias" | "none" => d.hold_fallback_mode.clone(),
@@ -1139,15 +1140,30 @@ fn Editor(id_param: String) -> impl IntoView {
                         .map_err(|_| "idle seconds must be an integer".to_string())?,
                 ),
             );
-            args.insert("extra_args".into(), Value::from(extra_args.get_untracked()));
+            // One argument per line.
+            let flags: Vec<String> = extra_args
+                .get_untracked()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            args.insert("extra_args".into(), Value::from(flags));
             let img = image.get_untracked();
             if img.trim().is_empty() {
                 clear.push("image");
             } else {
                 args.insert("image".into(), Value::from(img.trim()));
             }
-            let era = extra_run_args.get_untracked();
-            if era.trim().is_empty() {
+            // One argument per line.
+            let era: Vec<String> = extra_run_args
+                .get_untracked()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            if era.is_empty() {
                 clear.push("extra_run_args");
             } else {
                 args.insert("extra_run_args".into(), Value::from(era));
@@ -1253,16 +1269,15 @@ fn Editor(id_param: String) -> impl IntoView {
         save_error.set(None);
         let navigate = navigate.clone();
         spawn_local(async move {
-            let res =
-                crate::api::post::<Value, _>("/api/op/local_model_set", &Value::Object(args)).await;
+            let res = crate::api::post::<LocalModelSaved, _>(
+                "/api/op/local_model_set",
+                &Value::Object(args),
+            )
+            .await;
             saving.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     // Pickers everywhere list what the gateway serves; this
                     // just changed it.
                     catalog.refresh();
@@ -1273,18 +1288,13 @@ fn Editor(id_param: String) -> impl IntoView {
                     }
                     rebase();
                     if create_mode {
-                        if let Some(id) = v.get("id").and_then(Value::as_i64) {
-                            navigate(&format!("/models/local/{id}"), Default::default());
-                        }
+                        navigate(&format!("/models/local/{}", v.id), Default::default());
                     } else {
                         reload.update(|n| *n += 1);
                         // A container still up on the previous configuration
                         // (mid-request when the save stopped it) is what a
                         // test now would load: say so instead of passing it.
-                        let kept = v
-                            .get("container_kept_previous_config")
-                            .and_then(Value::as_bool)
-                            == Some(true);
+                        let kept = v.container_kept_previous_config == Some(true);
                         if then_test && kept {
                             not_tested(
                                 test_result,
@@ -1687,7 +1697,7 @@ fn Editor(id_param: String) -> impl IntoView {
                                 </Field>
                                 <Field
                                     label="Extra podman run args override"
-                                    unit="one per line"
+                                    unit="one argument per line"
                                     hint="An override replaces the class args whole: to run without some of them, list the ones to keep (an empty override inherits). Blank fields inherit the chat class settings:"
                                     hint_extra=|| {
                                         view! {
@@ -1777,7 +1787,7 @@ fn Editor(id_param: String) -> impl IntoView {
                                 </Field>
                                 <Field
                                     label="Extra llama-server flags"
-                                    unit="one per line"
+                                    unit="one argument per line"
                                     dirty=is_dirty("extra_args")
                                 >
                                     <textarea

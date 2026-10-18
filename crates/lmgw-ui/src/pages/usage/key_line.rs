@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{KeyRow, KeysResponse};
-use serde_json::{json, Value};
+use lmgw_api_types::{KeyRow, KeySecret, KeysResponse};
+use serde_json::json;
 
 use crate::fmt::{compact, grouped};
 use crate::widgets::{use_toasts, ConfirmButton, MenuItem, RowMenu};
@@ -40,6 +40,25 @@ pub(super) fn KeyLine(
         keys.data
             .with(|d| d.as_ref().map(|k| k.currency.clone()).unwrap_or_default())
     });
+    // Allow patterns naming a paired device's label the key holds no
+    // device-tools grant for: they filter tools it cannot reach.
+    let unmet = move || {
+        let Some(r) = row.get() else {
+            return Vec::new();
+        };
+        let hosted = keys.data.with(|d| {
+            d.as_ref()
+                .map(|k| super::device_tools::hosted_labels(&k.keys))
+                .unwrap_or_default()
+        });
+        super::device_tools::needs_grant(
+            &r.tool_scope_mode,
+            &r.tool_scope_patterns,
+            &r.device_tools,
+            None,
+            &hosted,
+        )
+    };
     let get = move |f: fn(&KeyRow) -> String| row.with(|r| r.as_ref().map(f).unwrap_or_default());
 
     // The overshoot is stated, not clamped: cost is only knowable after a
@@ -167,6 +186,10 @@ pub(super) fn KeyLine(
                     r.tool_scope_patterns.replace('\n', ", ")
                 ));
             }
+            // The paired devices' tools it may use (its device-tools grant).
+            if r.kind == "key" && !r.device_tools.is_empty() {
+                s.push_str(&format!(" · device tools {}", r.device_tools.join(", ")));
+            }
             s
         })
     };
@@ -217,12 +240,9 @@ pub(super) fn KeyLine(
     let copy = move || {
         spawn_local(async move {
             let res =
-                crate::api::post::<Value, _>("/api/op/key_reveal", &json!({ "id": id })).await;
+                crate::api::post::<KeySecret, _>("/api/op/key_reveal", &json!({ "id": id })).await;
             match res {
-                Ok(v) => {
-                    let key = v.get("key").and_then(Value::as_str).unwrap_or_default();
-                    crate::widgets::copy_secret(key, toasts, "key copied".into());
-                }
+                Ok(v) => crate::widgets::copy_secret(&v.key, toasts, "key copied".into()),
                 Err(e) => toasts.err(e.to_string()),
             }
         });
@@ -241,7 +261,7 @@ pub(super) fn KeyLine(
     };
     view! {
         <tr>
-            <td>
+            <td class="key-name">
                 // An internal identity cannot authenticate anything, but it
                 // spends and it is logged — "what has the corpus ingest been
                 // doing" is one of the better uses of this link.
@@ -259,6 +279,7 @@ pub(super) fn KeyLine(
                             <span class="chip off key-kind">"disabled"</span>
                         }
                     })}
+                {move || super::device_tools::needs_grant_chips(unmet())}
             </td>
             <td class="clip key-scope mono-sm dim" title=scope>
                 {scope}

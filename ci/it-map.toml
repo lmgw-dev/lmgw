@@ -47,22 +47,23 @@ why = "every suite builds its gateway from these"
 paths = ["crates/lmgw-core/src/config.rs", "crates/lmgw-core/src/config/*"]
 modules = ["config_hoisting", "web_pages", "migrations", "models_endpoint", "router",
            "mcp_selfadmin", "realtime_settings", "chat_voice_settings", "chat_stt_settings",
-           "dev_boot_prefix"]
-why = "settings and the snapshot; nearly every feature adds a field here, so the feature's own files pick its suites"
+           "dev_boot_prefix", "realtime_calls_net", "realtime_calls_audio"]
+why = "settings and the snapshot; nearly every feature adds a field here, so the feature's own files pick its suites (realtime_calls_audio: the WebRTC audio settings, webrtc_reorder_ms, webrtc_commit_window_ms and webrtc_output_kbps, live in config/settings/webrtc_audio.rs)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/server.rs", "crates/lmgw-core/src/principal.rs",
          "crates/lmgw-core/src/web/mod.rs", "crates/lmgw-core/src/web/wiring.rs",
          "crates/lmgw-core/src/web/admin.rs", "crates/lmgw-core/src/web/session.rs"]
 modules = ["route_walk", "principal_gate", "owner_keys", "session_login", "key_policy",
-           "openapi_", "web_pages", "body_limit", "dev_boot_prefix", "device_keys"]
-why = "the routing table and the gate in front of it (dev_boot_prefix: server::bind/serve)"
+           "openapi_", "web_pages", "body_limit", "dev_boot_prefix", "device_keys",
+           "realtime_calls_net", "realtime_calls"]
+why = "the routing table and the gate in front of it (dev_boot_prefix: server::bind/serve; realtime_calls_net: the calls' plain socket group serve binds and releases; realtime_calls: the calls' routes, their slot rule and /v1/models)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/web/api.rs", "crates/lmgw-core/src/web/api_settings.rs",
          "crates/lmgw-core/src/web/ui.rs"]
-modules = ["web_pages", "openapi_dashboard", "ui_cache", "config_hoisting", "dev_boot_prefix"]
-why = "the dashboard API (dev_boot_prefix: the settings write's dev-prefix refusal)"
+modules = ["web_pages", "openapi_dashboard", "ui_cache", "config_hoisting", "dev_boot_prefix", "ladder_wire", "settings_mcp_wire", "settings_full_wire", "key_answers_wire", "models_full_wire", "responses_wire", "dashboard_ops_wire"]
+why = "the dashboard API (dev_boot_prefix: the settings write's dev-prefix refusal; ladder_wire, settings_mcp_wire, settings_full_wire: the rung plan route and the settings read; key_answers_wire: the credential ops, the settings save and the update check; models_full_wire, responses_wire: the models and stored-conversation reads; dashboard_ops_wire: the routing and conversation ops' answers)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/config/settings/dev_models_dir.rs", "crates/lmgw-core/src/hf.rs",
@@ -84,8 +85,8 @@ why = "the voice worklets and visualisation modules are served from the bundle (
 [[map]]
 paths = ["crates/lmgw-core/src/web/op_names.rs", "crates/lmgw-core/src/web/op_body.rs",
          "crates/lmgw-core/src/ops.rs", "crates/lmgw-core/src/ops/*"]
-modules = ["ops_container", "openapi_ops", "mcp_selfadmin", "mcp_admin_plane", "tool_inventory"]
-why = "the /api/op plane and the MCP tools on it"
+modules = ["ops_container", "openapi_ops", "mcp_selfadmin", "mcp_admin_plane", "tool_inventory", "self_admin_wire", "self_admin_usage", "self_admin_agents", "self_admin_builds", "self_admin_audio", "self_admin_bench", "usage_wire", "agents_wire", "agents_ops_wire", "agents_service_wire", "ladder_wire", "settings_mcp_wire", "settings_full_wire", "key_answers_wire"]
+why = "the /api/op plane and the MCP tools on it (self_admin_wire, self_admin_usage, self_admin_agents, self_admin_builds, self_admin_audio, self_admin_bench: the text of the tools only they give; usage_wire, agents_wire, agents_ops_wire, agents_service_wire: the price and agent ops over HTTP; ladder_wire, settings_mcp_wire, settings_full_wire: the rung plan and the settings page's answer; key_answers_wire: the credential ops' answers)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/ops/routing.rs", "crates/lmgw-core/src/ops/upstream_settle.rs",
@@ -123,12 +124,21 @@ modules = ["knowledge", "knowledge_", "chat_knowledge", "realtime_chat_thread"]
 why = "the knowledge bases and their users"
 
 [[map]]
-paths = ["crates/lmgw-core/src/web/api_agents.rs", "crates/lmgw-core/src/web/agent_proxy.rs",
+paths = ["crates/lmgw-core/src/web/api_agents.rs", "crates/lmgw-core/src/web/api_agents/*",
+         "crates/lmgw-core/src/web/agent_proxy.rs",
          "crates/lmgw-core/src/web/agentchat.rs", "crates/lmgw-core/src/agent.rs",
          "crates/lmgw-core/src/agent/*", "crates/lmgw-core/builtin-agents/*",
          "crates/lmgw-core/assets/agent-shim.mjs"]
-modules = ["agents_", "agent_stopped_rows", "chat_agent_live"]
+modules = ["agents_", "agent_stopped_rows", "chat_agent_live", "self_admin_agents"]
 why = "the agent runtime"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/decision_lab/from_agent.rs",
+         "crates/lmgw-core/src/labs/*", "crates/lmgw-core/src/store/lab_*",
+         "crates/lmgw-core/src/proxy/systemone.rs",
+         "crates/lmgw-core/src/modelinfo/decision.rs"]
+modules = ["agents_runs", "labs_batch"]
+why = "a batch agent classifying through a question set and its runs saved as labelled set runs (labs-store design §4)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/web/api_usage.rs", "crates/lmgw-core/src/policy.rs",
@@ -140,8 +150,42 @@ why = "keys, budgets and usage"
 paths = ["crates/lmgw-core/src/devices.rs", "crates/lmgw-core/src/devices/*",
          "crates/lmgw-core/src/web/api_settings/device_keys.rs", "crates/lmgw-core/src/ops/keys.rs",
          "crates/lmgw-core/src/store/keys.rs", "crates/lmgw-core/src/realtime/session.rs"]
-modules = ["device_keys", "device_chat", "key_set", "owner_keys"]
+modules = ["device_keys", "device_chat", "key_set", "owner_keys", "key_answers_wire"]
 why = "device keys: pairing, the key ops, and the realtime session's revocation close"
+
+[[map]]
+paths = ["crates/lmgw-core/src/config/settings/devices.rs", "crates/lmgw-core/src/ops/devices_settings.rs",
+         "crates/lmgw-api-types/src/device_link.rs", "crates/lmgw-ui/src/pages/settings/devices.rs",
+         "crates/lmgw-core/src/mcp/selfadmin/guards.rs"]
+modules = ["devices_trust", "settings_full_wire", "mcp_selfadmin::the_access_settings_are_no_tool_s_to_change"]
+why = "the device link's settings class, its saves and status types, and the tools' refusal of it (device link WP1)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/server.rs", "crates/lmgw-core/src/server/*",
+         "crates/lmgw-core/src/devices.rs", "crates/lmgw-core/src/devices/*",
+         "crates/lmgw-core/src/ops/devices_settings.rs", "crates/lmgw-core/src/ops/settings_patch.rs",
+         "crates/lmgw-core/src/web/api_settings.rs", "crates/lmgw-api-types/src/device_link.rs",
+         "crates/lmgw-core/tests/it/support/device_link.rs"]
+modules = ["device_tls", "device_listener", "device_face", "server_stop", "devices_trust", "route_walk",
+           "realtime_calls_net", "realtime_calls"]
+why = "the device listener: its TLS accept and serving loop, its stop, the connect info, its face and principal, its settings' effects (device link WP2); the calls' device socket group follows it, and paired devices call through it (calls WP7: realtime_calls_net::devices, realtime_calls::devices)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/devices.rs", "crates/lmgw-core/src/devices/*",
+         "crates/lmgw-core/src/store/device_tokens.rs", "crates/lmgw-core/src/store/keys.rs",
+         "crates/lmgw-core/src/store/rows.rs", "crates/lmgw-core/src/store/request_logs.rs",
+         "crates/lmgw-core/src/web/api_settings/device_keys.rs", "crates/lmgw-core/src/web/api_settings.rs",
+         "crates/lmgw-core/src/web/api_usage.rs", "crates/lmgw-core/src/principal.rs",
+         "crates/lmgw-core/src/config/keys.rs", "crates/lmgw-core/src/openapi/planes/devices.rs",
+         "crates/lmgw-core/src/openapi/ops/table/keys.rs", "crates/lmgw-core/src/server/stop.rs",
+         "crates/lmgw-core/migrations/0081_device_link_pairing.sql",
+         "crates/lmgw-api-types/src/usage.rs", "crates/lmgw-api-types/src/realtime.rs",
+         "crates/lmgw-client/src/requests/enrol.rs", "crates/lmgw-client/src/tls.rs",
+         "crates/lmgw-core/tests/it/support/device_pair.rs"]
+modules = ["device_pairing", "device_keys", "device_chat", "device_face", "device_tls", "key_answers_wire",
+           "migrations", "route_walk", "openapi_", "chat_feed", "mcp_host", "mcp_tasks", "chat_approvals",
+           "chat_live_reads", "realtime_chat_thread"]
+why = "pairing over the device link: tokens, enrolment, the confirmation, re-pairing, the CA's rotation, the end of device bearers, the request row's listener, and every suite that pairs a device for real through support::device_pair (device link WP3)"
 
 [[map]]
 paths = ["crates/lmgw-core/src/web/chat*.rs", "crates/lmgw-core/src/web/chat_*/*",
@@ -221,6 +265,12 @@ modules = ["chat_feed"]
 why = "the Chat change feed: every thread and folder write records, turns and voice report live, the hold and the revocation reach it (client-apps WP4)"
 
 [[map]]
+paths = ["crates/lmgw-core/src/store/feed/*", "crates/lmgw-client/src/feed.rs",
+         "crates/lmgw-client/src/feed/*"]
+modules = ["chat_feed"]
+why = "the feed's store children (the open approvals read with the head, message records) and lmgw-client's reader, which chat_feed::push replays real streams through (device link WP5)"
+
+[[map]]
 paths = ["crates/lmgw-core/src/web/chat_feed.rs", "crates/lmgw-core/src/web/chat_feed/*",
          "crates/lmgw-core/src/web/chat_repo.rs", "crates/lmgw-core/src/web/api.rs",
          "crates/lmgw-core/src/store/feed.rs", "crates/lmgw-api-types/src/chat_changed.rs"]
@@ -278,8 +328,8 @@ why = "the module names are singular"
 [[map]]
 paths = ["crates/lmgw-core/src/gate/*", "crates/lmgw-core/src/ladder.rs"]
 modules = ["vram_admission", "candidate_routing", "ladder_models", "kv_unified_disable",
-           "background_admission", "gpu_contention"]
-why = "the request gate in front of every local send"
+           "background_admission", "gpu_contention", "aux_router", "systemone"]
+why = "the request gate in front of every local send, and its route checks"
 
 [[map]]
 paths = ["crates/lmgw-core/src/vram/*", "crates/lmgw-core/src/runtime/*"]
@@ -292,8 +342,9 @@ paths = ["crates/lmgw-core/src/proxy.rs", "crates/lmgw-core/src/proxy/*",
          "crates/lmgw-core/src/sse.rs"]
 modules = ["e2e_proxy", "count_compat", "key_policy", "body_limit", "responses_api",
            "embeddings_params", "anthropic_beta", "chat_live", "reasoning_off_fit", "stream_usage",
+           "aux_router", "systemone",
            "realtime_chat_thread::reasoning::a_voice_turn_answers_on_a_model_without_reasoning"]
-why = "the inference proxy"
+why = "the inference proxy, its route-kind guards and System One's relay"
 
 [[map]]
 paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
@@ -301,7 +352,7 @@ paths = ["crates/lmgw-core/src/egress/*", "crates/lmgw-core/src/ingress/*",
          "crates/lmgw-core/src/responses.rs"]
 modules = ["egress_adapters", "ingress_roundtrip", "ingress_tool_results", "e2e_proxy",
            "count_compat", "responses_api", "responses_key_ref", "anthropic_beta",
-           "chat_replay_shapes", "stream_usage", "gemini_signatures",
+           "chat_replay_shapes", "stream_usage", "gemini_signatures", "systemone",
            "mcp_tasks::thread::goldens"]
 why = "the protocol adapters"
 
@@ -319,6 +370,24 @@ modules = ["modelinfo_real_files", "capabilities_local", "model_runtime_override
 why = "model metadata"
 
 [[map]]
+paths = ["crates/lmgw-core/src/modelinfo/decision.rs",
+         "crates/lmgw-core/src/runtime/registry/decision_route.rs",
+         "crates/lmgw-core/src/ops/aux_model.rs", "crates/lmgw-core/src/ops/aux_model/*",
+         "crates/lmgw-core/src/config/snapshot.rs", "crates/lmgw-core/src/config/settings_classes.rs",
+         "crates/lmgw-core/src/capabilities/*", "crates/lmgw-core/src/catalog.rs"]
+modules = ["decision_", "systemone", "aux_router", "capabilities_"]
+why = "the decision kind: its plan and probe, the start's route read, its prefix, its fallback and its capabilities (decision-models design §2.4, §2.9, §3.4–§3.7, §3.10)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/catalog.rs", "crates/lmgw-core/src/catalog/*",
+         "crates/lmgw-core/src/web/admin.rs", "crates/lmgw-core/src/ops/routing.rs",
+         "crates/lmgw-core/src/ops/reads.rs", "crates/lmgw-core/src/store/upstreams.rs",
+         "crates/lmgw-core/src/store/snapshot.rs", "crates/lmgw-core/src/web/api.rs",
+         "crates/lmgw-api-types/src/upstreams.rs"]
+modules = ["openrouter_catalog", "catalog_fields", "usage_units"]
+why = "the catalog request's output_modalities=all and its per-upstream option, the non-text tasks OpenRouter's full list names, and Jev's price sync (decision-models design §6.2)"
+
+[[map]]
 paths = ["crates/lmgw-core/src/store.rs", "crates/lmgw-core/src/store/*",
          "crates/lmgw-core/migrations/*"]
 modules = ["migrations", "web_pages", "models_endpoint"]
@@ -331,8 +400,55 @@ why = "the chat page's voice mode is a realtime session"
 
 [[map]]
 paths = ["crates/lmgw-core/src/web/chat_voice.rs", "crates/lmgw-core/src/web/chat_voice/*"]
-modules = ["realtime_chat_thread"]
+modules = ["realtime_chat_thread", "realtime_calls"]
 why = "a realtime session bound to a chat thread"
+
+[[map]]
+paths = ["crates/lmgw-core/tests/it/realtime_calls_net/client.rs",
+         "crates/lmgw-core/tests/it/realtime_chat_thread.rs",
+         "crates/lmgw-core/tests/it/device_chat.rs", "crates/lmgw-core/tests/it/chat_ongoing.rs",
+         "crates/lmgw-core/src/web/chat_live.rs", "crates/lmgw-core/src/web/chat_live/*",
+         "crates/lmgw-core/src/web/chat_folders/pick.rs", "crates/lmgw-core/src/web/chat_folders/pick/*",
+         "crates/lmgw-core/src/openapi/planes/inference/calls.rs",
+         "crates/lmgw-api-types/src/realtime.rs", "crates/lmgw-api-types/src/realtime/*",
+         "crates/lmgw-client/src/requests/calls.rs", "crates/lmgw-client/src/realtime/*"]
+modules = ["realtime_calls"]
+why = "realtime_calls' harness borrows the str0m phone, realtime_chat_thread's world, the device pairing and the ongoing folders; its calls bind through chat_live's voice binding and the folder's pick, and lmgw-client reads its answers"
+
+[[map]]
+paths = ["crates/lmgw-core/tests/it/realtime_calls.rs",
+         "crates/lmgw-core/tests/it/realtime_calls_net/client.rs",
+         "crates/lmgw-core/tests/it/realtime_chat_thread.rs",
+         "crates/lmgw-core/tests/it/device_chat.rs", "crates/lmgw-core/tests/it/chat_feed.rs",
+         "crates/lmgw-core/src/web/chat_live.rs", "crates/lmgw-core/src/web/chat_live/*",
+         "crates/lmgw-core/src/web/chat_feed.rs", "crates/lmgw-core/src/web/chat_feed/*",
+         "crates/lmgw-core/src/server/stop.rs",
+         "crates/lmgw-api-types/src/realtime.rs", "crates/lmgw-api-types/src/realtime/*",
+         "crates/lmgw-client/src/realtime/*"]
+modules = ["realtime_calls_close"]
+why = "realtime_calls_close drives realtime_calls' phone and harness, reads a paired device's Chat feed for voice.ended (chat_live publishes it, the feed ends at a stop), and lmgw-client's CloseKind reads its lmgw.session.closed"
+
+[[map]]
+paths = ["crates/lmgw-core/tests/it/realtime_calls_net/client.rs",
+         "crates/lmgw-core/tests/it/realtime_calls.rs",
+         "crates/lmgw-core/tests/it/realtime_chat_thread.rs",
+         "crates/lmgw-core/src/web/chat_live.rs", "crates/lmgw-core/src/web/chat_live/*"]
+modules = ["realtime_calls_audio"]
+why = "realtime_calls_audio's harness borrows the str0m phone, realtime_calls' calls world and Phone, and realtime_chat_thread's world, whose bound calls bind through chat_live's voice binding"
+
+[[map]]
+paths = ["crates/lmgw-core/tests/it/realtime_calls_net/client.rs",
+         "crates/lmgw-core/tests/it/realtime_calls.rs",
+         "crates/lmgw-core/tests/it/realtime_calls_audio.rs",
+         "crates/lmgw-core/tests/it/realtime_chat_thread.rs",
+         "crates/lmgw-core/src/web/chat_live.rs", "crates/lmgw-core/src/web/chat_live/*",
+         "crates/lmgw-core/src/web/agentchat.rs",
+         "crates/lmgw-core/src/mcp/selfadmin.rs", "crates/lmgw-core/src/mcp/selfadmin/*",
+         "crates/lmgw-api-types/src/realtime.rs", "crates/lmgw-api-types/src/realtime/*",
+         "crates/lmgw-api-types/src/chat_frames.rs", "crates/lmgw-api-types/src/mcp_apps.rs",
+         "crates/lmgw-client/src/realtime.rs", "crates/lmgw-client/src/realtime/*"]
+modules = ["realtime_calls_events"]
+why = "realtime_calls_events drives realtime_calls' phone and calls world with realtime_calls_audio's Opus helper, joins and splits parts with lmgw-client's, and measures the tool result frames a bound self-admin session relays (agentchat's tool frame, the self-admin catalog's texts, the frame types)"
 
 [[map]]
 paths = ["crates/lmgw-core/assets/bench/*"]
@@ -345,6 +461,79 @@ modules = ["web_pages", "openapi_", "models_endpoint"]
 why = "the DTOs the dashboard reads"
 
 [[map]]
+paths = ["crates/lmgw-api-types/src/self_admin.rs", "crates/lmgw-api-types/src/self_admin/*"]
+modules = ["self_admin_"]
+why = "the answers only the lmgw__* tools give: every suite that reads a tool's text into its type"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api/responses_ops.rs", "crates/lmgw-api-types/src/ack.rs",
+         "crates/lmgw-api-types/src/upstreams.rs", "crates/lmgw-core/src/openapi/ops/table/routing.rs",
+         "crates/lmgw-core/src/openapi/ops/table/responses.rs"]
+modules = ["dashboard_ops_wire", "openapi_ops"]
+why = "the routing and conversation ops' answer types, the code that builds them and the document's rows for them"
+
+[[map]]
+paths = ["crates/lmgw-api-types/src/usage.rs", "crates/lmgw-core/src/openapi/ops/table/keys.rs",
+         "crates/lmgw-core/src/openapi/ops/table/settings.rs"]
+modules = ["key_answers_wire", "openapi_ops"]
+why = "the credential ops' answer types and the document's rows for them"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api/models_full.rs", "crates/lmgw-core/src/web/responses.rs",
+         "crates/lmgw-core/src/ops/local_model.rs", "crates/lmgw-api-types/src/models.rs",
+         "crates/lmgw-api-types/src/responses.rs"]
+modules = ["models_full_wire", "responses_wire"]
+why = "the models page's read, the stored-conversation reads and the types they are built from (ops::mirror holds a row to its API type)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/runtime/aux.rs", "crates/lmgw-api-types/src/aux_engine.rs",
+         "crates/lmgw-api-types/src/model_detail.rs", "crates/lmgw-core/src/ops/aux_model.rs"]
+modules = ["models_full_wire::aux_rows_say_their_thread_count_and_where_it_comes_from", "runtime_argv", "runtime_descriptor"]
+why = "an aux row's thread count in effect: the shared rule, the argv it renders, and the models list and row read that report it with its source (decision-models WP6)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/api_settings/full.rs", "crates/lmgw-core/src/config/settings_dto.rs",
+         "crates/lmgw-core/src/host.rs", "crates/lmgw-api-types/src/settings.rs"]
+modules = ["settings_full_wire"]
+why = "the settings page's answer and the types it is built from"
+
+[[map]]
+paths = ["crates/lmgw-core/src/vram/plan.rs", "crates/lmgw-api-types/src/wiring.rs"]
+modules = ["ladder_wire"]
+why = "the footprint the rung plan route reports, and the RungPlan it is read into"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat_voice/transcribe.rs", "crates/lmgw-core/src/web/chat_caller.rs",
+         "crates/lmgw-core/src/web/session.rs", "crates/lmgw-core/src/web/chat_profiles/try.rs",
+         "crates/lmgw-api-types/src/chat_voice.rs", "crates/lmgw-api-types/src/chat_frames.rs",
+         "crates/lmgw-api-types/src/session.rs"]
+modules = ["chat_voice_dictation_wire", "session_login", "chat_turn_wire", "chat_profiles_try",
+           "device_chat::revoke::a_rotate_ends_a_device_s_running_turn",
+           "device_chat::revoke::disable_delete_and_expiry_end_a_device_s_running_turn",
+           "device_chat::revoke::an_owner_key_s_rotate_ends_its_running_turn",
+           "device_chat::turns::non_turn_routes_call_models_as_the_device_too",
+           "server_stop::a_chat_turn_at_a_stop_says_so_and_is_saved_before_the_server_returns"]
+why = "the dictation's answer and refusals, the session view, the revoked and stopping error frames and the speak refusal: the Chat answers built from their api-types (typing sprint W12a)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/web/chat_export.rs", "crates/lmgw-api-types/src/chat_export.rs"]
+modules = ["chat_export", "chat_attachments_wire"]
+why = "the Chat export's JSON file, built with the folder and profile refs of its api-types and read back into ChatExport (typing sprint W12b)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/store/chat_search.rs", "crates/lmgw-core/src/ops/backends.rs",
+         "crates/lmgw-core/src/openapi/schemas.rs"]
+modules = ["openapi_non_null"]
+why = "the fields the document says are never null: the live samples' builders (a title hit, the builds answer) and the sent-required sync that must leave each property's null alone (typing sprint W16)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/mcp/selfadmin/chat_profiles.rs", "crates/lmgw-api-types/src/chat_profiles.rs",
+         "crates/lmgw-api-types/src/chat_profiles/*"]
+modules = ["self_admin_profiles", "mcp_selfadmin", "chat_profiles::speech_style",
+           "device_chat::profiles", "device_chat::profiles_admin"]
+why = "the profile tools' answers: ToolProfile, ToolProfileList and ToolProfileDeleted, read from the tools' text (typing sprint W12b)"
+
+[[map]]
 paths = ["crates/quickdoc-core/*"]
 modules = ["quickdoc_", "knowledge"]
 why = "lmgw-core's corpus store"
@@ -353,5 +542,17 @@ why = "lmgw-core's corpus store"
 paths = ["crates/lmgw-core/src/proxy/synthesize.rs", "crates/lmgw-core/src/proxy/synthesize/*",
          "crates/lmgw-core/src/proxy/audio.rs", "crates/lmgw-core/src/proxy/audio/*",
          "crates/lmgw-core/tests/fixtures/audio/supertonic3_unicode_indexer_trimmed.json"]
-modules = ["audio_speech_chars", "audio_expressive", "realtime_expressive", "audio_backend"]
+modules = ["audio_speech_chars", "audio_expressive", "realtime_expressive", "audio_backend",
+           "audio_lab_wire"]
 why = "every TTS path shapes its speech through these (the task routes too)"
+
+[[map]]
+paths = ["crates/lmgw-core/src/net.rs", "crates/lmgw-core/src/devices/links.rs"]
+modules = ["chat_feed::hello"]
+why = "hello.dashboard_url comes from net::dashboard_url, and the device feed's link details from Links (device link WP5)"
+
+[[map]]
+paths = ["crates/lmgw-client/src/tls.rs", "crates/lmgw-client/src/tls/*",
+         "crates/lmgw-client/src/requests/enrol.rs"]
+modules = ["device_pairing::enrol", "device_tls"]
+why = "lmgw-client's reading of the handshake and the enrolment, which these suites drive against the real device listener (device link WP5/WP6)"

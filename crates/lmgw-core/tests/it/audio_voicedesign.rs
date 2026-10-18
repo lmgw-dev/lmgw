@@ -17,7 +17,7 @@ use crate::support::realtime_tts::spoken_session;
 
 async fn set(state: &lmgw_core::state::SharedState, args: Value) -> Result<Value, String> {
     let patch = lmgw_core::ops::patch_from_args(args.as_object().cloned())?;
-    lmgw_core::ops::audio_model_set(state, patch).await
+    lmgw_core::ops::backends::to_json(lmgw_core::ops::audio_model_set(state, patch).await)
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 use lmgw_api_types::{
-    AgentBatchShape, AgentField, AgentImportReport, AgentProvenance, AgentRunSummary, AgentRuntime,
+    AgentBatchShape, AgentDetail, AgentField, AgentImportReport, AgentProvenance, AgentRunSummary,
+    AgentRuntime,
 };
 use serde_json::{json, Value};
 
@@ -542,12 +543,11 @@ fn the_unbound_line_names_the_slots_or_stays_away() {
     assert_eq!(line.lines().count(), 1, "{line}");
 }
 
-/// The App tab reads the mounts out of the document, so a build whose DTO
-/// has no `mounts` field still draws the list — and a slot with no host
+/// The App tab lists the mounts the detail carries, and a slot with no host
 /// path is not a mount and is not listed.
 #[test]
-fn the_service_mounts_come_out_of_the_document() {
-    let doc = json!({
+fn the_service_mounts_come_out_of_the_detail() {
+    let detail: AgentDetail = serde_json::from_value(json!({
         "id": "notes-desk",
         "service": {
             "port": 8080,
@@ -563,18 +563,19 @@ fn the_service_mounts_come_out_of_the_document() {
                 { "field": "empty", "host": "", "inside": "/lmgw/mounts/empty" },
             ],
         },
-    });
-    let mounts = service_mounts(&doc);
+    }))
+    .unwrap();
+    let mounts = service_mounts(&detail);
     assert_eq!(mounts.len(), 1, "{mounts:?}");
     assert_eq!(mounts[0].field, "notes");
     assert_eq!(mounts[0].host.as_deref(), Some("/home/alice/Notes"));
     assert_eq!(mounts[0].inside, "/lmgw/mounts/notes");
     assert_eq!(mounts[0].access, "rw");
 
-    // Nothing to read is not an error: no service, no key, or a null.
-    assert!(service_mounts(&json!({ "id": "x" })).is_empty());
-    assert!(service_mounts(&json!({ "service": { "port": 8080 } })).is_empty());
-    assert!(service_mounts(&json!({ "service": { "mounts": Value::Null } })).is_empty());
+    // Nothing to list is not an error: no service, or a service without mounts.
+    assert!(service_mounts(&AgentDetail::default()).is_empty());
+    let bare: AgentDetail = serde_json::from_value(json!({ "service": { "port": 8080 } })).unwrap();
+    assert!(service_mounts(&bare).is_empty());
 }
 
 /// An origin is a URL and a resolver is asked for a name: the App tab
@@ -586,8 +587,8 @@ fn the_hosts_line_names_the_host_and_not_the_origin() {
         "board.localhost"
     );
     assert_eq!(
-        origin_host("http://board.lmgw.lan:8001/?v=3"),
-        "board.lmgw.lan"
+        origin_host("http://board.lmgw.example:8001/?v=3"),
+        "board.lmgw.example"
     );
     assert_eq!(origin_host("http://board.localhost/"), "board.localhost");
     assert_eq!(origin_host(""), "");
@@ -606,10 +607,10 @@ fn the_lan_line_is_for_a_gateway_others_can_reach() {
         Some("0.0.0.0".to_string())
     );
     assert_eq!(
-        lan_origin_host("192.168.1.10:8001", "localhost"),
-        Some("192.168.1.10".to_string())
+        lan_origin_host("198.51.100.10:8001", "localhost"),
+        Some("198.51.100.10".to_string())
     );
-    assert_eq!(lan_origin_host("192.168.1.10:8001", "lmgw.lan"), None);
+    assert_eq!(lan_origin_host("198.51.100.10:8001", "lmgw.example"), None);
 }
 
 /// The Run tab's own refusal, before the click: a required field the form
@@ -626,4 +627,177 @@ fn a_required_field_the_form_has_nothing_in_blocks_the_start() {
     // refused again for the next is the worst way to learn there were two.
     let two = config_gap(&["MODEL".into(), "Mailbox".into()]).unwrap();
     assert!(two.starts_with("set MODEL and Mailbox in Config"), "{two}");
+}
+
+/// An output that can decide through a question set needs the model or a
+/// set before a classify: the form holding neither keeps Classify off, named
+/// as the form shows them (labs-store design §4). List only needs neither.
+#[test]
+fn a_classify_needs_the_model_or_a_question_set() {
+    use crate::widgets::schema_form::Draft;
+    let owner = leptos::prelude::Owner::new();
+    owner.with(|| {
+        let fields = vec![
+            AgentField {
+                name: "model".into(),
+                ty: "string".into(),
+                format: "model_alias".into(),
+                title: "Model".into(),
+                ..Default::default()
+            },
+            AgentField {
+                name: "decision_set".into(),
+                ty: "integer".into(),
+                format: "lmgw-question-set".into(),
+                title: "Question set".into(),
+                ..Default::default()
+            },
+        ];
+        let decide = lmgw_api_types::AgentDecide {
+            field: "decision_set".into(),
+            question: "category".into(),
+            model_field: Some("model".into()),
+            ..Default::default()
+        };
+        let draft = Draft::new();
+        draft.load(&fields, &json!({}));
+        assert_eq!(
+            unfilled_model_and_set(&fields, draft, &decide).as_deref(),
+            Some("set Model or Question set in Config above — a classify needs one of them")
+        );
+        draft.load(&fields, &json!({ "decision_set": 3 }));
+        assert_eq!(unfilled_model_and_set(&fields, draft, &decide), None);
+        draft.load(&fields, &json!({ "model": "m1" }));
+        assert_eq!(unfilled_model_and_set(&fields, draft, &decide), None);
+        // A literal alias in the manifest is no field of the form's.
+        let literal = lmgw_api_types::AgentDecide {
+            model_field: None,
+            ..decide
+        };
+        draft.load(&fields, &json!({}));
+        assert_eq!(unfilled_model_and_set(&fields, draft, &literal), None);
+    });
+}
+
+/// A digest podman could not report is an absent field, and the row says so in
+/// words; a known one is printed as it is.
+#[test]
+fn the_provenance_digest_row_says_when_podman_reported_none() {
+    let digest_row = |p: &AgentProvenance| {
+        provenance_rows(p)
+            .into_iter()
+            .find(|(k, _)| k == "digest")
+            .map(|(_, v)| v)
+    };
+    let mut p = AgentProvenance {
+        image: "ghcr.io/x/agent:1".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        digest_row(&p).as_deref(),
+        Some("podman could not report one")
+    );
+    p.digest = Some("sha256:one".into());
+    assert_eq!(digest_row(&p).as_deref(), Some("sha256:one"));
+}
+
+/// With a usable question set the attention group says the set's threshold
+/// sorted it; without one, the fallback (labs-store design §4).
+#[test]
+fn the_attention_group_names_the_sets_threshold() {
+    let mut d = lmgw_api_types::AgentDecide {
+        field: "decision_set".into(),
+        question: "category".into(),
+        set: Some(3),
+        threshold: Some(0.72),
+        measured: true,
+        ..Default::default()
+    };
+    let why = attention_why(Some(d.clone()));
+    assert!(why.contains("measured threshold of 0.72"), "{why}");
+    // A decision model answers a state the same way again: the way out is
+    // the set, not a plain re-run.
+    assert!(
+        why.ends_with("check them, or change the set or its threshold and re-run these"),
+        "{why}"
+    );
+    d.measured = false;
+    let why = attention_why(Some(d.clone()));
+    assert!(
+        why.contains("threshold of 0.72 is not measured, so not applied"),
+        "{why}"
+    );
+    d.threshold = Some(0.0);
+    assert!(attention_why(Some(d.clone())).contains("no measured threshold"));
+    d.problem = Some("gone".into());
+    assert!(attention_why(Some(d)).contains("fallback"));
+    assert!(attention_why(None).contains("fallback"));
+}
+
+/// The saved line names the set run, what it holds and the rows left out;
+/// the link goes to the set run's own page.
+#[test]
+fn a_saved_labelled_set_says_what_it_holds() {
+    let body = json!({
+        "batch": {
+            "id": 12, "lab": "decision", "preset_id": 3, "preset_name": "mail",
+            "set": { "questions": [], "default_model": "decide/laya", "thresholds": {} },
+            "model": "decide/laya", "source_name": "agent run 7 of mail-labeler",
+            "mapping": { "state": "prompt", "state_mode": "text", "key": "id",
+                         "labels": { "category": "category" }, "score_labels": {} },
+            "concurrency": 1, "status": "not_started", "total": 3, "done": 0, "failed": 0,
+            "unreadable": 0, "labelled": 2, "job_id": null, "job_error": null,
+            "cancel_requested": false,
+            "created_at": "2026-10-17T10:00:00Z"
+        },
+        "skipped": [
+            { "id": "18f9", "kind": "never_asked", "reason": "the model was never asked about it" },
+            { "id": "18fa", "kind": "call_failed", "reason": "its call failed: 500" },
+            { "id": "18fb", "kind": "call_failed", "reason": "its call failed: 500" }
+        ],
+        "set_changed": false
+    });
+    let mut s: lmgw_api_types::decision_lab::BatchFromAgentSaved =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(
+        saved_line(&s),
+        "Saved as set run #12 of 'mail' · 3 items on decide/laya, 2 labelled · not run yet · \
+         left out: 1 row the model never saw (18f9), 2 rows whose call failed (18fa, 18fb)"
+    );
+    s.skipped.clear();
+    s.set_changed = true;
+    assert_eq!(
+        saved_line(&s),
+        "Saved as set run #12 of 'mail' · 3 items on decide/laya, 2 labelled · not run yet · \
+         the set changed since these rows were classified"
+    );
+    assert_eq!(batch_href(12), "/decision-lab/batches/12");
+}
+
+/// "Save as labelled set" is offered on rows a question set classified:
+/// the stamp travels in the row from the server to Apply and back.
+#[test]
+fn a_run_names_a_set_when_its_rows_carry_one() {
+    let shape = AgentBatchShape::default();
+    let plain = review_rows(
+        &[json!({ "id": "m1", "output": { "category": "Work" } })],
+        &shape,
+    );
+    assert!(!rows_name_a_set(&plain));
+    let stamped = review_rows(
+        &[
+            json!({ "id": "m1", "output": { "category": "Work" } }),
+            json!({ "id": "m2", "output": { "category": "Work" },
+                    "set": { "id": 3, "name": "mail", "updated_at": "2026-10-17T10:00:00.000Z" } }),
+        ],
+        &shape,
+    );
+    assert!(rows_name_a_set(&stamped));
+    let set = stamped[1].set.as_ref().unwrap();
+    assert_eq!((set.id, set.name.as_str()), (3, "mail"));
+    // Apply posts the server's row whole, the stamp in it.
+    assert_eq!(
+        stamped[1].for_apply(&Default::default())["set"]["id"],
+        json!(3)
+    );
 }

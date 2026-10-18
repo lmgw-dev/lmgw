@@ -1,6 +1,8 @@
 //! `ops-settings`: gateway settings and the update check (api-docs design
 //! §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 
 const TAG: &str = "ops-settings";
@@ -13,7 +15,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__settings_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::SettingsPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::SettingsSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -44,7 +46,7 @@ pub(super) const OPS: &[OpDoc] = &[
         args: OpArgs::Struct(|g| {
             g.root_schema_for::<crate::web::api_settings::SettingsFullPatch>()
         }),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -61,7 +63,8 @@ pub(super) const OPS: &[OpDoc] = &[
              check when it uses another model, text to speech — with their sum, the VRAM \
              headroom, what lmgw may use (vram.budget_mb or the GPU's total) and what other \
              programs hold now. Each figure is the one admission charges: a chat row's GGUF \
-             weights + KV cache, an audio row's learned residency or, before it has one, its \
+             weights + KV cache + compute buffers, an audio row's learned residency or, before \
+             it has one, its \
              on-disk size; a cloud stage holds nothing, and a stage with no figure is listed \
              as unknown. An argument left out is the saved setting, so a draft can be sized \
              before it is saved. Starts nothing.",
@@ -87,7 +90,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::NoArgs,
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::MessageAck>()),
         writes: false,
         reveals_secret: false,
         confirm_note: None,

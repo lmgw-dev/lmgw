@@ -12,12 +12,25 @@
 //! SSE + WAV assembly in [`super::audio_stream`]; both are unit-tested natively.
 //!
 //! The layout is the labs' shared one ([`super::lab_frame`]): the form beside
-//! the session's run history, the voice library folded to the right.
+//! the kept run history, the voice library folded to the right.
+//!
+//! Every run is kept on the server (labs-store design §5): the page makes a
+//! group of the form first (`/audio-lab/api/groups`) and puts it in front of
+//! the history, its card the live one while the request (`?group=<id>`) is
+//! out. Once the answer has ended the page reads the group until it is no
+//! longer in flight and the kept run takes the live card's place, drawn by
+//! [`card`]: speech as the file the gateway kept as it streamed, an upload
+//! as the group's input, a stopped stream as far as it got. An answer that
+//! ended without a kept run (the store failed, the lab refused the
+//! hand-off, the connection broke) keeps its live card, which says so, until
+//! the next run. A run goes back into the form ("Open in form"), and the speech
+//! settings can be saved as named presets. The voice library stays what it
+//! is: reference input, not history.
 //!
 //! Deliberately absent, as in the old app: microphone capture (live
 //! transcription needs a duplex chunked upload the gateway does not proxy),
-//! any persistence of the history or of presets, and any container control —
-//! starting or applying the audio container stays on its own surface.
+//! and any container control — starting or applying the audio container
+//! stays on its own surface.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -29,7 +42,7 @@ use leptos::task::spawn_local;
 use leptos_router::components::A;
 use lmgw_api_types::audio_lab::{
     AudioLabModel, AudioLabModels, Clip, ClipList, ClipTranscribed, ClipTranscription, ClipsAck,
-    ClipsUploaded,
+    ClipsUploaded, LabVoices, VoiceTranscribed,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -39,14 +52,30 @@ use super::audio_spec::{
     task_body, task_fields, task_label, timeline_rate, transcription_body, SpeechForm, Widget,
     GROUPS, TASKS,
 };
-use super::audio_stream::{pcm_to_wav, read_sse, AudioEvent, StreamAcc};
+use super::audio_stream::{read_sse, AudioEvent, StreamAcc};
 use super::lab_frame::{Check, Fname, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
+use super::lab_history::{ExportMenu, HistoryList, LabHistory};
+use super::lab_presets::PresetsCard;
 use crate::catalog::CatalogEntry;
 use crate::fmt::human_bytes;
+use crate::scope::Latest;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
-use crate::widgets::voice_picker::voice_name;
-use crate::widgets::{use_toasts, ConfirmButton, Explain, ModelPicker, Select};
+use crate::widgets::{use_toasts, ConfirmButton, Explain, ModelPicker, Select, Toasts};
+use lmgw_api_types::lab_store::{LabKind, LabPresetBody, LabPresetKind};
+
+/// A kept run's card.
+mod card;
+/// The form and its kept groups: the route, the group made first, Open in
+/// form, the speech settings a preset keeps.
+mod kept;
+/// What an answer adds up to, live or kept.
+mod result;
+/// The built-in voice picker's options and notes.
+mod voices;
+
+use card::AudioCard;
+use voices::{HeldNote, MissingVoices, VoiceListNote};
 
 // ---------------------------------------------------------------------------
 // Server shapes
@@ -166,18 +195,6 @@ impl RunResult {
     }
 }
 
-/// One finished run in the history: what was asked of which model, and what
-/// came back (or why nothing did).
-#[derive(Clone, Debug)]
-struct AudioRun {
-    head: RunHead,
-    result: RunResult,
-    stats: Option<RunStats>,
-    error: String,
-    /// The object URLs its players and downloads point at, revoked with it.
-    urls: Vec<String>,
-}
-
 /// What a run was, fixed when it starts.
 #[derive(Clone, Debug, PartialEq)]
 struct RunHead {
@@ -275,6 +292,10 @@ struct Form {
     asr_path: RwSignal<String>,
     asr_file: StoredValue<Option<web_sys::File>>,
     asr_file_name: RwSignal<String>,
+    /// Which fetch of a kept upload into the file slot is current: a later
+    /// Open in form or a file picked by hand makes an earlier one's answer
+    /// stale.
+    asr_reads: Latest,
     language: RwSignal<String>,
     asr_stream: RwSignal<bool>,
     /// Send the same request to `…/transcriptions/details`, which answers
@@ -311,6 +332,7 @@ impl Form {
             asr_path: RwSignal::new(String::new()),
             asr_file: StoredValue::new(None),
             asr_file_name: RwSignal::new(String::new()),
+            asr_reads: Latest::new(),
             language: RwSignal::new(String::new()),
             asr_stream: RwSignal::new(false),
             asr_details: RwSignal::new(false),
@@ -336,10 +358,12 @@ struct Lab {
     /// Force the generic panel for a tts/asr model — the same model is
     /// reachable both ways, and comparing them is half the point of a bench.
     generic: RwSignal<bool>,
-    voices: RwSignal<Vec<String>>,
-    /// Where `voices` stands for the selected model. It is only ever read
-    /// from a container that is already up, so this says why it is empty.
+    /// The selected model's voices (lmgw's catalog; nothing is started).
+    voices: RwSignal<LabVoices>,
+    /// Where `voices` stands for the selected model.
     voice_list: RwSignal<VoiceList>,
+    /// The newest voice read; an older answer landing later is dropped.
+    voice_reads: Latest,
     clips: RwSignal<Vec<Clip>>,
     clips_err: RwSignal<String>,
     voices_dir: RwSignal<String>,
@@ -354,8 +378,14 @@ struct Lab {
     error: RwSignal<String>,
     result: RwSignal<Option<RunResult>>,
     stats: RwSignal<Option<RunStats>>,
-    /// Finished runs, newest first.
-    runs: RwSignal<Vec<AudioRun>>,
+    /// The kept history (`/labs/api/audio/*`).
+    history: LabHistory,
+    /// The group whose request this page has out, or whose answer ended
+    /// without a kept run: its card is the live one.
+    live: RwSignal<Option<i64>>,
+    /// A model "Open in form" just picked: its own task is not put over the
+    /// task loaded with it.
+    loaded: StoredValue<Option<String>>,
     next_run: StoredValue<u32>,
     /// Stop was pressed: an aborted run says so instead of nothing.
     stopped: StoredValue<bool>,
@@ -368,17 +398,15 @@ struct Lab {
     /// The page's lifetime: a read or a run that answers after the lab was
     /// left ends there (review code:C4).
     scope: Scope,
+    toasts: Toasts,
 }
 
-/// The voice list of the selected model. Opening the lab must not load a
-/// model onto the GPU, so the list is read from a running container only, and
-/// loading one for it is the owner's explicit call.
+/// The voice list of the selected model, read as soon as it is selected: it
+/// comes from lmgw's own catalog and starts nothing.
 #[derive(Clone, Debug, PartialEq)]
 enum VoiceList {
     /// No model selected yet.
     Idle,
-    /// The model is not running; nothing was started to ask it.
-    NotRunning,
     Loading,
     Loaded,
     Failed(String),
@@ -413,37 +441,25 @@ impl Lab {
         })
     }
 
-    /// Read the selected model's voices. `start` also loads the model when it
-    /// is down, which is only ever sent from the button that says so.
-    fn load_voices(self, start: bool) {
+    /// Read the selected model's voices.
+    fn load_voices(self) {
         let alias = self.alias.get_untracked();
         if alias.is_empty() {
             return;
         }
         self.voice_list.set(VoiceList::Loading);
-        let url = format!(
-            "/audio-lab/api/voices?model={}{}",
-            enc(&alias),
-            if start { "&start=1" } else { "" }
-        );
+        let url = format!("/audio-lab/api/voices?model={}", enc(&alias));
+        let ticket = self.voice_reads.next();
         self.scope.spawn(async move {
-            let res = lab_get::<Value>(url).await;
-            // The picker moved on while this was in flight.
-            if self.alias.get_untracked() != alias {
+            let res = lab_get::<LabVoices>(url).await;
+            // A newer read (another model, or the same one turning ready)
+            // went out meanwhile: only the newest is applied.
+            if !ticket.is_some_and(|t| self.voice_reads.is(t)) {
                 return;
             }
             match res {
-                Ok(v) if v["running"] == Value::Bool(false) => {
-                    self.voices.set(Vec::new());
-                    self.voice_list.set(VoiceList::NotRunning);
-                }
                 Ok(v) => {
-                    self.voices.set(
-                        v["voices"]
-                            .as_array()
-                            .map(|a| a.iter().filter_map(voice_name).collect())
-                            .unwrap_or_default(),
-                    );
+                    self.voices.set(v);
                     self.voice_list.set(VoiceList::Loaded);
                 }
                 Err(e) => self.voice_list.set(VoiceList::Failed(e)),
@@ -668,40 +684,33 @@ impl Lab {
         }
     }
 
-    /// Everything this page handed to a player, in flight and in the history.
+    /// Everything this page handed to the live run's players. A kept run's
+    /// card revokes its own.
     fn revoke_tracks(&self) {
-        Self::revoke(&self.urls.get_value());
-        self.urls.set_value(Vec::new());
-        if let Some(runs) = self.runs.try_get_untracked() {
-            for r in &runs {
-                Self::revoke(&r.urls);
-            }
+        if let Some(urls) = self.urls.try_get_value() {
+            Self::revoke(&urls);
         }
+        self.urls.try_set_value(Vec::new());
     }
 
-    /// The run in flight is over: into the history it goes, newest first.
+    /// The run in flight is over: its live card goes, the kept one (in the
+    /// history now) shows it.
     fn settle(&self) {
-        let Some(head) = self.current.get_untracked() else {
-            return;
-        };
-        let mut error = self.error.get_untracked();
-        let result = self.result.get_untracked().unwrap_or_default();
-        if error.is_empty() && self.stopped.get_value() {
-            error = "stopped before it finished".into();
-        }
-        let run = AudioRun {
-            head,
-            result,
-            stats: self.stats.get_untracked(),
-            error,
-            urls: self.urls.get_value(),
-        };
-        self.urls.set_value(Vec::new());
-        self.runs.update(|v| v.insert(0, run));
+        self.revoke_tracks();
         self.current.set(None);
         self.result.set(None);
         self.stats.set(None);
         self.error.set(String::new());
+        self.live.set(None);
+    }
+
+    /// Stop the request out: its fetch is aborted, and once the gateway has
+    /// kept what came its group lands.
+    fn stop(self) {
+        if let Some(a) = self.aborter.get_value() {
+            self.stopped.set_value(true);
+            a.abort();
+        }
     }
 
     /// The model the run in flight was sent to — what its files are named
@@ -711,41 +720,6 @@ impl Lab {
         self.current
             .with_untracked(|h| h.as_ref().map(|h| h.model.clone()))
             .unwrap_or_else(|| self.alias.get_untracked())
-    }
-
-    fn push_track(
-        &self,
-        out: &mut RunResult,
-        id: &str,
-        b64: Option<&str>,
-        rate: Option<f64>,
-        mime: &str,
-    ) -> usize {
-        // Short strings are never audio; the old island used the same guard so
-        // a stray `data` field cannot produce a broken player.
-        let Some(b64) = b64.filter(|s| s.len() >= 64) else {
-            return 0;
-        };
-        let Some(bytes) = super::audio_stream::b64_decode(b64) else {
-            return 0;
-        };
-        let n = bytes.len();
-        if let Some(url) = blob_url(&bytes, mime) {
-            self.urls.update_value(|v| v.push(url.clone()));
-            let stem = track_stem(&self.sent_model());
-            out.tracks.push(Track {
-                id: id.to_string(),
-                url,
-                name: if id.is_empty() {
-                    format!("{stem}.wav")
-                } else {
-                    format!("{stem}-{id}.wav")
-                },
-                size: n,
-                sample_rate: rate,
-            });
-        }
-        n
     }
 }
 
@@ -760,14 +734,16 @@ fn now() -> f64 {
 #[component]
 pub fn AudioLab() -> impl IntoView {
     let toasts = use_toasts();
+    let scope = Scope::new();
     let lab = Lab {
         models: RwSignal::new(Vec::new()),
         runtime: RwSignal::new(Vec::new()),
         alias: RwSignal::new(String::new()),
         task_sel: RwSignal::new("tts".to_string()),
         generic: RwSignal::new(false),
-        voices: RwSignal::new(Vec::new()),
+        voices: RwSignal::new(LabVoices::default()),
         voice_list: RwSignal::new(VoiceList::Idle),
+        voice_reads: Latest::new(),
         clips: RwSignal::new(Vec::new()),
         clips_err: RwSignal::new(String::new()),
         voices_dir: RwSignal::new(String::new()),
@@ -779,7 +755,9 @@ pub fn AudioLab() -> impl IntoView {
         error: RwSignal::new(String::new()),
         result: RwSignal::new(None),
         stats: RwSignal::new(None),
-        runs: RwSignal::new(Vec::new()),
+        history: LabHistory::new(LabKind::Audio, scope),
+        live: RwSignal::new(None),
+        loaded: StoredValue::new(None),
         next_run: StoredValue::new(1),
         stopped: StoredValue::new(false),
         view: RwSignal::new(LabView::Form),
@@ -787,7 +765,8 @@ pub fn AudioLab() -> impl IntoView {
         preview_clip: RwSignal::new(None),
         aborter: StoredValue::new(None),
         urls: StoredValue::new(Vec::new()),
-        scope: Scope::new(),
+        scope,
+        toasts,
     };
 
     let load_models = move || {
@@ -855,9 +834,7 @@ pub fn AudioLab() -> impl IntoView {
         }
     });
 
-    // Model change → adopt its task. The voice list is read only from a
-    // running container: when the model is not up it waits (the panel offers
-    // to load it), and it is read the moment the model turns ready. One-way
+    // Model change → adopt its task, and read its voices. One-way
     // (the picker never writes the alias back), so no notify-on-equal
     // ping-pong. The history stays: comparing models is what it is for.
     let model_ready = Memo::new(move |_| lab.model_ready());
@@ -866,43 +843,43 @@ pub fn AudioLab() -> impl IntoView {
         let ready = model_ready.get();
         let switched = prev.as_ref().is_none_or(|(a, _)| *a != alias);
         if switched {
-            lab.voices.set(Vec::new());
+            lab.voices.set(LabVoices::default());
+            // Picked with a task of its own ("Open in form"): that task stays.
+            let loaded = lab
+                .loaded
+                .try_update_value(Option::take)
+                .flatten()
+                .as_deref()
+                == Some(alias.as_str());
             if let Some(m) = lab
                 .models
                 .get_untracked()
                 .into_iter()
                 .find(|m| m.alias == alias)
+                .filter(|_| !loaded)
             {
                 lab.task_sel.set(m.task);
             }
         }
         if alias.is_empty() {
             lab.voice_list.set(VoiceList::Idle);
-        } else if ready {
-            let have = lab.voice_list.get_untracked();
-            if switched || !matches!(have, VoiceList::Loaded | VoiceList::Loading) {
-                lab.load_voices(false);
-            }
-        } else if switched {
-            lab.voice_list.set(VoiceList::NotRunning);
+        } else {
+            // Read at once, container or not: the list is lmgw's catalog. A
+            // model turning ready reads it again, for the names only its
+            // running container adds.
+            lab.load_voices();
         }
         (alias, ready)
     });
 
-    let stop = move || {
-        if let Some(a) = lab.aborter.get_value() {
-            lab.stopped.set_value(true);
-            a.abort();
-        }
-    };
+    let stop = move || lab.stop();
 
     let run = move || {
         if lab.running.get_untracked() {
             return;
         }
-        lab.result.set(None);
-        lab.stats.set(None);
-        lab.error.set(String::new());
+        // A live card left by an answer that was not kept goes now.
+        lab.settle();
         lab.stopped.set_value(false);
         let id = lab.next_run.get_value();
         lab.next_run.set_value(id + 1);
@@ -924,11 +901,12 @@ pub fn AudioLab() -> impl IntoView {
         let dispatch = match lab.build() {
             Ok(d) => d,
             Err(e) => {
-                lab.error.set(e);
+                lab.toasts.err(e);
                 lab.settle();
                 return;
             }
         };
+        let route = untrack(|| lab.route());
         lab.running.set(true);
         let ctrl = web_sys::AbortController::new().ok();
         let signal = ctrl.as_ref().map(|c| c.signal());
@@ -937,27 +915,16 @@ pub fn AudioLab() -> impl IntoView {
         // A run the lab was left during ends with it: its result has no
         // history to land in (and would leave object URLs behind).
         lab.scope.spawn(async move {
-            let sent = match dispatch {
-                Dispatch::Json { url, body } => {
-                    match Request::post(&url)
-                        .abort_signal(signal.as_ref())
-                        .json(&body)
-                    {
-                        Ok(req) => req.send().await.map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-                Dispatch::Form { url, form } => {
-                    match Request::post(&url).abort_signal(signal.as_ref()).body(form) {
-                        Ok(req) => req.send().await.map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
+            // The group first: the request is its run. In front of the
+            // history at once, its card the live one.
+            let Some(group) = lab.start_group(route).await else {
+                return;
             };
+            let sent = kept::send(dispatch, group, signal.as_ref()).await;
             match sent {
                 Err(e) => {
                     if !e.to_lowercase().contains("abort") {
-                        lab.error.set(e);
+                        lab.error.set(format!("not sent: {e}"));
                     }
                 }
                 Ok(resp) => {
@@ -975,11 +942,14 @@ pub fn AudioLab() -> impl IntoView {
                         shaped,
                         ..Default::default()
                     }));
-                    if ct.starts_with("text/event-stream") {
+                    if !(200..300).contains(&status) {
+                        // Read as every call reads a refusal: a `401
+                        // session_required` raises the login gate.
+                        if let Err(e) = crate::api::checked(resp).await {
+                            lab.error.set(e.to_string());
+                        }
+                    } else if ct.starts_with("text/event-stream") {
                         consume_stream(lab, &resp, t0).await;
-                    } else if !(200..300).contains(&status) {
-                        let text = resp.text().await.unwrap_or_default();
-                        lab.error.set(error_message(&text, status));
                     } else if ct.starts_with("application/json") {
                         match resp.text().await {
                             Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -996,14 +966,8 @@ pub fn AudioLab() -> impl IntoView {
                     }
                 }
             }
-            lab.stats.update(|s| {
-                if let Some(s) = s {
-                    if s.total_ms.is_none() {
-                        s.total_ms = Some(now() - t0);
-                    }
-                }
-            });
-            lab.settle();
+            // The kept run takes the live card's place.
+            lab.land(group, lab.stopped.get_value()).await;
             lab.running.set(false);
             lab.aborter.set_value(None);
         });
@@ -1034,6 +998,7 @@ pub fn AudioLab() -> impl IntoView {
                 reasoning: false,
                 reasoning_facts: None,
                 local: true,
+                routable: true,
             })
             .collect::<Vec<_>>()
     });
@@ -1059,7 +1024,13 @@ pub fn AudioLab() -> impl IntoView {
     });
     let preview = Memo::new(move |_| lab.preview());
     let check = Memo::new(move |_| lab.check());
-
+    let filter_models = Signal::derive(move || {
+        lab.models
+            .with(|v| v.iter().map(|m| m.alias.clone()).collect::<Vec<_>>())
+    });
+    let card = Callback::new(move |id: i64| view! { <AudioCard lab=lab id=id/> }.into_any());
+    let preset_now = Callback::new(move |()| kept::preset_now(lab));
+    let preset_load = Callback::new(move |b: LabPresetBody| kept::preset_load(lab, b));
     view! {
         <LabFrame
             persist="audio-lab.library"
@@ -1157,6 +1128,15 @@ pub fn AudioLab() -> impl IntoView {
             form=move || {
                 view! {
                     <Notices lab=lab on_retry=load_models/>
+                    <Show when=move || !lab.use_generic() && lab.task() == "tts">
+                        <PresetsCard
+                            lab=LabKind::Audio
+                            kind=LabPresetKind::AudioSettings
+                            title="Speech presets"
+                            current=preset_now
+                            on_load=preset_load
+                        />
+                    </Show>
                     {move || {
                         if lab.use_generic() {
                             view! { <GenericPanel lab=lab/> }.into_any()
@@ -1178,8 +1158,14 @@ pub fn AudioLab() -> impl IntoView {
             results=move || {
                 view! {
                     {move || {
+                        // Until its group is made; then the group's card is
+                        // the live one, while the history holds it.
+                        let carded = lab.live.get().is_some_and(|id| {
+                            lab.history.groups.with(|v| v.iter().any(|g| g.id == id))
+                        });
                         lab.current
                             .get()
+                            .filter(|_| !carded)
                             .map(|head| {
                                 view! {
                                     <RunCard
@@ -1191,24 +1177,19 @@ pub fn AudioLab() -> impl IntoView {
                                 }
                             })
                     }}
-                    <For each=move || lab.runs.get() key=|r| r.head.id let:r>
-                        <RunCard head=r.head.clone() lab=lab done=r/>
-                    </For>
+                    <HistoryList history=lab.history card=card/>
                 }
             }
-            results_n=Signal::derive(move || lab.runs.with(Vec::len))
+            results_n=Signal::derive(move || lab.history.total.get() as usize)
             check=check
             run_label=Signal::derive(move || lab.run_label().to_string())
             running=lab.running
             on_run=Callback::new(move |()| run())
             on_stop=Callback::new(move |()| stop())
-            on_clear=Callback::new(move |()| {
-                for r in lab.runs.get_untracked() {
-                    Lab::revoke(&r.urls);
-                }
-                lab.runs.set(Vec::new());
-            })
+            on_clear=Callback::new(move |()| lab.history.clear())
             view=lab.view
+            kept=Signal::derive(move || lab.history.usage.get())
+            results_tools=move || view! { <ExportMenu history=lab.history models=filter_models/> }
         />
     }
 }
@@ -1230,82 +1211,30 @@ fn now_hms() -> String {
 /// A complete audio file (or a JSON envelope carrying one) — nothing to
 /// assemble, the server already produced a playable container.
 fn consume_json(lab: Lab, j: Value) {
-    // `/v1/tasks/stream` wraps the same document as `{events, result}`.
-    let r = if j["result"].is_object() {
-        j["result"].clone()
-    } else {
-        j.clone()
-    };
-    let timing = if r["timing"].is_object() {
-        r["timing"].clone()
-    } else {
-        j["timing"].clone()
-    };
-    let mut out = RunResult {
-        json: Some(j.clone()),
-        events: j["events"].as_array().cloned(),
-        text: r["text"].as_str().unwrap_or("").to_string(),
-        language: r["language"].as_str().unwrap_or("").to_string(),
-        segments: r["segments"].as_array().cloned().unwrap_or_default(),
-        speaker_turns: r["speaker_turns"].as_array().cloned().unwrap_or_default(),
-        words: r["words"].as_array().cloned().unwrap_or_default(),
-        ..Default::default()
-    };
-    // A single `audio` (+ `sample_rate`) for one-output tasks,
-    // `named_audio_outputs` for separation's stem list; `data` / `b64_json`
-    // cover `/v1/audio/speech`'s json envelope.
-    let single = r["audio"]
-        .as_str()
-        .or_else(|| j["data"].as_str())
-        .or_else(|| j["b64_json"].as_str());
-    let mut bytes = lab.push_track(&mut out, "", single, r["sample_rate"].as_f64(), "audio/wav");
-    for n in r["named_audio_outputs"].as_array().into_iter().flatten() {
-        bytes += lab.push_track(
-            &mut out,
-            n["id"].as_str().unwrap_or(""),
-            n["audio"].as_str(),
-            n["sample_rate"].as_f64(),
-            "audio/wav",
-        );
-    }
+    let r = result::from_json(&j, &lab.sent_model(), &[]);
+    lab.urls.update_value(|v| v.extend(r.urls.iter().cloned()));
     lab.stats.update(|s| {
         if let Some(s) = s {
-            if bytes > 0 {
-                s.bytes = Some(bytes);
+            if r.bytes.is_some() {
+                s.bytes = r.bytes;
             }
-            s.wall_ms = timing["wall_ms"].as_f64();
-            s.audio_ms = timing["audio_duration_ms"].as_f64();
-            s.rtf = timing["rtf"].as_f64().filter(|v| v.is_finite());
+            s.wall_ms = r.timing["wall_ms"].as_f64();
+            s.audio_ms = r.timing["audio_duration_ms"].as_f64();
+            s.rtf = r.timing["rtf"].as_f64().filter(|v| v.is_finite());
         }
     });
-    lab.result.set(Some(out));
+    lab.result.set(Some(r.result));
 }
 
 fn consume_binary(lab: Lab, bytes: &[u8], mime: &str) {
-    let ext = if mime.contains("wav") {
-        "wav"
-    } else if mime.contains("mpeg") {
-        "mp3"
-    } else {
-        "bin"
-    };
-    let mut out = RunResult::default();
-    if let Some(url) = blob_url(bytes, mime) {
-        lab.urls.update_value(|v| v.push(url.clone()));
-        out.tracks.push(Track {
-            id: String::new(),
-            url,
-            name: format!("{}.{ext}", track_stem(&lab.sent_model())),
-            size: bytes.len(),
-            sample_rate: None,
-        });
-    }
+    let r = result::from_binary(bytes, mime, &lab.sent_model());
+    lab.urls.update_value(|v| v.extend(r.urls.iter().cloned()));
     lab.stats.update(|s| {
         if let Some(s) = s {
-            s.bytes = Some(bytes.len());
+            s.bytes = r.bytes;
         }
     });
-    lab.result.set(Some(out));
+    lab.result.set(Some(r.result));
 }
 
 /// SSE covers both streaming shapes: `speech.audio.delta` (base64 PCM, which is
@@ -1344,33 +1273,22 @@ async fn consume_stream(lab: Lab, resp: &gloo_net::http::Response, t0: f64) {
         .await;
     }
     let acc = acc.borrow();
-    let mut out = RunResult {
-        text: acc.text.clone(),
-        ..Default::default()
-    };
-    if !acc.pcm.is_empty() {
-        let f = lab.form;
-        let rate = f.pcm_rate.get_untracked().trim().parse().unwrap_or(24000);
-        let channels = f.pcm_channels.get_untracked().trim().parse().unwrap_or(1);
-        let bits = f.pcm_bits.get_untracked().trim().parse().unwrap_or(16);
-        let wav = pcm_to_wav(&acc.pcm, rate, channels, bits);
-        if let Some(url) = blob_url(&wav, "audio/wav") {
-            lab.urls.update_value(|v| v.push(url.clone()));
-            out.tracks.push(Track {
-                id: String::new(),
-                url,
-                name: format!("{}.wav", track_stem(&lab.sent_model())),
-                size: wav.len(),
-                sample_rate: Some(rate as f64),
-            });
-        }
+    let f = lab.form;
+    let pcm = result::Pcm::read(
+        &f.pcm_rate.get_untracked(),
+        &f.pcm_channels.get_untracked(),
+        &f.pcm_bits.get_untracked(),
+    );
+    let r = result::from_stream(&acc, pcm, &lab.sent_model());
+    lab.urls.update_value(|v| v.extend(r.urls.iter().cloned()));
+    if r.bytes.is_some() {
         lab.stats.update(|s| {
             if let Some(s) = s {
-                s.bytes = Some(acc.pcm.len());
+                s.bytes = r.bytes;
             }
         });
     }
-    lab.result.set(Some(out));
+    lab.result.set(Some(r.result));
 }
 
 // ---------------------------------------------------------------------------
@@ -1429,45 +1347,12 @@ fn Notices(lab: Lab, on_retry: impl Fn() + Copy + Send + Sync + 'static) -> impl
 // Panels
 // ---------------------------------------------------------------------------
 
-/// Why the voice picker is empty, and — for a model that is not running —
-/// the one way to fill it, which says that it loads the model.
-#[component]
-fn VoiceListNote(lab: Lab) -> impl IntoView {
-    move || match lab.voice_list.get() {
-        VoiceList::NotRunning => view! {
-            <div class="row mini-note dim">
-                <span>"Voices load once the model is running."</span>
-                <button
-                    class="btn ghost sm"
-                    title="Start this model's container and ask it for its voices"
-                    on:click=move |_| lab.load_voices(true)
-                >
-                    "Load voices (starts the model)"
-                </button>
-            </div>
-        }
-        .into_any(),
-        VoiceList::Loading => view! { <p class="dim mini-note">"Loading voices…"</p> }.into_any(),
-        VoiceList::Failed(e) => view! {
-            <div class="notice err" style="margin-top:8px">
-                {format!("⚠ voice list: {e}")}
-                <button class="btn ghost sm" on:click=move |_| lab.load_voices(false)>
-                    "Retry"
-                </button>
-            </div>
-        }
-        .into_any(),
-        VoiceList::Idle | VoiceList::Loaded => ().into_any(),
-    }
-}
-
 #[component]
 fn TtsPanel(lab: Lab) -> impl IntoView {
     let f = lab.form;
     let voice_opts = Signal::derive(move || {
-        std::iter::once((String::new(), "(none)".to_string()))
-            .chain(lab.voices.get().into_iter().map(|v| (v.clone(), v)))
-            .collect::<Vec<_>>()
+        let current = f.voice.get();
+        lab.voices.with(|v| voices::voice_options(v, &current))
     });
     let clip_opts = Signal::derive(move || {
         std::iter::once((String::new(), "(none)".to_string()))
@@ -1529,8 +1414,10 @@ fn TtsPanel(lab: Lab) -> impl IntoView {
                 />
             </div>
             <VoiceListNote lab=lab/>
+            <HeldNote lab=lab/>
+            <MissingVoices lab=lab/>
             <Show when=move || {
-                lab.voice_list.get() == VoiceList::Loaded && lab.voices.with(Vec::is_empty)
+                lab.voice_list.get() == VoiceList::Loaded && lab.voices.with(voices::no_built_in)
             }>
                 <p class="dim mini-note">
                     "This model reports no built-in voices, so cloning families need a reference clip. "
@@ -1660,12 +1547,20 @@ fn AsrPanel(lab: Lab) -> impl IntoView {
                         on:change=move |ev| {
                             let el: web_sys::HtmlInputElement = event_target(&ev);
                             let file = el.files().and_then(|l| l.get(0));
+                            // A kept upload still being fetched is not put
+                            // over the file picked by hand.
+                            f.asr_reads.next();
                             f.asr_file_name
                                 .set(file.as_ref().map(|x| x.name()).unwrap_or_default());
                             f.asr_file.set_value(file);
                         }
                     />
                 </div>
+                {move || {
+                    let name = f.asr_file_name.get();
+                    (!name.is_empty())
+                        .then(|| view! { <p class="mono-sm dim al-file">{format!("file: {name}")}</p> })
+                }}
                 <p class="dim mini-note">
                     "Uploaded bytes go through the gateway's multipart re-encode — the same path an OpenAI Whisper client takes."
                 </p>
@@ -1946,29 +1841,19 @@ fn RunCard(
     /// The run in flight: it reads the live signals and offers Stop.
     #[prop(optional)]
     live: bool,
-    /// A finished run, from the history.
-    #[prop(optional)]
-    done: Option<AudioRun>,
     #[prop(optional)] on_stop: Option<Callback<()>>,
 ) -> impl IntoView {
     let rate_field = lab.form.timeline_rate;
-    let failed = done.as_ref().is_some_and(|d| !d.error.is_empty());
-    let body = move || match &done {
-        Some(d) => result_body(
-            d.result.clone(),
-            d.stats.clone(),
-            d.error.clone(),
-            rate_field,
-        ),
-        None => result_body(
+    let body = move || {
+        result_body(
             lab.result.get().unwrap_or_default(),
             lab.stats.get(),
             lab.error.get(),
             rate_field,
-        ),
+        )
     };
     view! {
-        <div class="card result-card" class:failed=failed>
+        <div class="card result-card">
             <div class="run-head">
                 <span class="run-model mono-sm" title=head.model.clone()>
                     {head.model.clone()}
@@ -2032,7 +1917,7 @@ fn result_body(
                     <audio controls src=t.url.clone()></audio>
                     <div class="row">
                         <a class="btn ghost sm" href=t.url.clone() download=t.name.clone()>
-                            {format!("Download {}", t.name)}
+                            {format!("Save {}…", t.name)}
                         </a>
                         <span class="dim mono-sm">
                             {format!(
@@ -2345,14 +2230,13 @@ fn VoiceLibrary(
     let transcribe_missing = move |_| {
         transcribing.set(Some("*".into()));
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/voice_transcribe", &json!({})).await {
-                Ok(v) => {
-                    let msg = v["message"].as_str().unwrap_or("transcribed").to_string();
-                    match v["failed"].as_array().is_some_and(|f| !f.is_empty()) {
-                        true => toasts.warn(msg),
-                        false => toasts.ok(msg),
-                    }
-                }
+            match crate::api::post::<VoiceTranscribed, _>("/api/op/voice_transcribe", &json!({}))
+                .await
+            {
+                Ok(done) => match done.failed.is_empty() {
+                    false => toasts.warn(done.message),
+                    true => toasts.ok(done.message),
+                },
                 Err(e) => lab.clips_err.set(e.to_string()),
             }
             transcribing.set(None);
@@ -2579,18 +2463,5 @@ mod tests {
         assert_eq!(track_stem("audio/kokoro"), "audio-kokoro");
         assert_eq!(track_stem("my model v1.2"), "my-model-v1.2");
         assert_eq!(track_stem(""), "audio");
-    }
-
-    #[test]
-    fn voice_entries_accept_ids_or_objects() {
-        assert_eq!(
-            voice_name(&Value::from("af_heart")).as_deref(),
-            Some("af_heart")
-        );
-        assert_eq!(
-            voice_name(&serde_json::json!({"id": "am_adam"})).as_deref(),
-            Some("am_adam")
-        );
-        assert_eq!(voice_name(&serde_json::json!({"x": 1})), None);
     }
 }

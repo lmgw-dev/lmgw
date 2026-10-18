@@ -20,7 +20,10 @@
 //! uses — never a raw POST. That is what closes the `TODO(one-path)` the mail
 //! workflow left behind: the reason it hand-rolled its request was that
 //! [`ChatRequest::passthrough`] did not exist when it was written, and the
-//! structured-output constraint had nowhere else to ride (§4.2).
+//! structured-output constraint had nowhere else to ride (§4.2). A classify
+//! through a question set is no model turn: it asks the set's decision model
+//! through the real `/v1/systemone` handler in process ([`decide`],
+//! labs-store design §4).
 //!
 //! **One tool path.** Every tool call goes through the resolved MCP surface
 //! ([`mcp_exec::resolve`] + [`SplitExecutor`]), so the owner's per-tool switch,
@@ -38,7 +41,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -48,6 +50,7 @@ use crate::agent::{
     TurnRunner,
 };
 use crate::config::Route;
+use crate::erased::Erased;
 use crate::error::GatewayError;
 use crate::ingress::responses::{ApprovalRule, McpToolSpec};
 use crate::ir::{
@@ -223,11 +226,28 @@ pub struct Row {
     pub raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The output equals the fallback, or the call failed.
+    /// The output equals the fallback, or the call failed; through a question
+    /// set also a confidence below the set's measured threshold ([`decide`]).
     pub attention: bool,
+    /// The question set that classified this row, as the run read it
+    /// ([`decide`]); `None` for the model call. "Save as labelled set" saves
+    /// a run's rows into the set stamped on them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set: Option<lmgw_api_types::AgentRowSet>,
 }
 
 impl Row {
+    /// The row carries something a call (or its failure) left: an answer, a
+    /// prompt, a raw reply, an error or a set. A row a stage only listed or
+    /// fetched, and never reached, carries none of it.
+    fn asked(&self) -> bool {
+        !self.output.is_null()
+            || self.prompt.is_some()
+            || self.raw.is_some()
+            || self.error.is_some()
+            || self.set.is_some()
+    }
+
     /// What `{{rows}}` binds to in the apply step: the identity to write
     /// against and the (possibly overridden) output — `[{ id, <output
     /// fields…> }]`, and nothing else.
@@ -343,7 +363,6 @@ pub async fn cancel_for_agent(state: &SharedState, agent_id: &str) -> Result<Str
 
 pub struct AgentRunExecutor;
 
-#[async_trait]
 impl JobExecutor for AgentRunExecutor {
     fn kind(&self) -> JobKind {
         JobKind::AgentRun
@@ -355,20 +374,22 @@ impl JobExecutor for AgentRunExecutor {
         state.agent_meters.open(id);
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input = serde_json::from_value(input)
-            .map_err(|e| format!("agent_run input (phase: {}): {e}", Phase::names()))?;
-        let out = if input.ledger {
-            super::ledger::execute(&ctx, &input).await
-        } else {
-            execute(&ctx, &input).await
-        };
-        // The result column has taken over from here, whichever way it ended.
-        ctx.state.agent_runs.clear(ctx.id);
-        // Same for the per-run meter: a run that is over cannot be stamped any
-        // more, and a map entry nobody will ever read again is a leak.
-        ctx.state.agent_meters.take(ctx.id);
-        out
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input = serde_json::from_value(input)
+                .map_err(|e| format!("agent_run input (phase: {}): {e}", Phase::names()))?;
+            let out = if input.ledger {
+                super::ledger::execute(&ctx, &input).await
+            } else {
+                execute(&ctx, &input).await
+            };
+            // The result column has taken over from here, whichever way it ended.
+            ctx.state.agent_runs.clear(ctx.id);
+            // Same for the per-run meter: a run that is over cannot be stamped any
+            // more, and a map entry nobody will ever read again is a leak.
+            ctx.state.agent_meters.take(ctx.id);
+            out
+        })
     }
 }
 
@@ -403,6 +424,10 @@ struct Run<'a> {
     /// that broke is the sentence the model was going to write about it.
     applied: Mutex<Option<Value>>,
     meter: Meter,
+    /// The question set a classify or re-run classifies through, read once
+    /// as it starts; `None` classifies with the model call (labs-store
+    /// design §4).
+    decider: Option<decide::Decider>,
 }
 
 /// Drives one model turn for a run: [`proxy::stream_once`], logged as
@@ -416,31 +441,37 @@ struct AgentRunner {
     _admission: Option<crate::vram::LocalHold>,
 }
 
-#[async_trait]
 impl TurnRunner for AgentRunner {
-    async fn run_turn(
-        &self,
-        ir: &ChatRequest,
+    fn run_turn<'a>(
+        &'a self,
+        ir: &'a ChatRequest,
         deadline: Duration,
-        sink: &mut dyn DeltaSink,
-    ) -> Result<Completion, GatewayError> {
-        proxy::stream_once(
-            &self.state,
-            self._admission.as_ref(),
-            &self.route,
-            self.fallback,
-            ir,
-            AGENT_PROTO,
-            proxy::KeyRef::default(),
-            deadline,
-            sink,
-        )
-        .await
+        sink: &'a mut dyn DeltaSink,
+    ) -> Erased<'a, Result<Completion, GatewayError>> {
+        Box::pin(async move {
+            proxy::stream_once(
+                &self.state,
+                self._admission.as_ref(),
+                &self.route,
+                self.fallback,
+                ir,
+                AGENT_PROTO,
+                proxy::KeyRef::default(),
+                deadline,
+                sink,
+            )
+            .await
+        })
     }
 }
 
-/// Load, validate, wire, dispatch.
-async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
+/// Load, validate, wire, dispatch. Erased ([`crate::erased`]): the run's
+/// whole engine, which the job's `run` awaits.
+fn execute<'a>(ctx: &'a JobCtx, input: &'a Input) -> Erased<'a, Result<JobOutcome, String>> {
+    futures::FutureExt::boxed(execute_unerased(ctx, input))
+}
+
+async fn execute_unerased(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
     let state = &ctx.state;
     let row = store::get_agent(&state.db, &input.agent_id)
         .await
@@ -499,20 +530,35 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
     }
     .with_identity(&agent.manifest.id, &agent.manifest.name, Some(ctx.id));
 
+    // A classify through a question set (labs-store design §4) is read and
+    // checked before any tool call, like the model below: a set that is gone
+    // or cannot answer the output field fails the run saying why.
+    let decider = match (input.phase.classifies(), item.output.as_ref()) {
+        (true, Some(out)) if item.user.is_some() => {
+            decide::for_run(state, out, &base.config).await?
+        }
+        _ => None,
+    };
+
     // Does this phase reach a model at all? Decided from the manifest, not
     // assumed: a list-only run and an apply that is a direct tool call both
-    // spend no tokens and must not need a servable alias to start.
+    // spend no tokens and must not need a servable alias to start. A
+    // classify through a set asks the set's model, not this one.
     let needs_model = match input.phase {
         Phase::List => false,
-        Phase::Classify | Phase::Rerun => item.user.is_some(),
+        Phase::Classify | Phase::Rerun => item.user.is_some() && decider.is_none(),
         Phase::Apply => apply.as_ref().is_some_and(Step::is_turn),
         // Refused by `dispatch` below, after the run has a result to fail
         // into. Nothing here reaches a model.
         Phase::Run => false,
     };
-    let alias = template::render_text(&agent.manifest.model.alias, &base)
-        .trim()
-        .to_string();
+    // The model the run reports: the set's when a set classifies.
+    let alias = match &decider {
+        Some(d) => d.model.clone(),
+        None => template::render_text(&agent.manifest.model.alias, &base)
+            .trim()
+            .to_string(),
+    };
 
     // Before the tool plane is even resolved, let alone called: a run whose
     // model cannot be resolved is refused **before any tool call** (§8), so a
@@ -520,11 +566,26 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
     let mut runner: Option<AgentRunner> = None;
     if needs_model {
         if alias.is_empty() {
-            return Err(format!(
-                "this agent has no model: '{}' rendered empty against the stored config. Pick \
-                 one on the Run tab.",
-                agent.manifest.model.alias
-            ));
+            // A classify of an output that can decide through a set needs
+            // the one or the other (labs-store design §4).
+            let set_field = item
+                .output
+                .as_ref()
+                .and_then(|o| o.decide_field())
+                .filter(|_| input.phase.classifies());
+            return Err(match set_field {
+                Some(field) => format!(
+                    "this agent has no model and no question set: '{}' rendered empty against \
+                     the stored config, and '{field}' names no set. Pick a model or a question \
+                     set on the Run tab.",
+                    agent.manifest.model.alias
+                ),
+                None => format!(
+                    "this agent has no model: '{}' rendered empty against the stored config. \
+                     Pick one on the Run tab.",
+                    agent.manifest.model.alias
+                ),
+            });
         }
         // The gate's per-request half: the hold swap, then one admission for
         // the whole run, like a tool loop's (§9b) — the concurrent classify
@@ -602,6 +663,7 @@ async fn execute(ctx: &JobCtx, input: &Input) -> Result<JobOutcome, String> {
         overlay: Mutex::new(None),
         applied: Mutex::new(None),
         meter: Meter::default(),
+        decider,
     };
     run.dispatch(input).await
 }
@@ -671,9 +733,12 @@ async fn resolve_tools(state: &SharedState, m: &Manifest) -> Result<ResolvedTool
     // agent only at `full`, where it can also widen its own scope (the
     // pre-merge review's P-3), so the device's tool scope is not applied
     // here (the branch review's verification, V-6).
-    let resolved = mcp_exec::resolve(state, &specs, &crate::mcp::scope::ToolScope::gateway()).await;
-    if let Some((label, why)) = resolved.failed.first() {
-        return Err(format!("MCP server '{label}': {why}"));
+    // The manifest's labels, which the owner installed: a failure says its
+    // real reason, as a thread's attached label does.
+    let resolved =
+        mcp_exec::resolve_attached(state, &specs, &crate::mcp::scope::ToolScope::gateway()).await;
+    if let Some(f) = resolved.failed.first() {
+        return Err(format!("MCP server '{}': {}", f.label, f.why));
     }
     Ok((resolved.tools, resolved.builtin, resolved.servers))
 }
@@ -803,11 +868,43 @@ struct RunSink<'a> {
     seen: Seen,
 }
 
-#[async_trait]
 impl agent::EventSink for RunSink<'_> {
-    async fn emit(&mut self, ev: LoopEvent) -> bool {
-        self.seen.note(&ev);
-        !self.ctx.canceled()
+    fn emit<'a>(&'a mut self, ev: LoopEvent) -> Erased<'a, bool> {
+        Box::pin(async move {
+            self.seen.note(&ev);
+            !self.ctx.canceled()
+        })
+    }
+}
+
+/// The classify step through a question set (labs-store design §4).
+pub mod decide;
+
+/// One item's classify, as [`Run::classify_stage`]'s loop reads it.
+struct Classified {
+    row: Row,
+    /// The HTTP status of a *failed* call, which is what tells "the model is
+    /// unreachable" from "this one item went wrong" (§2.4's early abort
+    /// counts it at 5xx).
+    failed: Option<u16>,
+    meter: Meter,
+    /// The model answered, which switches the early abort off.
+    answered: bool,
+    /// lmgw refused the call with what it would answer every item
+    /// ([`decide`]): the stage stops and the run fails with it.
+    stop: Option<String>,
+}
+
+impl Classified {
+    /// `row` as it is, no call made or none that counts.
+    fn left(row: Row) -> Self {
+        Self {
+            row,
+            failed: None,
+            meter: Meter::default(),
+            answered: false,
+            stop: None,
+        }
     }
 }
 
@@ -866,7 +963,9 @@ impl Run<'_> {
         let merged = match self.overlay.lock().unwrap().as_ref() {
             Some(base) => {
                 let mut full = base.clone();
-                for fresh in rows.iter().filter(|r| !r.id.is_empty()) {
+                // A re-run's rows not re-asked (yet, or at all when it
+                // stops early) keep the base run's values.
+                for fresh in rows.iter().filter(|r| !r.id.is_empty() && r.asked()) {
                     if let Some(slot) = full.iter_mut().find(|b| b.id == fresh.id) {
                         *slot = fresh.clone();
                     }
@@ -1542,6 +1641,7 @@ impl Run<'_> {
         let mut infra_errs = 0usize;
         let mut fatal_seen: Option<String> = None;
         let mut fatal: Option<String> = None;
+        let mut stopped: Option<String> = None;
         let mut canceled = false;
         let mut meter = Meter::default();
         {
@@ -1550,15 +1650,35 @@ impl Run<'_> {
             }))
             .buffer_unordered(conc);
             let mut done = 0u64;
-            while let Some((i, (row, fail, m))) = s.next().await {
-                // A row the model actually answered. A row that was *skipped*
-                // (no id, or its fetch already failed) reports no failure
-                // either, and counting that as a success would switch the
-                // early abort off for the whole run — one unfetchable first
-                // item and a dead model would tag all fifty rows `fallback`,
-                // which is the outcome §2.4 exists to prevent.
-                let answered = m.model_calls > 0;
+            while let Some((i, c)) = s.next().await {
+                let Classified {
+                    row,
+                    failed: fail,
+                    meter: m,
+                    answered,
+                    stop,
+                } = c;
+                // `answered`: a row the model actually answered. A row that
+                // was *skipped* (no id, or its fetch already failed) reports
+                // no failure either, and counting that as a success would
+                // switch the early abort off for the whole run — one
+                // unfetchable first item and a dead model would tag all fifty
+                // rows `fallback`, which is the outcome §2.4 exists to
+                // prevent.
                 meter.absorb(m);
+                // lmgw's refusal that every row would get (a question set's
+                // call, `decide`): no row's answer. The stage stops at once,
+                // dropping the calls in flight as the early abort does, and
+                // the run fails with it; the rows answered so far stay, as a
+                // cancel keeps them.
+                if let Some(why) = stop {
+                    stopped = Some(format!(
+                        "stopped at row {}: {why}. The {done} of {total} rows done before it are \
+                         kept; start the run again once that is fixed",
+                        row.id
+                    ));
+                    break;
+                }
                 let failed = row.error.clone();
                 rows[i] = row;
                 done += 1;
@@ -1595,42 +1715,52 @@ impl Run<'_> {
         if let Some(why) = fatal {
             return Err((format!("model unavailable: {why}"), meter));
         }
+        if let Some(why) = stopped {
+            return Err((why, meter));
+        }
         Ok((rows, meter, canceled))
     }
 
     /// One item's classify call: the rendered prompt, the output schema as
-    /// `response_format`, the reply matched back onto the output (§4.2).
-    ///
-    /// The second tuple element is the HTTP status of a *failed* call, which is
-    /// what tells "the model is unreachable" from "this one item went wrong".
-    async fn classify_one(
-        &self,
-        item: &BatchItem,
-        mut row: Row,
-        fetched: Value,
-    ) -> (Row, Option<u16>, Meter) {
-        let meter = Meter::default();
+    /// `response_format`, the reply matched back onto the output (§4.2); or,
+    /// with a question set, the set's question asked of the prompt
+    /// ([`decide`]).
+    async fn classify_one(&self, item: &BatchItem, mut row: Row, fetched: Value) -> Classified {
         let Some(out) = &item.output else {
-            return (row, None, meter);
+            return Classified::left(row);
         };
         // A row with no id, or one whose fetch failed, is already an attention
         // row; §4.6 gives it the fallback rather than a model call.
         if row.id.is_empty() || row.error.is_some() {
             row.output = fallback_output(out);
             row.attention = true;
-            return (row, None, meter);
+            return Classified::left(row);
         }
-        let Some(runner) = self.runner else {
-            row.error = Some("no model was resolved for this run".to_string());
-            row.output = fallback_output(out);
-            row.attention = true;
-            return (row, None, meter);
-        };
 
         let mut tctx = self.base.clone();
         tctx.item = row.item.clone();
         tctx.fetched = fetched;
         let user = template::render_text(item.user.as_deref().unwrap_or_default(), &tctx);
+        // Through the set: its model's row is the run's, metered as a stamped
+        // call is (the run's result reads `agent_meters`).
+        if let Some(d) = &self.decider {
+            let cancel = self.cancel();
+            let done =
+                decide::classify(&self.ctx.state, self.ctx.id, &cancel, d, out, row, user).await;
+            return Classified {
+                row: done.row,
+                failed: done.failed,
+                meter: Meter::default(),
+                answered: done.answered,
+                stop: done.stop,
+            };
+        }
+        let Some(runner) = self.runner else {
+            row.error = Some("no model was resolved for this run".to_string());
+            row.output = fallback_output(out);
+            row.attention = true;
+            return Classified::left(row);
+        };
         row.prompt = Some(user.clone());
         let mut messages: Vec<Message> = Vec::new();
         if let Some(s) = &item.system {
@@ -1680,10 +1810,11 @@ impl Run<'_> {
             .guard(metered.run_turn(&ir, self.budget.wall_clock, &mut Discard))
             .await
         else {
-            return (row, None, meter);
+            return Classified::left(row);
         };
         let meter = metered.tally();
-        match answer {
+        let answered = meter.model_calls > 0;
+        let failed = match answer {
             Ok(completion) => {
                 let reply = completion_text(&completion);
                 let (value, is_fallback) = parse_reply(&reply, out, &self.base.config);
@@ -1692,15 +1823,22 @@ impl Run<'_> {
                 row.raw = Some(reply.trim().to_string());
                 row.output = value;
                 row.attention = is_fallback;
-                (row, None, meter)
+                None
             }
             Err(e) => {
                 let status = e.http_status().as_u16();
                 row.error = Some(e.to_string());
                 row.output = fallback_output(out);
                 row.attention = true;
-                (row, Some(status), meter)
+                Some(status)
             }
+        };
+        Classified {
+            row,
+            failed,
+            meter,
+            answered,
+            stop: None,
         }
     }
 
@@ -1763,7 +1901,11 @@ impl Run<'_> {
         let staged = self.classify_stage(Phase::Rerun, &item, pairs).await;
         let (redone, canceled) = self.fold_stage(staged)?;
         for (slot, row) in targets.iter().zip(redone) {
-            rows[*slot] = row;
+            // A row the stage never reached (a stop, a cancel, the early
+            // abort) keeps the base run's values, attention included.
+            if row.asked() {
+                rows[*slot] = row;
+            }
         }
         *self.overlay.lock().unwrap() = None;
         self.publish(&rows);
@@ -2407,27 +2549,28 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl ToolExecutor for FakeExec {
-        async fn call(&self, name: &str, args: &Value) -> ToolOutcome {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((name.to_string(), args.clone()));
-            if let Some(entered) = &self.entered {
-                entered.notify_one();
-                std::future::pending::<()>().await;
-            }
-            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            self.peak.fetch_max(now, Ordering::SeqCst);
-            if self.slow {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            self.in_flight.fetch_sub(1, Ordering::SeqCst);
-            match self.replies.get(name) {
-                Some(o) => o.clone(),
-                None => ToolOutcome::error(format!("no such tool '{name}'")),
-            }
+        fn call<'a>(&'a self, name: &'a str, args: &'a Value) -> Erased<'a, ToolOutcome> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), args.clone()));
+                if let Some(entered) = &self.entered {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                if self.slow {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                match self.replies.get(name) {
+                    Some(o) => o.clone(),
+                    None => ToolOutcome::error(format!("no such tool '{name}'")),
+                }
+            })
         }
     }
 
@@ -2526,37 +2669,38 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl TurnRunner for FakeRunner {
-        async fn run_turn(
-            &self,
-            ir: &ChatRequest,
+        fn run_turn<'a>(
+            &'a self,
+            ir: &'a ChatRequest,
             _deadline: Duration,
-            _sink: &mut dyn DeltaSink,
-        ) -> Result<Completion, GatewayError> {
-            self.seen.lock().unwrap().push(ir.clone());
-            if let Some((state, job_id)) = &self.peek {
-                let n = state.agent_runs.rows(*job_id).map(|r| r.len()).unwrap_or(0);
-                self.peeked.lock().unwrap().push(n);
-            }
-            if let Some(entered) = &self.entered {
-                entered.notify_one();
-                std::future::pending::<()>().await;
-            }
-            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            self.peak.fetch_max(now, Ordering::SeqCst);
-            if self.slow {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            self.in_flight.fetch_sub(1, Ordering::SeqCst);
-            if let Some(flag) = &self.trip {
-                flag.store(true, Ordering::SeqCst);
-            }
-            let next = self.script.lock().unwrap().pop();
-            match next {
-                Some(turn) => turn,
-                None => Err(GatewayError::BadRequest("the script ran out".into())),
-            }
+            _sink: &'a mut dyn DeltaSink,
+        ) -> Erased<'a, Result<Completion, GatewayError>> {
+            Box::pin(async move {
+                self.seen.lock().unwrap().push(ir.clone());
+                if let Some((state, job_id)) = &self.peek {
+                    let n = state.agent_runs.rows(*job_id).map(|r| r.len()).unwrap_or(0);
+                    self.peeked.lock().unwrap().push(n);
+                }
+                if let Some(entered) = &self.entered {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                if self.slow {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                if let Some(flag) = &self.trip {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                let next = self.script.lock().unwrap().pop();
+                match next {
+                    Some(turn) => turn,
+                    None => Err(GatewayError::BadRequest("the script ran out".into())),
+                }
+            })
         }
     }
 
@@ -2732,6 +2876,7 @@ mod tests {
                 overlay: Mutex::new(None),
                 applied: Mutex::new(None),
                 meter: Meter::default(),
+                decider: None,
             }
         }
     }
@@ -3744,6 +3889,7 @@ mod tests {
             enum_from: Some("config.categories".into()),
             schema: None,
             fallback: Some(json!("Other")),
+            decide: None,
         };
         let config = json!({ "categories": ["Work", "Finance"] });
         assert_eq!(

@@ -219,9 +219,8 @@ async fn unbound_with_lmgw(
     w: &World,
     d: &Device,
 ) -> (crate::support::realtime_fakes::Ws, Vec<String>) {
-    let bearer = format!("Bearer {}", d.key);
     let mut ws = w
-        .connect("model=chatty", &[("authorization", bearer.as_str())])
+        .connect_as(d, "model=chatty")
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut ws).await["type"], "session.created");
@@ -276,12 +275,8 @@ async fn the_gateway_s_level_lowered_narrows_a_device_at_full_at_once() {
 
     let (mut unbound, names) = unbound_with_lmgw(&w, &desk).await;
     assert!(names.contains(&"mcp_server_set".to_string()), "{names:?}");
-    let bearer = format!("Bearer {}", desk.key);
     let mut bound = w
-        .connect(
-            &format!("chat_thread={}", tools.id),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={}", tools.id))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut bound).await["type"], "session.created");
@@ -451,12 +446,8 @@ async fn the_gateway_s_level_set_to_off_hides_the_toolset_from_every_device() {
     drop(away);
     let (s, _) = get(&w, &desk.client, &format!("/chat/api/threads/{}", tools.id)).await;
     assert_eq!(s, 200, "read only sees the toolset's thread");
-    let bearer = format!("Bearer {}", desk.key);
     let mut bound = w
-        .connect(
-            &format!("chat_thread={}", tools.id),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&desk, &format!("chat_thread={}", tools.id))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     assert_eq!(next(&mut bound).await["type"], "session.created");

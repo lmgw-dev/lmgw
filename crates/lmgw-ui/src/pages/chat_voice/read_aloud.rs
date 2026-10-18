@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 
 use super::super::audio_stream::b64_decode;
 use super::super::chat::ChatThread;
-use super::super::chat_stream::{send_stream, ChatEvent};
+use super::super::chat_stream::{send_stream, ChatEvent, VoiceEvent};
 use super::audio::player::{self, Awake, Player};
 use super::spoken::ms_text;
 use super::state::{block_refusal, refusal_link, speech_lead, Note, NoteKind};
@@ -138,8 +138,8 @@ pub(crate) struct LiveSpeech {
 
 impl LiveSpeech {
     /// A voice frame of the turn's stream.
-    pub(crate) fn frame(&self, name: &str, data: &Value) {
-        self.ra.frame(&self.pb, name, data);
+    pub(crate) fn frame(&self, ev: &VoiceEvent) {
+        self.ra.frame(&self.pb, ev);
     }
 
     /// The text's `done`: the reply is complete; the speech may go on.
@@ -255,8 +255,8 @@ impl ReadAloud {
             let url = format!("/chat/api/threads/{tid}/messages/{mid}/speak");
             let feed = pb.clone();
             let res = send_stream(&url, &json!({}), &signal, move |ev| {
-                if let ChatEvent::Voice(name, data) = ev {
-                    me.frame(&feed, name, &data);
+                if let ChatEvent::Voice(ev) = ev {
+                    me.frame(&feed, &ev);
                 }
             })
             .await;
@@ -393,40 +393,41 @@ impl ReadAloud {
     }
 
     /// One voice frame of `pb`'s stream.
-    fn frame(&self, pb: &Rc<Playback>, name: &str, data: &Value) {
-        if name == "state" {
-            // A turn's own model (`chat`) is said whatever the speech does.
-            let tts = data["stage"].as_str() == Some("tts");
-            if !(tts && pb.stopped.get()) {
-                self.status.state_frame(data);
-            }
-            return;
+    fn frame(&self, pb: &Rc<Playback>, ev: &VoiceEvent) {
+        let VoiceEvent::State(data) = ev else {
+            return self.speech_frame(pb, ev);
+        };
+        // A turn's own model (`chat`) is said whatever the speech does.
+        let tts = data["stage"].as_str() == Some("tts");
+        if !(tts && pb.stopped.get()) {
+            self.status.state_frame(data);
         }
+    }
+
+    /// One of the speech's own frames of `pb`'s stream.
+    fn speech_frame(&self, pb: &Rc<Playback>, ev: &VoiceEvent) {
         if pb.stopped.get() || pb.over.get() {
             return;
         }
         let key = pb.key;
-        match name {
-            "voice" => {
-                let tts = data["tts"].as_str().map(str::to_string);
-                let by = data["tts_answered_by"].as_str().map(str::to_string);
-                if let (Some(t), Some(b)) = (&tts, &by) {
-                    if t != b {
-                        self.status.set(Note::new(
-                            "tts",
-                            NoteKind::Warn,
-                            format!("read-aloud: {b} speaks in place of {t}"),
-                        ));
-                    }
+        match ev {
+            VoiceEvent::State(_) => {}
+            VoiceEvent::Voice(v) => {
+                if let Some(by) = v.tts_answered_by.as_ref().filter(|by| **by != v.tts) {
+                    self.status.set(Note::new(
+                        "tts",
+                        NoteKind::Warn,
+                        format!("read-aloud: {by} speaks in place of {}", v.tts),
+                    ));
                 }
                 self.facts_update(key, |f| {
-                    f.tts = tts;
-                    f.voice = data["voice"].as_str().map(str::to_string);
-                    f.answered_by = by;
+                    f.tts = Some(v.tts.clone());
+                    f.voice = v.voice.clone();
+                    f.answered_by = v.tts_answered_by.clone();
                 });
             }
-            "speech" => {
-                let Some(pcm) = data["pcm"].as_str().and_then(b64_decode) else {
+            VoiceEvent::Speech(clause) => {
+                let Some(pcm) = b64_decode(&clause.pcm) else {
                     return;
                 };
                 if !pb.any_speech.replace(true) {
@@ -446,21 +447,20 @@ impl ReadAloud {
                     _ => s.waiting.push(pcm),
                 }
             }
-            "speech_done" => {
+            VoiceEvent::SpeechDone(done) => {
                 pb.ended.set(true);
                 self.facts_update(key, |f| {
-                    f.first_audio_ms = data["first_audio_ms"].as_u64();
-                    f.audio_ms = data["audio_ms"].as_u64();
+                    f.first_audio_ms = done.first_audio_ms;
+                    f.audio_ms = Some(done.audio_ms);
                     if f.tts.is_none() {
-                        f.tts = data["tts"].as_str().map(str::to_string);
+                        f.tts = Some(done.tts.clone());
                     }
                 });
                 self.end_item(pb);
             }
-            "speech_error" => {
+            VoiceEvent::SpeechError(e) => {
                 pb.ended.set(true);
-                let code = data["code"].as_str().unwrap_or_default();
-                let message = data["message"].as_str().unwrap_or("the voice failed");
+                let (code, message) = (e.code.as_str(), e.message.as_str());
                 let (kind, text) = match (
                     block_refusal(code, "read-aloud", message),
                     speech_lead(code),
@@ -478,7 +478,6 @@ impl ReadAloud {
                 // What was said before it still plays.
                 self.end_item(pb);
             }
-            _ => {}
         }
     }
 

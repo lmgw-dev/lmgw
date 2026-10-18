@@ -191,7 +191,9 @@ async fn catalog_refresh_install_and_serve_round_trip() {
     // Nothing cached: the endpoint answers empty rather than hitting the
     // network, and installing is refused until an explicit refresh.
     let v = get_json(&base, "/api/audio/catalog").await;
-    assert_eq!(v["fetched_at"], json!(""));
+    // A never-fetched catalog leaves `fetched_at` and `warnings` out.
+    assert!(v.get("fetched_at").is_none(), "{v}");
+    assert!(v.get("warnings").is_none(), "{v}");
     assert_eq!(v["families"], json!([]));
     let (status, body) = op(
         &base,
@@ -228,6 +230,10 @@ async fn catalog_refresh_install_and_serve_round_trip() {
     let v = get_json(&base, "/api/audio/catalog").await;
     assert!(!v["fetched_at"].as_str().unwrap().is_empty());
     let fam = &v["families"][0];
+    // The dashboard's catalog carries each family's options as the object,
+    // and no summary sentence.
+    assert!(fam["options"].is_object(), "{fam}");
+    assert!(fam.get("options_summary").is_none(), "{fam}");
     assert_eq!(fam["family"], json!("pocket_tts"));
     assert_eq!(fam["display_name"], json!("Pocket TTS"));
     assert_eq!(fam["category"], json!("tts"));

@@ -149,6 +149,27 @@ pub(crate) const TAGS: &[TagDef] = &[
                        and run it through the same handlers.",
     },
     TagDef {
+        id: "decision-lab",
+        name: "Decision lab",
+        group: Group::DashboardApi,
+        description: "The dashboard's System One playground: the models that answer \
+                       /v1/systemone with their header facts and token limits, the token \
+                       gauge, and Ask, which stores a group (models × variants) whose cells \
+                       run one at a time through the same handler as /v1/systemone and are \
+                       kept in the lab store.",
+    },
+    TagDef {
+        id: "labs",
+        name: "Lab store",
+        group: Group::DashboardApi,
+        description: "What the labs keep, one store for all three: each lab's history of \
+                       groups (one click: the form, the plan, the override) and runs (one \
+                       dispatch: the request and answer as the texts that went and came), the \
+                       artifact files they name, the size it all takes, deleting a group or a \
+                       whole lab, and the JSONL, zip or CSV export. Nothing is deleted by age \
+                       or count.",
+    },
+    TagDef {
         id: "agents",
         name: "Agents",
         group: Group::DashboardApi,
@@ -159,18 +180,31 @@ pub(crate) const TAGS: &[TagDef] = &[
         id: "chat",
         name: "Chat",
         group: Group::DeviceApi,
-        description: "The Chat API a client app uses with its device key (the `chat` \
-                       capability): the threads and folders it follows, an ongoing \
-                       conversation's current thread, and the change feed that keeps them \
-                       current. Every route here refuses a device key with 401 \
-                       device_key_unknown once it matches no device (it was rotated or \
-                       deleted: pair the device again), 401 device_disabled while the device \
-                       is disabled, and 401 key_expired past its expiry date. What is open \
-                       when that happens ends: the feed with `revoked`, a turn's stream with \
-                       an `error` event whose code is revoked. Both carry `kind`, what to do: \
-                       device_disabled and key_expired wait for the gateway's side, \
-                       key_unknown means pair the device again, and revoked is any other \
-                       kind of key's revocation.",
+        description: "The Chat API a client app uses as a paired device (the `chat` \
+                       capability), with its client certificate on the device listener: the \
+                       threads and folders it follows, an ongoing conversation's current \
+                       thread, and the change feed that keeps them current. Every route here \
+                       refuses a device with 401 device_key_unknown once its key opens no \
+                       device (it was replaced or deleted: pair the device again), 403 \
+                       device_unconfirmed until the owner confirms its enrolment, 401 \
+                       device_disabled while the device is disabled, 401 \
+                       device_certificate_expired past its certificate's notAfter, and 401 \
+                       key_expired past its expiry date. What is open when that happens ends: \
+                       the feed with `revoked`, a turn's stream with an `error` event whose \
+                       code is revoked. Both carry `kind`, what to do: device_disabled and \
+                       key_expired wait for the gateway's side, key_unknown and \
+                       certificate_expired mean pair the device again, and revoked is any \
+                       other kind of key's revocation.",
+    },
+    TagDef {
+        id: "devices",
+        name: "Devices",
+        group: Group::DeviceApi,
+        description: "The device listener's own routes (device link design §4.6): served \
+                       on the device listener only, over TLS 1.3, and the 404 an unknown \
+                       path is on the plain listener. Their bodies are at most 16 KiB \
+                       (16384 bytes), refused 413 body_too_large naming it, not \
+                       max_body_mb. Every answer carries Connection: close.",
     },
     // -- Ops ---------------------------------------------------------------
     // No human names were carried over from the design table (§4.3 lists ids

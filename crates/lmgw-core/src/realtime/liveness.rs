@@ -20,8 +20,8 @@
 //!
 //! **A verdict looks at what was read first** ([`Liveness::answered_meanwhile`]).
 //! The core can be busy past a tick — a large append, a writer with no room
-//! — while the client's pong already waits for it (`inbox`: the socket's
-//! reader passes frames on as they come); the session's unbiased `select!`
+//! — while the client's pong already waits for it (`link::inbox`: the
+//! link's reader passes frames on as they come); the session's unbiased `select!`
 //! can then take the overdue tick before the frame, and a client that did
 //! answer would be closed (WP1c review #6). So before closing, every frame
 //! already read is looked at: a pong lifts the verdict, and the rest stay
@@ -34,24 +34,25 @@
 //!
 //! **The round trip** of each ping is measured as well (`round_trip`): the
 //! barge-in window's end leans on it (§6.4).
+//!
+//! **The evidence is the link's** (calls design §7.1): on a WebSocket, the
+//! pings its sink sends and the pongs its reader passes on as
+//! [`Incoming::Pong`] (`link::ws`), which measure the round trip too. A
+//! WebRTC call is never pinged: its verdicts read the client's traffic and
+//! its acknowledgements of the session's output, two facts apart (`call`,
+//! calls design §8.1), on the same interval, with the same grace and the
+//! same look at what was read first.
 
 use std::time::Duration;
 
+pub(crate) mod call;
 mod round_trip;
 
 pub(crate) use round_trip::RoundTrip;
 
-use axum::extract::ws::Message;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
-use super::inbox::Inbox;
-
-/// What the socket's read half yields, kept as it came.
-pub(crate) type Frame = Option<Result<Message, axum::Error>>;
-
-/// RFC 6455 "unexpected condition" — what the `websockets` library behind
-/// openai-python closes a keepalive timeout with.
-pub(crate) const CLOSE_NO_PONG: u16 = 1011;
+use super::link::{End, Inbox, Incoming};
 
 /// What a tick of the liveness clock asks for.
 pub(crate) enum Beat {
@@ -73,23 +74,15 @@ pub(crate) enum Answer {
     Nothing,
 }
 
-/// How a client's read side ended (A2 review 1): the session closes the
-/// way the reader loop would have for the same frame.
-#[derive(Debug)]
-pub(crate) enum End {
-    /// A close frame, or the end of the stream.
-    Closed,
-    /// A failed read — a frame over the size limit, say, which closes with
-    /// 1009 and a reason naming the setting.
-    Failed(axum::Error),
-}
-
 pub(crate) struct Liveness {
-    /// `None`: `realtime.ping_interval_s` is 0.
+    /// `None`: `realtime.ping_interval_s` is 0, or the session is a call's.
     clock: Option<Interval>,
     every: Duration,
     /// A ping went out and no pong has come back yet.
     unanswered: bool,
+    /// A call's evidence (`call`), whose verdicts take the pings' place;
+    /// `None` on a WebSocket, and at 0.
+    call: Option<call::Watch>,
 }
 
 impl Liveness {
@@ -110,11 +103,28 @@ impl Liveness {
             clock,
             every,
             unanswered: false,
+            call: None,
         }
     }
 
-    /// The next tick; never, when the check is off.
+    /// A call's check (module doc): its evidence watched every
+    /// `ping_interval_s`, no pings; off at 0.
+    pub fn for_call(ping_interval_s: u32, watch: call::Watch) -> Self {
+        let every = Duration::from_secs(u64::from(ping_interval_s));
+        Self {
+            clock: None,
+            every,
+            unanswered: false,
+            call: (!every.is_zero()).then_some(watch),
+        }
+    }
+
+    /// The next tick; never, when the check is off. A call's never asks for
+    /// a ping: only its verdict comes.
     pub async fn beat(&mut self) -> Beat {
+        if let Some(call) = &mut self.call {
+            return Beat::Dead(call.verdict(self.every).await);
+        }
         let Some(clock) = &mut self.clock else {
             return std::future::pending().await;
         };
@@ -136,7 +146,7 @@ impl Liveness {
     /// How long the writer may take to drain once the session is over;
     /// `None` when the check is off.
     pub fn grace(&self) -> Option<Duration> {
-        self.clock.is_some().then_some(self.every)
+        (self.clock.is_some() || self.call.is_some()).then_some(self.every)
     }
 
     /// Before a [`Beat::Dead`] verdict (module doc): look at every frame
@@ -147,39 +157,35 @@ impl Liveness {
     /// session to handle before it reads on.
     pub fn answered_meanwhile(&mut self, inbox: &mut Inbox) -> Answer {
         while let Some(read) = inbox.ready() {
-            match &read.frame {
-                Some(Ok(Message::Pong(_))) => {
-                    inbox.consumed(read);
-                    self.pong();
-                    return Answer::Pong;
-                }
-                // Not queued: the session ends here (module doc).
-                None | Some(Ok(Message::Close(_))) => {
-                    inbox.consumed(read);
-                    return Answer::Ended(End::Closed);
-                }
-                Some(Err(_)) => {
-                    return Answer::Ended(match inbox.consumed(read) {
-                        Some(Err(e)) => End::Failed(e),
-                        _ => End::Closed,
-                    })
-                }
-                _ => inbox.keep(read),
+            if !matches!(read.what, Incoming::Pong | Incoming::End(_)) {
+                inbox.keep(read);
+                continue;
             }
+            return match inbox.consumed(read) {
+                // Not queued: the session ends here (module doc).
+                Incoming::End(end) => Answer::Ended(end),
+                _ => {
+                    self.pong();
+                    Answer::Pong
+                }
+            };
         }
         Answer::Nothing
     }
 
-    /// Whether pings are sent at all (`realtime.ping_interval_s` > 0).
-    pub fn on(&self) -> bool {
+    /// Whether pings are sent at all: a WebSocket's check, with
+    /// `realtime.ping_interval_s` > 0.
+    pub fn pings(&self) -> bool {
         self.clock.is_some()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::extract::ws::Message;
     use futures::StreamExt;
 
+    use super::super::link::ws;
     use super::*;
 
     #[tokio::test]
@@ -221,9 +227,9 @@ mod tests {
     async fn read(frames: Vec<Result<Message, axum::Error>>, ended: bool) -> Inbox {
         let socket = futures::stream::iter(frames);
         let inbox = if ended {
-            Inbox::spawn(socket, usize::MAX, Default::default())
+            ws::reader(socket, usize::MAX, Default::default())
         } else {
-            Inbox::spawn(
+            ws::reader(
                 socket.chain(futures::stream::pending()),
                 usize::MAX,
                 Default::default(),
@@ -249,8 +255,8 @@ mod tests {
         // on — the pong taken.
         let mut order = Vec::new();
         for _ in 0..3 {
-            match inbox.next().await.frame {
-                Some(Ok(Message::Text(t))) => order.push(t.to_string()),
+            match inbox.next().await.what {
+                Incoming::Event(t) => order.push(t.as_str().to_owned()),
                 other => panic!("{other:?}"),
             }
         }
@@ -262,10 +268,7 @@ mod tests {
         let mut l = Liveness::every(Duration::from_millis(20));
         let mut inbox = read(vec![text("a")], false).await;
         assert!(matches!(l.answered_meanwhile(&mut inbox), Answer::Nothing));
-        assert!(matches!(
-            inbox.next().await.frame,
-            Some(Ok(Message::Text(_)))
-        ));
+        assert!(matches!(inbox.next().await.what, Incoming::Event(_)));
 
         // The end of the stream, a close and a failed read (a frame over the
         // size limit) are each the end, never an answer — and the verdict's

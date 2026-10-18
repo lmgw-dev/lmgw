@@ -13,10 +13,10 @@
 //! `server.rs`: it is not under `/v1`, and every route `server.rs` registers
 //! is mounted there (§0 finding 6, `tests/it/route_walk.rs`).
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -96,7 +96,7 @@ async fn tokenize(
     } = match admit_counter(
         &state,
         &alias,
-        RouteCheck::Text("/tokenize"),
+        RouteCheck::Count("/tokenize"),
         false,
         Some(&mut row),
     )
@@ -146,7 +146,7 @@ async fn tokenize(
     // Relayed as the backend answered — its ids, and its own errors too: a
     // llama.cpp client reads llama.cpp's refusals already.
     let status = resp.status();
-    let content_type = resp.headers().get(header::CONTENT_TYPE).cloned();
+    let relayed = super::relay::RelayedHead::of(resp.headers());
     let bytes = resp.bytes().await;
     // Read to the end: the container no longer has to stay up for it.
     drop(hold);
@@ -177,24 +177,28 @@ async fn tokenize(
     } else {
         row.answered(status.as_u16(), None).await;
     }
-    let mut out = Response::builder().status(status.as_u16());
-    if let Some(ct) = content_type {
-        out = out.header(header::CONTENT_TYPE, ct);
-    }
-    headers.stamp(
-        out.body(Body::from(bytes))
-            .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()),
-    )
+    headers.stamp(relayed.response(status, bytes))
 }
 
-/// The client's object, from whatever bytes it posted: the body limit's
-/// `413` when the stream tripped it (`body_limit_mw`'s `Limited` wrapper), a
+/// The client's object, from whatever bytes it posted ([`read_bytes`]): a
 /// `400` when the bytes are not a JSON value.
 fn read_body(
     state: &SharedState,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Value, GatewayError> {
-    let bytes = body.map_err(|e| {
+    serde_json::from_slice(&read_bytes(state, body)?)
+        .map_err(|e| GatewayError::BadRequest(format!("the body is not JSON: {e}")))
+}
+
+/// Whatever bytes a llama.cpp-dialect route was posted, `Content-Type` or
+/// not: the body limit's `413` when the stream tripped it (`body_limit_mw`'s
+/// `Limited` wrapper), a `400` when it could not be read. `/v1/systemone`
+/// reads its body here too (decision-models design §2.1).
+pub(super) fn read_bytes(
+    state: &SharedState,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Bytes, GatewayError> {
+    body.map_err(|e| {
         if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
             GatewayError::BodyTooLarge {
                 max_mb: state.snapshot().settings.max_body_mb,
@@ -202,13 +206,11 @@ fn read_body(
         } else {
             GatewayError::BadRequest(e.body_text())
         }
-    })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| GatewayError::BadRequest(format!("the body is not JSON: {e}")))
+    })
 }
 
 /// A [`GatewayError`] in llama.cpp's error shape ([`llama_error`]).
-fn llama_error_of(e: &GatewayError) -> Response {
+pub(super) fn llama_error_of(e: &GatewayError) -> Response {
     llama_error(e.http_status(), &e.to_string(), e.code())
 }
 

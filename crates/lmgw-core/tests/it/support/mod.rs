@@ -1,8 +1,13 @@
+pub mod agent_world;
 pub mod audio_world;
 pub mod audiocpp_gguf;
 pub mod audiocpp_options;
 pub mod backends_fake;
 pub mod bench_fake;
+pub mod decision_world;
+pub mod device_link;
+pub mod device_pair;
+pub mod docs_world;
 pub mod golden;
 pub mod gpu_world;
 pub mod live_vram;
@@ -15,3 +20,4 @@ pub mod realtime_mcp;
 pub mod realtime_mic;
 pub mod realtime_tts;
 pub mod rust_source;
+pub mod self_admin;

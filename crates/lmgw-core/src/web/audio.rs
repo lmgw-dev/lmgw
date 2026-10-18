@@ -336,11 +336,12 @@ pub(crate) fn catalog_view(
                 builtin_voices: spec.builtin_voices.clone(),
                 default_voice: spec.default_voice.clone().unwrap_or_default(),
                 capabilities: spec.capabilities.clone(),
-                options: dto::AudioFamilyOptions {
+                options: Some(dto::AudioFamilyOptions {
                     request: spec.options.request.iter().map(option).collect(),
                     load: spec.options.load.iter().map(option).collect(),
                     session: spec.options.session.iter().map(option).collect(),
-                },
+                }),
+                options_summary: None,
                 any_installed: packages.iter().any(|p| p.installed),
                 // A package of it is loaded — not merely "a row names this
                 // family", which also held for a row loading nothing at all.
@@ -363,7 +364,7 @@ pub(crate) fn catalog_view(
         warnings.insert(0, NOT_CHECKED.to_string());
     }
     dto::AudioCatalog {
-        fetched_at: snapshot.fetched_at.clone(),
+        fetched_at: Some(snapshot.fetched_at.clone()),
         families,
         warnings,
     }
@@ -554,26 +555,17 @@ pub(crate) async fn catalog_download(
         ),
         false => String::new(),
     };
-    // Hand back the queued rows so the caller can follow its own download
-    // instead of diffing the whole tracked list (same as `ops::hf_add`).
-    let tracked = store::list_hf_models(&state.db).await.unwrap_or_default();
-    let downloads = tracked
-        .iter()
-        .filter(|r| r.repo == repo && wanted.contains(&r.file))
-        .map(|r| dto::QueuedDownload {
-            id: r.id,
-            file: r.file.clone(),
-            dest_path: r.dest_path.clone(),
-            status: r.status.clone(),
-        })
-        .collect();
+    // The queued rows go back as the queueing wrote them, so the caller can
+    // follow its own download (same as `ops::hf_add`).
+    let downloads = queued;
+    let n = downloads.len();
     Ok(dto::AudioCatalogInstall {
         ok: true,
         family: family.to_string(),
         package: package.to_string(),
         repo,
         revision,
-        files_queued: queued as u32,
+        files_queued: n as u32,
         downloads,
         message: if completing {
             let lacks = match missing.is_empty() {
@@ -590,12 +582,12 @@ pub(crate) async fn catalog_download(
                 ),
             };
             format!(
-                "completing {} — downloading {queued} file(s){at}: {lacks}{moved}{unchanged}",
+                "completing {} — downloading {n} file(s){at}: {lacks}{moved}{unchanged}",
                 pkg.display_name
             )
         } else {
             format!(
-                "downloading {} — {queued} file(s){at}; the package is servable once they finish",
+                "downloading {} — {n} file(s){at}; the package is servable once they finish",
                 pkg.display_name
             )
         },
@@ -804,7 +796,7 @@ mod tests {
             tracked("audio-cpp/PocketTTS-Multi", "multi/model.gguf", "queued", 0),
         ];
         let view = catalog_view(&snapshot, &rows, &[], &HashSet::new(), PINNED);
-        assert_eq!(view.fetched_at, "2026-08-29T10:00:00Z");
+        assert_eq!(view.fetched_at.as_deref(), Some("2026-08-29T10:00:00Z"));
         let fam = &view.families[0];
         assert_eq!(fam.display_name, "Pocket TTS");
         assert_eq!(fam.tasks, ["clone", "tts"]);
@@ -1032,7 +1024,7 @@ mod tests {
     async fn the_catalog_endpoint_is_empty_until_refreshed() {
         let state = AppState::init_for_tests().await.unwrap();
         let view = catalog(&state).await;
-        assert!(view.fetched_at.is_empty());
+        assert!(view.fetched_at.is_none());
         assert!(view.families.is_empty());
         let err = catalog_download(&state, "pocket_tts", "x")
             .await

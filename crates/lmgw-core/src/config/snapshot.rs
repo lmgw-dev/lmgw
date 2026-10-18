@@ -45,6 +45,11 @@ pub struct Snapshot {
     pub settings: Settings,
     /// (upstream_id, upstream_model_id) pairs hidden from /v1/models and UI.
     pub hidden_passthrough: HashSet<(i64, String)>,
+    /// Upstreams whose owner turned `catalog_all_modalities` off: their
+    /// catalog request goes without `output_modalities=all`
+    /// ([`crate::catalog::request`], decision-models design §6.2). Every
+    /// other upstream, a row not stored too, asks with it.
+    pub catalog_bare: HashSet<i64>,
     /// Registered MCP servers (config plane), keyed by `mcp_servers.id`.
     pub mcp_servers: HashMap<i64, McpServer>,
     /// (server_id, upstream tool name) → override (hide / rename).
@@ -75,13 +80,9 @@ pub struct DisabledTool {
     pub disabled_at: String,
 }
 
-/// `<prefix>/<id>`, or bare `<id>` when the class configures no prefix.
-fn prefixed(prefix: &str, id: &str) -> String {
-    match prefix.trim_matches('/') {
-        "" => id.to_string(),
-        p => format!("{p}/{id}"),
-    }
-}
+/// `<prefix>/<id>`, or bare `<id>` when the class configures no prefix: the
+/// rule the aux editor names a draft by ([`lmgw_api_types::public_names`]).
+use lmgw_api_types::public_names::prefixed;
 
 /// The model id inside a class-prefixed public name, or `None` when the name
 /// is not under that class's prefix at all.
@@ -467,10 +468,28 @@ impl Snapshot {
             .find(|m| m.model_id == route.upstream_model)
     }
 
-    /// Public client-facing name of an aux model
-    /// (`embed/<id>` under the configured aux prefix).
-    pub fn aux_public_name(&self, model_id: &str) -> String {
-        prefixed(&self.settings.aux_router.public_prefix, model_id)
+    /// Public client-facing name of an aux row: `decide/<id>` under the
+    /// decision prefix for a decision row, `embed/<id>` under the aux prefix
+    /// for an embedder or a reranker (decision-models design §3.10). One name
+    /// per row: the other prefix does not reach it.
+    pub fn aux_public_name(&self, m: &AuxModel) -> String {
+        self.aux_name_for(m.kind, &m.model_id)
+    }
+
+    /// [`Self::aux_public_name`] of a row of `kind` called `model_id`, for a
+    /// row that is not stored yet (a create's name checks).
+    pub fn aux_name_for(&self, kind: AuxKind, model_id: &str) -> String {
+        prefixed(self.aux_prefix(kind), model_id)
+    }
+
+    /// The prefix the aux rows of `kind` are exposed under.
+    fn aux_prefix(&self, kind: AuxKind) -> &str {
+        let aux = &self.settings.aux_router;
+        lmgw_api_types::public_names::aux_prefix(
+            kind.as_str(),
+            &aux.public_prefix,
+            &aux.decision_prefix,
+        )
     }
 
     /// Public client-facing name of a local chat model
@@ -540,12 +559,15 @@ impl Snapshot {
         Some(self.chat_local_route(&m.model_id))
     }
 
+    /// An aux row by its one public name (decision-models design §3.10): the
+    /// decision prefix reaches decision rows only, the aux prefix embedders
+    /// and rerankers only, so `embed/laya` does not resolve the decision row
+    /// `laya`. With both prefixes set alike, both kinds are under it.
     fn resolve_aux_local(&self, name: &str) -> Option<Route> {
-        let id = strip_prefix(&self.settings.aux_router.public_prefix, name)?;
-        let m = self
-            .aux_models
-            .iter()
-            .find(|m| m.enabled && m.model_id == id)?;
+        let m =
+            self.aux_models.iter().filter(|m| m.enabled).find(|m| {
+                strip_prefix(self.aux_prefix(m.kind), name) == Some(m.model_id.as_str())
+            })?;
         Some(self.aux_local_route(&m.model_id))
     }
 
@@ -703,7 +725,7 @@ impl Snapshot {
             .map(|m| (self.local_public_name(&m.model_id), "local"))
             .chain(
                 self.enabled_aux_models()
-                    .map(|m| (self.aux_public_name(&m.model_id), "aux")),
+                    .map(|m| (self.aux_public_name(m), "aux")),
             )
             .chain(
                 self.enabled_audio_models()

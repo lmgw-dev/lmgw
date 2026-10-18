@@ -19,12 +19,13 @@ pub struct VramSettings {
     pub enabled: bool,
     /// Memory kept free above the GGUF-derived estimate, in MiB.
     ///
-    /// The estimate is weights + KV cache, both read from the file and the
-    /// section's own flags. What it does **not** describe — llama.cpp's compute
-    /// and graph buffers, the CUDA context, allocator fragmentation — has no
-    /// metadata to derive it from, so it lives here as one visible number
-    /// instead of being smuggled into the estimate as a fudge factor. Raise it
-    /// if loads still OOM; the status surface shows both figures side by side.
+    /// The estimate is weights + KV cache + compute buffers, read from the
+    /// file and the section's own flags (`vram::plan`). What it does **not**
+    /// describe — the CUDA context, allocator fragmentation, a projector's
+    /// own compute buffer — has no metadata to derive it from, so it lives
+    /// here as one visible number instead of being smuggled into the
+    /// estimate as a fudge factor. Raise it if loads still OOM; the status
+    /// surface shows both figures side by side.
     pub headroom_mb: u64,
     /// GPU memory lmgw may plan against, in MiB. `0` = the device's real
     /// total, read from the driver (NVML on NVIDIA, amdgpu's sysfs counters on
@@ -249,6 +250,49 @@ impl RouterSettings {
             request_timeout_seconds: 60,
             ..Self::default()
         }
+    }
+}
+
+/// The aux class's settings: the class fields every llama.cpp class has, and
+/// the prefix of its decision rows (decision-models design §3.10).
+///
+/// A wrapper rather than a field on [`RouterSettings`], because that type is
+/// chat's too, and chat has no decision rows. `base` is flattened, so the
+/// stored blob and the settings wire stay one flat object, and the wrapper
+/// dereferences to it, so `aux_router.models_dir` reads as it always did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuxRouterSettings {
+    #[serde(flatten)]
+    pub base: RouterSettings,
+    /// Namespace of the decision rows (`decide` → clients request
+    /// `decide/<model id>`); embedders and rerankers keep `public_prefix`.
+    /// A row has one public name: `embed/<id>` does not resolve a decision
+    /// row. Empty = bare model ids, as the other class prefixes allow; set
+    /// to `public_prefix`, the kinds share one namespace, and aux model ids
+    /// are unique across the table anyway.
+    pub decision_prefix: String,
+}
+
+impl Default for AuxRouterSettings {
+    fn default() -> Self {
+        Self {
+            base: RouterSettings::default_aux(),
+            decision_prefix: "decide".into(),
+        }
+    }
+}
+
+impl std::ops::Deref for AuxRouterSettings {
+    type Target = RouterSettings;
+    fn deref(&self) -> &RouterSettings {
+        &self.base
+    }
+}
+
+impl std::ops::DerefMut for AuxRouterSettings {
+    fn deref_mut(&mut self) -> &mut RouterSettings {
+        &mut self.base
     }
 }
 
@@ -731,7 +775,9 @@ pub struct RealtimeSettings {
     /// Inside that tail a "mhm" must pass the barge-in gate, and half
     /// duplex does not listen, so the echo of the answer's last words is not
     /// answered. Echoed as `session.lmgw.echo_tail_ms`, which a session may
-    /// override; Bluetooth output wants more. 0 = the round trip alone.
+    /// override; Bluetooth output wants more. 0 = the round trip alone. On a
+    /// WebRTC call the round trip comes from the phone's RTCP receiver
+    /// reports, and the margin is the same sum (calls design §5.3).
     pub echo_tail_ms: u32,
     /// What decides a barge-in once the evidence gate passed (§6.4).
     /// `words` (the default): the evidence is transcribed with the
@@ -825,7 +871,8 @@ pub struct RealtimeSettings {
     /// the first `output_lead_ms` of a response's audio goes out at once, and
     /// the rest as fast as it plays. Echoed as `session.lmgw.output_lead_ms`,
     /// which a session may override. The listener's heard position is off by
-    /// at most this much after a barge-in (§7.3).
+    /// at most this much after a barge-in (§7.3). Not used on a WebRTC call,
+    /// whose frame clock sends in real time and echoes 0 (calls design §5.1).
     pub output_lead_ms: u32,
     /// How far synthesis may run ahead of the paced send, in seconds (§8.2):
     /// a speaking response stops synthesizing its next clause while more
@@ -872,6 +919,14 @@ pub struct RealtimeSettings {
     /// explicitly so the ceiling is a visible setting rather than a library
     /// constant. An overrun closes the socket with a close reason naming this
     /// setting. **0 = no bound.**
+    ///
+    /// **On a WebRTC call** (calls design §3.7, §6.3) it bounds two more
+    /// things: the largest event lmgw sends in one message, below the
+    /// client's own `max-message-size` (a larger one is refused naming the
+    /// bound; parts are WP4's), and the bytes of messages and audio waiting
+    /// for the call's session, past which the call ends with a close reason
+    /// naming this setting. A single message a client sends on a call is
+    /// bounded by the WebRTC stack (256 KiB), not by this.
     pub max_message_mb: u32,
     /// The largest single WebSocket **frame**, in MiB (§10.4) — tungstenite's
     /// built-in default is 16 MiB. An overrun closes the socket like
@@ -879,7 +934,8 @@ pub struct RealtimeSettings {
     /// bounded by `max_message_mb`, since it can never be larger than its
     /// message — and a frame is never unbounded, because tungstenite reserves
     /// a frame's declared length before reading it. Both at 0 is refused by
-    /// a save, and at load, with the defaults used instead.
+    /// a save, and at load, with the defaults used instead. WebSocket only: a
+    /// WebRTC call's messages are bounded by its stack (256 KiB).
     pub max_frame_mb: u32,
     /// How often a session pings its client, in seconds (§10.4). A ping with
     /// no pong for one more interval closes the session with a close reason
@@ -891,7 +947,27 @@ pub struct RealtimeSettings {
     /// answers TCP's own probes with a zero receive window, so TCP never
     /// gives up either — such a session, and the key's concurrency slot it
     /// holds, lasts forever.
+    ///
+    /// A WebRTC call is never pinged (calls design §8.1): its session ends
+    /// when nothing came from the client for one interval, or when its
+    /// output waited that long with no acknowledgement. The same interval
+    /// bounds a call that never connects or never opens its events channel,
+    /// a call waiting on a held thread, and how long a closing call waits
+    /// for its last event's delivery; 0 turns those bounds off too. A call
+    /// reads acknowledgements only as fast as SCTP retransmits a lost chunk
+    /// (its timer starts at 3 s, never goes below 1 s, and doubles up to
+    /// 60 s), so on a call an interval of about 3 s or less can end the call
+    /// on one lost chunk.
     pub ping_interval_s: u32,
+    /// `webrtc_enabled` and `webrtc_port`: the WebRTC calls' UDP listener
+    /// (calls design §3.1, `config::settings::webrtc`).
+    #[serde(flatten)]
+    pub webrtc: super::WebRtcSettings,
+    /// `webrtc_reorder_ms`, `webrtc_commit_window_ms` and
+    /// `webrtc_output_kbps`: a WebRTC call's audio (calls design §4.2, §4.4,
+    /// §5.2, `config::settings::webrtc_audio`).
+    #[serde(flatten)]
+    pub webrtc_audio: super::WebRtcAudioSettings,
 }
 
 impl RealtimeSettings {
@@ -965,6 +1041,8 @@ impl Default for RealtimeSettings {
             // Twice what browsers and the `websockets` library behind
             // openai-python allow a pong, so a busy client is not cut off.
             ping_interval_s: 20,
+            webrtc: Default::default(),
+            webrtc_audio: Default::default(),
         }
     }
 }

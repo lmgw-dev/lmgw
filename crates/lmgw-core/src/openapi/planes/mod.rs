@@ -21,9 +21,12 @@ pub(crate) mod chat_threads;
 /// Merged into [`chat`]'s list, not read by `all_routes` on its own.
 pub(crate) mod chat_turns;
 pub(crate) mod dashboard;
+pub(crate) mod decision_lab;
+pub(crate) mod devices;
 pub(crate) mod docs;
 pub(crate) mod image_lab;
 pub(crate) mod inference;
 pub(crate) mod knowledge;
+pub(crate) mod labs_store;
 pub(crate) mod session;
 pub(crate) mod usage;

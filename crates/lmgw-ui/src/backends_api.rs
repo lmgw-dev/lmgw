@@ -17,7 +17,7 @@ use lmgw_api_types::builds::{
     ContainerImagesArgs, ContainerImagesResponse, ForgePr, ForgePrArgs, ForgePrPage, ForgePrsArgs,
     ForgeRefsArgs, PromoteResponse, RemoteRefsView, ResolvedPreview, RunLogChunk, VerifyReport,
 };
-use lmgw_api_types::ContainerAnswer;
+use lmgw_api_types::{ContainerAnswer, MessageAck};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -185,7 +185,7 @@ pub fn class_section(class: &str) -> Option<&'static str> {
 /// `image` key of that one section is sent. The answer's `message` carries
 /// the server's note that running models keep the old image until they
 /// restart.
-pub async fn set_class_default(class: &str, image: &str) -> Result<Value> {
+pub async fn set_class_default(class: &str, image: &str) -> Result<MessageAck> {
     let Some(patch) = class_default_patch(class, image) else {
         return Err(crate::api::Error::Transport(format!(
             "'{class}' is not a class with a default image"
@@ -224,7 +224,7 @@ pub fn apply_outcome(v: &ContainerAnswer) -> std::result::Result<String, String>
 }
 
 /// Cancel a background job (a live build run) by its `JobRow.id`.
-pub async fn job_cancel(id: i64) -> Result<Value> {
+pub async fn job_cancel(id: i64) -> Result<MessageAck> {
     op("job_cancel", &json!({ "id": id })).await
 }
 

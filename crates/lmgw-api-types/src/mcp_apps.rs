@@ -138,6 +138,7 @@ pub struct ToolResultFrame {
     pub call_id: Option<String>,
     /// For a call that started an MCP task: which. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub task: Option<ResultTask>,
 }
 

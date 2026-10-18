@@ -21,9 +21,11 @@
 //! file size rather than a guessed constant.
 //!
 //! What is *not* here: tensor shapes and ggml types are parsed (they have to
-//! be, to walk past the descriptors) but only the names are kept, because that
-//! is all the MTP/draft-layer detection needs. Add fields to
-//! [`GgufMeta::tensor_names`]'s neighbourhood if a caller ever needs more.
+//! be, to walk past the descriptors) but only the names and each tensor's
+//! on-disk bytes are kept ([`GgufMeta::tensor_bytes`], from the data offsets,
+//! [`tensors`]), because that is all the MTP/draft-layer detection and the
+//! VRAM plan's output head need. Add fields to [`GgufMeta::tensor_names`]'s
+//! neighbourhood if a caller ever needs more.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -113,6 +115,8 @@ const VT_F64: u32 = 12;
 /// written: string / u32 / u64 KVs and tensor names with zero-byte data.
 /// Hidden from docs because it is not a general-purpose writer.
 pub mod embedded;
+pub mod licence;
+mod tensors;
 
 #[doc(hidden)]
 pub mod synth {
@@ -127,6 +131,8 @@ pub mod synth {
         kv_count: u64,
         tensors: Vec<u8>,
         tensor_count: u64,
+        /// Bytes of tensor data [`Self::tensor_sized`] has laid out.
+        data_len: u64,
     }
 
     impl Header {
@@ -196,6 +202,19 @@ pub mod synth {
             self.tensor_count += 1;
             self
         }
+        /// A tensor with `bytes` of (zeroed) data behind it, laid out after
+        /// the ones before it, so [`super::GgufMeta::tensor_size`] reads it
+        /// back. [`Self::tensor`]'s carry no data.
+        pub fn tensor_sized(&mut self, name: &str, bytes: u64) -> &mut Self {
+            put_str(&mut self.tensors, name);
+            self.tensors.extend_from_slice(&1u32.to_le_bytes());
+            self.tensors.extend_from_slice(&1u64.to_le_bytes());
+            self.tensors.extend_from_slice(&0u32.to_le_bytes());
+            self.tensors.extend_from_slice(&self.data_len.to_le_bytes());
+            self.tensor_count += 1;
+            self.data_len += bytes;
+            self
+        }
         pub fn bytes(&self) -> Vec<u8> {
             let mut out = b"GGUF".to_vec();
             out.extend_from_slice(&3u32.to_le_bytes());
@@ -203,6 +222,11 @@ pub mod synth {
             out.extend_from_slice(&self.kv_count.to_le_bytes());
             out.extend_from_slice(&self.kv);
             out.extend_from_slice(&self.tensors);
+            if self.data_len > 0 {
+                let start =
+                    super::tensors::data_start(out.len() as u64, super::tensors::DEFAULT_ALIGNMENT);
+                out.resize((start + self.data_len) as usize, 0);
+            }
             out
         }
         /// Write the header to `path`, creating parent directories.
@@ -417,6 +441,11 @@ pub struct GgufMeta {
     /// Tensor names in file order. Shapes and ggml types are parsed but
     /// dropped; nothing needs them yet.
     pub tensor_names: Vec<String>,
+    /// Each tensor's bytes on disk, parallel to `tensor_names`: from its data
+    /// offset to the next one's ([`tensors::sizes`]). Not serialized; read
+    /// through [`GgufMeta::tensor_size`].
+    #[serde(skip)]
+    pub tensor_bytes: Vec<u64>,
     /// Size of the whole file on disk, including the weights we did not read.
     pub file_size: u64,
 }
@@ -454,6 +483,12 @@ impl GgufMeta {
 
     pub fn arch_f64(&self, suffix: &str) -> Option<f64> {
         self.arch_get(suffix).and_then(GgufValue::as_f64)
+    }
+
+    /// The on-disk bytes of tensor `name`, when the header names it.
+    pub fn tensor_size(&self, name: &str) -> Option<u64> {
+        let i = self.tensor_names.iter().position(|n| n == name)?;
+        self.tensor_bytes.get(i).copied()
     }
 }
 
@@ -495,6 +530,7 @@ pub fn read_header(path: &Path) -> Result<GgufMeta> {
     }
 
     let mut tensor_names = Vec::with_capacity(tensor_count.min(4096) as usize);
+    let mut offsets = Vec::with_capacity(tensor_names.capacity());
     for _ in 0..tensor_count {
         let name = r.read_string("a tensor name")?;
         let n_dims = r.read_u32("a tensor rank")?;
@@ -503,15 +539,22 @@ pub fn read_header(path: &Path) -> Result<GgufMeta> {
             r.read_u64("a tensor dimension")?;
         }
         let _ggml_type = r.read_u32("a tensor type")?;
-        let _offset = r.read_u64("a tensor offset")?;
+        offsets.push(r.read_u64("a tensor offset")?);
         tensor_names.push(name);
     }
+    let alignment = kv
+        .get("general.alignment")
+        .and_then(GgufValue::as_u64)
+        .unwrap_or(tensors::DEFAULT_ALIGNMENT);
+    let data_len = file_size.saturating_sub(tensors::data_start(r.pos, alignment));
+    let tensor_bytes = tensors::sizes(&offsets, data_len);
 
     Ok(GgufMeta {
         version,
         tensor_count,
         kv,
         tensor_names,
+        tensor_bytes,
         file_size,
     })
 }
@@ -668,6 +711,7 @@ pub fn read_tokenizer_signature(path: &Path) -> Result<TokenizerSignature> {
         tensor_count,
         kv,
         tensor_names: Vec::new(),
+        tensor_bytes: Vec::new(),
         file_size,
     };
     // Every chat-template key, bare and named alike (struct doc) — plain
@@ -1565,6 +1609,8 @@ pub struct ModelSummary {
     /// `general.type`: `"model"`, `"mmproj"`, …
     pub general_type: Option<String>,
     pub size_label: Option<String>,
+    /// `general.license` and its name and link, when the header states one.
+    pub licence: Option<licence::Licence>,
     /// Human name for [`file_type_id`](Self::file_type_id), see [`ftype_name`].
     pub quant: Option<String>,
     pub file_type_id: Option<u32>,
@@ -1574,6 +1620,22 @@ pub struct ModelSummary {
     /// `<arch>.block_count` — transformer layers.
     pub block_count: Option<u64>,
     pub embedding_length: Option<u64>,
+    /// `<arch>.feed_forward_length`; the largest layer's when the header
+    /// gives one per layer (ModernBERT-style). Sizes an encoder's compute
+    /// buffer ([`crate::vram::compute`]).
+    pub feed_forward_length: Option<u64>,
+    /// `<arch>.n_deepstack_layers` (Qwen3-VL): the text model's input
+    /// embedding is this many `embedding_length`s wider than its hidden
+    /// state ([`crate::vram::compute`]).
+    pub deepstack_layers: Option<u64>,
+    /// The length of `tokenizer.ggml.tokens`: the vocabulary a decoder's
+    /// logits span ([`crate::vram::compute`]).
+    pub vocab_size: Option<u64>,
+    /// The output head's bytes on disk: `output.weight`, else the
+    /// `token_embd.weight` a tied head reuses. llama.cpp copies it to the
+    /// device for the logits when the weights stay on the host
+    /// (`--n-gpu-layers 0`, [`crate::vram::compute`]).
+    pub output_head_bytes: Option<u64>,
     pub head_count: Option<u64>,
     /// `<arch>.attention.head_count_kv` — KV heads (< `head_count` for GQA),
     /// the term that dominates KV-cache size.
@@ -1619,6 +1681,51 @@ pub struct ModelSummary {
     pub ssm_group_count: Option<u64>,
     pub ssm_inner_size: Option<u64>,
     pub rope_freq_base: Option<f64>,
+    /// `<arch>.expert_used_count`: the experts a mixture-of-experts layer
+    /// runs per token. With the two widths below it sizes such a layer's
+    /// activations in a chat row's compute buffer
+    /// ([`crate::vram::compute::chat`]).
+    pub expert_used_count: Option<u64>,
+    /// `<arch>.expert_feed_forward_length`, the largest layer's when the
+    /// header gives one per layer.
+    pub expert_feed_forward_length: Option<u64>,
+    /// `<arch>.expert_shared_feed_forward_length`: the always-on shared
+    /// expert's width (Qwen3.5-MoE, Ling).
+    pub expert_shared_feed_forward_length: Option<u64>,
+    /// `<arch>.attention.kv_lora_rank`: the latent width of multi-head latent
+    /// attention.
+    pub kv_lora_rank: Option<u64>,
+    /// `<arch>.attention.key_length_mla` / `value_length_mla`: the per-head
+    /// dims MLA decompresses to. llama.cpp runs the absorbed MLA graph, which
+    /// caches K only and reads V as a view of it, exactly when both are
+    /// stated (`llama_hparams::is_mla`; measured: Ling's V cache is 0
+    /// bytes). A DeepSeek or Kimi GGUF converted before these keys existed
+    /// keeps a real V cache although it states `kv_lora_rank`.
+    pub key_length_mla: Option<u64>,
+    pub value_length_mla: Option<u64>,
+    /// Some `<arch>.ssm.*`, `shortconv.*`, `kda.*` or `wkv.*` key: the
+    /// layers without attention keep a recurrent state (Qwen3.5's gated
+    /// delta net, LFM2's short convolutions, Ling's KDA, RWKV), rather than
+    /// being plain attention-free blocks that keep nothing.
+    pub has_recurrent_keys: bool,
+    /// `<arch>.embedding_length_per_layer_input` (Gemma 4 E-models): every
+    /// layer gets a per-layer input this wide, held through the whole graph.
+    pub embedding_length_per_layer_input: Option<u64>,
+    /// `<arch>.attention.shared_kv_layers`: the last this many layers reuse
+    /// an earlier layer's KV cache instead of keeping their own (Gemma 4
+    /// E-models; a Gemma 4 MTP assistant shares all of its layers with the
+    /// model it drafts for).
+    pub shared_kv_layers: Option<u64>,
+    /// `<arch>.nextn_predict_layers`: the multi-token-prediction layers a
+    /// `draft-mtp` row runs in a context of their own.
+    pub nextn_predict_layers: Option<u64>,
+    /// The bytes of the input embeddings llama.cpp keeps in host memory
+    /// whatever `--n-gpu-layers` says (its input layer is the CPU's):
+    /// `token_embd.weight` when the file has a separate `output.weight` (a
+    /// tied head is copied to the card for the logits), and Gemma 4's
+    /// `per_layer_token_embd.weight`. Measured against llama.cpp's
+    /// `CUDA0 model buffer size` on nine GGUF files (b11549).
+    pub host_input_bytes: u64,
     /// `<arch>.pooling_type` — written by the converter for embedding and
     /// rerank models (llama.cpp's `llama_pooling_type`: 0 none, 1 mean,
     /// 2 cls, 3 last, 4 rank) and absent on chat models. Its presence is the
@@ -1629,6 +1736,24 @@ pub struct ModelSummary {
     /// cross-encoder reranker scores with. Rerankers converted before the
     /// hub wrote `pooling_type = rank` are only recognisable by this.
     pub has_classifier_head: bool,
+    /// `<arch>.decision.type` — the key llama.cpp reads to serve the file as
+    /// a decision model on `/v1/systemone` (decision-models design §3.2).
+    /// Any value marks one, including a type this lmgw has never seen.
+    pub decision_type: Option<String>,
+    /// `<arch>.decision.max_head_tokens`.
+    pub decision_max_head_tokens: Option<u64>,
+    /// `<arch>.attention.causal`: absent on causal files, `false` on
+    /// non-causal encoders (Laya, Julia-1), whose whole prompt llama.cpp
+    /// evaluates in one ubatch.
+    pub attention_causal: Option<bool>,
+    /// `tokenizer.chat_template.systemone`: llama-server refuses to load a
+    /// decision model without it.
+    pub has_systemone_template: bool,
+    /// `decision.*` tensors: a decision head of the file's own (Clef's),
+    /// beside [`Self::has_classifier_head`]'s `cls.output*`. Either is what
+    /// the decision planner reads as "answers from a head, not from label
+    /// logits" (decision-models design §3.4).
+    pub has_decision_tensors: bool,
     /// Whether the file can drive a chat endpoint on its own.
     pub has_chat_template: bool,
     /// Full Jinja template text (~7–10 KB typically); callers truncate for
@@ -1745,11 +1870,21 @@ impl ModelSummary {
             general_name: meta.string("general.name"),
             general_type,
             size_label: meta.string("general.size_label"),
+            licence: licence::Licence::from_meta(meta),
             quant: file_type_id.map(ftype_name),
             file_type_id,
             context_length: meta.arch_u64("context_length"),
             block_count: meta.arch_u64("block_count"),
             embedding_length: meta.arch_u64("embedding_length"),
+            feed_forward_length: largest(meta.arch_get("feed_forward_length")),
+            deepstack_layers: meta.arch_u64("n_deepstack_layers"),
+            vocab_size: meta
+                .get("tokenizer.ggml.tokens")
+                .and_then(GgufValue::array_len),
+            output_head_bytes: meta
+                .tensor_size("output.weight")
+                .or_else(|| meta.tensor_size("token_embd.weight"))
+                .filter(|b| *b > 0),
             head_count: meta.arch_u64("attention.head_count"),
             head_count_kv: heads_kv.and_then(GgufValue::as_u64),
             head_count_kv_per_layer: heads_kv.and_then(GgufValue::as_u64_array),
@@ -1767,8 +1902,40 @@ impl ModelSummary {
             ssm_group_count: meta.arch_u64("ssm.group_count"),
             ssm_inner_size: meta.arch_u64("ssm.inner_size"),
             rope_freq_base: meta.arch_f64("rope.freq_base"),
+            expert_used_count: meta.arch_u64("expert_used_count"),
+            expert_feed_forward_length: largest(meta.arch_get("expert_feed_forward_length")),
+            expert_shared_feed_forward_length: largest(
+                meta.arch_get("expert_shared_feed_forward_length"),
+            ),
+            kv_lora_rank: meta.arch_u64("attention.kv_lora_rank"),
+            key_length_mla: meta.arch_u64("attention.key_length_mla"),
+            value_length_mla: meta.arch_u64("attention.value_length_mla"),
+            has_recurrent_keys: meta.architecture().is_some_and(|arch| {
+                ["ssm.", "shortconv.", "kda.", "wkv."].iter().any(|family| {
+                    let prefix = format!("{arch}.{family}");
+                    meta.kv.keys().any(|k| k.starts_with(&prefix))
+                })
+            }),
+            embedding_length_per_layer_input: meta.arch_u64("embedding_length_per_layer_input"),
+            shared_kv_layers: meta.arch_u64("attention.shared_kv_layers"),
+            nextn_predict_layers: meta.arch_u64("nextn_predict_layers"),
+            host_input_bytes: meta
+                .tensor_size("output.weight")
+                .and(meta.tensor_size("token_embd.weight"))
+                .unwrap_or(0)
+                .saturating_add(meta.tensor_size("per_layer_token_embd.weight").unwrap_or(0)),
             pooling_type: meta.arch_u64("pooling_type"),
             has_classifier_head,
+            decision_type: meta
+                .arch_get("decision.type")
+                .and_then(GgufValue::as_str)
+                .map(str::to_owned),
+            decision_max_head_tokens: meta.arch_u64("decision.max_head_tokens"),
+            attention_causal: meta
+                .arch_get("attention.causal")
+                .and_then(GgufValue::as_bool),
+            has_systemone_template: meta.get("tokenizer.chat_template.systemone").is_some(),
+            has_decision_tensors: meta.tensor_names.iter().any(|n| n.starts_with("decision.")),
             has_chat_template: chat_template.is_some(),
             chat_template,
             signals,
@@ -1786,6 +1953,14 @@ impl ModelSummary {
             file_size: meta.file_size,
         }
     }
+}
+
+/// A width the header states once or per layer (`feed_forward_length`,
+/// `expert_feed_forward_length`): the value, or the largest layer's.
+fn largest(v: Option<&GgufValue>) -> Option<u64> {
+    let v = v?;
+    v.as_u64()
+        .or_else(|| v.as_u64_array().and_then(|a| a.into_iter().max()))
 }
 
 /// `<key>` when present and boolean; else `Some(true)` when any key under
@@ -2091,7 +2266,7 @@ pub fn kv_cache_bytes(s: &ModelSummary, ctx: u64, bits_per_element: u32) -> Opti
 /// contract is a lower bound. `None` when `ssm.state_size` or
 /// `ssm.inner_size` is absent; a missing `conv_kernel` or `group_count` just
 /// zeroes its own term — shrinking the estimate, never inflating it.
-fn recurrent_state_bytes(s: &ModelSummary) -> Option<u64> {
+pub(crate) fn recurrent_state_bytes(s: &ModelSummary) -> Option<u64> {
     let state = s.ssm_state_size?;
     let inner = s.ssm_inner_size?;
     let groups = s.ssm_group_count.unwrap_or(0);

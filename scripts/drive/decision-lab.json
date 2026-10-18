@@ -1,0 +1,218 @@
+[
+ {
+  "js": "'SETUP: a dev instance whose database has a decision row decide/laya (backend cpu; labs-store design §7.2), started with LMGW_DATA_DIR=<scratch> scripts/dev-instance.sh 127.0.0.1:8897. Run: scripts/ui-drive.py scripts/drive/decision-lab.json --base http://127.0.0.1:8897 --token-file <scratch>.token --podman-guard \"\" --shots <dir>. The guard is off because the drive asks decide/laya, which starts its CPU container (and no other). It deletes the Decision lab history of that instance first, asks Ticket triage as written, perturbed and through an override with two options swapped, reads the JSONL and CSV exports back, deletes one group, reloads, and clears the lab. Then: a group with a typed image (data:image/x-receipt;…) opened in the form, its preview and Edit as JSON keeping the kept image as lab-artifact:<id>, re-asked (Laya reads no images: 501) with the URL as first typed; a double-clicked Ask asking once; an open Raw surviving another group’s cells; an Ask the model filter would hide clearing it; a switch of the head model to decide/kev-4b (never asked, never counted) clearing the gauge; the results head whole at 1024; and the history cleared again.'"
+ },
+ {
+  "js": "(async()=>{const r=await fetch('/labs/api/decision/clear',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return r.status})()"
+ },
+ {"nav": "/decision-lab"},
+ {"until": "document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {
+  "expect": "document.querySelector('.lab-head .model-picker').textContent.includes('laya') && [...document.querySelectorAll('.lab-head .dl-fact')].map(e=>e.textContent).join('|').startsWith('laya|non-causal|ctx 8192|ubatch 8192 (row)')",
+  "label": "the head starts on decide/laya (a CPU row, never a cold GPU row) and reads its facts"
+ },
+ {
+  "expect": "document.querySelector('.results-note').textContent.startsWith('newest first · kept') && document.querySelector('.results-list .empty').textContent.includes('kept on the server until you delete it')",
+  "label": "the results head and the empty text say the runs are kept"
+ },
+ {"click": ".dl-toolbar .btn"},
+ {"wait": 0.3},
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Ticket triage|Sentiment|Is the user done talking?|Empty form'",
+  "label": "the Examples menu lists the three examples and the empty form"
+ },
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.5},
+ {
+  "expect": "document.querySelector('.action-note').textContent==='Ask decide/laya · 3 questions' || document.querySelector('.action-note').textContent.startsWith('Ask decide/laya · 3 questions · ')",
+  "label": "the action bar says what Ask will do"
+ },
+ {
+  "expect": "document.querySelectorAll('.dl-q').length===3 && document.querySelectorAll('.dl-opt').length===4 && document.querySelectorAll('.dl-level').length===4",
+  "label": "the question builder holds triage's choice, score and noul"
+ },
+ {"click": ".action-bar .btn.primary"},
+ {
+  "until": "document.querySelectorAll('.dl-group').length===1 && !document.querySelector('.dl-group .chip.live') && document.querySelector('.dl-group .dl-run')",
+  "timeout": 300
+ },
+ {
+  "expect": "document.querySelector('.dl-group .dl-choice') && document.querySelector('.dl-group .dl-score .dl-marker') && document.querySelector('.dl-group .dl-noul-view .dl-meter') && !document.querySelector('.dl-group .dl-failed')",
+  "label": "the three answer views render"
+ },
+ {
+  "expect": "/\\d+ ms · [\\d\\u202f]+ input tokens/.test(document.querySelector('.dl-group .dl-foot').textContent)",
+  "label": "the footer has the latency and input_tokens"
+ },
+ {
+  "expect": "(async()=>{const g=(await (await fetch('/labs/api/decision/groups')).json()).groups[0];return g.runs.length===1 && g.runs[0].http_status===200 && g.runs[0].request===document.querySelector('.dl-request pre').textContent})()",
+  "label": "the stored request is the preview, byte for byte"
+ },
+ {"shot": "triage"},
+ {"click": ".dl-perturb .dl-check input", "nth": 0},
+ {"click": ".dl-perturb .dl-check input", "nth": 1},
+ {"wait": 0.3},
+ {
+  "expect": "document.querySelector('.action-note').textContent.startsWith('Ask 3: 1 model × 3 variants')",
+  "label": "Perturb with both boxes plans three cells"
+ },
+ {"click": ".action-bar .btn.primary"},
+ {
+  "until": "document.querySelectorAll('.dl-group').length===2 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix tbody tr').length===3 && ![...document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix td')].some(t=>t.textContent==='…')",
+  "timeout": 300
+ },
+ {
+  "expect": "document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-matrix thead .dl-cellbtn').length===3 && document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-deltas li').length>=2",
+  "label": "one card, a 1 × 3 matrix and its Δ lines"
+ },
+ {"click": ".dl-group .dl-matrix thead .dl-cellbtn", "nth": 2},
+ {"wait": 0.3},
+ {
+  "expect": "(()=>{const pos=[...document.querySelectorAll('.dl-group .dl-cell-open .dl-choice .pos')].map(e=>e.textContent);const names=[...document.querySelectorAll('.dl-group .dl-cell-open .dl-choice .n')].map(e=>e.textContent);const at=names.indexOf('billing');return pos.length===4 && at>=0 && pos[at]==='#4'})()",
+  "label": "the reversed cell opens below, billing sent as #4"
+ },
+ {"shot": "perturb"},
+ {"click": ".dl-request .row .btn"},
+ {"until": "document.querySelector('.dl-override')", "timeout": 10},
+ {
+  "js": "(()=>{const ta=document.querySelector('.dl-override');const a='\"billing\": \"payments, refunds, invoices\",\\n        \"technical\": \"bugs, errors, outages\",';const b='\"technical\": \"bugs, errors, outages\",\\n        \"billing\": \"payments, refunds, invoices\",';if(!ta.value.includes(a))return 'no billing/technical pair';ta.value=ta.value.replace(a,b);ta.dispatchEvent(new Event('input',{bubbles:true}));return 'swapped'})()"
+ },
+ {"wait": 0.3},
+ {
+  "expect": "document.querySelector('.action-note').textContent==='Ask decide/laya · the override' && document.querySelectorAll('.dl-perturb input:disabled').length===2",
+  "label": "the override is the request, and Perturb is off while it is in effect"
+ },
+ {"click": ".action-bar .btn.primary"},
+ {
+  "until": "document.querySelectorAll('.dl-group').length===3 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')",
+  "timeout": 300
+ },
+ {
+  "expect": "(async()=>{const g=(await (await fetch('/labs/api/decision/groups')).json()).groups[0];const r=g.runs[0];const t0=r.response.indexOf('\"team\"');const team=r.response.slice(r.response.indexOf('\"probabilities\"',t0));return g.override!==null && r.request.includes('\"technical\": \"bugs, errors, outages\",\\n        \"billing\"') && team.indexOf('\"technical\"')<team.indexOf('\"billing\"') && team.indexOf('\"billing\"')<team.indexOf('\"account\"')})()",
+  "label": "an override with two options swapped by hand is sent and stored in that order, and the probabilities come back in it"
+ },
+ {
+  "expect": "(()=>{const names=[...document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-choice .n')].map(e=>e.textContent);const pos=[...document.querySelectorAll('.dl-group')[0].querySelectorAll('.dl-choice .pos')].map(e=>e.textContent);return pos[names.indexOf('technical')]==='#1' && pos[names.indexOf('billing')]==='#2'})()",
+  "label": "the card shows the swapped places as sent"
+ },
+ {"click": ".dl-override-banner .btn"},
+ {"wait": 0.3},
+ {
+  "expect": "!document.querySelector('.dl-override') && document.querySelector('.action-note').textContent.startsWith('Ask 3: 1 model × 3 variants')",
+  "label": "Drop override gives the form, and its perturbations, back"
+ },
+ {"click": ".lh-export .btn"},
+ {"wait": 0.3},
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='All as JSONL|All as CSV'",
+  "label": "the results head's Export menu offers JSONL and CSV"
+ },
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.5},
+ {
+  "expect": "(async()=>{const r=await fetch('/labs/api/decision/export?format=jsonl');const cd=r.headers.get('content-disposition')||'';const lines=(await r.text()).trim().split('\\n').map(l=>JSON.parse(l));return cd.startsWith('attachment') && lines.length===3 && lines.every(l=>l.format==='lmgw.lab.v1' && l.lab==='decision') && lines[0].group.runs.length===1 && lines[1].group.runs.length===3 && lines[1].group.runs[2].variant==='reversed' && lines[2].group.override!==null})()",
+  "label": "the JSONL export reads back: one lmgw.lab.v1 line per group, oldest first, runs in cell order"
+ },
+ {
+  "expect": "(async()=>{const r=await fetch('/labs/api/decision/export?format=csv');const t=await r.text();const rows=t.split('\\r\\n').filter(Boolean);return rows[0].startsWith('group_id,batch_id,item_ix,item_key,run_id,created_at,model_asked,answered_by,upstream_model,variant,http_status') && rows.length===1+3+9+3 && rows.slice(1).every(x=>x.includes('decide/laya'))})()",
+  "label": "the CSV export reads back: a header and a row per run and question"
+ },
+ {"click": ".dl-group .row-menu-btn", "nth": 2},
+ {"wait": 0.3},
+ {
+  "expect": "[...document.querySelectorAll('.menu-pop .menu-item')].map(e=>e.textContent.trim()).join('|')==='Open in form|Export as JSONL|Export as CSV|Delete'",
+  "label": "the card's menu: Open in form, Export, Delete"
+ },
+ {"click": ".menu-pop .menu-item", "nth": 3},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 3},
+ {"until": "document.querySelectorAll('.dl-group').length===2", "timeout": 10},
+ {
+  "expect": "(async()=>{const u=await (await fetch('/labs/api/decision/usage')).json();return u.groups===2 && u.runs===4 && document.querySelector('.results-note').textContent.includes(' 4 runs ')})()",
+  "label": "the oldest group is deleted and the usage line follows"
+ },
+ {"nav": "/decision-lab"},
+ {"until": "document.querySelectorAll('.dl-group').length===2", "timeout": 20},
+ {
+  "expect": "document.querySelectorAll('.dl-group .dl-matrix thead .dl-cellbtn').length===3",
+  "label": "the history survives a reload"
+ },
+ {"click": ".results-head .confirm .btn"},
+ {"wait": 0.3},
+ {
+  "expect": "document.querySelector('.results-head .confirm').textContent.includes('Delete all 4 runs?')",
+  "label": "Clear asks with the runs it deletes"
+ },
+ {"click": ".results-head .confirm .btn", "nth": 0},
+ {"until": "document.querySelectorAll('.dl-group').length===0 && document.querySelector('.results-list .empty')", "timeout": 10},
+ {
+  "expect": "(async()=>{const u=await (await fetch('/labs/api/decision/usage')).json();return u.groups===0 && u.runs===0 && u.artifact_files===0})()",
+  "label": "Clear empties the lab"
+ },
+ {"js": "(async()=>{const url='data:image/x-receipt;name=r.png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';const body={form:{state_mode:'text',state:'Receipt attached: was order A-1001 paid twice?',images:[{source:'data_url',name:'r.png',url}],questions:[{id:'paid_twice',instructions:'Was it paid twice?',kind:{type:'noul',yes:'',no:''}}]},models:['decide/laya'],variants:[]};const r=await fetch('/decision-lab/api/groups',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const g=await r.json();return r.status+' group '+g.id+' '+JSON.stringify(g.artifacts.map(a=>[a.id,a.data_url_head,a.size]))})()"},
+ {"nav": "/decision-lab"},
+ {"until": "document.querySelectorAll('.dl-group').length===1 && document.querySelector('.lab-head .dl-facts .dl-fact')", "timeout": 20},
+ {"click": ".dl-group .row-menu-btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.5},
+ {"expect": "/\"data:image\\/x-receipt;name=r\\.png;base64,… \\d+ B\"/.test(document.querySelector('.dl-request pre').textContent) && !document.querySelector('.dl-request pre').textContent.includes('lab-artifact')", "label": "the preview shows a kept image by its typed head, its payload elided"},
+ {"shot": "kept-image-preview"},
+ {"click": ".dl-request .row .btn"},
+ {"until": "document.querySelector('.dl-override')", "timeout": 10},
+ {"expect": "/\"lab-artifact:\\d+\"/.test(document.querySelector('.dl-override').value) && !document.querySelector('.dl-override').value.includes('base64') && document.querySelector('.dl-override-banner').textContent.includes('kept image')", "label": "Edit as JSON keeps the kept image as its ref, and the banner says what that is"},
+ {"click": ".action-bar .btn.primary"},
+ {"until": "document.querySelectorAll('.dl-group').length===2 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')", "timeout": 120},
+ {"expect": "(async()=>{const gs=(await (await fetch('/labs/api/decision/groups')).json()).groups;const [g2,g1]=gs;const a1=g1.artifacts[0],a2=g2.artifacts[0];if(g2.artifacts.length!==1)return false;const r=g2.runs[0];window.__g2=g2;const bytes=new Uint8Array(await (await fetch(a2.href)).arrayBuffer());const b64=btoa(String.fromCharCode(...bytes));return a2 && a2.id!==a1.id && a2.sha256===a1.sha256 && a2.data_url_head==='data:image/x-receipt;name=r.png;base64' && g2.override.includes('\"lab-artifact:'+a2.id+'\"') && r.request.includes('\"lab-artifact:'+a2.id+'\"') && (a2.data_url_head+','+b64)==='data:image/x-receipt;name=r.png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='})()", "label": "the re-ask names its own row of the same file and head: <head>,<payload> is the URL as first typed"},
+ {"shot": "reask-kept-image"},
+ {"click": ".dl-override-banner .btn"},
+ {"wait": 0.3},
+ {"click": ".dl-toolbar .btn"},
+ {"wait": 0.3},
+ {"click": ".menu-pop .menu-item", "nth": 0},
+ {"wait": 0.3},
+ {"js": "document.querySelectorAll('.dl-q').length===3 ? 'triage' : (document.querySelector('.menu-pop .menu-item') ? (document.querySelectorAll('.menu-pop .menu-item')[0].click(), 'armed, picked again') : 'menu gone')"},
+ {"until": "document.querySelectorAll('.dl-q').length===3", "timeout": 5},
+ {"until": "document.querySelector('.dl-gauge .dl-bar') && document.querySelector('.dl-qtokens')", "timeout": 20},
+ {"js": "document.querySelectorAll('.dl-group')[0].querySelector('details.lab-details summary').click(), 'raw opened'"},
+ {"expect": "document.querySelectorAll('.dl-group')[0].querySelector('details.lab-details').open", "label": "Raw is open on the re-ask's card"},
+ {"js": "window.__groupsBefore=0; fetch('/labs/api/decision/usage').then(r=>r.json()).then(u=>window.__groupsBefore=u.groups); 'ok'"},
+ {"wait": 0.3},
+ {"dblclick": ".action-bar .btn.primary"},
+ {"until": "document.querySelectorAll('.dl-group').length===3 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run') && !document.querySelector('.action-bar .btn.danger')", "timeout": 120},
+ {"expect": "(async()=>{const u=await (await fetch('/labs/api/decision/usage')).json();const g=(await (await fetch('/labs/api/decision/groups')).json()).groups[0];return u.groups===window.__groupsBefore+1 && g.runs.length===g.plan.length && !document.querySelectorAll('.dl-group')[0].querySelector('.chip.warn')})()", "label": "a double-clicked Ask asks once and is not stopped by its second click"},
+ {"expect": "document.querySelectorAll('.dl-group')[1].querySelector('details.lab-details').open", "label": "another group's cells landing leave an open Raw open"},
+ {"click": ".lh-filter .select-btn"},
+ {"wait": 0.3},
+ {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('kev-4b')).click(), 'filter kev-4b'"},
+ {"until": "document.querySelectorAll('.dl-group').length===0 && document.querySelector('.lh-filter').textContent.includes('kev-4b')", "timeout": 10},
+ {"shot": "filter-kev"},
+ {"click": ".action-bar .btn.primary"},
+ {"until": "document.querySelectorAll('.dl-group').length===4 && !document.querySelector('.dl-group .chip.live') && document.querySelectorAll('.dl-group')[0].querySelector('.dl-run')", "timeout": 120},
+ {"expect": "document.querySelector('.lh-filter').textContent.includes('all models') && [...document.querySelectorAll('.toast')].some(t=>t.textContent.includes('model filter cleared'))", "label": "an Ask the filter would hide clears it, says so, and its card is in view"},
+ {"click": ".lab-head .mp-btn"},
+ {"wait": 0.3},
+ {"type": "kev"},
+ {"wait": 0.3},
+ {"key": "Enter"},
+ {"wait": 0.2},
+ {"expect": "document.querySelector('.lab-head .model-picker').textContent.includes('kev-4b') && document.querySelector('.dl-gauge').textContent.includes('decide/kev-4b is not loaded') && !document.querySelector('.dl-gauge .dl-bar') && !document.querySelector('.dl-qtokens')", "label": "a switch to another head model clears the bars and the per-question counts at once"},
+ {"shot": "kev-head"},
+ {"expect": "(()=>{const n=document.querySelector('.action-note');return n.textContent.endsWith('the first ask starts decide/kev-4b') && n.scrollWidth<=n.clientWidth})()", "label": "the action bar's line is whole"},
+ {"click": ".lab-head .mp-btn"},
+ {"wait": 0.3},
+ {"type": "laya"},
+ {"wait": 0.3},
+ {"key": "Enter"},
+ {"until": "document.querySelector('.lab-head .model-picker').textContent.includes('laya') && document.querySelector('.dl-gauge .dl-bar')", "timeout": 20},
+ {"expect": "(()=>{const h=document.querySelector('.results-head');const hr=h.getBoundingClientRect();const n=document.querySelector('.results-note');const inside=[...h.querySelectorAll('.results-tools > *, .results-note, .count')].every(e=>{const r=e.getBoundingClientRect();return r.right<=hr.right+0.5 && r.left>=hr.left-0.5});return h.scrollWidth<=h.clientWidth && n.scrollWidth<=n.clientWidth && inside})()", "label": "the results head at this size: nothing cut, nothing outside"},
+ {"size": "1024x700"},
+ {"wait": 0.5},
+ {"click": ".lh-filter .select-btn"},
+ {"wait": 0.3},
+ {"js": "[...document.querySelectorAll('.select-opt')].find(e=>e.textContent.includes('laya')).click(), 'filter laya'"},
+ {"until": "document.querySelector('.lh-filter').textContent.includes('laya') && document.querySelectorAll('.dl-group').length===4", "timeout": 10},
+ {"expect": "(()=>{const h=document.querySelector('.results-head');const hr=h.getBoundingClientRect();const n=document.querySelector('.results-note');const inside=[...h.querySelectorAll('.results-tools > *, .results-note, .count')].every(e=>{const r=e.getBoundingClientRect();return r.right<=hr.right+0.5 && r.left>=hr.left-0.5});return h.scrollWidth<=h.clientWidth && n.scrollWidth<=n.clientWidth && inside && /\\d+ runs · [\\d.]+ kB/.test(n.textContent)})()", "label": "at 1024 with a filter set: the head wraps, the count and the size whole, nothing outside"},
+ {"shot": "head-1024"},
+ {"js": "(async()=>{const r=await fetch('/labs/api/decision/clear',{method:'POST',headers:{'content-type':'application/json'},body:'null'});return r.status})()"}
+]

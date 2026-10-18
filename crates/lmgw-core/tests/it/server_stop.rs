@@ -206,7 +206,16 @@ async fn a_shutdown_closes_a_bound_session_with_going_away() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        w.state.stops.ended(u64::MAX, Duration::ZERO).await,
+        w.state
+            .stops
+            .ended(
+                lmgw_core::server::ServedAt {
+                    via: lmgw_core::server::Via::Plain,
+                    at: u64::MAX,
+                },
+                Duration::ZERO,
+            )
+            .await,
         0,
         "no session still running when the server returned"
     );
@@ -297,6 +306,9 @@ async fn a_chat_turn_at_a_stop_says_so_and_is_saved_before_the_server_returns() 
     .unwrap();
     assert_eq!(data["code"], "gateway_stopping", "{data}");
     assert_eq!(data["message"], lmgw_core::server::STOPPING);
+    // The documented `error` frame, with no `kind`: only a revocation has one.
+    crate::chat_turn_wire::typed_frames(&[("error".to_string(), data.clone())]);
+    assert!(data.get("kind").is_none(), "{data}");
 }
 
 /// Review F-9: `/mcp`'s notification stream ends at a stop, and the server

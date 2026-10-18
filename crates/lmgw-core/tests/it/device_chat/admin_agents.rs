@@ -229,7 +229,7 @@ async fn a_device_s_run_is_capped_at_its_level() {
     let started = lmgw_core::ops::agent_run(&w.state, "holder", "list", Some(desk.id))
         .await
         .unwrap();
-    let job = settle(&w.state, started["job_id"].as_i64().unwrap()).await;
+    let job = settle(&w.state, started.answer.job_id).await;
     let told = format!("{:?} {:?}", job.error, job.result);
     assert!(told.contains("read only"), "{told}");
     assert!(

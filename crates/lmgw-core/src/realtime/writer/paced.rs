@@ -51,6 +51,12 @@
 //! (package B review 11). A purged generation's window ended at its purge,
 //! so its stale marker is due at once and never holds back the next
 //! response's audio behind it.
+//!
+//! **Pulled, on a call** (calls design §5.1, `pulled`): the call's frame
+//! clock takes each 20 ms itself, so no pacer times the audio — a chunk and
+//! the transcript deltas queued ahead of it leave with the tick that
+//! reaches them — and the record, drained and heard are the frame clock's
+//! (§5.3, §5.4). Everything else here keeps its meaning.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Mutex;
@@ -64,6 +70,10 @@ use super::super::pacing::Pacer;
 use super::super::protocol::{PartRef, ServerEvent};
 use super::playback::Playback;
 use super::OUTPUT_RATE;
+
+mod pulled;
+
+pub(crate) use pulled::{Cut, Pulled};
 
 /// One paced entry.
 pub(super) struct Entry {
@@ -140,6 +150,8 @@ struct Inner {
     /// this one's `response.done` (its window's end) or its cancel (a purge,
     /// which ends it).
     playback: Option<Playback>,
+    /// A link's frame clock pulls the queue (module doc): its state.
+    pulled: Option<pulled::Pull>,
 }
 
 impl Default for Shared {
@@ -153,6 +165,7 @@ impl Default for Shared {
                 pacers: HashMap::new(),
                 epoch: Instant::now(),
                 playback: None,
+                pulled: None,
             }),
             wake: Notify::new(),
             released: watch::Sender::new(Released::default()),
@@ -172,18 +185,25 @@ impl Shared {
     /// here, or still on the lane — and answer how many of its audio
     /// samples did, per item, and whether anything of it did (module doc).
     /// Its drained marker stays: the generation's acknowledgement still
-    /// comes, and is stale by then.
-    pub fn purge(&self, generation: u64) -> Sent {
+    /// comes, and is stale by then. On a pulled queue the samples are what
+    /// the listener heard, as `cut` counts them with the round trip `rtt`
+    /// (`pulled`); a paced one's are what was sent, whatever the cut.
+    pub fn purge(&self, generation: u64, cut: Cut, rtt: Option<Duration>) -> Sent {
         let mut inner = self.lock();
         inner.purged.add(generation);
         inner
             .queue
             .retain(|e| e.gen != generation || matches!(e.kind, Kind::Drained));
         inner.pacers.remove(&generation);
+        let now = Instant::now();
         if let Some(p) = inner.playback.as_mut().filter(|p| p.gen == generation) {
-            p.cut(Instant::now());
+            p.cut(now);
         }
-        let audio = inner.sent.remove(&generation).unwrap_or_default();
+        let sent = inner.sent.remove(&generation).unwrap_or_default();
+        let audio = match inner.pulled.as_mut() {
+            Some(p) => p.cut(generation, cut, rtt, now),
+            None => sent,
+        };
         let heard = inner.heard == generation;
         drop(inner);
         self.wake.notify_one();
@@ -217,8 +237,11 @@ impl Shared {
         let mut inner = self.lock();
         inner.purged.drops(generation, false);
         let now = Instant::now();
-        let playing = inner.window_end(generation).is_some_and(|end| end > now);
-        if inner.queue.is_empty() && !playing {
+        let playing = inner.drained_end(generation).is_some_and(|end| end > now);
+        // A frame clock still cutting its last chunk: its audio has not all
+        // left (`pulled`).
+        let holding = inner.pulled.as_ref().is_some_and(|p| p.holds(generation));
+        if inner.queue.is_empty() && !playing && !holding {
             inner.pacers.remove(&generation);
             return false;
         }
@@ -239,6 +262,9 @@ impl Shared {
             return;
         }
         if let Kind::Audio { at, .. } = &entry.kind {
+            if let Some(p) = inner.pulled.as_mut() {
+                p.queued(entry.gen, &at.response_id);
+            }
             // Registered at queueing, so a purge before the first send says
             // "nothing of it left" rather than nothing at all.
             inner
@@ -331,10 +357,11 @@ impl Shared {
         let inner = self.lock();
         let mut p = inner.playback?;
         p.waiting = p.ended.is_none()
-            && inner
+            && (inner
                 .queue
                 .iter()
-                .any(|e| e.gen == p.gen && matches!(e.kind, Kind::Audio { .. }));
+                .any(|e| e.gen == p.gen && matches!(e.kind, Kind::Audio { .. }))
+                || inner.pulled.as_ref().is_some_and(|q| q.holds(p.gen)));
         Some(p)
     }
 
@@ -352,6 +379,9 @@ impl Shared {
         inner.queue.clear();
         inner.sent.clear();
         inner.pacers.clear();
+        if let Some(p) = inner.pulled.as_mut() {
+            p.clear();
+        }
     }
 }
 
@@ -370,15 +400,18 @@ impl Inner {
         self.playback = Some(p);
     }
 
-    /// Where `generation`'s playing window ends, if it has one and it is
-    /// still the one recorded.
-    fn window_end(&self, generation: u64) -> Option<Instant> {
+    /// When `generation`'s drained marker is due (`Playback::drained_at`),
+    /// if it has a window and it is still the one recorded.
+    fn drained_end(&self, generation: u64) -> Option<Instant> {
         self.playback
             .filter(|p| p.gen == generation)
-            .and_then(|p| p.end())
+            .and_then(|p| p.drained_at())
     }
 
     fn head_due(&self, now: Instant) -> Option<Instant> {
+        if let Some(p) = &self.pulled {
+            return p.head_due(&self.queue, self.drained_end_of_head(), now);
+        }
         match self.queue.front()? {
             Entry {
                 gen,
@@ -389,7 +422,7 @@ impl Inner {
             Entry {
                 gen,
                 kind: Kind::Drained,
-            } => Some(self.window_end(*gen).unwrap_or(now)),
+            } => Some(self.drained_end(*gen).unwrap_or(now)),
             // A transcript delta leaves with the first audio behind it — or
             // at once when the marker comes first (a clause with no audio):
             // with nothing behind it yet, it waits for what is on the lane.
@@ -401,6 +434,17 @@ impl Inner {
                 Kind::Drained => Some(now),
                 Kind::Other(_) => None,
             }),
+        }
+    }
+
+    /// When the head's drained marker is due, if the head is one.
+    fn drained_end_of_head(&self) -> Option<Instant> {
+        match self.queue.front()? {
+            Entry {
+                gen,
+                kind: Kind::Drained,
+            } => self.drained_end(*gen),
+            _ => None,
         }
     }
 

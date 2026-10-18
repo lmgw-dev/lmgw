@@ -7,24 +7,24 @@
 //! the stream opened. The owner sees every thread, so no record is left out
 //! for its level (L3 is a device's rule), and the admin-level records are
 //! skipped: they move nothing the owner sees. The threads whose messages
-//! changed come from the message marks (`super::marks`), which the table
-//! does not hold yet.
+//! changed are the ones its `message.*` records name (WP10; an in-memory
+//! mark per message write stood in for them before).
 //!
 //! A frame names ids; it renders nothing. The dashboard reads the list or
 //! the thread again, so a frame is small however much changed, and what the
 //! page shows is always what the Chat API answers.
 //!
 //! - **Coalesced**: the first change of a burst waits [`COALESCE`] (a fixed
-//!   200 ms, not a setting) for the rest, then one read of the marks and the
-//!   table names them all in one frame. A folder deleted with its threads,
-//!   or a turn's user row and its title, is one frame. So a stream sends at
-//!   most one frame per [`COALESCE`] plus a read, but for one the backstop
-//!   finds, which goes out at once.
-//! - **Nothing missed**: the wake and the marks are subscribed before the
-//!   head is read, and the route sends its `resync` frame after both, so a
-//!   change is either before what the client reads on that frame or named
-//!   by a later one. Retention pruning records this reader had not read
-//!   yet, or a head it could not read at the start, is a `resync`.
+//!   200 ms, not a setting) for the rest, then one read of the table names
+//!   them all in one frame. A folder deleted with its threads, or a turn's
+//!   user row and its title, is one frame. So a stream sends at most one
+//!   frame per [`COALESCE`] plus a read, but for one the backstop finds,
+//!   which goes out at once.
+//! - **Nothing missed**: the wake is subscribed before the head is read,
+//!   and the route sends its `resync` frame after both, so a change is
+//!   either before what the client reads on that frame or named by a later
+//!   one. Retention pruning records this reader had not read yet, or a head
+//!   it could not read at the start, is a `resync`.
 //! - **The backstop**: the table is read at every
 //!   `chat_feed_keepalive_s` too, as a device's feed reads it, so a write
 //!   that recorded and forgot to wake the feed is late by one interval at
@@ -37,7 +37,6 @@ use futures::Stream;
 use lmgw_api_types::ChatChanged;
 use tokio::sync::watch;
 
-use super::marks::Marks;
 use super::stream::FeedStream;
 use crate::state::SharedState;
 use crate::store::feed::{self as table, kind};
@@ -51,9 +50,6 @@ pub(crate) const COALESCE: Duration = Duration::from_millis(200);
 pub(crate) struct Changes {
     state: SharedState,
     stored: watch::Receiver<u64>,
-    messages: watch::Receiver<Marks>,
-    /// The message marks' generation read up to.
-    seen: u64,
     /// The newest record read; `None` while the head could not be read.
     after: Option<i64>,
     /// `chat_feed_page_size` when the stream opened: what one read holds.
@@ -63,13 +59,11 @@ pub(crate) struct Changes {
 }
 
 impl Changes {
-    /// Subscribe to the wake and the marks, then read the table's head:
-    /// every change committed after this moment is named by a frame.
+    /// Subscribe to the wake, then read the table's head: every change
+    /// committed after this moment is named by a frame.
     pub(crate) async fn open(state: &SharedState) -> Self {
         let mut stored = state.chat_feed.stored.subscribe();
         stored.borrow_and_update();
-        let mut messages = state.chat_feed.messages.subscribe();
-        let seen = messages.borrow_and_update().now();
         let after = match table::bounds(&state.db).await {
             Ok(b) => Some(b.head),
             Err(e) => {
@@ -84,8 +78,6 @@ impl Changes {
         Self {
             state: state.clone(),
             stored,
-            messages,
-            seen,
             after,
             page_size: snap.settings.chat_feed_page_size.max(1),
             backstop: FeedStream::keepalive(snap.settings.chat_feed_keepalive_s),
@@ -97,10 +89,6 @@ impl Changes {
         loop {
             let backstop = tokio::select! {
                 changed = self.stored.changed() => {
-                    changed.ok()?;
-                    false
-                }
-                changed = self.messages.changed() => {
                     changed.ok()?;
                     false
                 }
@@ -119,22 +107,15 @@ impl Changes {
     /// Everything that changed since the last read.
     async fn read(&mut self) -> ChatChanged {
         self.stored.borrow_and_update();
-        let (messages, seen) = {
-            let marks = self.messages.borrow_and_update();
-            marks.since(self.seen)
-        };
-        self.seen = seen;
-        let mut out = ChatChanged {
-            messages,
-            ..ChatChanged::default()
-        };
+        let mut out = ChatChanged::default();
         self.read_table(&mut out).await;
         out
     }
 
     /// The records after the last one read, every page of them, as the
-    /// threads and folders they name. A read that fails keeps where it was:
-    /// the next wake or backstop tick reads the same records again.
+    /// threads, folders and threads whose messages changed they name. A
+    /// read that fails keeps where it was: the next wake or backstop tick
+    /// reads the same records again.
     async fn read_table(&mut self, out: &mut ChatChanged) {
         let db = &self.state.db;
         let Some(mut after) = self.after else {
@@ -151,6 +132,7 @@ impl Changes {
         };
         let mut threads = BTreeSet::new();
         let mut folders = BTreeSet::new();
+        let mut messages = BTreeSet::new();
         loop {
             let (page, bounds) = match table::page_with_bounds(db, after, self.page_size).await {
                 Ok(read) => read,
@@ -187,6 +169,9 @@ impl Changes {
                     | kind::FOLDER_CURRENT => {
                         folders.extend(r.folder_id);
                     }
+                    kind::MESSAGE_ADDED | kind::MESSAGE_UPDATED | kind::MESSAGE_DELETED => {
+                        messages.extend(r.thread_id);
+                    }
                     // A device's or the gateway's admin level: what a
                     // device reaches moved, nothing the owner sees. A
                     // `profile.*` record names no thread or folder (the
@@ -203,6 +188,7 @@ impl Changes {
         self.after = Some(after);
         out.threads = threads.into_iter().collect();
         out.folders = folders.into_iter().collect();
+        out.messages = messages.into_iter().collect();
     }
 }
 
@@ -233,9 +219,10 @@ mod tests {
                     .unwrap(),
             );
         }
-        state.chat_feed.messages_changed(ids[0]);
-        // A temporary thread is never named (L7).
-        state.chat_feed.messages_changed(-3);
+        // Its `message.added` record names the thread (WP10).
+        crate::store::append_chat_message(&state.db, ids[0], "user", "hi", "", None, None, None)
+            .await
+            .unwrap();
         let out = c.read().await;
         assert_eq!(out.threads, ids);
         assert_eq!(out.messages, vec![ids[0]]);
@@ -300,7 +287,10 @@ mod tests {
         let b = crate::store::create_chat_thread(&state.db, "m", "chat")
             .await
             .unwrap();
-        state.chat_feed.messages_changed(b);
+        crate::store::append_chat_message(&state.db, b, "user", "hi", "", None, None, None)
+            .await
+            .unwrap();
+        state.chat_feed.wake();
         let out = c.next().await.unwrap();
         assert_eq!((out.threads, out.messages), (vec![a, b], vec![b]));
         // No wake: the keep-alive interval's read finds it.

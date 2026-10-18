@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lmgw_core::config::{AudioModel, AudioSettings};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::audio::render_server_config;
 use lmgw_core::state::AppState;
 use lmgw_core::store::{self, NewAudioModel};
@@ -594,6 +595,7 @@ async fn setup_audio_proxy(upstream_base: &str) -> (lmgw_core::state::SharedStat
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -963,6 +965,7 @@ async fn audio_speech_rejects_non_openai_upstream() {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await
@@ -1575,17 +1578,18 @@ async fn audio_lab_task_wrapper_selects_run_or_stream() {
 /// is the wiremock the port allocator points at.
 struct FakePodman;
 
-#[async_trait::async_trait]
 impl lmgw_core::runtime::registry::CommandRunner for FakePodman {
-    async fn run(
-        &self,
-        _program: &str,
-        _args: &[String],
-    ) -> std::io::Result<lmgw_core::runtime::registry::CmdOutput> {
-        Ok(lmgw_core::runtime::registry::CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<lmgw_core::runtime::registry::CmdOutput>> {
+        Box::pin(async move {
+            Ok(lmgw_core::runtime::registry::CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -1707,18 +1711,19 @@ impl RecordingPodman {
     }
 }
 
-#[async_trait::async_trait]
 impl lmgw_core::runtime::registry::CommandRunner for RecordingPodman {
-    async fn run(
-        &self,
-        _program: &str,
-        args: &[String],
-    ) -> std::io::Result<lmgw_core::runtime::registry::CmdOutput> {
-        self.calls.lock().unwrap().push(args.to_vec());
-        Ok(lmgw_core::runtime::registry::CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        args: &'a [String],
+    ) -> Erased<'a, std::io::Result<lmgw_core::runtime::registry::CmdOutput>> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push(args.to_vec());
+            Ok(lmgw_core::runtime::registry::CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -1778,9 +1783,9 @@ async fn lab_with_one_audio_model(
     .unwrap();
     state.reload_snapshot().await.unwrap();
     let base = serve(state.clone()).await;
-    let voices = move |q: &'static str| {
+    let voices = move |route: &'static str| {
         let client = base.client();
-        let url = format!("{base}/audio-lab/api/voices?model=audio/pocket-tts{q}");
+        let url = format!("{base}{route}");
         Box::pin(async move {
             let resp = client.get(url).send().await.unwrap();
             assert_eq!(resp.status().as_u16(), 200);
@@ -1807,26 +1812,31 @@ async fn mount_pocket_tts(mock: &MockServer, voice_reads: u64) {
         .await;
 }
 
-/// Opening the Audio lab asks for the selected model's voices, and that list
-/// comes out of the model's own container. Through admission, the page load
-/// itself put a model on the GPU. The dashboard route now reads only a
-/// container that is already up: a stopped model answers an empty list with
-/// `running: false` and no `podman run` is issued, until the owner asks for it
-/// with `start=1`. Once the model is up, the plain read reaches it.
+/// The lab's voice route the picker reads, and the public route's engine
+/// probe, which is the one read that starts the model.
+const LAB_VOICES: &str = "/audio-lab/api/voices?model=audio/pocket-tts";
+const ENGINE_PROBE: &str = "/v1/audio/voices?model=audio/pocket-tts&probe=engine";
+
+/// Opening the Audio lab asks for the selected model's voices. The list is
+/// lmgw's own catalog and the lab never starts a model for it: a stopped
+/// model answers (here an empty catalog) with no `podman run`. Once the model
+/// is up some other way, the same read also asks it, without a claim, and
+/// adds the names the catalog lacks.
 #[tokio::test]
 async fn the_lab_voice_list_does_not_start_a_stopped_model() {
     let mock = MockServer::start().await;
     mount_pocket_tts(&mock, 2).await;
     let (state, podman, voices) = lab_with_one_audio_model(mock.address().port()).await;
 
-    // Browsing: nothing is started, and the answer says why the list is empty.
-    let v = voices("").await;
-    assert_eq!(v, json!({"voices": [], "running": false}));
+    // Browsing: nothing is started.
+    let v = voices(LAB_VOICES).await;
+    assert_eq!(v["voices"], json!([]));
+    assert_eq!(v["engine_asked"], json!(false));
     assert_eq!(podman.runs(), 0, "a browse must not run a container");
     assert!(state.runtime().list().is_empty());
 
-    // "Load voices": the explicit start admits the model like any request.
-    let v = voices("&start=1").await;
+    // The public route's engine probe starts the model like any request.
+    let v = voices(ENGINE_PROBE).await;
     assert_eq!(v["voices"][0].as_str(), Some("alba"));
     assert_eq!(podman.runs(), 1);
     assert!(state
@@ -1835,9 +1845,14 @@ async fn the_lab_voice_list_does_not_start_a_stopped_model() {
         .iter()
         .any(|e| e.model_id == "pocket-tts" && e.port == mock.address().port()));
 
-    // Up now: the plain read reaches the container and starts nothing more.
-    let v = voices("").await;
-    assert_eq!(v["voices"][0].as_str(), Some("alba"));
+    // Up now: the lab's read reaches the container, adds what only it knows
+    // and starts nothing more.
+    let v = voices(LAB_VOICES).await;
+    assert_eq!(v["engine_asked"], json!(true));
+    assert_eq!(
+        v["voices"],
+        json!([{"id": "alba", "kind": "engine", "send": "voice"}])
+    );
     assert_eq!(podman.runs(), 1);
 }
 
@@ -1846,7 +1861,7 @@ async fn the_lab_voice_list_does_not_start_a_stopped_model() {
 /// port where nothing listens. Through admission, the refused connection ran
 /// the dead-container recovery — stop it, admit it afresh, `podman run` — and
 /// opening the lab put the model back on the GPU. The browse read now takes no
-/// claim and recovers nothing: it answers "not running" and runs no podman
+/// claim and recovers nothing: it asks no one and runs no podman
 /// command at all.
 #[tokio::test]
 async fn the_lab_voice_list_does_not_restart_a_dead_ready_model() {
@@ -1857,7 +1872,7 @@ async fn the_lab_voice_list_does_not_restart_a_dead_ready_model() {
     let port = mock.address().port();
     let (state, podman, voices) = lab_with_one_audio_model(port).await;
 
-    let v = voices("&start=1").await;
+    let v = voices(ENGINE_PROBE).await;
     assert_eq!(v["voices"][0].as_str(), Some("alba"));
     assert_eq!(podman.runs(), 1);
 
@@ -1880,8 +1895,9 @@ async fn the_lab_voice_list_does_not_restart_a_dead_ready_model() {
     };
     assert!(ready(&state), "the registry should still believe it is up");
 
-    let v = voices("").await;
-    assert_eq!(v, json!({"voices": [], "running": false}));
+    let v = voices(LAB_VOICES).await;
+    assert_eq!(v["voices"], json!([]));
+    assert_eq!(v["engine_asked"], json!(false));
     assert_eq!(
         podman.runs(),
         1,
@@ -1898,7 +1914,7 @@ async fn the_lab_voice_list_does_not_restart_a_dead_ready_model() {
 /// A chat model resolves on the voice routes too — its llama-server speaks
 /// the OpenAI protocol — and admitting it started a chat container for a
 /// question it answers with a 404. Both voice routes refuse it before
-/// admission, the lab's "Load voices" (`start=1`) included.
+/// admission.
 #[tokio::test]
 async fn a_chat_model_asked_for_voices_is_refused_and_starts_nothing() {
     let state = AppState::init_for_tests().await.unwrap();
@@ -1935,7 +1951,6 @@ async fn a_chat_model_asked_for_voices_is_refused_and_starts_nothing() {
     let base = serve(state.clone()).await;
     for url in [
         format!("{base}/v1/audio/voices?model=chatty"),
-        format!("{base}/audio-lab/api/voices?model=chatty&start=1"),
         format!("{base}/audio-lab/api/voices?model=chatty"),
     ] {
         let resp = base.client().get(&url).send().await.unwrap();
@@ -1976,7 +1991,11 @@ async fn the_lab_voice_list_reads_a_remote_upstream_directly() {
         .json()
         .await
         .unwrap();
-    assert_eq!(v["voices"][0].as_str(), Some("alba"));
+    assert_eq!(
+        v["voices"],
+        json!([{"id": "alba", "kind": "engine", "send": "voice"}])
+    );
+    assert_eq!(v["source"], "upstream");
 }
 
 /// The reverse-route gate, the image class's twin: an `audio/<id>` sent to a

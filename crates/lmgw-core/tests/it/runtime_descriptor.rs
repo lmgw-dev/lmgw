@@ -15,8 +15,8 @@
 use std::path::Path;
 
 use lmgw_core::config::{
-    AudioModel, AudioSettings, AuxKind, AuxModel, ImageModel, ImageSettings, LlamaParams,
-    LocalModel, RouterSettings, Settings, Snapshot,
+    AudioModel, AudioSettings, AuxKind, AuxModel, AuxRouterSettings, ImageModel, ImageSettings,
+    LlamaParams, LocalModel, RouterSettings, Settings, Snapshot,
 };
 use lmgw_core::ladder::Rung;
 use lmgw_core::runtime::argv::podman_run_argv;
@@ -54,6 +54,11 @@ fn aux(model_id: &str, image: Option<&str>, extra: Option<Vec<&str>>, warm: bool
         kind: AuxKind::Embed,
         pooling: None,
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: vec![],
         idle_seconds: 0,
         enabled: true,
@@ -154,11 +159,14 @@ fn snapshot_with_images(
                 models_dir: "/srv/chat-models".into(),
                 ..RouterSettings::default()
             },
-            aux_router: RouterSettings {
-                image: "class-aux-image".into(),
-                extra_run_args: vec!["--aux-class-flag".into()],
-                models_dir: "/srv/aux-models".into(),
-                ..RouterSettings::default_aux()
+            aux_router: AuxRouterSettings {
+                base: RouterSettings {
+                    image: "class-aux-image".into(),
+                    extra_run_args: vec!["--aux-class-flag".into()],
+                    models_dir: "/srv/aux-models".into(),
+                    ..RouterSettings::default_aux()
+                },
+                ..AuxRouterSettings::default()
             },
             audio: AudioSettings {
                 image: "class-audio-image".into(),
@@ -990,6 +998,85 @@ fn a_cpu_row_renders_the_cpu_backend_and_drops_the_gpu_passthrough() {
             &snap.settings.audio
         ))
     );
+}
+
+/// An aux row on the CPU (decision-models design §3.3) is a CPU container to
+/// its descriptor, runs the class's args without the GPU passthrough, and
+/// renders this machine's physical cores as `--threads` when it names none.
+/// Its own run-args override is used verbatim; a GPU row keeps the class's
+/// args and renders no thread count.
+#[test]
+fn a_cpu_aux_row_drops_the_gpu_passthrough_and_renders_the_cores() {
+    use lmgw_core::config::AuxBackend;
+    use lmgw_core::runtime::argv::LlamaArgs;
+    use lmgw_core::runtime::Placement;
+
+    let mut cpu = aux("laya", None, None, false);
+    cpu.backend = Some(AuxBackend::Cpu);
+    let mut own = aux(
+        "own",
+        None,
+        Some(vec!["--device", "nvidia.com/gpu=all"]),
+        false,
+    );
+    own.backend = Some(AuxBackend::Cpu);
+    own.threads = Some(4);
+    let gpu = aux("bge", None, None, false);
+    let mut snap = snapshot(vec![], vec![cpu, own, gpu], vec![]);
+    snap.settings.aux_router.extra_run_args = [
+        "--device",
+        "nvidia.com/gpu=all",
+        "--security-opt",
+        "label=disable",
+    ]
+    .map(String::from)
+    .to_vec();
+    let threads = |rt: &lmgw_core::runtime::descriptor::ModelRuntime| match rt.llama {
+        Some(LlamaArgs::Aux { threads, .. }) => threads,
+        _ => panic!("an aux descriptor"),
+    };
+
+    let rt = model_runtime(&snap, Class::Aux, "laya").unwrap();
+    assert_eq!(rt.placement(), Placement::Cpu);
+    assert_eq!(
+        rt.extra_run_args,
+        [
+            "--security-opt",
+            "label=disable",
+            "-e",
+            "NVIDIA_VISIBLE_DEVICES=void"
+        ]
+    );
+    let cores = lmgw_core::host::cpu().physical_cores as i64;
+    assert_eq!(threads(&rt), Some(cores));
+
+    let rt = model_runtime(&snap, Class::Aux, "own").unwrap();
+    assert_eq!(rt.placement(), Placement::Cpu);
+    assert_eq!(rt.extra_run_args, ["--device", "nvidia.com/gpu=all"]);
+    assert_eq!(threads(&rt), Some(4));
+
+    let rt = model_runtime(&snap, Class::Aux, "bge").unwrap();
+    assert_eq!(rt.placement(), Placement::Gpu);
+    assert_eq!(rt.extra_run_args, snap.settings.aux_router.extra_run_args);
+    assert_eq!(threads(&rt), None);
+
+    // A CPU row whose freeform args still name a count (e.g.
+    // `--threads 16`) gets no default: the default would claim the key and
+    // drop the count as written.
+    for args in [["-t", "16"], ["--threads", "16"]] {
+        let mut m = aux("args-threads", None, None, false);
+        m.backend = Some(AuxBackend::Cpu);
+        m.args = args.map(String::from).to_vec();
+        let snap = snapshot(vec![], vec![m], vec![]);
+        let rt = model_runtime(&snap, Class::Aux, "args-threads").unwrap();
+        assert_eq!(threads(&rt), None, "{args:?}");
+        let spec = rt
+            .preview_spec("lmgw", 9000, "/srv/aux", Path::new("/srv/data"))
+            .unwrap();
+        let argv = lmgw_core::runtime::argv::render_llama_args(&spec).join(" ");
+        assert!(argv.ends_with(&args.join(" ")), "{argv}");
+        assert_eq!(argv.matches("16").count(), 1, "{argv}");
+    }
 }
 
 /// The run-args label a start puts on the container (`lmgw.run_args=…`).

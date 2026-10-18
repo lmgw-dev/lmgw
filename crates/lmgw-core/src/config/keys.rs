@@ -84,6 +84,108 @@ pub struct ApiKey {
     /// every other kind, which the table's CHECK states.
     #[serde(default)]
     pub self_admin: DeviceAdmin,
+    /// A **device**'s pairing over the device link (device link design
+    /// §3.6): its URLs, its latest certificate, its enrolment and the
+    /// owner's confirmation. Empty on every other kind.
+    #[serde(default)]
+    pub link: DeviceLink,
+}
+
+/// What a device row keeps of its pairing over the device link (device link
+/// design §3.6, migration 0081). Its credential is `ApiKey::key_hash`
+/// itself: `spki:<hex>` once enrolled, `pending:<random>` before, `v1:<old
+/// hash>` for a pairing from before TLS ([`DeviceLink::credential`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLink {
+    /// The device's lmgw URLs, `https` base URLs in the owner's order
+    /// (§3.1).
+    pub urls: Vec<String>,
+    /// Paired as "this computer" (§4.1).
+    pub local_only: bool,
+    /// The certificate of the key the row holds (`key_hash`), the latest
+    /// issued for it: its serial, `notAfter` and the notice date, RFC 3339
+    /// UTC.
+    pub cert_serial: Option<String>,
+    pub cert_not_after: Option<String>,
+    pub cert_notice_after: Option<String>,
+    /// The last enrolment: when, from which peer address, with which
+    /// `client` text (a waiting key's, while one waits).
+    pub enrolled_at: Option<String>,
+    pub enrolled_from: Option<String>,
+    pub client_info: Option<String>,
+    /// The owner's confirmation of the enrolled key (§3.5): `None` refuses
+    /// the device 403 `device_unconfirmed`.
+    pub confirmed_at: Option<String>,
+    /// A used token presented again by another key (§3.3), since the row's
+    /// latest token was minted.
+    pub contested_at: Option<String>,
+    pub contested_from: Option<String>,
+    /// A new key enrolled beside the row's confirmed one, which it kept (a
+    /// re-pair that kept the current key, §5.2): refused 403
+    /// `device_unconfirmed` until the owner confirms it, which makes it the
+    /// row's key and ends the kept one (§3.5).
+    pub waiting: Option<WaitingKey>,
+}
+
+/// A key enrolled beside a device row's confirmed one (device link design
+/// §5.2, *changed 2026-10-15*), with the certificate its enrolment answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingKey {
+    /// `spki:<hex>`, as a row's `key_hash` names an enrolled key.
+    pub key_hash: String,
+    pub cert_serial: Option<String>,
+    pub cert_not_after: Option<String>,
+    pub cert_notice_after: Option<String>,
+}
+
+/// Which credential a device row holds, by its `key_hash`'s prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceCredential<'a> {
+    /// An enrolled key: the hex SHA-256 of its SubjectPublicKeyInfo.
+    Key(&'a str),
+    /// None yet: waiting for an enrolment.
+    Pending,
+    /// A bearer key from a pairing before TLS, which nothing accepts.
+    V1,
+}
+
+impl DeviceLink {
+    /// The prefix of an enrolled key's `key_hash`.
+    pub const KEY_PREFIX: &'static str = "spki:";
+    /// The prefix of a row that waits for its key.
+    pub const PENDING_PREFIX: &'static str = "pending:";
+    /// The prefix of a row paired with a link from before TLS.
+    pub const V1_PREFIX: &'static str = "v1:";
+
+    /// What a device row's `key_hash` names.
+    pub fn credential(key_hash: &str) -> DeviceCredential<'_> {
+        if let Some(hex) = key_hash.strip_prefix(Self::KEY_PREFIX) {
+            DeviceCredential::Key(hex)
+        } else if key_hash.starts_with(Self::V1_PREFIX) {
+            DeviceCredential::V1
+        } else {
+            DeviceCredential::Pending
+        }
+    }
+
+    /// The confirmation code (§3.5) of the key an enrolled row's `key_hash`
+    /// names; `None` for a row with no enrolled key.
+    pub fn confirm_code(key_hash: &str) -> Option<String> {
+        let DeviceCredential::Key(hex) = Self::credential(key_hash) else {
+            return None;
+        };
+        let mut digest = [0u8; 32];
+        hex::decode_to_slice(hex, &mut digest).ok()?;
+        Some(lmgw_api_types::device_link::confirm_code(&digest))
+    }
+
+    /// A `key_hash` for a row that waits for its key: `pending:` and 32
+    /// random hex digits, which no certificate's key hash and no bearer's
+    /// hash can equal.
+    pub fn pending_hash() -> String {
+        let bytes: [u8; 16] = rand::random();
+        format!("{}{}", Self::PENDING_PREFIX, hex::encode(bytes))
+    }
 }
 
 /// A device's level of lmgw's admin tools (`ApiKey::self_admin`): stored as
@@ -259,6 +361,13 @@ pub struct KeyPolicy {
     pub tool_scope_mode: ScopeMode,
     #[serde(default)]
     pub tool_scope_patterns: String,
+    /// The device-hosted labels whose tools the key reaches (client-apps
+    /// design L16 as changed 2026-10-15): `["kai"]` lets it use Kai
+    /// desktop's tools, whatever its tool scope's mode; the tool scope then
+    /// filters which of them it sees, as it does any server's. A label no
+    /// device hosts (yet) is kept and reaches nothing until one does.
+    #[serde(default)]
+    pub device_tools: Vec<String>,
     /// Currency micro-units. `0` = no budget.
     pub budget_micro: i64,
     pub budget_period: BudgetPeriod,
@@ -370,6 +479,15 @@ impl KeyPolicy {
                 !lmgw_api_types::scope::patterns_match(&self.tool_scope_patterns, name)
             }
         }
+    }
+
+    /// Does this key's device-tools grant name the hosted `label`? Matched
+    /// case-insensitively, as a label's namespace is.
+    pub fn grants_device_tools(&self, label: &str) -> bool {
+        let label = lmgw_api_types::scope::fold(label.trim());
+        self.device_tools
+            .iter()
+            .any(|l| lmgw_api_types::scope::fold(l.trim()) == label)
     }
 }
 

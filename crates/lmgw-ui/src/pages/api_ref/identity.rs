@@ -13,9 +13,9 @@ pub enum Identity {
     None,
 }
 
-/// `GET /api/session`'s answer to a pasted key: `kind` is `"owner"` |
-/// `"agent"` | `"key"` | `""` (core `web::session::SessionView`), mirrored
-/// here verbatim rather than parsed into an enum, so a kind core adds later
+/// `GET /api/session`'s answer to a pasted key (`SessionView`): `kind` is
+/// `"owner"` | `"agent"` | `"key"` | `"device"` | `""`, kept here as the
+/// string it is rather than parsed into an enum, so a kind core adds later
 /// is shown by its own name instead of failing to parse. (`"internal"` is
 /// the one other kind core has; its rows never authenticate over HTTP, so a
 /// pasted internal key answers `authenticated: false` like any unknown one.)

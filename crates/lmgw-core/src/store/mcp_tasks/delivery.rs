@@ -191,6 +191,8 @@ async fn deliver_result_in(
     .execute(&mut *conn)
     .await?
     .last_insert_rowid();
+    // The gateway's own: a result entering the thread (client-apps §2.2).
+    feed::record_added(&mut *conn, thread_id, message_id, None).await?;
     let facts = TaskFacts {
         id: row.id,
         task_id: row.task_id.clone(),

@@ -54,18 +54,19 @@ pub async fn measure_rates(cx: &PhaseCx<'_>, plan: &MixedPlan) -> Result<Rates, 
     let t = rec
         .timings()
         .map_err(|e| BenchError::Failed(format!("mixed, measuring a stream's rates: {e}")))?;
-    let usable = |v: f64| v.is_finite() && v > 0.0;
-    if !usable(t.predicted_per_second) || !usable(t.prompt_per_second) {
+    let usable = |v: Option<f64>| v.filter(|v| *v > 0.0);
+    let (Some(decode), Some(prefill)) =
+        (usable(t.predicted_per_second), usable(t.prompt_per_second))
+    else {
+        let say = |v: Option<f64>| v.map_or("no".to_string(), |v| v.to_string());
         return Err(BenchError::Failed(format!(
             "mixed, measuring a stream's rates: the server reported {} tok/s decode and {} tok/s \
              prefill",
-            t.predicted_per_second, t.prompt_per_second
+            say(t.predicted_per_second),
+            say(t.prompt_per_second)
         )));
-    }
-    Ok(Rates {
-        decode: t.predicted_per_second,
-        prefill: t.prompt_per_second,
-    })
+    };
+    Ok(Rates { decode, prefill })
 }
 
 /// Measure the phase as `plan` (already sized) says.

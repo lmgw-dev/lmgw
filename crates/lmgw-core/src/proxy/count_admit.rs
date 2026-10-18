@@ -52,6 +52,20 @@ pub(super) async fn admit_counter(
     admit_routed(state, routed, pinned, row).await
 }
 
+/// Whether a count on `route` brings nothing up: a cloud route, or a local
+/// model whose container is ready (labs-store design §2.5, "ready or
+/// cloud"). One that is starting is not ready: a gauge does not wait for a
+/// load it did not ask for.
+pub(super) fn ready_or_cloud(state: &SharedState, route: &crate::config::Route) -> bool {
+    crate::vram::classify(route).is_none_or(|t| {
+        state.runtime().list().iter().any(|e| {
+            e.class == t.class
+                && e.model_id == t.model_id
+                && e.state == crate::runtime::registry::RuntimeState::Ready
+        })
+    })
+}
+
 /// [`admit_counter`] past the resolve, for a counter that judges the resolved
 /// route itself first (`/v1/messages/count_tokens`'s facets).
 pub(super) async fn admit_routed(

@@ -1,5 +1,7 @@
 //! `ops-routing`: upstream and alias plumbing (api-docs design §4.7).
 
+use lmgw_api_types as dto;
+
 use super::{OpArgs, OpDoc, Resp};
 use crate::openapi::ops::args;
 
@@ -13,7 +15,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__upstream_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::UpstreamPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::RowSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -27,7 +29,7 @@ pub(super) const OPS: &[OpDoc] = &[
         description: None,
         tool: Some("lmgw__model_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::AliasPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::RowSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -38,10 +40,14 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "candidate_alias_set",
         tag: TAG,
         summary: "Create, update, delete, enable, disable or preview a candidate alias",
-        description: None,
+        description: Some(
+            "The answer follows the action: `preview` answers CandidateAliasPreview (the \
+             draft's derivation and the models it could add, written nowhere), every other \
+             action CandidateAliasSaved.",
+        ),
         tool: Some("lmgw__candidate_alias_set"),
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::ops::CandidateAliasPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::CandidateAliasAnswer>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -59,7 +65,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::web::api::AliasFullPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::RowSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -77,7 +83,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::web::api::UpstreamFullPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::RowSaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -96,7 +102,7 @@ pub(super) const OPS: &[OpDoc] = &[
         ),
         tool: None,
         args: OpArgs::Struct(|g| g.root_schema_for::<crate::web::api::ModelVisibilityPatch>()),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::ModelVisibilitySaved>()),
         writes: true,
         reveals_secret: false,
         confirm_note: None,
@@ -107,10 +113,14 @@ pub(super) const OPS: &[OpDoc] = &[
         name: "upstream_test",
         tag: TAG,
         summary: "Test connectivity to a configured upstream",
-        description: Some("Connect to one configured upstream now and report what happened."),
+        description: Some(
+            "Connect to one configured upstream now. It answers `{ok: true}` when the model \
+             list came back; a failed connection is an error answer with the upstream's own \
+             words.",
+        ),
         tool: None,
         args: OpArgs::Hand(args::upstream_test),
-        response: Resp::OpOutcome,
+        response: Resp::Json(|g| g.root_schema_for::<dto::UpstreamTested>()),
         writes: false,
         reveals_secret: false,
         confirm_note: None,

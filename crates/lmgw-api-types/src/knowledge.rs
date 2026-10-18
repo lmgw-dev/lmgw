@@ -287,17 +287,21 @@ pub struct ResumeResult {
     pub job: Option<i64>,
     /// `kb_ingest` or `kb_reembed`; absent when no job was started.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub kind: Option<String>,
     /// Present when Resume joined a running job (`true`) or started the
     /// plain ingest of the pending files (`false`); absent for a re-embed or
     /// re-chunk it started.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub already_running: Option<bool>,
     /// Present when the files holding oversized chunks are re-chunked first:
     /// why.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub rechunk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub message: Option<String>,
 }
 
@@ -397,6 +401,7 @@ pub struct KnowledgeSource {
     /// Said when the highlight is not the cited chunk itself: it was found by
     /// the citation's stored position because the chunk id no longer exists.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(transform = crate::openapi_ext::non_null))]
     pub notice: Option<String>,
 }
 

@@ -445,7 +445,7 @@ async fn a_run_flag_only_podman_run_takes_is_refused_at_save() {
                 transport: Some("stdio".into()),
                 container_image: Some(IMAGE.into()),
                 command: Some("sleep".into()),
-                extra_run_args: Some("-v\n/a:/b:Z\n--rmi".into()),
+                extra_run_args: Some(vec!["-v".into(), "/a:/b:Z".into(), "--rmi".into()]),
                 ..Default::default()
             },
             writer,
@@ -465,7 +465,7 @@ async fn a_run_flag_only_podman_run_takes_is_refused_at_save() {
             transport: Some("stdio".into()),
             container_image: Some(IMAGE.into()),
             command: Some("sleep".into()),
-            extra_run_args: Some("--sig-proxy=false".into()),
+            extra_run_args: Some(vec!["--sig-proxy=false".into()]),
             autostart: Some(false),
             ..Default::default()
         },
@@ -473,14 +473,14 @@ async fn a_run_flag_only_podman_run_takes_is_refused_at_save() {
     )
     .await
     .expect("a flag podman start takes is fine");
-    let id = created["id"].as_i64().unwrap();
+    let id = created.id;
     for writer in [RowWriter::Dashboard, RowWriter::Tool] {
         let refused = ops::mcp_server_set(
             &state,
             McpServerPatch {
                 action: "update".into(),
                 id: Some(id),
-                extra_run_args: Some("-d\n--preserve-fds=1".into()),
+                extra_run_args: Some(vec!["-d".into(), "--preserve-fds=1".into()]),
                 timeout_ms: Some(1_234),
                 ..Default::default()
             },

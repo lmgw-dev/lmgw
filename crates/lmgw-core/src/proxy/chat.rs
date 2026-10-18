@@ -43,12 +43,13 @@ pub async fn handle_chat(
     );
 
     let parsed = match proto {
-        // `Realtime`, `Chat` and `AdminChat` never reach this handler (their
-        // labels are for rows).
+        // `Realtime`, `Chat`, `AdminChat` and `SystemOne` never reach this
+        // handler (their labels are for rows).
         ClientProto::OpenaiChat
         | ClientProto::Realtime
         | ClientProto::Chat
-        | ClientProto::AdminChat => openai::parse_chat_request(&body),
+        | ClientProto::AdminChat
+        | ClientProto::SystemOne => openai::parse_chat_request(&body),
         ClientProto::AnthropicMessages => anthropic::parse_messages_request(&body),
     };
     let mut ir = match parsed {
@@ -117,12 +118,18 @@ pub async fn handle_chat(
     // alias refuses a facet it does not enable here, before anything starts
     // (`Routed::using`).
     let uses = crate::gate::request_facets(&ir, ctx.reasoning_control().as_ref());
+    // The route the client called, which a refusal names: this handler
+    // serves both chat dialects.
+    let endpoint = match proto {
+        ClientProto::AnthropicMessages => "/v1/messages",
+        _ => "/v1/chat/completions",
+    };
     unanswered.stage("waiting for admission (GPU room, or the model's container starting)");
     let opened = match async {
         crate::gate::resolve(
             &state,
             &ir.model_alias,
-            crate::gate::RouteCheck::Text("/v1/chat/completions"),
+            crate::gate::RouteCheck::Text(endpoint),
         )
         .await?
         .using(uses)?

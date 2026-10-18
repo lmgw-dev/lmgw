@@ -38,8 +38,8 @@ pub(super) fn tools() -> Vec<Builtin> {
                     enum_p(
                         "Wire protocol the upstream speaks. Required on create. 'llama_cpp' is \
                          llama.cpp's own server (llama-server, ik_llama.cpp) and is always kind \
-                         'llama_server'; 'openai' with kind 'llama_server' is its old spelling \
-                         and is stored as 'llama_cpp'.",
+                         'llama_server'; 'openai' with kind 'llama_server' (its old spelling) is \
+                         refused, use protocol 'llama_cpp'.",
                         &["openai", "anthropic", "gemini", "llama_cpp"],
                     ),
                 ),
@@ -85,6 +85,19 @@ pub(super) fn tools() -> Vec<Builtin> {
                          'llama_cpp': lmgw synthesizes /v1/responses there, so every request \
                          goes through its llama.cpp egress. Most other local servers have no \
                          such endpoint.",
+                    ),
+                ),
+                (
+                    "catalog_all_modalities",
+                    bool_p(
+                        "Ask the upstream's catalog for every output modality \
+                         (GET …/models?output_modalities=all), so OpenRouter lists its decision, \
+                         embedding, rerank, speech, transcription, image and video models as \
+                         well as its chat models. Default true; only the catalog request of an \
+                         'openai' upstream of kind 'generic' carries it. Some endpoints refuse \
+                         the parameter: Gemini's OpenAI-compatible one answers 400, so with \
+                         this on its catalog fails, and the error names this option. Set it \
+                         false for such an upstream.",
                     ),
                 ),
             ],

@@ -438,7 +438,7 @@ HTMX; SSE for live regions. No JS build step.
 > (NVIDIA only, and only when no WebKit render variable is already set). It
 > avoids the Error 71 crash *and* keeps the zero-copy hardware renderer;
 > `WEBKIT_DISABLE_DMABUF_RENDERER=1` means software compositing, measured
-> 2026-09-27 at 21 fps vs 60 (1600×1000) and 4 vs 60 (5000×1400) on the RTX 4090.
+> 2026-09-27 at 21 fps vs 60 (1600×1000) and 4 vs 60 (5000×1400) on a 24 GB GPU.
 > An explicit `WEBKIT_DISABLE_DMABUF_RENDERER=1 lmgw` stays the escape hatch.
 > See `render_workaround` in `src-tauri/src/main.rs`. The text below is the
 > original design.

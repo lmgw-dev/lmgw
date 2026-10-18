@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{CandidateAliasView, ModelsFull};
+use lmgw_api_types::{CandidateAliasPreview, CandidateAliasSaved, CandidateAliasView, ModelsFull};
 use serde_json::{json, Value};
 
 use crate::catalog::CatalogEntry;
@@ -246,43 +246,21 @@ fn CandidateAliasForm(
     let preview = LocalResource::new(move || {
         let body = draft.get();
         async move {
-            crate::api::post::<Value, _>("/api/op/candidate_alias_set", &body)
+            crate::api::post::<CandidateAliasPreview, _>("/api/op/candidate_alias_set", &body)
                 .await
                 .ok()
         }
     });
-    let field = move |name: &'static str| -> Value {
-        preview
-            .get()
-            .flatten()
-            .and_then(|v| v.get(name).cloned())
-            .unwrap_or(Value::Null)
-    };
-    let str_list = move |name: &'static str| -> Vec<String> {
-        field(name)
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let common_facets = move || str_list("common_facets");
-    let problems = move || str_list("problems");
-    let advisories = move || str_list("advisories");
-    let preview_error = move || field("error").as_str().map(str::to_string);
-    let fallback_usable = move || field("fallback_usable").as_bool().unwrap_or(false);
+    // Nothing yet, or a preview that failed to arrive: every list empty, no
+    // error, the fallback not usable.
+    let answer = move || preview.get().flatten().unwrap_or_default();
+    let common_facets = move || answer().common_facets;
+    let problems = move || answer().problems;
+    let advisories = move || answer().advisories;
+    let preview_error = move || answer().error;
+    let fallback_usable = move || answer().fallback_usable;
     let unsupported_by = move |facet: &str| -> Vec<String> {
-        field("unsupported_by")
-            .get(facet)
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
+        answer().unsupported_by.remove(facet).unwrap_or_default()
     };
     // Every enabled local chat model not already a candidate, and which of
     // it supports every facet the draft currently enables — "listing only
@@ -291,33 +269,19 @@ fn CandidateAliasForm(
     // `addable`) instead of one request per row a client-only picker would
     // otherwise cost.
     let addable = move || -> Vec<String> {
-        field("addable")
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter(|e| {
-                        e.get("missing")
-                            .and_then(Value::as_array)
-                            .is_none_or(|m| m.is_empty())
-                    })
-                    .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
+        answer()
+            .addable
+            .into_iter()
+            .filter(|e| e.missing.is_empty())
+            .map(|e| e.id)
+            .collect()
     };
     let excluded_count = move || {
-        field("addable")
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter(|e| {
-                        e.get("missing")
-                            .and_then(Value::as_array)
-                            .is_some_and(|m| !m.is_empty())
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
+        answer()
+            .addable
+            .iter()
+            .filter(|e| !e.missing.is_empty())
+            .count()
     };
 
     // --- Candidate list edits --------------------------------------------
@@ -467,15 +431,13 @@ fn CandidateAliasForm(
         });
         saving.set(true);
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/candidate_alias_set", &args).await;
+            let res =
+                crate::api::post::<CandidateAliasSaved, _>("/api/op/candidate_alias_set", &args)
+                    .await;
             saving.set(false);
             match res {
                 Ok(v) => {
-                    toasts.ok(v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("candidate alias saved")
-                        .to_string());
+                    toasts.ok(v.message);
                     open.set(false);
                     on_saved();
                 }

@@ -49,6 +49,7 @@ async fn setup(mock: &MockServer, kind: UpstreamKind) -> (SharedState, Gw) {
             expose_all: false,
             expose_prefix: String::new(),
             supports_responses: false,
+            catalog_all_modalities: true,
         },
     )
     .await

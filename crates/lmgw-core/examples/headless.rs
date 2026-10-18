@@ -28,7 +28,10 @@
 //! deletion and keep_runs pruning, tags builds into
 //! `localhost/lmgw-dev-<engine>:…`, and keeps its builds under
 //! `~/.cache/lmgw-dev/builds` — a guard that must not hang on whether the
-//! runner happened to be started through the script.
+//! runner happened to be started through the script. And as a dev instance
+//! it never asks the desktop's Secret Service (`state::wrap_key_store`): the
+//! device CA it makes when its device listener is turned on keeps its key
+//! plain in its own data dir, whatever the session bus in its environment.
 
 use lmgw_core::config::dev_instance_override;
 use lmgw_core::state::{AppState, SharedState};

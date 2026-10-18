@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use lmgw_api_types::{KeyRow, KeysResponse, PricesResponse, ToolInventory};
-use serde_json::{json, Value};
+use lmgw_api_types::{
+    KeyCreated, KeyRow, KeySecret, KeysResponse, MessageAck, PricesResponse, ToolInventory,
+};
+use serde_json::json;
 
 use crate::fmt::grouped;
 use crate::live::use_live;
@@ -234,7 +236,7 @@ fn KeyCreate(fresh: RwSignal<Option<(String, String)>>, refresh: RwSignal<u32>) 
         busy.set(true);
         let key_name = n.clone();
         spawn_local(async move {
-            let res = crate::api::post::<Value, _>("/api/op/key_create", &body).await;
+            let res = crate::api::post::<KeyCreated, _>("/api/op/key_create", &body).await;
             // Leaving the page while the POST was out disposed the signals
             // below; reading one (`scope.load`) would trap the module.
             if !page.alive() {
@@ -250,13 +252,7 @@ fn KeyCreate(fresh: RwSignal<Option<(String, String)>>, refresh: RwSignal<u32>) 
             busy.set(false);
             match res {
                 Ok(v) => {
-                    let text = |f: &str| {
-                        v.get(f)
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string()
-                    };
-                    fresh.set(Some((text("name"), text("plaintext"))));
+                    fresh.set(Some((v.name, v.key)));
                     name.set(String::new());
                     scope.load("all", "", "all", "");
                     scope_open.set(false);
@@ -342,19 +338,11 @@ fn KeysTable(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
         rotate_open.set(false);
         spawn_local(async move {
             let res =
-                crate::api::post::<Value, _>("/api/op/key_rotate", &json!({ "id": k.id })).await;
+                crate::api::post::<KeySecret, _>("/api/op/key_rotate", &json!({ "id": k.id }))
+                    .await;
             match res {
                 Ok(v) => {
-                    let key = v
-                        .get("key")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let msg = v
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("key rotated")
-                        .to_string();
+                    let (key, msg) = (v.key, v.message);
                     stranded.set(false);
                     if !key.is_empty() {
                         rotated.set(Some((k.name.clone(), key.clone())));
@@ -388,7 +376,9 @@ fn KeysTable(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
     };
     let revoke = move |id: i64, name: String| {
         spawn_local(async move {
-            match crate::api::post::<Value, _>("/api/op/key_delete", &json!({ "id": id })).await {
+            match crate::api::post::<MessageAck, _>("/api/op/key_delete", &json!({ "id": id }))
+                .await
+            {
                 Ok(_) => {
                     toasts.ok(format!("{name} revoked"));
                     refresh.update(|v| *v = v.wrapping_add(1));
@@ -495,7 +485,18 @@ fn KeysTable(keys: Src<KeysResponse>, refresh: RwSignal<u32>) -> impl IntoView {
                 <tbody>{rows}</tbody>
             </table>
         </div>
-        <KeyEditor open=open editing=editing refresh=refresh/>
+        <KeyEditor
+            open=open
+            editing=editing
+            refresh=refresh
+            hosted=Signal::derive(move || {
+                keys.data.with(|d| {
+                    d.as_ref()
+                        .map(|k| super::device_tools::hosted_labels(&k.keys))
+                        .unwrap_or_default()
+                })
+            })
+        />
 
         // What rotating this particular key costs, before the click: the
         // dashboard key is every browser's session, the others are

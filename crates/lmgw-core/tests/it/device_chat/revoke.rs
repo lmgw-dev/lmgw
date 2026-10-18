@@ -8,6 +8,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lmgw_api_types::chat_frames::ErrorFrame;
+use lmgw_api_types::realtime::RevokeKind;
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 
@@ -36,6 +38,22 @@ async fn read_until(
     buf
 }
 
+/// The `revoked` frame is the documented `error` frame (validated against
+/// the send route's frame set) and its `kind` is one of the four tokens, not
+/// an unknown one.
+fn typed_revoked(revoked: &(String, Value), token: &str) {
+    crate::chat_turn_wire::typed_frames(std::slice::from_ref(revoked));
+    let frame: ErrorFrame = serde_json::from_value(revoked.1.clone()).unwrap();
+    assert_eq!(frame.code.as_deref(), Some("revoked"));
+    assert_eq!(frame.kind.as_ref().map(RevokeKind::as_str), Some(token));
+    assert!(
+        !matches!(frame.kind, Some(RevokeKind::Unknown(_))),
+        "{frame:?}"
+    );
+}
+
+/// A new token that ends the device's key (device link design §5.2) ends
+/// its running turn as a rotation did.
 #[tokio::test]
 async fn a_rotate_ends_a_device_s_running_turn() {
     let (w, d) = device_world().await;
@@ -58,7 +76,12 @@ async fn a_rotate_ends_a_device_s_running_turn() {
     assert_eq!(resp.status(), 200);
     read_until(&mut resp, 10, |b| b.contains("Thinking")).await;
 
-    let (s, v) = op(&w, "key_rotate", json!({ "id": d.id })).await;
+    let (s, v) = op(
+        &w,
+        "device_token",
+        json!({ "id": d.id, "end_current": true }),
+    )
+    .await;
     assert_eq!(s, 200, "{v}");
     let rest = read_until(&mut resp, 10, |_| false).await;
     let said = frames(&rest);
@@ -68,8 +91,9 @@ async fn a_rotate_ends_a_device_s_running_turn() {
         .unwrap_or_else(|| panic!("no revoked frame in {rest}"));
     assert_eq!(
         revoked.1["message"],
-        "device 'phone' was rotated — pair it again"
+        "the key of device 'phone' was replaced — pair it again"
     );
+    typed_revoked(revoked, "key_unknown");
     assert!(
         !rest.contains(" more."),
         "nothing after the revocation: {rest}"
@@ -158,6 +182,7 @@ async fn disable_delete_and_expiry_end_a_device_s_running_turn() {
             _ => "key_expired",
         };
         assert_eq!(revoked.1["kind"], kind, "{how}");
+        typed_revoked(revoked, kind);
         assert!(!rest.contains(" more."), "{how}: {rest}");
         hold.notify_one();
     }
@@ -207,6 +232,7 @@ async fn an_owner_key_s_rotate_ends_its_running_turn() {
     assert_eq!(revoked.1["message"], "owner key 'dashboard' was rotated");
     // Any key but a paired device's is `revoked` (review G-7, G-9).
     assert_eq!(revoked.1["kind"], "revoked");
+    typed_revoked(revoked, "revoked");
     assert!(!rest.contains(" more."), "{rest}");
     let stopped = tokio::time::timeout(Duration::from_secs(5), async {
         while w.chat.seen.closed_early.load(Ordering::SeqCst) == 0 {
@@ -246,18 +272,21 @@ async fn api_events_says_when_a_device_connects_and_when_it_is_revoked() {
     read_until(&mut feed, 10, |b| b.contains("event: updates")).await;
 
     // A device's realtime session is one of its links: open, then closed.
-    let bearer = format!("Bearer {}", d.key);
     let tid = w.thread("chatty", json!({})).await;
     let ws = w
-        .connect(
-            &format!("chat_thread={tid}"),
-            &[("authorization", bearer.as_str())],
-        )
+        .connect_as(&d, &format!("chat_thread={tid}"))
         .await
         .unwrap_or_else(|(s, b)| panic!("expected a 101, got {s}: {b}"));
     let link = json!({ "key_id": d.id, "what": "link" });
     let buf = read_until(&mut feed, 10, |b| keys_frames(b).contains(&link)).await;
-    assert_eq!(keys_frames(&buf), vec![link.clone()]);
+    // Its first request with the certificate its pairing token answered may
+    // also have ended that token, which says `token` (device link D8's note
+    // of 2026-10-15).
+    let said: Vec<Value> = keys_frames(&buf)
+        .into_iter()
+        .filter(|f| f != &json!({ "key_id": d.id, "what": "token" }))
+        .collect();
+    assert_eq!(said, vec![link.clone()]);
 
     // A Disable says so, and the session's close says "link" again.
     let (s, v) = op(&w, "key_set", json!({ "id": d.id, "enabled": false })).await;

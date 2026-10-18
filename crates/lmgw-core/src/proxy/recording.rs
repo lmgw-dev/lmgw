@@ -65,11 +65,25 @@ pub struct RequestCtx {
     /// moment it starts, never every revocation the key ever had (review
     /// W2-14). The credential's fingerprint still catches a Rotate.
     pub revocation_mark: Option<u64>,
-    /// The generation of the server the request came in on
+    /// The listener the request came in on and its generation then
     /// ([`ServedAt`](crate::server::ServedAt)): its streams and sessions end
-    /// at that server's stop, and the stop waits for its turns. `None` for a
-    /// context built by hand, which takes the server serving then.
-    pub served_at: Option<u64>,
+    /// at that listener's stop, and the stop waits for its turns. `None` for
+    /// a context built by hand, which takes the plain listener serving then.
+    pub served_at: Option<crate::server::ServedAt>,
+    /// The listener the request came in on (device link design §4.5): the
+    /// plain one, or the device listener with a client certificate. A
+    /// context built by hand is the plain listener's.
+    pub via: crate::server::Via,
+    /// On the device listener, the `notAfter` of the client certificate the
+    /// principal was resolved from (device link design D5, §5.1): a
+    /// long-lived connection it opens ends at that date with
+    /// `certificate_expired`. `None` everywhere else.
+    pub cert_not_after: Option<chrono::DateTime<chrono::Utc>>,
+    /// On the device listener, the connection of a device the certificate
+    /// opened (device link design §4.5): its peer, the local address it
+    /// arrived on, and its socket handle, which the feed sets
+    /// `TCP_USER_TIMEOUT` through (§7.1). `None` everywhere else.
+    pub conn: Option<crate::server::Conn>,
 }
 
 impl RequestCtx {
@@ -113,6 +127,7 @@ impl RequestCtx {
             name: self.client_key.clone(),
             id: self.principal.key_id(),
             run: self.run,
+            via: self.via,
         }
     }
 
@@ -148,6 +163,9 @@ pub(crate) struct KeyRef {
     pub name: Option<String>,
     pub id: Option<i64>,
     pub run: Option<i64>,
+    /// The listener the caller's request came in on (device link design
+    /// §4.5), which its rows record.
+    pub via: crate::server::Via,
 }
 
 impl KeyRef {
@@ -274,6 +292,7 @@ pub(super) async fn record(
         images_out: quantity_column(q.images_out),
         // A model call: no approval decides one.
         approved_by: None,
+        via: p.ctx.via,
     };
     note_on_run(p.state, p.ctx.run, &row, &usage);
     // Its own task: a handler dropped mid-insert neither loses the row nor
@@ -1111,6 +1130,7 @@ async fn record_free_form(
         audio_in_ms: quantity_column(q.audio_in_ms),
         chars_in: quantity_column(q.chars_in),
         images_out: quantity_column(q.images_out),
+        via: ctx.via,
         ..Default::default()
     };
     // A stamped native passthrough's answer is the run's like any `/v1`

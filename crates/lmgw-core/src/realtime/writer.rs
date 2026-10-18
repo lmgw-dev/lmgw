@@ -1,5 +1,6 @@
 //! The writer (realtime design §4.1, §4.3, §8.2): the one task that writes
-//! to the socket.
+//! to the socket — the link's sending half (`link::Sink`; calls design
+//! §7.1), a WebSocket's today.
 //!
 //! Everything the session says goes through [`WriterHandle`] in order, and
 //! the writer turns each event into a [`ServerFrame`] with a freshly minted
@@ -64,12 +65,23 @@
 //! gets the close only once its thread holds the reply's cut and the last
 //! turn; a writer that ended at the failed send dropped the socket at once,
 //! and the browser saw the connection drop (1006) before the drain.
+//!
+//! **A link whose own clock pulls the audio** (a WebRTC call's frame clock,
+//! calls design §5.1): the writer hands it the paced queue at the start
+//! ([`link::Sink::pull`], [`Pulled`]), and from then on no pacer times the
+//! audio — each tick of the link's clock takes its 20 ms, with the
+//! transcript deltas queued ahead of it — while purges, the playback record,
+//! the drained marker and `progress()` keep their meaning (`paced`). The
+//! writer stops that clock wherever its own sending ends: before a bound
+//! call's `lmgw.session.closed` goes out (the session's last event), at the
+//! close, at the end once every handle is gone, and when the client is gone.
+//! Right after the `response.done` of a response whose audio started on the
+//! call it sends `output_audio_buffer.stopped`, or `.cleared` for one that
+//! was cut (calls design §6.2, `paced::pulled`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::ws::{CloseFrame, Message};
-use futures::{Sink, SinkExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -78,6 +90,7 @@ use bytes::Bytes;
 use super::audio::pcm::encode_pcm16_le;
 use super::audio::resample::INPUT_RATE;
 use super::ids::Ids;
+use super::link::{self, Close};
 use super::liveness::RoundTrip;
 use super::protocol::{PartRef, ServerEvent, ServerFrame};
 
@@ -89,7 +102,7 @@ mod progress;
 mod tests;
 
 pub(crate) use outbox::Outbox;
-pub(crate) use paced::Sent;
+pub(crate) use paced::{Cut, Pulled, Sent};
 pub(crate) use playback::Playback;
 pub(crate) use progress::Progress;
 
@@ -122,10 +135,10 @@ enum Data {
 
 /// The control lane.
 enum Control {
-    /// A WebSocket ping (the liveness check).
+    /// The liveness check's ping (`link::Sink::ping`).
     Ping,
-    /// Send what the data lane already holds, then close the socket.
-    Close { code: u16, reason: String },
+    /// Send what the data lane already holds, then close the link.
+    Close(Close),
 }
 
 /// The session's end of the writer. Cheap to clone; the writer ends once
@@ -145,7 +158,38 @@ impl WriterHandle {
     /// samples of `generation` that did leave, per item, and whether
     /// anything of it did (module doc).
     pub fn purge(&self, generation: u64) -> Sent {
-        self.paced.purge(generation)
+        self.purge_cut(generation, Cut::Sent)
+    }
+
+    /// [`Self::purge`], where a link that pulls the audio counts what the
+    /// listener heard as `cut` says (calls design §5.4); on a WebSocket the
+    /// same as [`Self::purge`].
+    pub fn purge_cut(&self, generation: u64, cut: Cut) -> Sent {
+        self.paced.purge(generation, cut, self.round_trip.get())
+    }
+
+    /// Whether `response_id`'s audio is in a call's output buffer: its
+    /// `output_audio_buffer.started` went out and its `response.done` has
+    /// not (calls design §6.2). Never on a WebSocket.
+    pub fn speaking(&self, response_id: &str) -> bool {
+        self.paced.speaking(response_id)
+    }
+
+    /// A bound call's playout report (`lmgw.output_audio.playout`, calls
+    /// design §5.3) that arrived at `arrived`: what the playout made of it,
+    /// for the session's log. Nothing on a WebSocket.
+    pub fn playout(
+        &self,
+        arrived: Instant,
+        playout_ntp_ms: Option<f64>,
+        jitter_buffer_ms: Option<f64>,
+    ) -> Vec<crate::realtime::calls::audio::playout::Note> {
+        self.paced.playout(
+            arrived,
+            playout_ntp_ms,
+            jitter_buffer_ms,
+            self.round_trip.get(),
+        )
     }
 
     /// Whether anything of `generation`'s paced output — an audio chunk, a
@@ -185,29 +229,28 @@ impl WriterHandle {
         self.round_trip.get()
     }
 
-    /// Close the socket with `code` and `reason` once the events already
-    /// queued have gone out.
-    pub fn close(&self, code: u16, reason: String) {
-        let _ = self.control.send(Control::Close { code, reason });
+    /// Close the link, saying `close`, once the events already queued have
+    /// gone out.
+    pub fn close(&self, close: Close) {
+        let _ = self.control.send(Control::Close(close));
     }
 }
 
 /// The drained acknowledgements: one generation each.
 pub(crate) type Drained = mpsc::UnboundedReceiver<u64>;
 
-/// Start the writer on the socket's sending half.
-pub(crate) fn spawn<S>(
-    sink: S,
+/// Start the writer on the link's sending half — handing a link whose own
+/// clock pulls the audio the paced queue first (module doc).
+pub(crate) fn spawn<S: link::Sink>(
+    mut sink: S,
     ids: Arc<Ids>,
-) -> (WriterHandle, Drained, tokio::task::JoinHandle<()>)
-where
-    S: Sink<Message> + Unpin + Send + 'static,
-{
+) -> (WriterHandle, Drained, tokio::task::JoinHandle<()>) {
     let (data_tx, data_rx) = mpsc::channel(WINDOW);
     let (control_tx, control_rx) = mpsc::unbounded_channel();
     let (drained_tx, drained_rx) = mpsc::unbounded_channel();
     let paced = Arc::new(Shared::default());
     let round_trip = Arc::new(RoundTrip::default());
+    sink.pull(Pulled::new(paced.clone(), ids.clone(), round_trip.clone()));
     let w = Writer {
         sink,
         ids,
@@ -236,9 +279,38 @@ struct Writer<S> {
     round_trip: Arc<RoundTrip>,
 }
 
-impl<S: Sink<Message> + Unpin> Writer<S> {
+impl<S: link::Sink> Writer<S> {
     /// Send one event now. `false`: the client is gone.
+    ///
+    /// A bound call's `lmgw.session.closed` (calls design §8.2) is the
+    /// session's last event, whichever way it reached the lane (the close's
+    /// `say_closed`, a verdict's `say_closed_now`): a link's own clock stops
+    /// before it goes, so nothing the clock sends follows it (`paced::pulled`).
+    ///
+    /// A call's `output_audio_buffer.stopped` or `.cleared` (calls design
+    /// §6.2) follows the `response.done` of a response whose audio started
+    /// on the call (`paced::pulled`), also when the shaper dropped that
+    /// `response.done`; an emptied one's `event_too_large` errors come
+    /// between (§6.5).
     async fn send(&mut self, event: ServerEvent) -> bool {
+        if matches!(event, ServerEvent::LmgwSessionClosed(_)) {
+            self.paced.stop_pulled();
+        }
+        let after = match &event {
+            ServerEvent::ResponseDone { response } => self.paced.done(&response.id),
+            _ => None,
+        };
+        if !self.send_one(event).await {
+            return false;
+        }
+        match after {
+            Some(e) => self.send_one(e).await,
+            None => true,
+        }
+    }
+
+    /// [`Self::send`]'s one event, its `event_id` minted now.
+    async fn send_one(&mut self, event: ServerEvent) -> bool {
         let frame = ServerFrame {
             event_id: self.ids.event(),
             event,
@@ -250,7 +322,7 @@ impl<S: Sink<Message> + Unpin> Writer<S> {
                 return true;
             }
         };
-        self.sink.send(Message::text(text)).await.is_ok()
+        self.sink.event(text).await
     }
 
     /// Take one lane entry: send it, pace it, or drop it. `false`: the
@@ -377,38 +449,28 @@ impl<S: Sink<Message> + Unpin> Writer<S> {
                     // Every handle dropped and nothing left on the lane: a
                     // normal close, without what is paced (module doc).
                     None => {
+                        self.paced.stop_pulled();
                         self.paced.clear();
-                        let _ = self.sink.close().await;
+                        self.sink.end().await;
                         return;
                     }
                 },
             };
             let alive = match next {
                 Step::Data(d) => self.take(d).await,
-                Step::Control(Control::Ping) => {
-                    // When it is sent, not when it was asked for: the round
-                    // trip is the network's, not the writer's queue — and
-                    // before the send, so a pong read while the send is
-                    // still being flushed finds its ping (E3).
-                    let id = self.round_trip.pinged(Instant::now());
-                    self.sink
-                        .send(Message::Ping(id.to_vec().into()))
-                        .await
-                        .is_ok()
-                }
-                Step::Control(Control::Close { code, reason }) => {
+                // Noted on the round trip as it is sent (`link::ws`).
+                Step::Control(Control::Ping) => self.sink.ping(&self.round_trip).await,
+                Step::Control(Control::Close(close)) => {
                     // What was queued before the close still goes out — but
-                    // not the paced audio (module doc).
+                    // not the paced audio (module doc). A link's own clock
+                    // stops first (if `lmgw.session.closed` has not stopped
+                    // it already), so nothing it releases follows the last
+                    // events (`paced::pulled`).
+                    self.paced.stop_pulled();
                     if !self.finish_lane(&mut data).await {
                         return self.quiet(data, control).await;
                     }
-                    let _ = self
-                        .sink
-                        .send(Message::Close(Some(CloseFrame {
-                            code,
-                            reason: reason.into(),
-                        })))
-                        .await;
+                    self.sink.close(close).await;
                     return;
                 }
             };
@@ -422,12 +484,14 @@ impl<S: Sink<Message> + Unpin> Writer<S> {
     /// The client closed or the socket broke (module doc): send nothing
     /// more, drop what comes — both lanes are still read, so no sender
     /// waits on a writer that has nowhere to write — and close the socket
-    /// once every handle is gone.
+    /// once every handle is gone. A link's own clock stops at once: it has
+    /// nowhere to send either.
     async fn quiet(
         mut self,
         mut data: mpsc::Receiver<Data>,
         mut control: mpsc::UnboundedReceiver<Control>,
     ) {
+        self.paced.stop_pulled();
         let mut control_open = true;
         loop {
             tokio::select! {
@@ -438,7 +502,7 @@ impl<S: Sink<Message> + Unpin> Writer<S> {
             }
         }
         self.paced.clear();
-        let _ = self.sink.close().await;
+        self.sink.end().await;
     }
 }
 

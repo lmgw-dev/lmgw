@@ -58,6 +58,7 @@ pub mod amdgpu;
 pub mod attribution;
 mod background;
 mod climb;
+pub(crate) mod compute;
 pub mod nvml;
 pub mod peak;
 pub mod plan;

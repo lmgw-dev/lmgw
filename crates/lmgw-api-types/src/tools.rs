@@ -15,6 +15,9 @@ pub struct ToolInventory {
     pub tools: Vec<ToolEntryView>,
 }
 
+/// One source of tools, so a source that currently offers none (a disabled
+/// server, self-admin off, a server that has not connected) is still visible
+/// with the reason: the per-tool rows cannot carry that.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -30,10 +33,13 @@ pub struct ToolSourceView {
     pub plane: String,
     pub available: bool,
     pub reason: Option<String>,
+    /// Tools this source contributes to the inventory right now.
     pub tool_count: i64,
+    /// How many of those the owner has switched off.
     pub disabled_count: i64,
 }
 
+/// One tool the gateway can serve, with its provenance and current state.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -63,4 +69,22 @@ pub struct ToolEntryView {
     /// A disable record whose tool the gateway no longer offers.
     pub stale: bool,
     pub disabled_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An inventory with nothing in it is two empty arrays, which the reader
+    /// takes for the same inventory.
+    #[test]
+    fn an_empty_inventory_is_two_empty_arrays() {
+        let empty = serde_json::json!({"sources": [], "tools": []});
+        assert_eq!(
+            serde_json::to_value(ToolInventory::default()).unwrap(),
+            empty
+        );
+        let read: ToolInventory = serde_json::from_value(empty).unwrap();
+        assert_eq!(read, ToolInventory::default());
+    }
 }

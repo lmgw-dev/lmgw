@@ -8,6 +8,14 @@
 # The release notes are the annotated tag's message. The build polls the public
 # default feed, this repository's `releases/latest/download/latest.json`, which
 # is why every release is marked latest and carries latest.json next to the RPM.
+#
+# Two jobs, so the token that can write never meets the build: `build`
+# (contents: read) compiles the tag, and with it every dependency's build
+# script, and hands the RPM and latest.json (and the best-effort AppImage) on
+# as artifacts; `publish` (contents: write) checks out nothing and runs no code
+# of this repository, built or not, on a fresh runner: it checks the artifact
+# (the tag's version, the URL the release serves, the RPM's sha256 against
+# latest.json) and creates the release with gh.
 name: Release
 
 on:
@@ -22,8 +30,8 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write # create the release, upload assets
+# Each job names what it needs.
+permissions: {}
 
 # One release at a time and never cancelled half-way: a newer push waits for
 # the running one (GitHub keeps only the newest pending run).
@@ -36,11 +44,13 @@ defaults:
     shell: bash
 
 jobs:
-  release:
-    name: Build and publish
+  build:
+    name: Build
     # Not in forks: their builds would still poll this repository's feed.
     if: github.repository == 'lmgw-dev/lmgw'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # Current Fedora, as on GitLab, so the RPM's webkit2gtk4.1 / appindicator
     # SONAME dependencies match the hosts it is installed on.
     container:
@@ -53,9 +63,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
-      # The token itself (contents: write) is handed only to the steps that
-      # publish, never to the build: every dependency's build script runs there.
-      GH_REPO: ${{ github.repository }}
       # The tag being released: the pushed one, or the dispatch input. ci/build.sh
       # takes the version from it.
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -66,14 +73,14 @@ jobs:
             echo "::error::'$RELEASE_TAG' is not a release tag (v<X.Y.Z>)"
             exit 1
           fi
-      # git for a real clone; gh + jq to publish.
-      - name: Install checkout and publish tools
-        run: dnf -y install git-core gh jq
+      # git for a real clone; jq to read the manifest.
+      - name: Install checkout tools
+        run: dnf -y install git-core jq
       - uses: actions/checkout@v7
         with:
           # A dispatch runs on the default branch, so ask for the tag's commit.
           ref: refs/tags/${{ env.RELEASE_TAG }}
-          # Nothing here pushes; keep the write token out of .git/config.
+          # Nothing here pushes; keep the token out of .git/config.
           persist-credentials: false
       # Container root vs the runner-owned workspace: git refuses it as "dubious ownership".
       - name: Mark the workspace a safe git directory
@@ -107,21 +114,101 @@ jobs:
             GITHUB_REF="refs/tags/$RELEASE_TAG"
           bash ci/build.sh
 
-      - name: Read the release from the manifest
+      # Exactly the RPM latest.json names and latest.json itself; publish
+      # checks them again.
+      - name: Stage the release files
+        run: |
+          rpm="$(jq -er .rpm.file dist/latest.json)"
+          mkdir release
+          cp "dist/$rpm" dist/latest.json release/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+      # Best effort, after the release files are handed on. It runs inside the
+      # build job, ahead of the publish job, so a hang would hold up the RPM
+      # release: the step timeout plus continue-on-error bound it. Reuses the release binary compiled above (cargo has
+      # nothing to redo) and only runs Tauri's linuxdeploy-based bundler, which
+      # downloads linuxdeploy and its plugins. Caveat: an AppImage built on
+      # current Fedora bundles against its glibc and will not start on
+      # distributions with an older one.
+      - name: AppImage (best effort)
+        id: appimage
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          # linuxdeploy and its appimage plugin are AppImages themselves, and a
+          # container has no FUSE: extract them to /tmp and run from there.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          # linuxdeploy's bundled strip predates Fedora's binutils and fails on
+          # newer ELF sections; Fedora's libraries ship stripped anyway.
+          NO_STRIP: "true"
+        run: |
+          version="${RELEASE_TAG#v}"
+          # The bundler copies xdg-open into the AppDir and fails without it.
+          dnf -y install xdg-utils
+          rm -rf target/release/bundle/appimage
+          cargo tauri build --bundles appimage
+          # By its exact version, like the RPM: never whatever else is lying there.
+          appimage="$(ls -1 target/release/bundle/appimage/*_"${version}"_*.AppImage | head -n1)"
+          mkdir appimage
+          cp "$appimage" appimage/
+      - name: Hand on the AppImage
+        if: steps.appimage.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: appimage
+          path: appimage/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: build
+    if: github.repository == 'lmgw-dev/lmgw'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release, upload assets
+    timeout-minutes: 15
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    # No checkout and nothing from the build but its artifacts: this job runs
+    # only the steps below, with the runner's own gh, jq and sha256sum.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: release
+
+      - name: Check the build against the tag and latest.json
         id: manifest
         run: |
-          version="$(jq -er .version dist/latest.json)"
-          rpm="$(jq -er .rpm.file dist/latest.json)"
-          url="$(jq -er .rpm.url dist/latest.json)"
-          want="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${rpm}"
-          if [[ "$url" != "$want" ]]; then
-            echo "::error::latest.json points at $url, but this release serves $want"
-            exit 1
-          fi
-          if [[ ! -f "dist/$rpm" ]]; then
-            echo "::error::latest.json names dist/$rpm, which does not exist"
-            exit 1
-          fi
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail "$TAG is no v<X.Y.Z> tag"
+          version="${BASH_REMATCH[1]}"
+          m=release/latest.json
+          [[ -f "$m" ]] || fail "the build handed on no latest.json"
+          got="$(jq -er .version "$m")" || fail "latest.json has no version"
+          [[ "$got" == "$version" ]] || fail "latest.json says $got, the tag $TAG"
+          rpm="$(jq -er .rpm.file "$m")" || fail "latest.json names no RPM"
+          [[ "$rpm" =~ ^lmgw-[0-9A-Za-z._+~-]+\.x86_64\.rpm$ && "$rpm" == "lmgw-${version}-"* ]] \
+            || fail "latest.json names $rpm, not an RPM of lmgw $version"
+          url="$(jq -er .rpm.url "$m")" || fail "latest.json has no RPM URL"
+          want="https://github.com/${GH_REPO}/releases/download/${TAG}/${rpm}"
+          [[ "$url" == "$want" ]] || fail "latest.json points at $url, but this release serves $want"
+          sha="$(jq -er .rpm.sha256 "$m")" || fail "latest.json has no sha256"
+          [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "latest.json's sha256 is not 64 hex digits: $sha"
+          files="$(cd release && find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort)"
+          [[ "$files" == "$(printf '%s\n' "$rpm" latest.json | LC_ALL=C sort)" ]] \
+            || fail "the build handed on other files than $rpm and latest.json: $files"
+          [[ -f "release/$rpm" && ! -L "release/$rpm" ]] || fail "$rpm is not a plain file"
+          have="$(sha256sum "release/$rpm" | cut -d' ' -f1)"
+          [[ "$have" == "$sha" ]] || fail "$rpm's sha256 is $have, latest.json says $sha"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "rpm=$rpm" >> "$GITHUB_OUTPUT"
 
@@ -132,23 +219,44 @@ jobs:
           RPM: ${{ steps.manifest.outputs.rpm }}
         run: |
           tag="v${VERSION}"
+          dist=release
           if gh release view "$tag" >/dev/null 2>&1; then
             # A re-run of this tag, so the release (or the draft a failed
-            # upload left behind) is already there. Replace the assets — RPM
-            # first, then the manifest that names its sha256.
-            gh release upload "$tag" "dist/${RPM}" --clobber
-            gh release upload "$tag" dist/latest.json --clobber
+            # upload left behind) is already there. Replace the assets: the
+            # RPM first, then the manifest that names its sha256.
+            gh release upload "$tag" "$dist/${RPM}" --clobber
+            gh release upload "$tag" "$dist/latest.json" --clobber
             gh release edit "$tag" --draft=false --latest
           else
-            # The notes are the annotated tag's message (checkout leaves only
-            # a lightweight copy of the tag, so ask the API), unwrapped to one
-            # line per paragraph: GitHub shows every line break. A lightweight
-            # tag gets GitHub's generated notes instead.
+            # The notes are the annotated tag's message (asked of the API: this
+            # job has no checkout), unwrapped to one line per paragraph: GitHub
+            # shows every line break. The program is ci/unwrap-notes.awk's
+            # (scripts/release.sh uses that file), inline here so this job runs
+            # nothing from the repository. A lightweight tag gets GitHub's
+            # generated notes instead.
+            unwrap="$RUNNER_TEMP/unwrap-notes.awk"
+            cat > "$unwrap" <<'AWK'
+          function flush() {
+              if (buf != "") print buf
+              buf = ""
+          }
+          /^[[:space:]]*```/ { flush(); print; fence = !fence; next }
+          fence { print; next }
+          /^[[:space:]]*$/ { flush(); print ""; next }
+          /^[[:space:]]*(#|>|\|)/ { flush(); print; next }
+          /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/ { flush(); buf = $0; next }
+          {
+              if (buf == "") { buf = $0; next }
+              line = $0
+              sub(/^[[:space:]]+/, "", line)
+              buf = buf " " line
+          }
+          END { flush() }
+          AWK
             ref="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')"
             notes=""
             if [[ "$ref" == "tag "* ]]; then
-              notes="$(gh api "repos/${GH_REPO}/git/tags/${ref#tag }" --jq .message \
-                | awk -f ci/unwrap-notes.awk)"
+              notes="$(gh api "repos/${GH_REPO}/git/tags/${ref#tag }" --jq .message | awk -f "$unwrap")"
             fi
             if [[ -n "${notes//[[:space:]]/}" ]]; then
               notes_args=(--notes "$notes")
@@ -157,7 +265,7 @@ jobs:
             fi
             # With assets, gh creates a draft, uploads, then publishes: the
             # release never appears without both files.
-            gh release create "$tag" "dist/${RPM}" dist/latest.json \
+            gh release create "$tag" "$dist/${RPM}" "$dist/latest.json" \
               --title "lmgw ${VERSION}" \
               "${notes_args[@]}" \
               --verify-tag \
@@ -165,36 +273,25 @@ jobs:
           fi
 
       # Best effort, after the release exists, so it can never hold up the RPM.
-      # Reuses the release binary compiled above (cargo has nothing to redo)
-      # and only runs Tauri's linuxdeploy-based bundler, which downloads
-      # linuxdeploy and its plugins — hence no token in this step. Caveat: an
-      # AppImage built on current Fedora bundles against its glibc and will not
-      # start on distributions with an older one.
-      - name: AppImage (best effort)
+      # The build job's AppImage artifact is absent when that build failed.
+      - uses: actions/download-artifact@v8
         id: appimage
         continue-on-error: true
-        env:
-          VERSION: ${{ steps.manifest.outputs.version }}
-          # linuxdeploy and its appimage plugin are AppImages themselves, and a
-          # container has no FUSE: extract them to /tmp and run from there.
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-          # linuxdeploy's bundled strip predates Fedora's binutils and fails on
-          # newer ELF sections; Fedora's libraries ship stripped anyway.
-          NO_STRIP: "true"
-        run: |
-          # The bundler copies xdg-open into the AppDir and fails without it.
-          dnf -y install xdg-utils
-          rm -rf target/release/bundle/appimage
-          cargo tauri build --bundles appimage
-          # By its exact version, like the RPM: never whatever else is lying there.
-          appimage="$(ls -1 target/release/bundle/appimage/*_"${VERSION}"_*.AppImage | head -n1)"
-          echo "path=$appimage" >> "$GITHUB_OUTPUT"
-
+        timeout-minutes: 20
+        with:
+          name: appimage
+          path: appimage
       - name: Attach the AppImage
         if: steps.appimage.outcome == 'success'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.manifest.outputs.version }}
-          APPIMAGE: ${{ steps.appimage.outputs.path }}
-        run: gh release upload "v${VERSION}" "$APPIMAGE" --clobber
+        run: |
+          shopt -s nullglob
+          files=(appimage/*_"${VERSION}"_*.AppImage)
+          if ((${#files[@]} != 1)) || [[ -L "${files[0]}" ]]; then
+            echo "::warning::no single AppImage of ${VERSION} in the artifact; not attaching"
+            exit 0
+          fi
+          gh release upload "v${VERSION}" "${files[0]}" --clobber

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::embed::InProcessEmbedder;
+use crate::erased::Erased;
 use crate::jobs::{JobCtx, JobExecutor, JobKind, JobOutcome, JobProgress, Spawn};
 use crate::state::SharedState;
 
@@ -60,20 +61,21 @@ pub async fn start(
 
 pub struct ReEmbedExecutor;
 
-#[async_trait::async_trait]
 impl JobExecutor for ReEmbedExecutor {
     fn kind(&self) -> JobKind {
         JobKind::ReEmbed
     }
 
-    async fn run(&self, ctx: JobCtx, input: Value) -> Result<JobOutcome, String> {
-        let input: Input =
-            serde_json::from_value(input).map_err(|e| format!("re_embed input: {e}"))?;
-        let corpus = qstore::get_corpus(&ctx.state.corpus, input.corpus_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("corpus {} no longer exists", input.corpus_id))?;
-        run_re_embed(&ctx, corpus, input.embed_model).await
+    fn run<'a>(&'a self, ctx: JobCtx, input: Value) -> Erased<'a, Result<JobOutcome, String>> {
+        Box::pin(async move {
+            let input: Input =
+                serde_json::from_value(input).map_err(|e| format!("re_embed input: {e}"))?;
+            let corpus = qstore::get_corpus(&ctx.state.corpus, input.corpus_id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("corpus {} no longer exists", input.corpus_id))?;
+            run_re_embed(&ctx, corpus, input.embed_model).await
+        })
     }
 }
 

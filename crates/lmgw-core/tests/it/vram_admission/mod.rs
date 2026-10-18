@@ -71,6 +71,8 @@ mod ladder_local_model_test;
 mod ladder_review_fixes;
 mod ladder_wp4;
 mod live_frame;
+mod open_ended_upstream;
+mod outside_vram_decision;
 mod outside_vram_fallback;
 mod pool_mock;
 mod release_after_llama_server;
@@ -81,6 +83,7 @@ mod unheld_pass;
 
 use containers::*;
 use fixture::*;
+use open_ended_upstream::*;
 use podman::*;
 use world::*;
 

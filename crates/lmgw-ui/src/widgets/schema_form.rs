@@ -15,6 +15,7 @@
 //! | `string` + `format: secret` | password input | string, or **omitted** |
 //! | `string` + `format: directory`/`file` | path box + picker | string |
 //! | `integer` / `number` | number input, `min`/`max` shown | number or null |
+//! | `integer` + `format: lmgw-question-set` | select of the Decision lab's question sets | id, or null |
 //! | `boolean` | checkbox | bool |
 //! | `array` (of string) | comma-separated box that wraps and grows | array of strings |
 //!
@@ -38,11 +39,15 @@
 use leptos::prelude::*;
 use leptos::wasm_bindgen::closure::Closure;
 use leptos::wasm_bindgen::{JsCast, JsValue};
-use lmgw_api_types::AgentField;
+use lmgw_api_types::{AgentDecide, AgentField, QUESTION_SET_FORMAT};
 use serde_json::{Map, Value};
 
 use super::{Explain, ModelPicker, Select};
 use crate::catalog::use_model_catalog;
+
+/// A question-set field and the notes `decide` puts beside the form.
+mod question_set;
+use question_set::{categories_note, set_note, QuestionSetSelect};
 
 // ---------------------------------------------------------------------------
 // The draft — one signal, not one per field
@@ -476,6 +481,8 @@ fn hint_of(f: &AgentField) -> String {
     if is_mount(f) {
         // The chip beside the control already reads `directory · rw`; saying it
         // again three words to the left is the same fact twice on one row.
+    } else if f.format == QUESTION_SET_FORMAT {
+        parts.push("question set".to_string());
     } else if !f.format.is_empty() {
         parts.push(f.format.clone());
     } else if f.ty == "array" {
@@ -534,9 +541,16 @@ pub fn default_label(f: &AgentField) -> String {
 
 /// Render one agent's config form as rows of label | control | help (the
 /// help drops under its control when the form is narrow). Every `model_alias`
-/// field picks from the shared model catalog.
+/// field picks from the shared model catalog. `decide` is the batch output's
+/// question-set view (labs-store design §4), which notes on the categories
+/// field that a chosen set replaces it.
 #[component]
-pub fn SchemaForm(#[prop(into)] fields: Signal<Vec<AgentField>>, draft: Draft) -> impl IntoView {
+pub fn SchemaForm(
+    #[prop(into)] fields: Signal<Vec<AgentField>>,
+    draft: Draft,
+    #[prop(optional_no_strip)] decide: Option<AgentDecide>,
+) -> impl IntoView {
+    let decide = StoredValue::new(decide);
     let rows = move || {
         let generation = draft.generation();
         fields
@@ -558,7 +572,7 @@ pub fn SchemaForm(#[prop(into)] fields: Signal<Vec<AgentField>>, draft: Draft) -
                     >
                         {
                             let (_, f) = row;
-                            view! { <FieldControl field=f draft=draft/> }
+                            view! { <FieldControl field=f draft=draft decide=decide.get_value()/> }
                         }
                     </For>
                 </div>
@@ -568,7 +582,15 @@ pub fn SchemaForm(#[prop(into)] fields: Signal<Vec<AgentField>>, draft: Draft) -
 }
 
 #[component]
-fn FieldControl(field: AgentField, draft: Draft) -> impl IntoView {
+fn FieldControl(field: AgentField, draft: Draft, decide: Option<AgentDecide>) -> impl IntoView {
+    // What `decide` says on this field, as the form holds the set field now:
+    // on the categories it replaces, that they are not read; on the set
+    // field, why the stored set cannot classify or where attention starts.
+    let notes = decide.map(StoredValue::new);
+    let on_categories =
+        notes.filter(|d| d.with_value(|d| d.enum_from.as_deref() == Some(&field.name)));
+    let on_set = notes.filter(|d| d.with_value(|d| d.field == field.name));
+    let held = move |d: StoredValue<AgentDecide>| draft.text(&d.with_value(|d| d.field.clone()));
     let desc = field.description.clone();
     let hint = hint_of(&field);
     let secret = field.format == "secret";
@@ -612,6 +634,35 @@ fn FieldControl(field: AgentField, draft: Draft) -> impl IntoView {
             <div class="fr-ctl">{control}</div>
             <div class="fr-help">
                 {(!desc.trim().is_empty()).then(|| view! { <div>{desc}</div> })}
+                {move || {
+                    on_categories
+                        .and_then(|d| {
+                            let h = held(d);
+                            d.with_value(|v| categories_note(v, &h))
+                        })
+                        .map(|n| view! { <div class="notice warn">{n}</div> })
+                }}
+                {move || {
+                    on_set
+                        .and_then(|d| {
+                            let h = held(d);
+                            d.with_value(|v| set_note(v, &h))
+                        })
+                        .map(|(problem, n)| {
+                            view! { <div class=if problem { "notice err" } else { "dim" }>{n}</div> }
+                        })
+                }}
+                {on_set
+                    .is_some()
+                    .then(|| {
+                        view! {
+                            <div class="dim">
+                                "Question sets are made and measured in the "
+                                <a href="/decision-lab">"Decision lab"</a>
+                                "."
+                            </div>
+                        }
+                    })}
                 // On the field, because this is where the owner decides — the
                 // run log saying it afterwards would be saying it too late
                 // (§5.5). Folded to its one line; both halves are in it.
@@ -726,6 +777,9 @@ fn control_for(f: &AgentField, draft: Draft) -> AnyView {
             />
         }
         .into_any(),
+        ("integer", QUESTION_SET_FORMAT) => {
+            view! { <QuestionSetSelect name=name.get_value() draft=draft/> }.into_any()
+        }
         ("array", _) => view! { <ListControl name=name.get_value() draft=draft/> }.into_any(),
         _ if !f.enum_values.is_empty() => {
             let values = f.enum_values.clone();

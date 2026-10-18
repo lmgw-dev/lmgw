@@ -92,8 +92,7 @@ pub async fn update_thread(
                 ok: true,
                 continue_state: verdict,
                 voice: chat_wire::thread_voice(&t.voice),
-                voice_resolved: serde_json::to_value(chat_voice::resolve_shown(&state, &t).await)
-                    .expect("a resolved voice always serializes"),
+                voice_resolved: chat_voice::resolve_shown(&state, &t).await.wire(),
             };
             Json(chat_wire::wire(&ack)).into_response()
         }

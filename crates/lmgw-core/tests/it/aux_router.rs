@@ -5,10 +5,13 @@
 //! (per-model-containers §7): there is no shared aux container to reload or
 //! restart, and `tests/it/ops_container.rs` covers the per-model verbs that
 //! replaced it.
+//!
+//! The decision kind's gate, both ways, is in [`decision`].
 
 use std::sync::{Arc, Mutex};
 
 use lmgw_core::config::{AuxKind, Settings};
+use lmgw_core::erased::Erased;
 use lmgw_core::runtime::registry::Registry;
 use lmgw_core::state::AppState;
 use lmgw_core::store::{self, NewAuxModel};
@@ -16,6 +19,8 @@ use serde_json::{json, Value};
 
 use crate::common;
 use common::{serve, Gw};
+
+mod decision;
 
 // ---------------------------------------------------------------------------
 // The zero-vector gate
@@ -47,6 +52,11 @@ async fn embeddings_against_a_rerank_model_are_refused_not_forwarded() {
                 kind,
                 pooling: None,
                 ctx_size: None,
+                ubatch_size: None,
+                batch_size: None,
+                mmproj_path: None,
+                backend: None,
+                threads: None,
                 args: vec![],
                 idle_seconds: 0,
                 enabled: true,
@@ -119,17 +129,18 @@ async fn embeddings_against_a_rerank_model_are_refused_not_forwarded() {
 /// is not shell the real binary.
 struct FakePodman;
 
-#[async_trait::async_trait]
 impl lmgw_core::runtime::registry::CommandRunner for FakePodman {
-    async fn run(
-        &self,
-        _program: &str,
-        _args: &[String],
-    ) -> std::io::Result<lmgw_core::runtime::registry::CmdOutput> {
-        Ok(lmgw_core::runtime::registry::CmdOutput {
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+    fn run<'a>(
+        &'a self,
+        _program: &'a str,
+        _args: &'a [String],
+    ) -> Erased<'a, std::io::Result<lmgw_core::runtime::registry::CmdOutput>> {
+        Box::pin(async move {
+            Ok(lmgw_core::runtime::registry::CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         })
     }
 }
@@ -180,6 +191,11 @@ async fn aux_world(upstream_base: &str) -> (lmgw_core::state::SharedState, Gw) {
                 kind,
                 pooling: None,
                 ctx_size: None,
+                ubatch_size: None,
+                batch_size: None,
+                mmproj_path: None,
+                backend: None,
+                threads: None,
                 args: vec![],
                 idle_seconds: 0,
                 enabled: true,
@@ -313,6 +329,15 @@ async fn rerank_speaks_the_jina_shape_and_accepts_the_tei_spelling() {
     assert_eq!(body["results"][0]["index"], 1, "order is the upstream's");
     assert_eq!(body["results"][0]["relevance_score"], 1.0);
     assert_eq!(body["usage"]["prompt_tokens"], 7);
+    // The document describes this answer whole: its four keys, the model
+    // as asked for, and results without a document.
+    crate::common::validates_against_component_of("rerank", "RerankResponse", &body);
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(&body), ["model", "object", "results", "usage"]);
+    assert_eq!(body["object"], "list");
+    assert_eq!(body["model"], "embed/bge-reranker-v2-m3");
+    assert_eq!(keys(&body["results"][0]), ["index", "relevance_score"]);
+    assert_eq!(keys(&body["usage"]), ["prompt_tokens", "total_tokens"]);
 
     // The TEI spelling arrives as `documents` upstream — one shape leaves lmgw.
     client
@@ -385,15 +410,53 @@ fn settings_written_as_embed_router_load_as_aux_router() {
     let s: Settings = serde_json::from_value(legacy).unwrap();
     assert_eq!(s.aux_router.models_dir, "/srv/models/embed");
     assert_eq!(s.aux_router.public_prefix, "embed");
+    // A blob from before decision rows had a prefix of their own
+    // (decision-models design §3.10) takes the default one.
+    assert_eq!(s.aux_router.decision_prefix, "decide");
 
     // …and saving it back writes the new spelling only, without the four
-    // router-mode keys.
+    // router-mode keys, flat beside the decision prefix.
     let round = serde_json::to_value(&s).unwrap();
     let aux = round.get("aux_router").unwrap();
     assert!(round.get("embed_router").is_none());
     for gone in ["container_name", "listen_port", "models_max", "auto_start"] {
         assert!(aux.get(gone).is_none(), "`{gone}` survived the save");
     }
+    assert_eq!(aux["decision_prefix"], "decide");
+    assert_eq!(aux["models_dir"], "/srv/models/embed");
+}
+
+/// A stored `aux_router` of the current shape but from before §3.10 (no
+/// `decision_prefix`) keeps every field it has and takes the default prefix
+/// for its decision rows; one that names a prefix keeps it.
+#[test]
+fn an_aux_router_blob_without_a_decision_prefix_loads_with_the_default() {
+    let stored = json!({
+        "aux_router": {
+            "image": "localhost/mine:latest",
+            "models_dir": "/srv/aux",
+            "extra_run_args": ["--device", "nvidia.com/gpu=all"],
+            "public_prefix": "vec",
+            "request_timeout_seconds": 15
+        }
+    });
+    let s: Settings = serde_json::from_value(stored).unwrap();
+    let aux = &s.aux_router;
+    assert_eq!(aux.decision_prefix, "decide");
+    assert_eq!(
+        (
+            aux.image.as_str(),
+            aux.models_dir.as_str(),
+            aux.public_prefix.as_str()
+        ),
+        ("localhost/mine:latest", "/srv/aux", "vec")
+    );
+    assert_eq!(aux.extra_run_args, ["--device", "nvidia.com/gpu=all"]);
+    assert_eq!(aux.request_timeout_seconds, 15);
+
+    let named: Settings =
+        serde_json::from_value(json!({"aux_router": {"decision_prefix": "ask"}})).unwrap();
+    assert_eq!(named.aux_router.decision_prefix, "ask");
 }
 
 /// The renderer refuses to emit `pooling` for a rerank section either way, but
@@ -502,6 +565,11 @@ async fn an_aux_container_never_carries_the_other_kinds_flag() {
         kind: AuxKind::Embed,
         pooling: None,
         ctx_size: None,
+        ubatch_size: None,
+        batch_size: None,
+        mmproj_path: None,
+        backend: None,
+        threads: None,
         args: vec!["--reranking".into()],
         idle_seconds: 0,
         enabled: true,
@@ -545,6 +613,11 @@ async fn aux_models_round_trip_their_kind() {
             kind: AuxKind::Rerank,
             pooling: None,
             ctx_size: Some(8192),
+            ubatch_size: None,
+            batch_size: None,
+            mmproj_path: None,
+            backend: None,
+            threads: None,
             args: vec!["--ubatch-size".into(), "8192".into()],
             idle_seconds: 600,
             enabled: true,

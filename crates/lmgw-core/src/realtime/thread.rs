@@ -1,25 +1,30 @@
 //! A realtime session bound to a Chat thread (chat-voice design §8): the
 //! dashboard's realtime mode.
 //!
-//! **The binding is decided at the handshake** (`bind`): `GET
-//! /v1/realtime?chat_thread=<id>`, checked before the 101 — the Chat
-//! capability (`Cap::Chat`: the dashboard, an owner key, a paired device),
-//! the thread, and no Admin Chat; for a device, its key's check of the
-//! thread's aliases (client-apps design §1.3). A bound session starts
-//! bound: `session.created` carries the thread's resolution, realtime's
-//! default-model resolution is skipped, and the connect warm is the
-//! thread's Admit group (§4.2). One bound session per thread: a second bind
-//! takes over, and the older session closes with a reason naming the binder
-//! (`web::chat_live`'s voice binding, client-apps §1.7); the newer session's
-//! journal writes only once the older one's has drained.
+//! **The binding is decided at the handshake** (`check`, then `bind`): `GET
+//! /v1/realtime?chat_thread=<id>`, or `?chat_folder=<id>` for an ongoing
+//! folder's current thread (realtime calls design §2.2), checked before the
+//! 101 — the Chat capability (`Cap::Chat`: the dashboard, an owner key, a
+//! paired device), the thread (or the folder's decision, under its lock),
+//! and no Admin Chat; for a device, its key's check of the thread's aliases
+//! (client-apps design §1.3). A call checks at its POST and binds when its
+//! channel opens (calls §2.8). A bound session starts bound:
+//! `session.created` carries the thread's resolution and its turn mode
+//! (`turn_mode`), realtime's default-model resolution is skipped, and the
+//! connect warm is the thread's Admit group (§4.2). One bound session per
+//! thread: a second bind takes over, and the older session closes with a
+//! reason naming the binder (`web::chat_live`'s voice binding, client-apps
+//! §1.7); the newer session's journal writes only once the older one's has
+//! drained.
 //!
 //! **The thread owns** the chat model, the instructions, the tools, the
 //! transcription model, the TTS, the voice, the speech instructions, the tag
 //! hint, the language, the seed and the conversation (`owned`): a
 //! `session.update` that changes one of them, the overrides of a
 //! `response.create`, and `conversation.item.create` / `.delete` are refused
-//! with `owned_by_thread`. The client owns turn detection, the barge-in and
-//! echo knobs, the output modality and the response and buffer events.
+//! with `owned_by_thread`. The client owns turn detection (and with it the
+//! turn mode lmgw resolved, `turn_mode`), the barge-in and echo knobs, the
+//! output modality and the response and buffer events.
 //!
 //! **A bound turn** (§8.2) is the Chat's own turn (`turn`): the thread's
 //! model, prompt with the voice block (§8.5), sampling, reasoning,
@@ -45,7 +50,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::protocol::{ChatThreadRef, Session};
@@ -58,10 +63,12 @@ use crate::web::chat_live::VoiceBinding;
 
 pub(crate) mod approvals;
 mod bind;
+mod check;
 pub(crate) mod hearing;
 mod hooks;
 pub(crate) mod journal;
 mod owned;
+mod refusal;
 pub(crate) mod reply;
 /// The session's own voice following its thread's (personality-profiles
 /// design D21).
@@ -70,12 +77,15 @@ mod stages;
 /// Late MCP task results in the thread (MCP Tasks design §3.4, §4.2).
 pub(crate) mod tasks;
 pub(crate) mod turn;
+pub(in crate::realtime) mod turn_mode;
 mod verdict;
 
 use journal::Journal;
 
-pub(crate) use bind::{handshake, Binding};
+pub(crate) use bind::{bind, check_and_bind, Bind, Binding, Outcome, Pending};
+pub(crate) use check::{check, Target};
 pub(in crate::realtime) use owned::{check_create, check_update, refuse_item};
+pub(crate) use refusal::Refused;
 
 /// The close code a session taken over by another window closes with:
 /// application-defined (RFC 6455 §7.4.2), so a page tells it from a
@@ -208,6 +218,9 @@ pub(crate) struct Bound {
     /// the next create answers it, and is no continuation (MCP Tasks design
     /// §3.4, `lifecycle::bound`).
     pub committed: bool,
+    /// The thread's turn detection as the bind read it: the rule a switch
+    /// of `session.lmgw.turn_mode` to automatic applies (`turn_mode`).
+    pub turn_rule: TurnDetection,
     /// Holds the thread's one binding for the session's life.
     _binding: VoiceBinding,
 }
@@ -276,6 +289,7 @@ impl Bound {
             approvals: Default::default(),
             tasks: std::mem::take(&mut b.tasks),
             committed: false,
+            turn_rule: b.cfg.turn_detection.value,
             _binding: b.guard.take().expect("a binding is taken once"),
         }
     }
@@ -291,23 +305,28 @@ pub(in crate::realtime) async fn taken(taken: Option<&StopSignal>) {
 
 /// A bound session's session object, shaped by what its thread chose
 /// (§8.1): its transcription model and language, its voice, its TTS and
-/// its own speech style, and its turn detection as the session's starting
-/// point (the client's to change). Through realtime's own merge, so it is
-/// checked and normalized as a client's `session.update` would be. The
-/// voice, the TTS and the style follow the thread from then on, each
-/// response's re-read taking a change (`reshape`).
+/// its own speech style, and its turn mode with the turn detection it
+/// implies as the session's starting point (the client's to change,
+/// `turn_mode`). Through realtime's own merge, so it is checked and
+/// normalized as a client's `session.update` would be. The voice, the TTS
+/// and the style follow the thread from then on, each response's re-read
+/// taking a change (`reshape`).
 pub(in crate::realtime) fn shape_session(
     session: &mut Session,
     b: &Binding,
     settings: &RealtimeSettings,
 ) {
     let cfg = &b.cfg;
-    let turn_detection = match cfg.turn_detection.value {
-        TurnDetection::SemanticVad => json!({"type": "semantic_vad"}),
-        TurnDetection::ServerVad => json!({"type": "server_vad"}),
-        TurnDetection::PushToTalk => Value::Null,
-    };
+    let rule = cfg.turn_detection.value;
+    let mode = turn_mode::of_rule(rule);
+    let turn_detection = turn_mode::detection(&mode, rule);
     let mut patch = reshape::voice_patch(cfg);
+    let lmgw = patch
+        .entry("lmgw")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("the voice patch's lmgw is an object");
+    lmgw.insert("turn_mode".into(), json!(mode));
     let audio = patch
         .entry("audio")
         .or_insert_with(|| json!({}))

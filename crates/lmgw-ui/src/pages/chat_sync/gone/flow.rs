@@ -440,6 +440,7 @@ mod tests {
             crate::api::Error::Api(lmgw_api_types::ApiError {
                 code: code.into(),
                 message: format!("the {code} answer"),
+                ..Default::default()
             })
         };
         assert_eq!(

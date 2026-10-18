@@ -4,9 +4,11 @@
 //! module owns *when* they run. Five moments, and they are the whole of the
 //! runtime's relationship with the process around it:
 //!
-//! - [`boot`]: reconcile against what podman is already running, sweep the
-//!   router-mode containers a pre-upgrade install left behind (by the names
-//!   the §6 settings migration preserved), then start the `warm_start` models.
+//! - [`boot`]: hoist the aux rows' flags into their fields
+//!   ([`hoist_aux_args`]), reconcile against what podman is already running,
+//!   sweep the router-mode containers a pre-upgrade install left behind (by
+//!   the names the §6 settings migration preserved), then start the
+//!   `warm_start` models.
 //! - [`reap_idle`]: one pass of the idle reaper (§3.7), driven by the server's
 //!   background tick — beside a reconciliation pass ([`readopt`]) that makes
 //!   a running container the registry lost track of lmgw's again.
@@ -33,6 +35,9 @@ use super::Class;
 
 mod readopt;
 pub use readopt::{readopt, readopt_in_background};
+
+mod aux_hoist;
+pub use aux_hoist::hoist_aux_args;
 
 /// How often the idle reaper looks (§3.7).
 ///
@@ -108,6 +113,19 @@ impl Drop for BootSettled<'_> {
 /// serves cloud upstreams exactly as before — the same posture the VRAM plane
 /// takes when there is no GPU telemetry.
 pub async fn boot(state: &SharedState) {
+    // Until adoption and the legacy sweep are over, a container a previous
+    // lmgw left on the card is not in the registry, and its memory would read
+    // as outside use to the outside-VRAM verdict (candidate-aliases §12,
+    // review finding 1) — which is therefore unavailable until this guard
+    // drops. A guard, so every way out of this block settles it: a podman
+    // that cannot be run, a hoist or a sweep that fails, a panic. Taken
+    // before the aux hoist, whose image reads are podman calls too. Once boot
+    // is over, what the registry does not hold is not lmgw's to free.
+    let settled = BootSettled(state);
+    // Existing aux rows' flags into their fields, before reconciliation
+    // compares any container with what its row renders (decision-models
+    // design §3.3, WP2b).
+    hoist_aux_args(state).await;
     let snap = state.snapshot();
     let runtimes = model_runtimes(&snap);
     // A ladder row's higher rungs: a container a previous lmgw had climbed is
@@ -125,14 +143,6 @@ pub async fn boot(state: &SharedState) {
     let candidates = readopt::candidates(state, &snap, &runtimes, &rungs);
 
     let registry = state.runtime();
-    // Until adoption and the legacy sweep are over, a container a previous
-    // lmgw left on the card is not in the registry, and its memory would read
-    // as outside use to the outside-VRAM verdict (candidate-aliases §12,
-    // review finding 1) — which is therefore unavailable until this guard
-    // drops. A guard, so every way out of this block settles it: a podman
-    // that cannot be run, a sweep that fails, a panic. Once boot is over,
-    // what the registry does not hold is not lmgw's to free.
-    let settled = BootSettled(state);
     // Leftover benchmark containers first (benchmark design §3.3): no run
     // survives a restart, so each one is a dead run's, holding VRAM nothing
     // accounts for. Reconciliation below skips them by their label.

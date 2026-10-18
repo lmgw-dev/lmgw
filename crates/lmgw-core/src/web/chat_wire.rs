@@ -25,7 +25,9 @@ use crate::state::SharedState;
 use crate::store::{self, ChatFolderListed, ChatThread};
 
 mod messages;
-pub(crate) use messages::{attachment, message, message_context};
+pub(crate) use messages::{
+    attachment, input_path, message, message_context, message_voice, timing_of,
+};
 
 #[cfg(test)]
 mod tests;
@@ -194,8 +196,7 @@ pub(crate) async fn thread(state: &SharedState, t: &ChatThread) -> api::Thread {
     let last = last_messages(state, &[t]).await.get(&t.id).copied();
     api::Thread {
         row: thread_row(t, &PurgeDays::load(state).await, last),
-        voice_resolved: serde_json::to_value(super::chat_voice::resolve_shown(state, t).await)
-            .expect("a resolved voice always serializes"),
+        voice_resolved: super::chat_voice::resolve_shown(state, t).await.wire(),
         continue_state: None,
     }
 }
@@ -274,7 +275,7 @@ fn kb_mode_of(m: store::KbMode) -> api::KbMode {
     }
 }
 
-fn turn_detection_of(t: store::TurnDetection) -> api::TurnDetectionMode {
+pub(crate) fn turn_detection_of(t: store::TurnDetection) -> api::TurnDetectionMode {
     match t {
         store::TurnDetection::SemanticVad => api::TurnDetectionMode::SemanticVad,
         store::TurnDetection::ServerVad => api::TurnDetectionMode::ServerVad,
@@ -282,7 +283,7 @@ fn turn_detection_of(t: store::TurnDetection) -> api::TurnDetectionMode {
     }
 }
 
-fn audio_input_of(m: store::AudioInputMode) -> api::AudioInputMode {
+pub(crate) fn audio_input_of(m: store::AudioInputMode) -> api::AudioInputMode {
     match m {
         store::AudioInputMode::Off => api::AudioInputMode::Off,
         store::AudioInputMode::On => api::AudioInputMode::On,

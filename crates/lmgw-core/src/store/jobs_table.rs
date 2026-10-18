@@ -95,6 +95,22 @@ pub async fn active_job_by_key(
     Ok(row.as_ref().map(job_from_row))
 }
 
+/// The newest job of `kind` keyed `key`, whatever its status: the last job
+/// that ran the thing the key names, while its row is kept.
+pub async fn latest_job_by_key(
+    pool: &SqlitePool,
+    kind: &str,
+    key: &str,
+) -> DbResult<Option<JobRow>> {
+    let row =
+        sqlx::query("SELECT * FROM jobs WHERE kind = ?1 AND key = ?2 ORDER BY id DESC LIMIT 1")
+            .bind(kind)
+            .bind(key)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.as_ref().map(job_from_row))
+}
+
 /// Newest first. `limit <= 0` means every row the retention rules have kept —
 /// the table is already bounded by a visible setting, so there is no second,
 /// invisible cap here.

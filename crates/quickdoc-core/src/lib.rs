@@ -34,3 +34,15 @@ pub mod store;
 pub mod vector;
 
 pub use error::{QuickdocError, Result};
+
+/// What the async trait methods ([`Embedder`](embed::Embedder),
+/// [`Reranker`](embed::Reranker), [`SearchSource`](retrieve::SearchSource),
+/// [`AsyncTokenCounter`](ingest::AsyncTokenCounter)) return: a boxed
+/// `dyn Future + Send`, so the traits stay usable as `dyn`. A method is
+/// `fn m<'a>(&'a self, …) -> BoxFut<'a, T>` with the body
+/// `Box::pin(async move { … })`, written out rather than left to
+/// `#[async_trait]`: the macro's extra where-clauses give each method a param
+/// env of its own, so the leaf proofs (e.g. `Self: Sync` for the captured
+/// `&self`) were not shared between methods (lmgw-core's
+/// `erased` module has the numbers).
+pub type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;

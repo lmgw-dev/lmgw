@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JobsView {
     pub jobs: Vec<JobRow>,
-    /// Number of jobs currently running, of any kind.
-    pub active: i64,
 }
 
 /// One background job. `done`/`total` are in the kind's own unit (bytes for

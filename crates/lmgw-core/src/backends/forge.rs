@@ -41,6 +41,7 @@ use super::git::{Git, GitAuth, RemoteRefs};
 use super::model::Forge;
 use super::presets;
 use super::validate;
+use crate::erased::Erased;
 use crate::state::{AppState, SharedState};
 
 /// Where github.com's API is. `LMGW_GITHUB_API` overrides it (a mock in
@@ -1246,15 +1247,21 @@ impl GatewayForge {
     }
 }
 
-#[async_trait::async_trait]
 impl super::ForgeLookup for GatewayForge {
-    async fn pr(&self, repo_url: &str, forge: Forge, number: u64) -> Result<ForgePr, String> {
-        let state = self
-            .state
-            .upgrade()
-            .ok_or("the gateway is shutting down, so the forge is not asked")?;
-        let session = session(&state)?;
-        session.pr(repo_url, forge, number).await
+    fn pr<'a>(
+        &'a self,
+        repo_url: &'a str,
+        forge: Forge,
+        number: u64,
+    ) -> Erased<'a, Result<ForgePr, String>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or("the gateway is shutting down, so the forge is not asked")?;
+            let session = session(&state)?;
+            session.pr(repo_url, forge, number).await
+        })
     }
 }
 

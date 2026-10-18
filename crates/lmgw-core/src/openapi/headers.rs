@@ -105,6 +105,7 @@ const GATED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/completions"),
     ("POST", "/v1/embeddings"),
     ("POST", "/v1/rerank"),
+    ("POST", "/v1/systemone"),
     ("POST", "/v1/count_tokens"),
     ("POST", "/tokenize"),
     ("POST", "/v1/audio/speech"),
@@ -116,6 +117,9 @@ const GATED_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/images/edits"),
     ("POST", "/v1/tasks/run"),
     ("POST", "/v1/tasks/stream"),
+    // The Chat's dictation: the gate answers it too, so a failed call names
+    // the fallback that had the audio.
+    ("POST", "/chat/api/threads/{id}/transcribe"),
 ];
 
 /// Routes whose response can report a reasoning control the route could not
@@ -243,8 +247,9 @@ pub const LMGW_HEADERS: &[LmgwHeader] = &[
         audience: Audience::Client,
         scope: Scope::Routes(GATED_ROUTES),
         schema: HeaderSchema::Text,
-        description: "The alias that answered instead of the requested local model; the body's \
-            model field still names the requested one. On the chat routes, a fallback whose \
+        description:
+            "The alias that answered instead of the requested local model; the answer still \
+            names the requested alias. On the chat routes, a fallback whose \
             capabilities say it cannot see receives the request's images as text placeholders, \
             and x-lmgw-images-omitted gives the count.",
     },

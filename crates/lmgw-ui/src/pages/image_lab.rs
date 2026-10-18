@@ -13,6 +13,17 @@
 //! — the same function the server dispatches with, so the "Request" panel shows
 //! what will actually be sent and not a second opinion about it.
 //!
+//! Every generation and edit is kept on the server (labs-store design §5):
+//! the page keeps the form as a group first (`/image-lab/api/groups`,
+//! `/groups/edit`), puts it in front of the history in flight, then runs it
+//! (`/groups/{id}/run`) and puts the answered group in its place. A Stop
+//! reads the group again until it is no longer in flight, so a picture the
+//! route answered meanwhile still lands. The results column is the lab's
+//! kept history, read through `pages/lab_history` and drawn by [`card`],
+//! each picture a file the lab store serves. A group goes back into the form ("Open in form"), a kept
+//! picture into the edit panel without an upload, and the form's prompt and
+//! settings can be saved as named presets.
+//!
 //! Two things the OpenAI image routes cannot say, and how they are said here:
 //! everything beyond `prompt`/`n`/`size`/`output_format`/`output_compression`
 //! (§2.3) rides in sd.cpp's own `<sd_cpp_extra_args>` prompt block, and a LoRA
@@ -26,17 +37,26 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use lmgw_api_types::image_lab::{ImageGenForm, ImageLoraRow, EDITS_ENDPOINT, GENERATIONS_ENDPOINT};
 use lmgw_api_types::image_lab::{ImageLabModel, ImageLabModels};
+use lmgw_api_types::lab_store::{LabFileRef, LabGroupView, LabKind, LabPresetBody, LabPresetKind};
 use lmgw_api_types::ImageCapabilities;
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::lab_frame::{Check, Fname, LabFrame, LabView, TaskGroup, TaskMenu, TaskOpt};
+use super::lab_history::{ExportMenu, HistoryList, LabHistory};
+use super::lab_presets::PresetsCard;
 use crate::catalog::CatalogEntry;
-use crate::fmt::human_bytes;
 use crate::scope::Scope;
 use crate::widgets::model_picker::ListStatus;
 use crate::widgets::{Explain, ModelPicker, Select};
+
+/// A kept generation's or edit's card.
+mod card;
+/// The form and the kept groups: Open in form, presets, Send to edit, the
+/// edit's upload.
+mod kept;
+
+use card::{ImageCard, StrayCard};
 
 // ---------------------------------------------------------------------------
 // Server shapes
@@ -46,18 +66,6 @@ use crate::widgets::{Explain, ModelPicker, Select};
 // type the gateway builds — so a renamed field breaks this build, not the page.
 type LabModel = ImageLabModel;
 type ModelsResp = ImageLabModels;
-
-/// The lab's success wrapper: what was sent, where, and what came back.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct RunResp {
-    endpoint: String,
-    request: Value,
-    /// The gateway's own measurement of the dispatch, in process.
-    latency_ms: u64,
-    headers: Value,
-    response: Value,
-}
 
 // ---------------------------------------------------------------------------
 // Fetch helpers
@@ -100,74 +108,6 @@ async fn lab_get<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Results
-// ---------------------------------------------------------------------------
-
-/// One picture, ready to render and to download. The bytes stay base64: that is
-/// what the route answers with, a `data:` URL needs nothing else, and an object
-/// URL would have to be revoked at exactly the moment this page is built to
-/// keep — the gallery holds every run of the session.
-#[derive(Clone, Debug, PartialEq)]
-struct Shot {
-    data_url: String,
-    file_name: String,
-    /// Decoded size, for the caption. The base64 is 4/3 of it.
-    bytes: usize,
-}
-
-/// One dispatch: its pictures (or the refusal), the request that made them,
-/// and the clock.
-#[derive(Clone, Debug, PartialEq)]
-struct Run {
-    id: u32,
-    model: String,
-    endpoint: String,
-    request: String,
-    shots: Vec<Shot>,
-    /// `(code, message)` of a run that brought nothing back.
-    error: Option<(String, String)>,
-    /// Browser round trip, including the in-process dispatch.
-    wall_ms: f64,
-    /// The gateway's own measurement of the dispatch.
-    server_ms: u64,
-    /// `x-lmgw-*` — a hold fallback names the model that really answered.
-    headers: Vec<(String, String)>,
-    at: String,
-}
-
-/// `alias` → a safe file stem for downloads, runs of unusable characters
-/// collapsing to one dash (the Audio lab's rule, same reason).
-fn model_stem(alias: &str) -> String {
-    let mut out = String::with_capacity(alias.len());
-    let mut dash = false;
-    for c in alias.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            out.push(c);
-            dash = false;
-        } else if !dash {
-            out.push('-');
-            dash = true;
-        }
-    }
-    if out.is_empty() {
-        "image".to_string()
-    } else {
-        out
-    }
-}
-
-/// `png` | `jpeg` | `webp` → the media type of the `data:` URL. Unknown formats
-/// are relayed as given: a build that grows a fourth encoder should show its
-/// picture, not a broken one.
-fn media_type(fmt: &str) -> String {
-    match fmt {
-        "" => "image/png".to_string(),
-        "jpg" => "image/jpeg".to_string(),
-        other => format!("image/{other}"),
-    }
-}
-
 fn now_hms() -> String {
     let d = js_sys::Date::new_0();
     format!(
@@ -206,6 +146,10 @@ struct Form {
     image_name: RwSignal<String>,
     mask_file: StoredValue<Option<web_sys::File>>,
     mask_name: RwSignal<String>,
+    /// A kept picture in the image slot (an opened edit's, a result sent to
+    /// edit): named by its artifact, sent without an upload.
+    image_ref: RwSignal<Option<LabFileRef>>,
+    mask_ref: RwSignal<Option<LabFileRef>>,
 }
 
 impl Form {
@@ -229,6 +173,8 @@ impl Form {
             image_name: RwSignal::new(String::new()),
             mask_file: StoredValue::new(None),
             mask_name: RwSignal::new(String::new()),
+            image_ref: RwSignal::new(None),
+            mask_ref: RwSignal::new(None),
         }
     }
 }
@@ -246,10 +192,20 @@ struct Lab {
     /// Where the model list stands (the picker says so while it loads).
     list: RwSignal<ListStatus>,
     running: RwSignal<bool>,
-    /// The run in flight: model, route and start time, for its card.
+    /// The request being kept as a group: model, route and start time, for
+    /// the card it has until the group is made.
     pending: RwSignal<Option<(String, &'static str, String)>>,
-    runs: RwSignal<Vec<Run>>,
-    next_run: RwSignal<u32>,
+    /// The group whose request this page has out: its card is the live one.
+    live: RwSignal<Option<i64>>,
+    /// An answer whose group is no longer in the history (a Clear while it
+    /// ran), with why it was not kept: its card stays above the history
+    /// until the next run.
+    stray: RwSignal<Option<(LabGroupView, String)>>,
+    /// The kept history (`/labs/api/image/*`).
+    history: LabHistory,
+    /// A model "Open in form" or a preset just picked: its row's own
+    /// defaults are not put over the fields loaded with it.
+    loaded: StoredValue<Option<String>>,
     view: RwSignal<LabView>,
     aborter: StoredValue<Option<web_sys::AbortController>>,
     /// The page's lifetime: a read or a run that answers after the lab was
@@ -259,6 +215,14 @@ struct Lab {
 }
 
 impl Lab {
+    /// Stop the request out: its fetch is aborted, and its group read again
+    /// until it is no longer in flight.
+    fn stop(self) {
+        if let Some(a) = self.aborter.get_value() {
+            a.abort();
+        }
+    }
+
     fn model(&self) -> Option<LabModel> {
         let alias = self.alias.get();
         self.models.get().into_iter().find(|m| m.name == alias)
@@ -401,12 +365,22 @@ impl Lab {
                 .iter()
                 .map(|(k, v)| format!("{k} = {v}"))
                 .collect::<Vec<_>>();
+            let kept = |r: &Option<LabFileRef>| {
+                r.as_ref()
+                    .map(|r| format!(" (kept, lab-artifact:{})", r.id))
+                    .unwrap_or_default()
+            };
             out.push(format!(
-                "image = {}",
-                some_or(&f.image_name.get(), "⚠ no file picked")
+                "image = {}{}",
+                some_or(&f.image_name.get(), "⚠ no file picked"),
+                kept(&f.image_ref.get())
             ));
             if !f.mask_name.get().is_empty() {
-                out.push(format!("mask = {}", f.mask_name.get()));
+                out.push(format!(
+                    "mask = {}{}",
+                    f.mask_name.get(),
+                    kept(&f.mask_ref.get())
+                ));
             }
             return out.join("\n");
         }
@@ -435,10 +409,6 @@ fn arg_text(args: &Option<serde_json::Map<String, Value>>, key: &str) -> String 
     }
 }
 
-fn now() -> f64 {
-    js_sys::Date::now()
-}
-
 // ---------------------------------------------------------------------------
 // The page
 // ---------------------------------------------------------------------------
@@ -456,6 +426,7 @@ fn random_seed() -> i64 {
 
 #[component]
 pub fn ImageLab() -> impl IntoView {
+    let scope = Scope::new();
     let lab = Lab {
         models: RwSignal::new(Vec::new()),
         models_dir: RwSignal::new(String::new()),
@@ -466,12 +437,14 @@ pub fn ImageLab() -> impl IntoView {
         list: RwSignal::new(ListStatus::Loading),
         running: RwSignal::new(false),
         pending: RwSignal::new(None),
-        runs: RwSignal::new(Vec::new()),
-        next_run: RwSignal::new(1),
+        live: RwSignal::new(None),
+        stray: RwSignal::new(None),
+        history: LabHistory::new(LabKind::Image, scope),
+        loaded: StoredValue::new(None),
         view: RwSignal::new(LabView::Form),
         aborter: StoredValue::new(None),
         toasts: crate::widgets::use_toasts(),
-        scope: Scope::new(),
+        scope,
     };
 
     let load_models = move || {
@@ -518,6 +491,19 @@ pub fn ImageLab() -> impl IntoView {
         else {
             return alias;
         };
+        if !m.edit {
+            lab.editing.set(false);
+        }
+        // Loaded with its fields: the row's defaults stay out of them.
+        if lab
+            .loaded
+            .try_update_value(Option::take)
+            .flatten()
+            .as_deref()
+            == Some(alias.as_str())
+        {
+            return alias;
+        }
         let f = lab.form;
         f.width.set(arg_text(&m.args, "width"));
         f.height.set(arg_text(&m.args, "height"));
@@ -525,17 +511,10 @@ pub fn ImageLab() -> impl IntoView {
         f.cfg_scale.set(arg_text(&m.args, "cfg_scale"));
         f.sampler.set(arg_text(&m.args, "sampling_method"));
         f.scheduler.set(arg_text(&m.args, "scheduler"));
-        if !m.edit {
-            lab.editing.set(false);
-        }
         alias
     });
 
-    let stop = move || {
-        if let Some(a) = lab.aborter.get_value() {
-            a.abort();
-        }
-    };
+    let stop = move || lab.stop();
 
     let run = move || {
         if lab.running.get_untracked() {
@@ -544,29 +523,26 @@ pub fn ImageLab() -> impl IntoView {
         let spec = untrack(|| lab.spec());
         let editing = lab.editing.get_untracked();
         let endpoint = untrack(|| lab.endpoint());
-        let request = untrack(|| lab.preview());
         let f = lab.form;
-        let file = f.image_file.get_value();
-        let t0 = now();
-        let model = spec.model.trim().to_string();
-        let refuse = move |code: String, msg: String| {
-            push_failed(lab, &model, endpoint, &request, now() - t0, code, msg)
-        };
-        lab.view.set(LabView::Results);
+        let image = (f.image_file.get_value(), f.image_ref.get_untracked());
+        let mask = (f.mask_file.get_value(), f.mask_ref.get_untracked());
         // The same refusals the action bar shows, before a container is
         // started for a request that cannot be made.
-        if spec.model.trim().is_empty() {
-            refuse(String::new(), "pick a model first".into());
+        let refusal = if spec.model.trim().is_empty() {
+            Some("pick a model first".to_string())
+        } else if let Err(e) = spec.generation_body() {
+            Some(e)
+        } else if editing && image.0.is_none() && image.1.is_none() {
+            Some("pick an image to edit".to_string())
+        } else {
+            None
+        };
+        if let Some(e) = refusal {
+            lab.toasts.err(e);
             return;
         }
-        if let Err(e) = spec.generation_body() {
-            refuse(String::new(), e);
-            return;
-        }
-        if editing && file.is_none() {
-            refuse(String::new(), "pick an image to edit".into());
-            return;
-        }
+        lab.view.set(LabView::Results);
+        lab.stray.set(None);
 
         lab.running.set(true);
         lab.pending
@@ -574,55 +550,24 @@ pub fn ImageLab() -> impl IntoView {
         let ctrl = web_sys::AbortController::new().ok();
         let signal = ctrl.as_ref().map(|c| c.signal());
         lab.aborter.set_value(ctrl);
-        // A run the lab was left during ends with it: its card has no
-        // history to land in.
+        // A run the lab was left during ends with it; the server keeps it.
         lab.scope.spawn(async move {
-            let sent = if editing {
-                match build_upload(&spec, file, f.mask_file.get_value()) {
-                    Ok(form) => match Request::post("/image-lab/api/edit")
-                        .abort_signal(signal.as_ref())
-                        .body(form)
-                    {
-                        Ok(req) => req.send().await.map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    },
-                    Err(e) => Err(e),
+            match kept::make_group(&spec, editing, image, mask, signal.as_ref()).await {
+                Ok(g) => {
+                    let id = g.id;
+                    lab.live.set(Some(id));
+                    lab.history.prepend(g);
+                    lab.pending.set(None);
+                    kept::run_group(lab, id, signal.as_ref()).await;
+                    // A first request starts the container; its capability
+                    // probe is what fills the sampler lists.
+                    load_models();
                 }
-            } else {
-                match Request::post("/image-lab/api/generate")
-                    .abort_signal(signal.as_ref())
-                    .json(&spec)
-                {
-                    Ok(req) => req.send().await.map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                }
-            };
-            match sent {
-                Err(e) => {
-                    let msg = if e.to_lowercase().contains("abort") {
-                        "stopped before it finished".to_string()
-                    } else {
-                        e
-                    };
-                    refuse(String::new(), msg);
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    if (200..300).contains(&status) {
-                        match serde_json::from_str::<RunResp>(&text) {
-                            Ok(r) => collect_run(lab, r, now() - t0, &spec),
-                            Err(e) => refuse(String::new(), format!("bad response body: {e}")),
-                        }
-                        // A first request starts the container; its capability
-                        // probe is what fills the sampler lists.
-                        load_models();
-                    } else {
-                        let (msg, code) = error_parts(&text, status);
-                        refuse(code, msg);
-                    }
-                }
+                Err(e) if kept::is_abort(&e) => {}
+                Err(e) => lab.toasts.err(e),
             }
+            lab.history.refresh_usage();
+            lab.live.set(None);
             lab.pending.set(None);
             lab.running.set(false);
             lab.aborter.set_value(None);
@@ -661,6 +606,8 @@ pub fn ImageLab() -> impl IntoView {
                 reasoning: false,
                 reasoning_facts: None,
                 local: m.local,
+                // Listed because it serves /v1/images/generations.
+                routable: true,
             })
             .collect::<Vec<_>>()
     });
@@ -694,6 +641,18 @@ pub fn ImageLab() -> impl IntoView {
     });
     let preview = Memo::new(move |_| lab.preview());
     let check = Memo::new(move |_| lab.check());
+    let filter_models = Signal::derive(move || {
+        lab.models
+            .with(|v| v.iter().map(|m| m.name.clone()).collect::<Vec<_>>())
+    });
+    let card = Callback::new(move |id: i64| view! { <ImageCard lab=lab id=id/> }.into_any());
+    let preset_now =
+        Callback::new(move |()| LabPresetBody::ImagePrompt(Box::new(untrack(|| lab.spec()))));
+    let preset_load = Callback::new(move |b: LabPresetBody| {
+        if let LabPresetBody::ImagePrompt(f) = b {
+            lab.load_form(&f);
+        }
+    });
 
     view! {
         <LabFrame
@@ -759,6 +718,13 @@ pub fn ImageLab() -> impl IntoView {
             form=move || {
                 view! {
                     <Notices lab=lab on_retry=load_models/>
+                    <PresetsCard
+                        lab=LabKind::Image
+                        kind=LabPresetKind::ImagePrompt
+                        title="Prompt presets"
+                        current=preset_now
+                        on_load=preset_load
+                    />
                     {move || {
                         if lab.editing.get() {
                             view! { <EditPanel lab=lab/> }.into_any()
@@ -800,10 +766,11 @@ pub fn ImageLab() -> impl IntoView {
                                 }
                             })
                     }}
-                    <Gallery lab=lab/>
+                    <StrayCard lab=lab/>
+                    <HistoryList history=lab.history card=card/>
                 }
             }
-            results_n=Signal::derive(move || lab.runs.with(Vec::len))
+            results_n=Signal::derive(move || lab.history.total.get() as usize)
             check=check
             run_label=Signal::derive(move || {
                 if lab.editing.get() { "Edit image" } else { "Generate" }.to_string()
@@ -811,178 +778,12 @@ pub fn ImageLab() -> impl IntoView {
             running=lab.running
             on_run=Callback::new(move |()| run())
             on_stop=Callback::new(move |()| stop())
-            on_clear=Callback::new(move |()| lab.runs.set(Vec::new()))
+            on_clear=Callback::new(move |()| lab.history.clear())
             view=lab.view
+            kept=Signal::derive(move || lab.history.usage.get())
+            results_tools=move || view! { <ExportMenu history=lab.history models=filter_models/> }
         />
     }
-}
-
-/// A run that brought nothing back joins the history with its reason, where
-/// its picture would have been.
-fn push_failed(
-    lab: Lab,
-    model: &str,
-    endpoint: &str,
-    request: &str,
-    wall_ms: f64,
-    code: String,
-    msg: String,
-) {
-    let id = lab.next_run.get_untracked();
-    lab.next_run.set(id + 1);
-    lab.runs.update(|v| {
-        v.insert(
-            0,
-            Run {
-                id,
-                model: model.to_string(),
-                endpoint: endpoint.to_string(),
-                request: request.to_string(),
-                shots: Vec::new(),
-                error: Some((code, msg)),
-                wall_ms,
-                server_ms: 0,
-                headers: Vec::new(),
-                at: now_hms(),
-            },
-        )
-    });
-}
-
-/// The `FormData` an edit posts: the typed form as JSON plus the two uploads.
-/// The canonical multipart the edits route reads is assembled on the server —
-/// a browser cannot name a part's `Content-Type` per file the way that route
-/// wants it, and the page would be building a second copy of the request.
-fn build_upload(
-    spec: &ImageGenForm,
-    image: Option<web_sys::File>,
-    mask: Option<web_sys::File>,
-) -> Result<web_sys::FormData, String> {
-    let form = web_sys::FormData::new().map_err(|_| "FormData unavailable".to_string())?;
-    let json = serde_json::to_string(spec).map_err(|e| e.to_string())?;
-    let _ = form.append_with_str("form", &json);
-    let image = image.ok_or("pick an image to edit")?;
-    let _ = form.append_with_blob_and_filename("image", &image, &image.name());
-    if let Some(mask) = mask {
-        let _ = form.append_with_blob_and_filename("mask", &mask, &mask.name());
-    }
-    Ok(form)
-}
-
-/// Turn one answered dispatch into a gallery entry, labelled with the form
-/// **as it was sent** (`sent`): a model switched or a seed re-rolled while a
-/// cold start was rendering must not rename the picture it produced
-/// (code:A5).
-fn collect_run(lab: Lab, r: RunResp, wall_ms: f64, sent: &ImageGenForm) {
-    let model = sent.model.trim().to_string();
-    let stem = model_stem(&model);
-    let seed = sent.seed.trim().to_string();
-    // The server's own word for what it encoded; the form's choice only when a
-    // build stops echoing it.
-    let fmt = r.response["output_format"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| sent.output_format.clone());
-    let ext = if fmt.is_empty() {
-        "png".to_string()
-    } else {
-        fmt.clone()
-    };
-    let mime = media_type(&fmt);
-    let shots: Vec<Shot> = r.response["data"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, d)| {
-            let b64 = d["b64_json"].as_str().filter(|s| !s.is_empty())?;
-            let name = if seed.is_empty() {
-                format!("{stem}-{i}.{ext}")
-            } else {
-                format!("{stem}-{seed}-{i}.{ext}")
-            };
-            Some(Shot {
-                data_url: format!("data:{mime};base64,{b64}"),
-                file_name: name,
-                // base64 is 4 characters per 3 bytes, padding included.
-                bytes: b64.len() / 4 * 3 - b64.chars().rev().take_while(|c| *c == '=').count(),
-            })
-        })
-        .collect();
-    if shots.is_empty() {
-        let msg = format!(
-            "the response carried no image: {}",
-            serde_json::to_string(&r.response).unwrap_or_default()
-        );
-        push_failed(
-            lab,
-            &model,
-            &r.endpoint,
-            &r.request.to_string(),
-            wall_ms,
-            String::new(),
-            msg,
-        );
-        return;
-    }
-    let headers = r
-        .headers
-        .as_object()
-        .map(|o| {
-            o.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let request = match &r.request {
-        Value::Object(o) if o.contains_key("fields") => {
-            // The edits multipart summary, as the server assembled it.
-            let mut out: Vec<String> = o["fields"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .map(|f| {
-                    format!(
-                        "{} = {}",
-                        f["name"].as_str().unwrap_or_default(),
-                        f["value"].as_str().unwrap_or_default()
-                    )
-                })
-                .collect();
-            for f in o["files"].as_array().cloned().unwrap_or_default() {
-                out.push(format!(
-                    "{} = {} ({})",
-                    f["name"].as_str().unwrap_or_default(),
-                    f["filename"].as_str().unwrap_or_default(),
-                    human_bytes(f["bytes"].as_u64().unwrap_or_default()),
-                ));
-            }
-            out.join("\n")
-        }
-        other => serde_json::to_string_pretty(other).unwrap_or_default(),
-    };
-    let id = lab.next_run.get_untracked();
-    lab.next_run.set(id + 1);
-    lab.runs.update(|v| {
-        v.insert(
-            0,
-            Run {
-                id,
-                model,
-                endpoint: r.endpoint,
-                request,
-                shots,
-                error: None,
-                wall_ms,
-                server_ms: r.latency_ms,
-                headers,
-                at: now_hms(),
-            },
-        )
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,6 +1275,7 @@ fn EditPanel(lab: Lab) -> impl IntoView {
                             let el: web_sys::HtmlInputElement = event_target(&ev);
                             let file = el.files().and_then(|l| l.get(0));
                             f.image_name.set(file.as_ref().map(|x| x.name()).unwrap_or_default());
+                            f.image_ref.set(None);
                             f.image_file.set_value(file);
                         }
                     />
@@ -1490,6 +1292,7 @@ fn EditPanel(lab: Lab) -> impl IntoView {
                             let el: web_sys::HtmlInputElement = event_target(&ev);
                             let file = el.files().and_then(|l| l.get(0));
                             f.mask_name.set(file.as_ref().map(|x| x.name()).unwrap_or_default());
+                            f.mask_ref.set(None);
                             f.mask_file.set_value(file);
                         }
                     />
@@ -1513,6 +1316,34 @@ fn EditPanel(lab: Lab) -> impl IntoView {
                         }
                     })
             }}
+            {move || {
+                let kept: Vec<String> = [f.image_ref.get(), f.mask_ref.get()]
+                    .into_iter()
+                    .flatten()
+                    .map(|r| r.name)
+                    .collect();
+                (!kept.is_empty())
+                    .then(|| {
+                        view! {
+                            <p class="mini-note il-kept">
+                                {format!("kept: {} — sent from the lab store, no upload. ", kept.join(" · "))}
+                                <button
+                                    type="button"
+                                    class="btn ghost sm"
+                                    title="Forget the kept pictures; pick files instead"
+                                    on:click=move |_| {
+                                        f.image_ref.set(None);
+                                        f.mask_ref.set(None);
+                                        f.image_name.set(String::new());
+                                        f.mask_name.set(String::new());
+                                    }
+                                >
+                                    "Clear"
+                                </button>
+                            </p>
+                        }
+                    })
+            }}
             <p class="dim mini-note">
                 "The upload is relayed as multipart through "
                 <span class="mono-sm">"/v1/images/edits"</span>
@@ -1522,143 +1353,6 @@ fn EditPanel(lab: Lab) -> impl IntoView {
         <PromptCard lab=lab/>
         <SizeCard lab=lab/>
         <SamplingCard lab=lab/>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Gallery
-// ---------------------------------------------------------------------------
-
-#[component]
-fn Gallery(lab: Lab) -> impl IntoView {
-    view! {
-        <For each=move || lab.runs.get() key=|r| r.id let:run>
-            {
-                let request = run.request.clone();
-                let can_edit = lab.can_edit();
-                let failed = run.error.is_some();
-                view! {
-                    <div class="card result-card" class:failed=failed>
-                        <div class="run-head">
-                            <span class="run-model mono-sm" title=run.model.clone()>
-                                {run.model.clone()}
-                            </span>
-                            <span class="mono-sm dim">{run.endpoint.clone()}</span>
-                            <span class="spacer"></span>
-                            <span class="mono-sm dim">
-                                {if failed {
-                                    format!("{} · {:.0} ms", run.at, run.wall_ms)
-                                } else {
-                                    format!(
-                                        "{} · {:.0} ms wall · {} ms in-process",
-                                        run.at,
-                                        run.wall_ms,
-                                        run.server_ms,
-                                    )
-                                }}
-                            </span>
-                        </div>
-                        {run
-                            .error
-                            .clone()
-                            .map(|(code, msg)| {
-                                view! {
-                                    <div class="notice err">
-                                        {(!code.is_empty()).then(|| view! { <b>{code.clone()}</b> })}
-                                        {format!("⚠ {msg}")}
-                                    </div>
-                                }
-                            })}
-                        <div class="gallery" hidden=failed>
-                            {run
-                                .shots
-                                .iter()
-                                .map(|s| {
-                                    let (url, name) = (s.data_url.clone(), s.file_name.clone());
-                                    let (send_url, send_name) = (url.clone(), name.clone());
-                                    view! {
-                                        <figure class="shot">
-                                            <img src=url.clone() alt=name.clone()/>
-                                            <figcaption class="meta">
-                                                <a class="btn ghost" href=url download=name.clone()>
-                                                    "Download"
-                                                </a>
-                                                {can_edit
-                                                    .then(|| {
-                                                        view! {
-                                                            <button
-                                                                class="btn ghost"
-                                                                title="Load this picture into the edit panel"
-                                                                on:click=move |_| {
-                                                                    send_to_edit(lab, &send_url, &send_name)
-                                                                }
-                                                            >
-                                                                "Send to edit"
-                                                            </button>
-                                                        }
-                                                    })}
-                                                <span class="spacer" style="flex:1"></span>
-                                                <span class="dim mono-sm">
-                                                    {human_bytes(s.bytes as u64)}
-                                                </span>
-                                            </figcaption>
-                                        </figure>
-                                    }
-                                })
-                                .collect::<Vec<_>>()}
-                        </div>
-                        {(!run.headers.is_empty())
-                            .then(|| {
-                                view! {
-                                    <div class="lab-stats mono-sm dim">
-                                        <span>
-                                            {run
-                                                .headers
-                                                .iter()
-                                                .map(|(k, v)| format!("{k}: {v}"))
-                                                .collect::<Vec<_>>()
-                                                .join(" · ")}
-                                        </span>
-                                    </div>
-                                }
-                            })}
-                        <details class="lab-details">
-                            <summary>"The request that made it"</summary>
-                            <pre class="preset">{request}</pre>
-                        </details>
-                    </div>
-                }
-            }
-        </For>
-    }
-}
-
-/// Load a result back into the edit panel's image slot.
-///
-/// The bytes are the base64 the route answered with, turned back into a `File`
-/// so the edit posts exactly what is on screen — no round trip through the
-/// gateway to fetch a picture the browser is already holding.
-fn send_to_edit(lab: Lab, data_url: &str, name: &str) {
-    let Some((head, b64)) = data_url.split_once(";base64,") else {
-        return;
-    };
-    let mime = head.trim_start_matches("data:").to_string();
-    let Some(bytes) = super::audio_stream::b64_decode(b64) else {
-        lab.toasts.err("that result could not be decoded");
-        return;
-    };
-    let arr = js_sys::Uint8Array::from(bytes.as_slice());
-    let parts = js_sys::Array::new();
-    parts.push(&arr);
-    let opts = web_sys::FilePropertyBag::new();
-    opts.set_type(&mime);
-    match web_sys::File::new_with_u8_array_sequence_and_options(&parts, name, &opts) {
-        Ok(file) => {
-            lab.form.image_name.set(file.name());
-            lab.form.image_file.set_value(Some(file));
-            lab.editing.set(true);
-        }
-        Err(_) => lab.toasts.err("that result could not be reused"),
     }
 }
 
@@ -1809,22 +1503,6 @@ mod tests {
             "prompt required"
         );
         assert_eq!(error_parts("", 503).0, "HTTP 503");
-    }
-
-    #[test]
-    fn download_names_collapse_unusable_characters() {
-        assert_eq!(model_stem("image/z-image-turbo"), "image-z-image-turbo");
-        assert_eq!(model_stem("flux 1.1 pro"), "flux-1.1-pro");
-        assert_eq!(model_stem(""), "image");
-    }
-
-    #[test]
-    fn the_media_type_follows_the_servers_own_word() {
-        assert_eq!(media_type("png"), "image/png");
-        assert_eq!(media_type("jpeg"), "image/jpeg");
-        assert_eq!(media_type("jpg"), "image/jpeg");
-        assert_eq!(media_type("webp"), "image/webp");
-        assert_eq!(media_type(""), "image/png");
     }
 
     /// A row's own flags are the form's defaults; anything else stays empty,

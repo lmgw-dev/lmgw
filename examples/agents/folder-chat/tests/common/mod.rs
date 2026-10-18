@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use async_trait::async_trait;
 use folder_chat::gateway::EMBED_PROBE_TEXT;
 use folder_chat::index::IndexDir;
 use folder_chat::sync::{self, SyncError, SyncEvent, SyncOptions, SyncReport};
 use quickdoc_core::embed::{EmbedIdentity, Embedder, FixtureEmbedder};
+use quickdoc_core::BoxFut;
 use quickdoc_core::QuickdocError;
 use sha2::{Digest, Sha256};
 
@@ -120,31 +120,35 @@ pub fn server_error() -> QuickdocError {
     ))
 }
 
-#[async_trait]
 impl Embedder for Counting {
     fn identity(&self) -> EmbedIdentity {
         self.inner.identity()
     }
 
-    async fn embed(&self, texts: &[String]) -> quickdoc_core::Result<Vec<Vec<f32>>> {
-        if is_probe(texts) {
-            self.probes.fetch_add(1, Ordering::SeqCst);
-            return self.inner.embed(texts).await;
-        }
-        if let Some(h) = &self.hook {
-            h(texts);
-        }
-        let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.hold_after.is_some_and(|h| n >= h) {
-            return Err(gpu_hold_error());
-        }
-        if let Some(needle) = &self.fail_containing {
-            if texts.iter().any(|t| t.contains(needle.as_str())) {
-                return Err(server_error());
+    fn embed<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> BoxFut<'a, quickdoc_core::Result<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            if is_probe(texts) {
+                self.probes.fetch_add(1, Ordering::SeqCst);
+                return self.inner.embed(texts).await;
             }
-        }
-        self.texts.fetch_add(texts.len(), Ordering::SeqCst);
-        self.inner.embed(texts).await
+            if let Some(h) = &self.hook {
+                h(texts);
+            }
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.hold_after.is_some_and(|h| n >= h) {
+                return Err(gpu_hold_error());
+            }
+            if let Some(needle) = &self.fail_containing {
+                if texts.iter().any(|t| t.contains(needle.as_str())) {
+                    return Err(server_error());
+                }
+            }
+            self.texts.fetch_add(texts.len(), Ordering::SeqCst);
+            self.inner.embed(texts).await
+        })
     }
 }
 
