@@ -52,10 +52,16 @@ async fn a_rotation_that_fails_before_the_key_is_written_changes_nothing() {
     assert_eq!(store.count(dir.path()), 1);
 
     // The new item added, then the key file not written (a crash, or a
-    // directory that refuses it): the old file still opens with its item.
-    chmod(&files.dir, 0o500);
+    // path that refuses it): the old file still opens with its item. The
+    // refusal is a directory standing where the key file goes, so the final
+    // rename fails for every user; a read-only `tls/` would not bind root,
+    // which is who a container's test run is.
+    let aside = files.dir.join("ca.key.aside");
+    std::fs::rename(&files.key, &aside).unwrap();
+    std::fs::create_dir(&files.key).unwrap();
     let e = t.replace(dir.path()).await.unwrap_err();
-    chmod(&files.dir, 0o700);
+    std::fs::remove_dir(&files.key).unwrap();
+    std::fs::rename(&aside, &files.key).unwrap();
     assert!(e.to_string().contains("tls/ca.key"), "{e}");
     unchanged(&t);
     assert_eq!(store.count(dir.path()), 2, "the new item, beside the old");

@@ -414,7 +414,10 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
         "{plan}"
     );
 
-    // Create from the plan, with CPU placement in its fields.
+    // Create from the plan, with CPU placement in its fields. The thread
+    // count is this host's physical cores, what lmgw itself would run: a
+    // fixed count would warn on a host with fewer CPUs.
+    let threads = lmgw_core::host::cpu().physical_cores as u64;
     let (is_err, created) = call(
         &base,
         &sid,
@@ -427,7 +430,7 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
             "pooling": "last",
             "ctx_size": 32768,
             "backend": "cpu",
-            "threads": 16,
+            "threads": threads,
         }),
     )
     .await;
@@ -448,7 +451,7 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
     assert_eq!(row.pooling.as_deref(), Some("last"));
     assert_eq!(row.ctx_size, Some(32768));
     assert_eq!(row.backend, Some(AuxBackend::Cpu));
-    assert_eq!(row.threads, Some(16));
+    assert_eq!(row.threads, Some(threads as i64));
     assert!(row.args.is_empty(), "{:?}", row.args);
     assert!(
         snap.local_models.is_empty(),
@@ -474,10 +477,10 @@ async fn an_embedding_model_is_planned_created_and_read_back_as_an_aux_row() {
         "{cmd}"
     );
     assert!(cmd.contains("--n-gpu-layers 0"), "{cmd}");
-    assert!(cmd.contains("--threads 16"), "{cmd}");
+    assert!(cmd.contains(&format!("--threads {threads}")), "{cmd}");
     assert_eq!(
         (&got["backend"], &got["threads"]),
-        (&json!("cpu"), &json!(16))
+        (&json!("cpu"), &json!(threads))
     );
 
     // The listing now shows the file in use.
