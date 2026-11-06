@@ -229,7 +229,7 @@ async fn lowering_the_level_mid_session_narrows_the_device_at_once() {
     let names = tools(&again);
     assert!(names.contains(&"status".to_string()), "{names:?}");
     assert!(!names.contains(&"mcp_server_set".to_string()), "{names:?}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "state" && f.data["self_admin"] == json!("read_only"))
     })

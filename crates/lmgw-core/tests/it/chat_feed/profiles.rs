@@ -50,8 +50,8 @@ async fn each_write_is_an_event_every_reader_hears_and_a_resync_repeats_the_list
     assert_eq!(s, 200, "{v}");
 
     let done = |f: &[super::Frame]| f.iter().any(|f| f.event == "profile.deleted");
-    mine.until(10, done).await;
-    theirs.until(10, done).await;
+    mine.until(done).await;
+    theirs.until(done).await;
     for feed in [&mine, &theirs] {
         let events: Vec<(String, Value)> = feed
             .frames
@@ -87,7 +87,7 @@ async fn each_write_is_an_event_every_reader_hears_and_a_resync_repeats_the_list
     // `profile.created` with no id and no author.
     let mut again = Feed::open(&w, &d.client, "?since=another-db:5", None).await;
     again
-        .until(10, |f| f.iter().any(|f| f.event == "profile.created"))
+        .until(|f| f.iter().any(|f| f.event == "profile.created"))
         .await;
     assert_eq!(again.frames[1].event, "resync", "{:?}", again.frames);
     let listed: Vec<&super::Frame> = again.named("profile.created");

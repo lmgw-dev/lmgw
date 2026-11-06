@@ -71,7 +71,7 @@ async fn a_delete_a_move_out_and_an_archive_each_end_the_current_thread_with_a_r
             "reason": "gone", "by": "the dashboard",
         }));
     }
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .filter(|f| f.event == "folder.current" && f.data["folder_id"] == folder)
             .count()
@@ -121,7 +121,7 @@ async fn a_folder_that_stops_being_ongoing_loses_its_current_thread() {
     .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["ongoing"], json!(null));
-    feed.until(10, |f| f.iter().any(|f| f.event == "folder.current"))
+    feed.until(|f| f.iter().any(|f| f.event == "folder.current"))
         .await;
     assert_eq!(
         currents(&feed, folder),

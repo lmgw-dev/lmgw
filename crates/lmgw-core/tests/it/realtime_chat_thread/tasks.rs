@@ -154,7 +154,7 @@ async fn a_result_that_entered_before_the_bind_is_owed_at_bind() {
     let owner = w.gw.client();
     let mut feed = Feed::open(&w, &owner, "", None).await;
     dev.complete("t1", "42 files", true);
-    feed.until(10, |f| f.iter().any(|f| f.event == "task.done"))
+    feed.until(|f| f.iter().any(|f| f.event == "task.done"))
         .await;
     let msgs = until_results(&w, tid, 1).await;
     let done = feed.frames.iter().find(|f| f.event == "task.done").unwrap();

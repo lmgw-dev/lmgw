@@ -141,7 +141,7 @@ async fn attaching_the_self_admin_toolset_takes_a_thread_out_of_a_device_s_reach
     // reach (review W5-6, the W4-13 residue); the device hears nothing of it
     // — the thread is not there for it.
     owners
-        .until(10, |f| f.iter().any(|f| f.event == "voice.ended"))
+        .until(|f| f.iter().any(|f| f.event == "voice.ended"))
         .await;
     let ended = owners.named("voice.ended")[0].data.clone();
     assert_eq!(
@@ -151,7 +151,7 @@ async fn attaching_the_self_admin_toolset_takes_a_thread_out_of_a_device_s_reach
     );
 
     // The feed tells the device the thread is gone; by id it is not found.
-    feed.until(10, |f| f.iter().any(|f| f.event == "thread.deleted"))
+    feed.until(|f| f.iter().any(|f| f.event == "thread.deleted"))
         .await;
     assert!(feed.named("voice.ended").is_empty(), "{:#?}", feed.frames);
     let gone = &feed.named("thread.deleted")[0].data;
@@ -171,7 +171,7 @@ async fn attaching_the_self_admin_toolset_takes_a_thread_out_of_a_device_s_reach
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == tid)
     })
@@ -275,7 +275,7 @@ async fn a_plain_thread_in_a_folder_that_left_a_device_s_reach_is_in_none_for_it
     assert_eq!(mine["thread"]["folder_id"], folder);
 
     // The feed: the folder goes, the thread is re-rendered without it.
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.updated" && f.data["id"] == tid)
     })
@@ -292,11 +292,11 @@ async fn a_plain_thread_in_a_folder_that_left_a_device_s_reach_is_in_none_for_it
 
     // Taken off: the folder and the thread's place in it are back.
     set_defaults(json!({})).await;
-    feed.until(10, |f| f.iter().any(|f| f.event == "folder.created"))
+    feed.until(|f| f.iter().any(|f| f.event == "folder.created"))
         .await;
     // (The pin and archive above recorded updates of their own, rendered
     // without the folder while it was hidden.)
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter().any(|f| {
             f.event == "thread.updated" && f.data["id"] == tid && f.data["folder_id"] == folder
         })

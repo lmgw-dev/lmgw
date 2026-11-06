@@ -146,7 +146,7 @@ async fn a_stopping_server_says_shutting_down_and_the_feed_ends() {
         )
     );
     assert_eq!(read.kind, CloseKind::ShuttingDown);
-    c.feed.until(10, |_| false).await;
+    c.feed.until(|_| false).await;
     assert!(c.feed.ended, "the feed ends");
 }
 

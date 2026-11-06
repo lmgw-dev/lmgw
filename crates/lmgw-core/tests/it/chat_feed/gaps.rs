@@ -35,7 +35,7 @@ async fn a_device_catching_up_across_a_flip_hears_the_thread_go_and_come() {
         assert_eq!(s, 200, "{v}");
     }
     let mut late = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
-    late.until(10, |f| about_thread(f, tid).len() >= 3).await;
+    late.until(|f| about_thread(f, tid).len() >= 3).await;
     let seen: Vec<&str> = about_thread(&late.frames, tid)
         .iter()
         .map(|f| f.event.as_str())
@@ -87,9 +87,7 @@ async fn a_device_s_lag_state_leaves_admin_chat_out() {
     for i in 0..6 {
         publish(i % 2 == 0);
     }
-    device
-        .until(10, |f| f.iter().any(|f| f.event == "state"))
-        .await;
+    device.until(|f| f.iter().any(|f| f.event == "state")).await;
     let state = &device.named("state")[0].data;
     assert_eq!(state["turns"], json!([]), "{state}");
     let reason = state["reason"].as_str().unwrap();
@@ -176,7 +174,7 @@ async fn a_rotate_closes_a_device_s_feed_unseen() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |_| false).await;
+    feed.until(|_| false).await;
     assert_eq!(feed.frames.last().unwrap().event, "revoked");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -208,7 +206,7 @@ async fn an_owner_key_s_feed_ends_with_revoked() {
     );
     let (s, v) = op(&w, "key_rotate", json!({ "id": id })).await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |_| false).await;
+    feed.until(|_| false).await;
     assert!(feed.ended);
     assert_eq!(feed.frames.last().unwrap().event, "revoked");
 }
@@ -229,7 +227,7 @@ async fn the_sweep_s_purge_is_in_the_feed() {
     .unwrap();
     let mut feed = Feed::open(&w, &owner, "", None).await;
     lmgw_core::server::chat_upkeep(&w.state).await;
-    feed.until(10, |f| f.iter().any(|f| f.event == "thread.deleted"))
+    feed.until(|f| f.iter().any(|f| f.event == "thread.deleted"))
         .await;
     assert_eq!(
         feed.named("thread.deleted")[0].data,
@@ -248,7 +246,7 @@ async fn the_keep_alive_reads_a_write_that_never_woke_the_feed() {
     let id = lmgw_core::store::create_chat_thread(&w.state.db, "chatty", "chat")
         .await
         .unwrap();
-    feed.until(5, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == id)
     })

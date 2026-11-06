@@ -242,8 +242,8 @@ async fn heard(w: &World, device: &mut Feed, owners: &mut Feed, tid: i64) -> (He
             f.iter()
                 .any(|f| f.event == "thread.created" && f.data["id"] == marker)
         };
-        device.until(10, seen).await;
-        owners.until(10, seen).await;
+        device.until(seen).await;
+        owners.until(seen).await;
     }
     let names = |f: &Frame| f.data["thread_id"] == tid || f.data["id"] == tid;
     let from = device
@@ -852,7 +852,7 @@ async fn a_level_drop_reaches_a_device_s_feed_only_once_its_routes_say_it() {
         f.iter()
             .any(|f| f.event == "thread.deleted" && f.data["thread_id"] == tools.id)
     };
-    let heard = tokio::time::timeout(Duration::from_secs(1), feed.until(10, gone))
+    let heard = tokio::time::timeout(Duration::from_secs(1), feed.until(gone))
         .await
         .is_ok();
     let (s, _) = get(&w, &d.client, &format!("/chat/api/threads/{}", tools.id)).await;
@@ -879,10 +879,10 @@ async fn a_level_drop_reaches_a_device_s_feed_only_once_its_routes_say_it() {
     // Published, and the next wake plays it: the routes say it by then.
     w.state.reload_snapshot().await.unwrap();
     let after = chat_thread(&w, &owner, "chatty").await;
-    feed.until(10, gone).await;
+    feed.until(gone).await;
     let (s, _) = get(&w, &d.client, &format!("/chat/api/threads/{}", tools.id)).await;
     assert_eq!(s, 404);
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == after)
     })

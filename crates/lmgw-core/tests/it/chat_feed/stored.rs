@@ -77,10 +77,8 @@ async fn writes_arrive_in_commit_order_and_resume_by_since_and_last_event_id() {
         ("thread.deleted".to_string(), t),
         ("folder.deleted".to_string(), folder),
     ];
-    live.until(10, |f| {
-        f.iter().filter(|f| f.id.is_some()).count() >= want.len()
-    })
-    .await;
+    live.until(|f| f.iter().filter(|f| f.id.is_some()).count() >= want.len())
+        .await;
     assert_eq!(live.stored(), want);
     // Ids are cursors of this database, increasing in commit order, and
     // every change names who made it.
@@ -106,9 +104,7 @@ async fn writes_arrive_in_commit_order_and_resume_by_since_and_last_event_id() {
     // the thread and the folder are gone, so their creations are tombstones.
     let mut caught = Feed::open(&w, &w.gw.client(), &format!("?since={start}"), None).await;
     caught
-        .until(10, |f| {
-            f.iter().filter(|f| f.id.is_some()).count() >= want.len()
-        })
+        .until(|f| f.iter().filter(|f| f.id.is_some()).count() >= want.len())
         .await;
     assert_eq!(caught.stored(), want);
     assert!(caught.named("resync").is_empty());
@@ -132,9 +128,7 @@ async fn writes_arrive_in_commit_order_and_resume_by_since_and_last_event_id() {
     let mut resumed =
         Feed::open(&w, &w.gw.client(), &format!("?since={start}"), Some(&third)).await;
     resumed
-        .until(10, |f| {
-            f.iter().filter(|f| f.id.is_some()).count() >= want.len() - 3
-        })
+        .until(|f| f.iter().filter(|f| f.id.is_some()).count() >= want.len() - 3)
         .await;
     assert_eq!(resumed.hello()["cursor"], third);
     assert_eq!(resumed.stored(), want[3..].to_vec());
@@ -179,7 +173,7 @@ async fn catch_up_comes_in_pages_and_across_a_restart() {
         asr: w.asr,
     };
     let mut feed = Feed::open(&restarted, &client, &format!("?since={before}"), None).await;
-    feed.until(10, |f| f.iter().filter(|f| f.id.is_some()).count() >= 5)
+    feed.until(|f| f.iter().filter(|f| f.id.is_some()).count() >= 5)
         .await;
     assert!(feed.named("resync").is_empty(), "{:?}", feed.frames);
     let created: Vec<i64> = feed
@@ -202,7 +196,7 @@ async fn catch_up_comes_in_pages_and_across_a_restart() {
         None,
     )
     .await;
-    foreign.until(10, |f| f.len() >= 2).await;
+    foreign.until(|f| f.len() >= 2).await;
     assert_eq!(foreign.frames[1].event, "resync");
     assert!(
         foreign.frames[1].data["reason"]
@@ -231,7 +225,7 @@ async fn the_sweep_is_in_the_feed_and_retention_turns_an_old_cursor_into_a_resyn
     // The hourly tick's Chat step: the sweep archives the idle thread, as
     // the gateway's own change.
     lmgw_core::server::chat_upkeep(&w.state).await;
-    feed.until(10, |f| f.iter().filter(|f| f.id.is_some()).count() >= 2)
+    feed.until(|f| f.iter().filter(|f| f.id.is_some()).count() >= 2)
         .await;
     let archived = feed.named("thread.updated")[0];
     assert_eq!(archived.data["id"], t);
@@ -250,7 +244,7 @@ async fn the_sweep_is_in_the_feed_and_retention_turns_an_old_cursor_into_a_resyn
         .unwrap();
     lmgw_core::server::chat_upkeep(&w.state).await;
     let mut kept = Feed::open(&w, &w.gw.client(), &format!("?since={start}"), None).await;
-    kept.until(10, |f| f.iter().filter(|f| f.id.is_some()).count() >= 2)
+    kept.until(|f| f.iter().filter(|f| f.id.is_some()).count() >= 2)
         .await;
     assert!(kept.named("resync").is_empty());
 
@@ -259,7 +253,7 @@ async fn the_sweep_is_in_the_feed_and_retention_turns_an_old_cursor_into_a_resyn
     set(&w, |s| s.chat_feed_retention_days = 7).await;
     lmgw_core::server::chat_upkeep(&w.state).await;
     let mut stale = Feed::open(&w, &w.gw.client(), &format!("?since={start}"), None).await;
-    stale.until(10, |f| f.len() >= 2).await;
+    stale.until(|f| f.len() >= 2).await;
     assert_eq!(stale.frames[1].event, "resync");
     let reason = stale.frames[1].data["reason"].as_str().unwrap();
     assert!(
@@ -274,13 +268,13 @@ async fn the_sweep_is_in_the_feed_and_retention_turns_an_old_cursor_into_a_resyn
         "from now"
     );
     owner(&w, &format!("/chat/api/threads/{t}/delete"), json!({})).await;
-    stale.until(10, |f| has_event(f, "thread.deleted")).await;
+    stale.until(|f| has_event(f, "thread.deleted")).await;
 
     // A cursor newer than the newest event: this database was restored
     // from an older copy.
     let epoch = feed.hello()["epoch"].as_str().unwrap().to_string();
     let mut ahead = Feed::open(&w, &w.gw.client(), &format!("?since={epoch}:99999"), None).await;
-    ahead.until(10, |f| f.len() >= 2).await;
+    ahead.until(|f| f.len() >= 2).await;
     assert_eq!(ahead.frames[1].event, "resync");
     assert!(ahead.frames[1].data["reason"]
         .as_str()
@@ -304,7 +298,7 @@ async fn a_restored_copy_that_wrote_past_a_cursor_is_another_database() {
     for _ in 0..3 {
         owner(&w, "/chat/api/threads", json!({ "model_alias": "chatty" })).await;
     }
-    feed.until(10, |f| f.iter().filter(|f| f.id.is_some()).count() >= 3)
+    feed.until(|f| f.iter().filter(|f| f.id.is_some()).count() >= 3)
         .await;
     let cursor = feed.cursor();
     assert_eq!(cursor.split(':').count(), 3, "a tagged cursor: {cursor}");
@@ -328,7 +322,7 @@ async fn a_restored_copy_that_wrote_past_a_cursor_is_another_database() {
     }
 
     let mut back = Feed::open(&w, &w.gw.client(), "", Some(&cursor)).await;
-    back.until(10, |f| f.len() >= 2).await;
+    back.until(|f| f.len() >= 2).await;
     assert_eq!(back.frames[1].event, "resync", "{:#?}", back.frames);
     assert!(back.frames[1].data["reason"]
         .as_str()

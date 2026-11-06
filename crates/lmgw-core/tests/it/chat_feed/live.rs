@@ -46,7 +46,7 @@ async fn hello_says_who_the_feed_is_for_and_the_limits_it_runs_under() {
 
     // Keep-alive comments at the interval `hello` stated.
     let started = std::time::Instant::now();
-    device.until(5, |f| f.iter().any(|f| f.event == ":")).await;
+    device.until(|f| f.iter().any(|f| f.event == ":")).await;
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
 
@@ -69,7 +69,7 @@ async fn a_turn_is_live_with_who_started_it_and_how_it_ended() {
     let mid = done["message_id"].as_i64().unwrap();
 
     owner
-        .until(10, |f| f.iter().any(|f| f.event == "turn.done"))
+        .until(|f| f.iter().any(|f| f.event == "turn.done"))
         .await;
     let started = &owner.named("turn.started")[0].data;
     assert_eq!(
@@ -97,8 +97,7 @@ async fn the_hold_is_live() {
     let mut feed = Feed::open(&w, &w.gw.client(), "", None).await;
     let (s, v) = op(&w, "hold_set", json!({ "active": true })).await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| f.iter().any(|f| f.event == "hold"))
-        .await;
+    feed.until(|f| f.iter().any(|f| f.event == "hold")).await;
     assert_eq!(
         feed.named("hold")[0].data,
         json!({ "active": true, "benchmark": false })
@@ -120,15 +119,14 @@ async fn a_benchmark_s_lease_is_part_of_the_hold() {
     let guard = lmgw_core::bench::lease::LeaseGuard::take(&w.state, 7, "chatty");
     let held = json!({ "active": false, "benchmark": true });
     for feed in [&mut owner, &mut device] {
-        feed.until(10, |f| f.iter().any(|f| f.event == "hold"))
-            .await;
+        feed.until(|f| f.iter().any(|f| f.event == "hold")).await;
         assert_eq!(feed.named("hold")[0].data, held);
     }
     let again = Feed::open(&w, &d.client, "", None).await;
     assert_eq!(again.hello()["hold"], held);
     drop(guard);
     device
-        .until(10, |f| f.iter().filter(|f| f.event == "hold").count() >= 2)
+        .until(|f| f.iter().filter(|f| f.event == "hold").count() >= 2)
         .await;
     assert_eq!(
         device.named("hold")[1].data,
@@ -151,8 +149,7 @@ async fn a_reader_behind_the_live_buffer_gets_state_naming_it_never_a_silent_gap
     for i in 0..6 {
         publish(i % 2 == 0, 2);
     }
-    feed.until(10, |f| f.iter().any(|f| f.event == "state"))
-        .await;
+    feed.until(|f| f.iter().any(|f| f.event == "state")).await;
     let state = &feed.named("state")[0].data;
     let reason = state["reason"].as_str().unwrap();
     assert!(
@@ -168,7 +165,7 @@ async fn a_reader_behind_the_live_buffer_gets_state_naming_it_never_a_silent_gap
     // A resized buffer moves the open feeds over, with a state saying so,
     // and live events flow on the new one.
     publish(true, 8);
-    feed.until(10, |f| f.iter().filter(|f| f.event == "state").count() >= 2)
+    feed.until(|f| f.iter().filter(|f| f.event == "state").count() >= 2)
         .await;
     let resized = &feed.named("state")[1].data;
     assert!(
@@ -177,7 +174,7 @@ async fn a_reader_behind_the_live_buffer_gets_state_naming_it_never_a_silent_gap
     );
     assert_eq!(resized["hold"]["active"], true);
     publish(false, 8);
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .rev()
             .any(|f| f.event == "hold" && f.data["active"] == false)
@@ -205,7 +202,7 @@ async fn a_folder_deleted_with_its_threads_says_a_bound_thread_went() {
     let tid = v["id"].as_i64().unwrap();
     let mut feed = Feed::open(&w, &owner, "", None).await;
     let (_ws, _) = w.bind(tid).await;
-    feed.until(10, |f| f.iter().any(|f| f.event == "voice.bound"))
+    feed.until(|f| f.iter().any(|f| f.event == "voice.bound"))
         .await;
     assert_eq!(
         feed.named("voice.bound")[0].data,
@@ -220,7 +217,7 @@ async fn a_folder_deleted_with_its_threads_says_a_bound_thread_went() {
     .await;
     assert_eq!(s, 200, "{v}");
     drop(_ws);
-    feed.until(10, |f| f.iter().any(|f| f.event == "voice.ended"))
+    feed.until(|f| f.iter().any(|f| f.event == "voice.ended"))
         .await;
     let ended = &feed.named("voice.ended")[0].data;
     assert_eq!(

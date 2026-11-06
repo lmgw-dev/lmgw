@@ -16,6 +16,7 @@ use str0m::Event;
 use tokio::time::Instant;
 
 use super::{closed_last, removed_at, voice_ended, BoundCall};
+use crate::chat_feed::Feed;
 use crate::common::captured_log::capture_log_at;
 use crate::common::patience::{until, within};
 use crate::realtime_calls::hangup;
@@ -134,12 +135,26 @@ async fn a_closing_call_is_shown_closing_and_a_hangup_closes_it_at_once() {
 /// ignores, said at DEBUG), then ends as after a hangup — the feed says
 /// `voice.ended {reason: "closed"}` — and lmgw sends nothing more: no
 /// `lmgw.session.closed`, no close of lmgw's own, only the end of the call.
+///
+/// The binding let go by the session's end (§8.2's order): a feed opened
+/// once the session ended lists no session on the thread, where one opened
+/// before the close listed it. That holds the moment the session ends;
+/// when the open feed reads its `voice.ended` is its delivery's business
+/// (`Feed::until`).
 #[tokio::test]
 async fn the_phones_own_close_applies_what_came_before_it_and_hears_nothing_after() {
     let (log, _guard) = capture_log_at(tracing::Level::DEBUG);
     let mut c = BoundCall::start(|_| {}).await;
     c.settled().await;
     let sid = c.w.state.calls.get(&c.phone.id).unwrap().session.unwrap();
+    let live = |feed: &Feed| feed.hello()["voice"].clone();
+    let before = Feed::open(&c.w, &c.device.client, "", None).await;
+    assert_eq!(
+        live(&before),
+        json!([{"thread_id": c.tid, "by": "the dashboard"}]),
+        "{:#?}",
+        before.frames
+    );
     c.phone.send(json!({"type": "lmgw.session.take_over"}));
     c.phone.c.close_channel();
     let mut after = Vec::new();
@@ -177,6 +192,8 @@ async fn the_phones_own_close_applies_what_came_before_it_and_hears_nothing_afte
         !text.contains(&format!("WebRTC call {}: closing (", c.phone.id)),
         "no close of lmgw's own: {text}"
     );
+    let after_end = Feed::open(&c.w, &c.device.client, "", None).await;
+    assert_eq!(live(&after_end), json!([]), "{:#?}", after_end.frames);
     let frames = c.feed_after().await;
     assert_eq!(
         voice_ended(&frames),

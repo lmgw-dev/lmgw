@@ -47,7 +47,7 @@ async fn disable_rotate_and_delete_end_a_device_s_feed_with_revoked() {
             _ => op(&w, "key_delete", json!({ "id": d.id })).await,
         };
         assert_eq!(status, 200, "{how}: {v}");
-        feed.until(10, |_| false).await;
+        feed.until(|_| false).await;
         assert!(feed.ended, "{how}: the stream ends");
         let last = feed.frames.last().unwrap();
         assert_eq!(last.event, "revoked", "{how}: {:#?}", feed.frames);
@@ -67,7 +67,7 @@ async fn a_device_s_feed_ends_at_its_key_s_expiry() {
     let at = (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339();
     let (status, v) = op(&w, "key_set", json!({ "id": d.id, "expires_at": at })).await;
     assert_eq!(status, 200, "{v}");
-    feed.until(8, |_| false).await;
+    feed.until(|_| false).await;
     let last = feed.frames.last().unwrap();
     assert_eq!(
         last.data,

@@ -91,7 +91,7 @@ async fn a_level_drop_plays_at_its_publish_while_the_mcp_reconcile_hangs() {
             .post(format!("{}/api/op/key_set", w.gw))
             .json(&json!({ "id": d.id, "self_admin": "off" }));
     let level = tokio::spawn(async move { req.send().await.map(|r| r.status().as_u16()) });
-    feed.until(10, |f| says_gone(f, tools.id)).await;
+    feed.until(|f| says_gone(f, tools.id)).await;
     let end = ended(&mut ws, Duration::from_secs(10))
         .await
         .expect("the session closes at the publish");
@@ -143,7 +143,7 @@ async fn a_feed_opened_before_the_publish_starts_at_once_and_opens_at_the_new_le
     .unwrap();
     assert_eq!(resp.status(), 200);
     let mut feed = Feed::reading(resp);
-    feed.until(5, |f| !f.is_empty()).await;
+    feed.until(|f| !f.is_empty()).await;
     assert_eq!(
         feed.frames[0].event, ":",
         "a keep-alive comment first, while the snapshot is behind: {:#?}",
@@ -152,8 +152,7 @@ async fn a_feed_opened_before_the_publish_starts_at_once_and_opens_at_the_new_le
 
     let state = w.state.clone();
     let reload = tokio::spawn(async move { state.reload_snapshot().await.map(|_| ()) });
-    feed.until(10, |f| f.iter().any(|f| f.event == "hello"))
-        .await;
+    feed.until(|f| f.iter().any(|f| f.event == "hello")).await;
     let hello = feed.named("hello")[0].data.clone();
     assert_eq!(hello["self_admin"], "off", "{hello}");
     assert!(

@@ -24,7 +24,7 @@ fn updates(feed: &Feed) -> Vec<(String, String)> {
 /// Wait until `feed` holds the `thread.created` of thread `id`: every
 /// record before it was rendered for this reader.
 async fn past(feed: &mut Feed, id: i64) {
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == id)
     })
@@ -95,7 +95,7 @@ async fn a_feed_reopened_from_its_cursor_replays_them() {
     let id = t["id"].as_str().unwrap().to_string();
     put(&w, &desktop.client, &id, 0, &bytes, 500).await;
     let mut back = Feed::open(&w, &phone.client, "", Some(&cursor)).await;
-    back.until(10, |f| f.iter().any(|f| f.event == "transfer.updated"))
+    back.until(|f| f.iter().any(|f| f.event == "transfer.updated"))
         .await;
     assert_eq!(updates(&back), [("ready".to_string(), id.clone())]);
     // And the list a receiver reads at its start says the same.

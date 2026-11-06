@@ -38,7 +38,7 @@ async fn approval_records_are_hidden_from_a_device_that_cannot_see_the_thread() 
     // The feed does not send a request whose call is decided by delivery
     // (it renders at delivery, not at the write), so the request is read
     // before the decision is made.
-    mine.until(10, |f| f.iter().any(|f| f.event == "approval.requested"))
+    mine.until(|f| f.iter().any(|f| f.event == "approval.requested"))
         .await;
     w.chat.push(Turn::text(&["All well."]));
     let (s, frames) = decide(
@@ -49,7 +49,7 @@ async fn approval_records_are_hidden_from_a_device_that_cannot_see_the_thread() 
     )
     .await;
     assert_eq!(s, 200, "{frames:?}");
-    mine.until(10, |f| f.iter().any(|f| f.event == "approval.decided"))
+    mine.until(|f| f.iter().any(|f| f.event == "approval.decided"))
         .await;
     assert_eq!(
         mine.named("approval.requested").len(),
@@ -62,7 +62,7 @@ async fn approval_records_are_hidden_from_a_device_that_cannot_see_the_thread() 
     // the approval records by then.
     let plain = chat_thread(&w, &owner, "chatty").await;
     theirs
-        .until(10, |f| {
+        .until(|f| {
             f.iter()
                 .any(|f| f.event == "thread.created" && f.data["id"] == plain)
         })

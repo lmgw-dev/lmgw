@@ -299,7 +299,7 @@ async fn a_device_s_folder_delete_keeps_the_owner_s_retention() {
         "the device's thread went"
     );
     // The device's feed: its thread's delete, then the folder's.
-    feed.until(10, |f| f.iter().any(|f| f.event == "folder.deleted"))
+    feed.until(|f| f.iter().any(|f| f.event == "folder.deleted"))
         .await;
     let stored: Vec<&str> = feed
         .frames
@@ -388,7 +388,7 @@ async fn the_owner_shows_a_folder_a_device_deleted_to_devices_again() {
     )
     .await;
     assert_eq!((s, &v["devices_hidden"]), (200, &json!(false)), "{v}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.updated" && crate::chat_feed::subject(f) == plain)
     })

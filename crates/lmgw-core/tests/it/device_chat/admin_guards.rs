@@ -243,7 +243,7 @@ async fn marked<const N: usize>(w: &World, feeds: [&mut Feed; N], nth: usize) ->
     crate::chat_feed::set(w, |s| s.hold.active = false).await;
     let mut counts = [0; N];
     for (i, f) in feeds.into_iter().enumerate() {
-        f.until(10, |f| {
+        f.until(|f| {
             f.iter()
                 .filter(|f| f.event == "hold" && f.data["active"] == json!(false))
                 .count()
@@ -297,7 +297,7 @@ async fn the_gateway_s_level_lowered_narrows_a_device_at_full_at_once() {
     .await;
     assert_eq!(s, 200, "{v}");
 
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "state" && f.data["self_admin"] == json!("read_only"))
     })
@@ -332,7 +332,7 @@ async fn the_gateway_s_level_lowered_narrows_a_device_at_full_at_once() {
     // Raised again: the device hears `full`.
     let (s, v) = op(&w, "settings_set_full", json!({ "self_admin": "full" })).await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "state" && f.data["self_admin"] == json!("full"))
     })
@@ -472,7 +472,7 @@ async fn the_gateway_s_level_set_to_off_hides_the_toolset_from_every_device() {
         lmgw_client::realtime::close_kind(code, &reason),
         lmgw_client::realtime::CloseKind::OutOfReach
     );
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter().any(|f| f.event == "folder.deleted")
             && f.iter()
                 .any(|f| f.event == "state" && f.data["self_admin"] == json!("off"))
@@ -513,7 +513,7 @@ async fn the_gateway_s_level_set_to_off_hides_the_toolset_from_every_device() {
     let last = marker(&w).await;
     let mut back = Feed::open(&w, &tablet.client, "", Some(&cursor)).await;
     assert_eq!(back.hello()["self_admin"], json!("off"));
-    back.until(10, |f| {
+    back.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && crate::chat_feed::subject(f) == last)
     })
@@ -535,7 +535,7 @@ async fn the_gateway_s_level_set_to_off_hides_the_toolset_from_every_device() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && crate::chat_feed::subject(f) == tools.id)
             && f.iter()

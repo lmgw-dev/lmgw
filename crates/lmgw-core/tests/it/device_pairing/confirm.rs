@@ -22,7 +22,7 @@ async fn feed(gw: &Gw, client: &reqwest::Client) -> Feed {
         .unwrap();
     assert_eq!(resp.status(), 200, "the feed opens");
     let mut feed = Feed::reading(resp);
-    feed.until(10, |f| !f.is_empty()).await;
+    feed.until(|f| !f.is_empty()).await;
     assert_eq!(feed.frames[0].event, "hello", "{:?}", feed.frames);
     feed
 }
@@ -228,7 +228,7 @@ async fn a_new_key_waits_beside_the_kept_one_until_it_is_confirmed() {
         since.ended(&w.state),
         Some(lmgw_core::devices::RevokeReason::Rotated)
     );
-    feed.until(10, |_| false).await;
+    feed.until(|_| false).await;
     let last = feed.frames.last().unwrap();
     assert_eq!(last.event, "revoked", "{:#?}", feed.frames);
     assert_eq!(last.data["kind"], "key_unknown", "{}", last.data);

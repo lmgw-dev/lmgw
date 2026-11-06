@@ -317,7 +317,7 @@ async fn the_switch_takes_the_toolset_s_threads_from_the_device_at_once_and_give
         ),
         "neutral, as an attach closes it"
     );
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter().any(|f| f.event == "folder.deleted") && f.iter().any(|f| f.event == "state")
     })
     .await;
@@ -366,7 +366,7 @@ async fn the_switch_takes_the_toolset_s_threads_from_the_device_at_once_and_give
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f[seen..]
             .iter()
             .any(|f| f.event == "thread.updated" && crate::chat_feed::subject(f) == inside)
@@ -412,8 +412,7 @@ async fn a_device_away_at_the_switch_hears_it_when_it_catches_up() {
     assert_eq!(s, 200, "{v}");
     let mut back = Feed::open(&w, &phone.client, "", Some(&cursor)).await;
     assert_eq!(back.hello()["self_admin"], json!("read_only"));
-    back.until(10, |f| f.iter().any(|f| f.event == "resync"))
-        .await;
+    back.until(|f| f.iter().any(|f| f.event == "resync")).await;
     let (_, list) = get(&w, &phone.client, "/chat/api/threads").await;
     assert!(ids(&list, "threads").contains(&tools.id), "{list}");
 }

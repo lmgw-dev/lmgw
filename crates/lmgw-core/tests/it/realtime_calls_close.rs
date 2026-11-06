@@ -117,7 +117,7 @@ impl BoundCall {
     async fn feed_after(&mut self) -> Vec<Frame> {
         let tid = self.tid;
         self.feed
-            .until(10, |f| {
+            .until(|f| {
                 f.iter()
                     .any(|f| f.event == "voice.ended" && f.data["thread_id"] == tid)
             })
@@ -125,7 +125,7 @@ impl BoundCall {
         if !self.feed.ended {
             let marker = chat_thread(&self.w, &self.w.gw.client(), "chatty").await;
             self.feed
-                .until(10, |f| {
+                .until(|f| {
                     f.iter()
                         .any(|f| f.event == "thread.created" && f.data["id"] == marker)
                 })

@@ -238,7 +238,7 @@ async fn a_device_that_pairs_again_as_another_app_ends_its_offers() {
     let (_, v) = read(&w, &desktop.client, &from_phone).await;
     assert_eq!(v["state"], "ready", "what it sends goes on: {v}");
     sender
-        .until(10, |f| {
+        .until(|f| {
             f.iter().any(|f| {
                 f.event == "transfer.updated"
                     && f.data["id"] == to_phone.as_str()

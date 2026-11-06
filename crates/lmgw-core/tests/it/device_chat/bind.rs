@@ -155,7 +155,7 @@ async fn a_device_taken_over_is_told_it_moved_to_the_dashboard() {
     let close = close.expect("a close frame with a reason");
     assert_eq!(u16::from(close.code), 4000);
     assert_eq!(close.reason.as_str(), "voice mode moved to the dashboard");
-    feed.until(10, |f| f.iter().any(|f| f.event == "voice.ended"))
+    feed.until(|f| f.iter().any(|f| f.event == "voice.ended"))
         .await;
     let ended = feed.named("voice.ended")[0].data.clone();
     assert_eq!(

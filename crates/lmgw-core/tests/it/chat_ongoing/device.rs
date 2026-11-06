@@ -114,7 +114,7 @@ async fn the_thread_a_device_starts_is_a_chat_thread_of_its_own_within_its_scope
     assert_eq!(v["thread"]["kind"], "chat");
 
     // Attributed to the device in the feed: the thread and the move.
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .filter(|f| f.event == "folder.current" && f.data["folder_id"] == folder)
             .count()
@@ -162,7 +162,7 @@ async fn folder_current_never_tells_a_device_of_a_folder_out_of_its_reach() {
     let start = live.cursor();
     let (first, _, _) = current_ok(&w, &owner, folder, false).await;
     // The device hears that one while the folder is plain.
-    live.until(10, |f| f.iter().any(|f| f.event == "folder.current"))
+    live.until(|f| f.iter().any(|f| f.event == "folder.current"))
         .await;
 
     // The folder's defaults take the toolset, not the thread (the opt-out),
@@ -191,7 +191,7 @@ async fn folder_current_never_tells_a_device_of_a_folder_out_of_its_reach() {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == marker)
     };
-    live.until(10, seen).await;
+    live.until(seen).await;
     let currents = |feed: &Feed| -> Vec<Value> {
         feed.named("folder.current")
             .into_iter()
@@ -204,12 +204,12 @@ async fn folder_current_never_tells_a_device_of_a_folder_out_of_its_reach() {
     // Caught up from before it all, now that the folder is out of reach:
     // not even the record written while it was plain.
     let mut late = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
-    late.until(10, seen).await;
+    late.until(seen).await;
     assert!(currents(&late).is_empty(), "catch-up: {:#?}", late.frames);
 
     // The owner hears both.
     let mut mine = Feed::open(&w, &owner, &format!("?since={start}"), None).await;
-    mine.until(10, seen).await;
+    mine.until(seen).await;
     assert_eq!(currents(&mine).len(), 2, "{:#?}", mine.frames);
 }
 
@@ -251,8 +251,8 @@ async fn a_device_is_never_told_why_its_conversation_moved() {
         f.iter()
             .any(|f| f.event == "folder.current" && f.data["thread_id"] == next)
     };
-    devices.until(10, moved).await;
-    mine.until(10, moved).await;
+    devices.until(moved).await;
+    mine.until(moved).await;
     let seen = devices.named("folder.current").last().unwrap().data.clone();
     assert_eq!(
         (&seen["reason"], &seen["previous_thread_id"]),
@@ -295,8 +295,8 @@ async fn a_rollover_from_a_hidden_thread_reads_first_for_a_device() {
         f.iter()
             .any(|f| f.event == "folder.current" && f.data["thread_id"] == next)
     };
-    devices.until(10, moved).await;
-    mine.until(10, moved).await;
+    devices.until(moved).await;
+    mine.until(moved).await;
     let seen = devices.named("folder.current").last().unwrap().data.clone();
     assert_eq!(
         (&seen["reason"], &seen["previous_thread_id"]),

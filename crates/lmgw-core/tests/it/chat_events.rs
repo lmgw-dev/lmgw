@@ -45,7 +45,7 @@ async fn events(w: &World) -> Events {
             .unwrap();
     assert_eq!(resp.status(), 200);
     let mut ev = Events::reading(resp);
-    ev.until(10, |f| f.iter().any(|f| f.event == "chat")).await;
+    ev.until(|f| f.iter().any(|f| f.event == "chat")).await;
     ev
 }
 
@@ -87,7 +87,7 @@ async fn a_device_s_thread_and_turn_are_named_as_they_are_stored() {
 
     // A new conversation.
     let tid = chat_thread(&w, &d.client, "chatty").await;
-    ev.until(10, |f| named(f, seen, "threads", tid)).await;
+    ev.until(|f| named(f, seen, "threads", tid)).await;
     let seen = chats(&ev.frames).len();
 
     // A turn: its user row is named as it is stored, while the upstream
@@ -100,7 +100,7 @@ async fn a_device_s_thread_and_turn_are_named_as_they_are_stored() {
     let path = format!("/chat/api/threads/{tid}/send");
     let send = sse(&w, &d.client, &path, json!({ "content": "hi" }));
     let user_row = async {
-        ev.until(10, |f| named(f, seen, "messages", tid)).await;
+        ev.until(|f| named(f, seen, "messages", tid)).await;
         let seen = chats(&ev.frames).len();
         release.notify_one();
         seen
@@ -112,7 +112,7 @@ async fn a_device_s_thread_and_turn_are_named_as_they_are_stored() {
         .find(|(e, _)| e == "done")
         .unwrap_or_else(|| panic!("{frames:?}"));
     let reply = done.1["message_id"].as_i64().expect("the reply was saved");
-    ev.until(10, |f| named(f, seen, "messages", tid)).await;
+    ev.until(|f| named(f, seen, "messages", tid)).await;
     let seen = chats(&ev.frames).len();
 
     // A message deleted.
@@ -124,7 +124,7 @@ async fn a_device_s_thread_and_turn_are_named_as_they_are_stored() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    ev.until(10, |f| named(f, seen, "messages", tid)).await;
+    ev.until(|f| named(f, seen, "messages", tid)).await;
 }
 
 #[tokio::test]
@@ -148,10 +148,8 @@ async fn a_device_rolling_its_folder_over_names_the_folder_and_the_new_thread() 
     let (next_thread, rolled, _) = current_ok(&w, &d.client, folder, true).await;
     assert!(rolled);
     assert_ne!(next_thread, first);
-    ev.until(10, |f| {
-        named(f, seen, "folders", folder) && named(f, seen, "threads", next_thread)
-    })
-    .await;
+    ev.until(|f| named(f, seen, "folders", folder) && named(f, seen, "threads", next_thread))
+        .await;
 }
 
 #[tokio::test]
@@ -176,11 +174,11 @@ async fn a_device_s_spoken_turn_names_the_thread_s_messages() {
         Box::new(Turn::text(&["Late."])),
     ));
     say(&mut ws).await;
-    ev.until(10, |f| named(f, seen, "messages", tid)).await;
+    ev.until(|f| named(f, seen, "messages", tid)).await;
     let seen = chats(&ev.frames).len();
     release.notify_one();
     until_type(&mut ws, "lmgw.response.timing").await;
-    ev.until(10, |f| named(f, seen, "messages", tid)).await;
+    ev.until(|f| named(f, seen, "messages", tid)).await;
 }
 
 #[tokio::test]
@@ -200,7 +198,7 @@ async fn the_owner_hears_of_admin_chat_and_a_burst_is_one_frame() {
     .await;
     assert_eq!(s, 200, "{v}");
     let admin = v["id"].as_i64().unwrap();
-    ev.until(10, |f| named(f, seen, "threads", admin)).await;
+    ev.until(|f| named(f, seen, "threads", admin)).await;
 
     // A folder with three conversations, deleted with them in one write.
     let (s, v) = post(
@@ -225,7 +223,7 @@ async fn the_owner_hears_of_admin_chat_and_a_burst_is_one_frame() {
         threads.push(v["id"].as_i64().unwrap());
     }
     let last = *threads.last().unwrap();
-    ev.until(10, |f| named(f, 0, "threads", last)).await;
+    ev.until(|f| named(f, 0, "threads", last)).await;
     let seen = chats(&ev.frames).len();
     let (s, v) = post(
         &w,
@@ -235,7 +233,7 @@ async fn the_owner_hears_of_admin_chat_and_a_burst_is_one_frame() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    ev.until(10, |f| named(f, seen, "folders", folder)).await;
+    ev.until(|f| named(f, seen, "folders", folder)).await;
     let frame = chats(&ev.frames)
         .into_iter()
         .skip(seen)

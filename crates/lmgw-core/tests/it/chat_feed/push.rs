@@ -86,7 +86,7 @@ async fn a_long_keepalive_holds_back_no_event() {
     let t = lmgw_core::store::create_chat_thread(&w.state.db, "chatty", "chat")
         .await
         .unwrap();
-    long.until(10, |f| {
+    long.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == t)
     })
@@ -94,7 +94,7 @@ async fn a_long_keepalive_holds_back_no_event() {
     assert!(long.named(":").is_empty(), "no comment: {:?}", long.frames);
     // A stream at the gateway's interval gets its comments.
     let mut short = Feed::open(&w, &w.gw.client(), "", None).await;
-    short.until(10, |f| f.iter().any(|f| f.event == ":")).await;
+    short.until(|f| f.iter().any(|f| f.event == ":")).await;
 }
 
 /// Review of WP5, N2: a device feed waiting for its levels to be published
@@ -119,8 +119,7 @@ async fn a_waiting_feed_keeps_the_keepalive_it_asked_for() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let mut feed = Feed::reading(resp);
-    feed.until(10, |f| f.iter().any(|f| f.event == "hello"))
-        .await;
+    feed.until(|f| f.iter().any(|f| f.event == "hello")).await;
     let before = feed
         .frames
         .iter()
@@ -226,7 +225,7 @@ async fn hello_lists_the_open_approvals_and_a_catch_up_changes_none() {
 
     // From now: nothing to catch up.
     let mut now = Feed::open(&w, &owner, "", None).await;
-    now.until(10, |f| f.iter().any(|f| f.event == "caught_up"))
+    now.until(|f| f.iter().any(|f| f.event == "caught_up"))
         .await;
     assert_eq!(now.frames[1].event, "caught_up", "{:?}", now.frames);
     assert_eq!(now.frames[1].data["cursor"], now.hello()["cursor"]);
@@ -245,7 +244,7 @@ async fn hello_lists_the_open_approvals_and_a_catch_up_changes_none() {
     // the other call's decision; that call's request is not sent, decided by
     // delivery (review of WP5, N3).
     let mut back = Feed::open(&w, &owner, &format!("?since={start}"), None).await;
-    back.until(10, |f| f.iter().any(|f| f.event == "caught_up"))
+    back.until(|f| f.iter().any(|f| f.event == "caught_up"))
         .await;
     assert_eq!(back.hello()["open_approvals"], open);
     let at = back
@@ -298,7 +297,7 @@ async fn hello_lists_the_open_approvals_and_a_catch_up_changes_none() {
     .await;
     assert_eq!(s, 200, "{frames:?}");
     let seen = back.frames.len();
-    back.until(10, |f| {
+    back.until(|f| {
         f.iter()
             .any(|f| f.event == "approval.decided" && f.data["approval_request_id"] == id)
     })
@@ -365,7 +364,7 @@ async fn caught_up_follows_a_paged_catch_up() {
         made.push(chat_thread(&w, &owner, "chatty").await);
     }
     let mut back = Feed::open(&w, &owner, &format!("?since={start}"), None).await;
-    back.until(10, |f| f.iter().any(|f| f.event == "caught_up"))
+    back.until(|f| f.iter().any(|f| f.event == "caught_up"))
         .await;
     let at = back
         .frames
@@ -387,7 +386,7 @@ async fn caught_up_follows_a_paged_catch_up() {
     documented("caught_up", &back.frames[at].data);
 
     let later = chat_thread(&w, &owner, "chatty").await;
-    back.until(10, |f| {
+    back.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == later)
     })
@@ -414,7 +413,7 @@ fn state_naming(frames: &[Frame], id: &Value) -> bool {
 /// A device's feed after `caught_up`, with the reader that followed it.
 async fn caught_up_device(w: &World, d: &crate::device_chat::Device) -> (Feed, FeedReader) {
     let mut feed = Feed::open(w, &d.client, "", None).await;
-    feed.until(10, |f| f.iter().any(|f| f.event == "caught_up"))
+    feed.until(|f| f.iter().any(|f| f.event == "caught_up"))
         .await;
     let mut reader = FeedReader::new(None);
     let got = changes(&mut reader, &feed.frames);
@@ -447,7 +446,7 @@ async fn a_level_raise_brings_the_calls_waiting_in_reach_and_a_loss_withdraws_th
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| state_naming(f, &id)).await;
+    feed.until(|f| state_naming(f, &id)).await;
     let came = feed.frames[seen..]
         .iter()
         .position(|f| f.event == "thread.created" && f.data["id"] == tid)
@@ -467,12 +466,12 @@ async fn a_level_raise_brings_the_calls_waiting_in_reach_and_a_loss_withdraws_th
     let seen = feed.frames.len();
     let (s, v) = op(&w, "key_set", json!({"id": phone.id, "self_admin": "off"})).await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.deleted" && f.data["thread_id"] == tid)
     })
     .await;
-    feed.until(10, |f| f[seen..].iter().any(|f| f.event == "state"))
+    feed.until(|f| f[seen..].iter().any(|f| f.event == "state"))
         .await;
     let got = changes(&mut reader, &feed.frames[seen..]);
     assert_eq!(
@@ -504,7 +503,7 @@ async fn taking_the_toolset_off_brings_the_waiting_call_to_a_device() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| state_naming(f, &id)).await;
+    feed.until(|f| state_naming(f, &id)).await;
     assert!(feed.frames[seen..]
         .iter()
         .any(|f| f.event == "thread.created" && f.data["id"] == tid));

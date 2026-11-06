@@ -114,7 +114,7 @@ async fn a_device_away_across_a_switch_off_catches_up_at_its_reach_now() {
         json!([]),
         "the toolset thread's turn is not the device's to see now"
     );
-    back.until(10, |f| created(f, last)).await;
+    back.until(|f| created(f, last)).await;
     assert!(
         about_thread(&back.frames, tools.id).is_empty(),
         "nothing of the toolset thread: {:#?}",
@@ -171,7 +171,7 @@ async fn a_device_away_across_an_on_and_an_off_hears_nothing_of_the_toolset() {
 
     let mut back = Feed::open(&w, &phone.client, "", Some(&cursor)).await;
     assert_eq!(back.hello()["self_admin"], json!("off"));
-    back.until(10, |f| created(f, last)).await;
+    back.until(|f| created(f, last)).await;
     assert!(
         about_thread(&back.frames, tools.id).is_empty(),
         "no thread.created, nothing at all: {:#?}",
@@ -205,7 +205,7 @@ async fn a_device_away_across_an_on_reloads_at_the_switch() {
 
     let mut back = Feed::open(&w, &phone.client, "", Some(&cursor)).await;
     assert_eq!(back.hello()["self_admin"], json!("read_only"));
-    back.until(10, |f| says(f, "written-after-the-on")).await;
+    back.until(|f| says(f, "written-after-the-on")).await;
     assert!(!says(&back.frames, "written-before-the-on"));
     let order: Vec<&str> = back
         .frames
@@ -226,7 +226,7 @@ async fn a_live_switch_off_leaves_no_state_with_the_toolset_s_turn() {
     let tools = self_admin_thread(&w).await;
     let mut feed = Feed::open(&w, &desk.client, "", None).await;
     let (turn, hold) = held_turn(&w, &w.gw.client(), tools.id).await;
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "turn.started" && f.data["thread_id"] == tools.id)
     })
@@ -234,7 +234,7 @@ async fn a_live_switch_off_leaves_no_state_with_the_toolset_s_turn() {
 
     let (s, _) = op(&w, "key_set", json!({ "id": desk.id, "self_admin": "off" })).await;
     assert_eq!(s, 200);
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .skip_while(|f| f.event != "thread.deleted")
             .any(|f| f.event == "state" && f.data["self_admin"] == json!("off"))
@@ -271,7 +271,7 @@ async fn a_live_switch_off_leaves_no_state_with_the_toolset_s_turn() {
     )
     .await;
     assert_eq!(s, 200);
-    feed.until(10, |f| {
+    feed.until(|f| {
         f[seen..]
             .iter()
             .any(|f| f.event == "state" && f.data["self_admin"] == json!("read_only"))
@@ -325,7 +325,7 @@ async fn a_folder_delete_by_another_device_moves_a_switched_device_s_threads_out
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    feed.until(10, |f| f.iter().any(|f| f.event == "folder.deleted"))
+    feed.until(|f| f.iter().any(|f| f.event == "folder.deleted"))
         .await;
     let order: Vec<(String, i64)> = feed
         .frames

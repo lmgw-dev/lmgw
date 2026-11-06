@@ -51,10 +51,8 @@ async fn a_record_reaches_a_device_without_its_seals() {
     .unwrap();
     // Caught up: the write is a store's, which wakes no live feed.
     let mut feed = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
-    feed.until(10, |f| {
-        message_events(f).iter().any(|f| f.event == "message.added")
-    })
-    .await;
+    feed.until(|f| message_events(f).iter().any(|f| f.event == "message.added"))
+        .await;
     let added = message_events(&feed.frames)
         .into_iter()
         .find(|f| f.event == "message.added")
@@ -131,7 +129,7 @@ async fn a_turn_s_messages_arrive_whole_with_the_thread_s_title() {
         .unwrap();
 
     owner
-        .until(10, |f| {
+        .until(|f| {
             message_events(f)
                 .iter()
                 .filter(|f| f.event == "message.added")
@@ -164,7 +162,7 @@ async fn a_turn_s_messages_arrive_whole_with_the_thread_s_title() {
     // the thread lists it.
     let mut caught = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
     caught
-        .until(10, |f| {
+        .until(|f| {
             message_events(f)
                 .iter()
                 .filter(|f| f.event == "message.added")
@@ -250,7 +248,7 @@ async fn edits_and_deletes_arrive_and_a_catch_up_renders_them_now() {
         ("message.deleted".to_string(), vec![again]),
     ];
     // The last delete always renders: it reads nothing.
-    live.until(10, |f| {
+    live.until(|f| {
         message_events(f)
             .iter()
             .any(|f| f.event == "message.deleted" && ids_of(f) == vec![again])
@@ -291,9 +289,7 @@ async fn edits_and_deletes_arrive_and_a_catch_up_renders_them_now() {
     // updated records are not sent; the deletes are.
     let mut caught = Feed::open(&w, &owner_client, &format!("?since={start}"), None).await;
     caught
-        .until(10, |f| {
-            f.iter().filter(|f| f.event == "message.deleted").count() >= 2
-        })
+        .until(|f| f.iter().filter(|f| f.event == "message.deleted").count() >= 2)
         .await;
     let got: Vec<(String, Vec<i64>)> = message_events(&caught.frames)
         .into_iter()
@@ -329,14 +325,14 @@ async fn a_device_never_hears_of_a_hidden_thread_s_messages() {
         crate::device_chat::seed(&w, visible, "for the phone").await;
 
         owner
-            .until(10, |f| {
+            .until(|f| {
                 message_events(f)
                     .iter()
                     .any(|f| f.data["thread_id"] == thread.id)
             })
             .await;
         device
-            .until(10, |f| {
+            .until(|f| {
                 message_events(f)
                     .iter()
                     .any(|f| f.data["thread_id"] == visible)
@@ -349,7 +345,7 @@ async fn a_device_never_hears_of_a_hidden_thread_s_messages() {
         );
         let mut caught = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
         caught
-            .until(10, |f| {
+            .until(|f| {
                 message_events(f)
                     .iter()
                     .any(|f| f.data["thread_id"] == visible)
@@ -405,7 +401,7 @@ async fn a_catch_up_leaves_out_the_messages_of_a_thread_hidden_since() {
     };
 
     let mut caught = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
-    caught.until(10, past).await;
+    caught.until(past).await;
     assert!(
         hidden_messages(&caught.frames, tid).is_empty(),
         "no message of a thread hidden since: {:#?}",
@@ -414,7 +410,7 @@ async fn a_catch_up_leaves_out_the_messages_of_a_thread_hidden_since() {
     // The owner's catch-up has them: the records are there, the reach is
     // the device's.
     let mut owner = Feed::open(&w, &owner_client, &format!("?since={start}"), None).await;
-    owner.until(10, past).await;
+    owner.until(past).await;
     let theirs: Vec<(String, Vec<i64>)> = hidden_messages(&owner.frames, tid)
         .into_iter()
         .map(|f| (f.event.clone(), ids_of(f)))
@@ -449,9 +445,9 @@ async fn a_read_only_device_hears_the_toolset_s_messages() {
             .any(|f| f.data["thread_id"] == visible)
     };
 
-    live.until(10, past).await;
+    live.until(past).await;
     let mut caught = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
-    caught.until(10, past).await;
+    caught.until(past).await;
     for (feed, what) in [(&live, "live"), (&caught, "caught up")] {
         let heard: Vec<Vec<i64>> = hidden_messages(&feed.frames, toolset.id)
             .into_iter()

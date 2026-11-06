@@ -30,7 +30,7 @@ fn said(name: &str) -> Value {
 
 /// Wait until `feed` holds the `thread.created` of thread `id`.
 async fn until_thread(feed: &mut Feed, id: i64) {
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == id)
     })
@@ -68,13 +68,11 @@ async fn a_delete_reaches_the_owner_and_the_devices_shown_the_device() {
     assert_eq!(s, 200, "{v}");
     let (s, v) = op(&w, "key_delete", json!({"id": phone.id})).await;
     assert_eq!(s, 200, "{v}");
-    mine.until(10, |f| {
-        f.iter().filter(|f| f.event == "device.revoked").count() == 2
-    })
-    .await;
+    mine.until(|f| f.iter().filter(|f| f.event == "device.revoked").count() == 2)
+        .await;
     assert_eq!(revoked(&mine), [said("watch"), said("phone")]);
     theirs
-        .until(10, |f| f.iter().any(|f| f.event == "device.revoked"))
+        .until(|f| f.iter().any(|f| f.event == "device.revoked"))
         .await;
     // The phone's came after the watch's: the tablet was never shown the
     // watch, so it hears only the phone.
@@ -84,7 +82,7 @@ async fn a_delete_reaches_the_owner_and_the_devices_shown_the_device() {
     let from = theirs.hello()["cursor"].as_str().unwrap().to_string();
     let mut again = Feed::open(&w, &tablet.client, "", Some(&from)).await;
     again
-        .until(10, |f| f.iter().any(|f| f.event == "device.revoked"))
+        .until(|f| f.iter().any(|f| f.event == "device.revoked"))
         .await;
     assert_eq!(revoked(&again), [said("phone")]);
 }
@@ -128,9 +126,9 @@ async fn a_delete_reaches_the_host_of_a_task_the_device_started() {
 
     let (s, v) = op(&w, "key_delete", json!({"id": phone.id})).await;
     assert_eq!(s, 200, "{v}");
-    mine.until(10, |f| f.iter().any(|f| f.event == "device.revoked"))
+    mine.until(|f| f.iter().any(|f| f.event == "device.revoked"))
         .await;
-    host.until(10, |f| f.iter().any(|f| f.event == "device.revoked"))
+    host.until(|f| f.iter().any(|f| f.event == "device.revoked"))
         .await;
     assert_eq!(revoked(&mine), [said("phone")]);
     assert_eq!(revoked(&host), [said("phone")]);
@@ -177,9 +175,9 @@ async fn a_delete_reaches_the_host_owed_the_cancel_of_a_task_the_device_started(
 
     let (s, v) = op(&w, "key_delete", json!({"id": phone.id})).await;
     assert_eq!(s, 200, "{v}");
-    mine.until(10, |f| f.iter().any(|f| f.event == "device.revoked"))
+    mine.until(|f| f.iter().any(|f| f.event == "device.revoked"))
         .await;
-    host.until(10, |f| f.iter().any(|f| f.event == "device.revoked"))
+    host.until(|f| f.iter().any(|f| f.event == "device.revoked"))
         .await;
     assert_eq!(revoked(&host), [said("phone")]);
     assert_eq!(crate::mcp_tasks::the_row(&w).await.state, "cancel_owed");

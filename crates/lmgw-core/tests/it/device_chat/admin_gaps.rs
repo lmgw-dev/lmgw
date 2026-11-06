@@ -220,7 +220,7 @@ async fn a_catch_up_across_both_kinds_of_level_record() {
 
     let mut back = Feed::open(&w, &tablet.client, "", Some(&cursor)).await;
     assert_eq!(back.hello()["self_admin"], json!("off"));
-    back.until(10, |f| {
+    back.until(|f| {
         f.iter()
             .any(|f| f.event == "thread.created" && subject(f) == last)
     })

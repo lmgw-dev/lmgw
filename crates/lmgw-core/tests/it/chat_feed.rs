@@ -29,7 +29,11 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::common::patience::Wait;
 use crate::realtime_chat_thread::{settings, World};
+
+/// How long [`Feed::until`] reads before it looks at its wait again.
+const SLICE: Duration = Duration::from_secs(1);
 
 mod deleted_device;
 mod device;
@@ -78,7 +82,7 @@ impl Feed {
         let resp = req.send().await.unwrap();
         assert_eq!(resp.status(), 200, "the feed opens");
         let mut feed = Self::reading(resp);
-        feed.until(10, |f| !f.is_empty()).await;
+        feed.until(|f| !f.is_empty()).await;
         assert_eq!(feed.frames[0].event, "hello", "{:?}", feed.frames);
         feed
     }
@@ -95,15 +99,30 @@ impl Feed {
     }
 
     /// Read until `done` holds over every frame read so far (or the stream
-    /// ended); fail after `secs`.
-    pub(crate) async fn until(&mut self, secs: u64, done: impl Fn(&[Frame]) -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    /// ended), for as long as the harness lets a test run
+    /// (`common::patience`): on a working build that is as soon as the
+    /// frame is there.
+    ///
+    /// No figure of its own: a frame's way to the reader — the gateway's
+    /// feed stream, its read of the store first (a live event too), the
+    /// device listener's TLS and a device's proxy — has no bound in the
+    /// design, so a guessed one fails a correct test on a box slower than
+    /// the guess: a fixed 10 s ran out on a GitHub runner on 2026-11-06 for
+    /// a `voice.ended` published before its session's end. It says on
+    /// stderr what it read each period it waits.
+    pub(crate) async fn until(&mut self, done: impl Fn(&[Frame]) -> bool) {
+        let mut wait = Wait::new("the feed's next frames");
         while !done(&self.frames) && !self.ended {
-            let chunk = tokio::time::timeout_at(deadline, self.resp.chunk())
-                .await
-                .unwrap_or_else(|_| panic!("timed out; read so far: {:#?}", self.frames))
-                .unwrap();
-            match chunk {
+            // A slice of the wait, so it can say how it goes; a chunk read
+            // cut off by it loses nothing (the body's frame waits in hyper).
+            let Ok(chunk) = tokio::time::timeout(SLICE, self.resp.chunk()).await else {
+                let seen = self.read_so_far();
+                if !wait.goes_on(Some(&seen)) {
+                    panic!("timed out; read so far: {:#?}", self.frames);
+                }
+                continue;
+            };
+            match chunk.unwrap() {
                 Some(c) => {
                     self.buf.push_str(&String::from_utf8_lossy(&c));
                     self.parse();
@@ -111,6 +130,12 @@ impl Feed {
                 None => self.ended = true,
             }
         }
+    }
+
+    /// The events read so far, by name: what a wait says it saw.
+    fn read_so_far(&self) -> String {
+        let names: Vec<&str> = self.frames.iter().map(|f| f.event.as_str()).collect();
+        format!("{} frame(s): {}", names.len(), names.join(", "))
     }
 
     fn parse(&mut self) {

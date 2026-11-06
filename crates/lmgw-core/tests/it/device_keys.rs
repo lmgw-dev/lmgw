@@ -643,10 +643,14 @@ async fn a_lapsing_certificate_ends_the_feed_and_the_session_with_certificate_ex
         }
     );
 
-    feed.until(bound.as_secs() + 1, |f| {
-        f.iter().any(|f| f.event == "revoked")
-    })
-    .await;
+    // Within the lapse's own bound, as the session's close came.
+    let bound = bound + std::time::Duration::from_secs(1);
+    tokio::time::timeout(
+        bound,
+        feed.until(|f| f.iter().any(|f| f.event == "revoked")),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("the feed's revoked within {bound:?}: {:#?}", feed.frames));
     let revoked = feed.named("revoked");
     assert_eq!(
         revoked[0].data,

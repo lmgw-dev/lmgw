@@ -53,7 +53,7 @@ async fn task_records_come_in_commit_order_and_render_after_the_row_is_gone() {
     let from = feed.cursor();
     call(&executor(&w, server, Some(tid)), "desktop__build").await;
     dev.complete("t1", "42 files", true);
-    feed.until(10, |f| f.iter().any(|f| f.event == "task.done"))
+    feed.until(|f| f.iter().any(|f| f.event == "task.done"))
         .await;
     let got = tasks(&feed);
     assert_eq!(got.len(), 2, "{got:#?}");
@@ -82,7 +82,7 @@ async fn task_records_come_in_commit_order_and_render_after_the_row_is_gone() {
 
     let mut again = Feed::open(&w, &owner, "", Some(&from)).await;
     again
-        .until(10, |f| f.iter().any(|f| f.event == "task.done"))
+        .until(|f| f.iter().any(|f| f.event == "task.done"))
         .await;
     assert_eq!(tasks(&again), got, "rendered from the records alone");
 }
@@ -99,13 +99,13 @@ async fn a_device_hears_no_task_of_an_admin_chat_thread() {
     let admin = labelled(&w, "admin").await;
     call(&executor(&w, server, Some(admin)), "desktop__build").await;
     dev.complete("t1", "done", true);
-    mine.until(10, |f| f.iter().any(|f| f.event == "task.done"))
+    mine.until(|f| f.iter().any(|f| f.event == "task.done"))
         .await;
     assert_eq!(tasks(&mine).len(), 2);
 
     let plain = chat_thread(&w, &owner, "chatty").await;
     theirs
-        .until(10, |f| {
+        .until(|f| {
             f.iter()
                 .any(|f| f.event == "thread.created" && f.data["id"] == plain)
         })

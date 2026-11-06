@@ -67,8 +67,8 @@ async fn a_device_never_hears_of_an_admin_thread_live_or_in_its_catch_up() {
         f.iter()
             .any(|f| f.event == "thread.created" && f.data["id"] == visible)
     };
-    owner.until(10, seen).await;
-    device.until(10, seen).await;
+    owner.until(seen).await;
+    device.until(seen).await;
     assert_eq!(
         about_thread(&owner.frames, admin).len(),
         3,
@@ -94,14 +94,14 @@ async fn a_device_never_hears_of_an_admin_thread_live_or_in_its_catch_up() {
 
     // In catch-up from before it all: the same, from the table.
     let mut caught = Feed::open(&w, &d.client, &format!("?since={start}"), None).await;
-    caught.until(10, seen).await;
+    caught.until(seen).await;
     assert!(
         about_thread(&caught.frames, admin).is_empty(),
         "catch-up: {:#?}",
         caught.frames
     );
     let mut owner_caught = Feed::open(&w, &w.gw.client(), &format!("?since={start}"), None).await;
-    owner_caught.until(10, seen).await;
+    owner_caught.until(seen).await;
     assert_eq!(about_thread(&owner_caught.frames, admin).len(), 3);
 }
 
@@ -145,7 +145,7 @@ async fn a_folder_s_counts_and_the_live_turns_leave_admin_chat_out_for_a_device(
         .unwrap();
     assert_eq!(send.status(), 200);
     owner
-        .until(10, |f| f.iter().any(|f| f.event == "turn.started"))
+        .until(|f| f.iter().any(|f| f.event == "turn.started"))
         .await;
     assert_eq!(owner.named("turn.started")[0].data["thread_id"], admin);
 
@@ -164,11 +164,11 @@ async fn a_folder_s_counts_and_the_live_turns_leave_admin_chat_out_for_a_device(
     )
     .await;
     device
-        .until(10, |f| f.iter().any(|f| f.event == "folder.updated"))
+        .until(|f| f.iter().any(|f| f.event == "folder.updated"))
         .await;
     assert_eq!(device.named("folder.updated")[0].data["threads_active"], 0);
     owner
-        .until(10, |f| f.iter().any(|f| f.event == "folder.updated"))
+        .until(|f| f.iter().any(|f| f.event == "folder.updated"))
         .await;
     assert_eq!(owner.named("folder.updated")[0].data["threads_active"], 1);
 
@@ -177,7 +177,7 @@ async fn a_folder_s_counts_and_the_live_turns_leave_admin_chat_out_for_a_device(
     hold.notify_one();
     drop(send);
     owner
-        .until(10, |f| f.iter().any(|f| f.event == "turn.done"))
+        .until(|f| f.iter().any(|f| f.event == "turn.done"))
         .await;
     let chat = chat_thread(&w, &d.client, "chatty").await;
     let (s, _) = crate::device_chat::sse(
@@ -189,7 +189,7 @@ async fn a_folder_s_counts_and_the_live_turns_leave_admin_chat_out_for_a_device(
     .await;
     assert_eq!(s, 200);
     device
-        .until(10, |f| f.iter().any(|f| f.event == "turn.done"))
+        .until(|f| f.iter().any(|f| f.event == "turn.done"))
         .await;
     let turns: Vec<_> = device
         .frames
@@ -230,7 +230,7 @@ async fn a_toolset_flip_mid_turn_gives_a_device_a_fresh_state_each_way() {
         .unwrap();
     assert_eq!(send.status(), 200);
     device
-        .until(10, |f| f.iter().any(|f| f.event == "turn.started"))
+        .until(|f| f.iter().any(|f| f.event == "turn.started"))
         .await;
 
     let set_tools = |tools: serde_json::Value| {
@@ -248,7 +248,7 @@ async fn a_toolset_flip_mid_turn_gives_a_device_a_fresh_state_each_way() {
     };
     let states = |f: &[super::Frame]| f.iter().filter(|f| f.event == "state").count();
     set_tools(json!([{ "server_label": "lmgw" }])).await;
-    device.until(10, |f| states(f) >= 1).await;
+    device.until(|f| states(f) >= 1).await;
     let gone = device.named("state")[0].data.clone();
     assert_eq!(gone["turns"], json!([]), "{gone}");
     // Neutral (review W6-4): nothing says why.
@@ -260,19 +260,19 @@ async fn a_toolset_flip_mid_turn_gives_a_device_a_fresh_state_each_way() {
     assert!(device.frames.iter().any(|f| f.event == "thread.deleted"));
 
     set_tools(json!([])).await;
-    device.until(10, |f| states(f) >= 2).await;
+    device.until(|f| states(f) >= 2).await;
     let back = device.named("state")[1].data.clone();
     assert_eq!(back["turns"][0]["thread_id"], tid, "{back}");
 
     hold.notify_one();
     drop(send);
     device
-        .until(10, |f| f.iter().any(|f| f.event == "turn.done"))
+        .until(|f| f.iter().any(|f| f.event == "turn.done"))
         .await;
     assert_eq!(device.named("turn.done")[0].data["thread_id"], tid);
     // The owner's feed needed no refresh.
     owner
-        .until(10, |f| f.iter().any(|f| f.event == "turn.done"))
+        .until(|f| f.iter().any(|f| f.event == "turn.done"))
         .await;
     assert_eq!(states(&owner.frames), 0, "{:#?}", owner.frames);
 }
@@ -299,7 +299,7 @@ async fn the_keep_alive_hands_a_device_the_cursor_its_skipped_records_moved() {
         .unwrap()
         .head;
     device
-        .until(10, |f| f.iter().any(|f| f.event == ":" && f.id.is_some()))
+        .until(|f| f.iter().any(|f| f.event == ":" && f.id.is_some()))
         .await;
     let tick = device
         .frames
@@ -313,7 +313,7 @@ async fn the_keep_alive_hands_a_device_the_cursor_its_skipped_records_moved() {
     assert!(device.stored().is_empty(), "{:#?}", device.frames);
     // Resumed from it: no resync, nothing about the admin thread.
     let mut again = Feed::open(&w, &d.client, "", Some(tick.id.as_deref().unwrap())).await;
-    again.until(3, |f| f.len() >= 2).await;
+    again.until(|f| f.len() >= 2).await;
     assert!(again.named("resync").is_empty(), "{:#?}", again.frames);
 
     // Review W6-3: the tag the device was handed for the record it may not
@@ -405,7 +405,7 @@ async fn a_malformed_settings_blob_opens_a_device_s_feed_at_once() {
         .unwrap();
         assert_eq!(resp.status(), 200, "{blob}");
         let mut feed = Feed::reading(resp);
-        feed.until(5, |f| !f.is_empty()).await;
+        feed.until(|f| !f.is_empty()).await;
         assert_eq!(
             feed.frames[0].event, "hello",
             "{blob}: no wait for a publish: {:#?}",

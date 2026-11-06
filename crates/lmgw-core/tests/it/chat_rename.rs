@@ -128,7 +128,7 @@ async fn a_rename_reaches_the_feed_as_thread_updated() {
     let id = chat_thread(&w, &owner, "chatty").await;
     let mut feed = Feed::open(&w, &owner, "", None).await;
     post(&w, &owner, &title_path(id), json!({ "title": "Renamed" })).await;
-    feed.until(10, |f| f.iter().any(|f| f.event == "thread.updated"))
+    feed.until(|f| f.iter().any(|f| f.event == "thread.updated"))
         .await;
     let updated = feed.named("thread.updated");
     assert_eq!(subject(updated.last().unwrap()), id);

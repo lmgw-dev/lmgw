@@ -59,7 +59,7 @@ async fn a_write_whose_client_hangs_up_before_its_commit_runs_to_its_end() {
     for how in ["attach", "delete"] {
         let tid = chat_thread(&w, &d.client, "chatty").await;
         let (mut ws, mut links) = bind(&w, &d, tid).await;
-        feed.until(10, |f| {
+        feed.until(|f| {
             f.iter()
                 .any(|f| f.event == "voice.bound" && f.data["thread_id"] == tid)
         })
@@ -77,7 +77,7 @@ async fn a_write_whose_client_hangs_up_before_its_commit_runs_to_its_end() {
         let req = owner.post(format!("{base}{path}")).json(&body);
         let write = tokio::spawn(async move { req.send().await.map(|r| r.status().as_u16()) });
         // Its first step is done: the device no longer hears the session.
-        feed.until(10, |f| f[from..].iter().any(|f| no_voice_on(f, tid)))
+        feed.until(|f| f[from..].iter().any(|f| no_voice_on(f, tid)))
             .await;
         // The client hangs up, and the server drops its request.
         write.abort();

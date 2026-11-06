@@ -92,7 +92,7 @@ async fn a_folder_binds_its_current_thread_and_starts_the_first_one() {
         (&json!(folder), &json!("chatty"), &json!(0.3)),
         "{t}"
     );
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .any(|f| f.event == "folder.current" && f.data["folder_id"] == folder)
     })
@@ -139,7 +139,7 @@ async fn new_and_idleness_roll_over_and_an_empty_thread_is_kept() {
     assert_ne!(idle, requested);
     assert_eq!(current_of(&w, folder).await, json!(idle));
 
-    feed.until(10, |f| {
+    feed.until(|f| {
         f.iter()
             .filter(|f| f.event == "folder.current" && f.data["folder_id"] == folder)
             .count()

@@ -34,7 +34,7 @@ async fn the_resumed_turn_runs_as_its_starter_and_names_its_approver() {
     let before = chat_rows(&rows_of(&w, d.id).await);
     // The feed does not send a request whose call is decided by delivery, so
     // the request is read before the decision is made.
-    feed.until(10, |f| f.iter().any(|f| f.event == "approval.requested"))
+    feed.until(|f| f.iter().any(|f| f.event == "approval.requested"))
         .await;
 
     w.chat.push(Turn::text(&["Done."]));
@@ -74,7 +74,7 @@ async fn the_resumed_turn_runs_as_its_starter_and_names_its_approver() {
         vec![Some("owner:dashboard".to_string())]
     );
 
-    feed.until(10, |f| f.iter().any(|f| f.event == "approval.decided"))
+    feed.until(|f| f.iter().any(|f| f.event == "approval.decided"))
         .await;
     let asked = feed.named("approval.requested");
     assert_eq!(asked.len(), 1, "{:?}", feed.frames);
