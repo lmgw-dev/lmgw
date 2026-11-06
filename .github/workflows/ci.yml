@@ -69,7 +69,7 @@ jobs:
       # Fedora's own registry: Docker Hub's unauthenticated pull limit hits GitHub's shared runners.
       image: quay.io/fedora/fedora:latest
     # A cold run took 42 minutes before the prebuilt tauri-cli, 12 of them
-    # compiling it, with four compile jobs; two (below) take longer. This
+    # compiling it, with four compile jobs; one (below) takes longer. This
     # bounds what a hung test can cost.
     timeout-minutes: 120
     env:
@@ -77,10 +77,11 @@ jobs:
       # stays small enough to cache. With line tables the runner's disk ran
       # out while compressing the cache.
       CARGO_PROFILE_DEV_DEBUG: none
-      # Two compile jobs at a time: with the runner's four, lmgw-core's test build ran
-      # alongside the UI and app crates and the runner's 16 GiB ran out (rustc killed
-      # with SIGKILL, 0.6.0). Slower, but it finishes.
-      CARGO_BUILD_JOBS: "2"
+      # One compile job at a time, until these checks get a bigger runner: with the
+      # runner's four, and again with two, lmgw-core's test build ran alongside the UI
+      # and app crates and the runner's 16 GiB ran out (exit 137, 0.6.0). One job
+      # also keeps rustc's own code generation to one thread. Slower, but it finishes.
+      CARGO_BUILD_JOBS: "1"
     steps:
       # git for a real clone; tar + zstd for the cache inside the container.
       - name: Install checkout and cache tools
